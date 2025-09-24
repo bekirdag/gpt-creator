@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  shellcheck:
+    name: ShellCheck (bash scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Run shellcheck
+        run: |
+          set -e
+          shopt -s globstar nullglob
+          files=(**/*.sh bin/gpt-creator)
+          if [ "${#files[@]}" -gt 0 ]; then
+            shellcheck -S warning "${files[@]}"
+          else
+            echo "No shell scripts found."
+          fi
+
+  openapi-validate:
+    name: Validate OpenAPI (examples)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Validate with swagger-cli
+        run: |
+          set -e
+          cd examples/sample-project
+          npx -y @apidevtools/swagger-cli@4.0.4 validate openapi.yaml

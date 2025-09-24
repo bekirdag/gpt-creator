@@ -1,0 +1,50 @@
+# Node / package managers
+node_modules/
+.pnpm-store/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+# keep pnpm lockfile in VCS
+# pnpm-lock.yaml
+
+# Build & tooling output
+dist/
+build/
+coverage/
+.vite/
+.eslintcache
+.stylelintcache
+*.tsbuildinfo
+
+# Env & secrets
+.env
+.env.* 
+!.env.example
+
+# Logs & temps
+logs/
+*.log
+*.log.*
+.tmp/
+temp/
+.cache/
+
+# Docker (local volumes/artifacts)
+docker/.data/
+docker-data/
+.docker/
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# Misc
+*.orig

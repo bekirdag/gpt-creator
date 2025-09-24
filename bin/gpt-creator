@@ -1,0 +1,403 @@
+#!/usr/bin/env bash
+# gpt-creator — global CLI for scaffolding & orchestrating AI-assisted builds
+# Usage: gpt-creator <command> [args]
+# License: MIT
+
+set -Eeuo pipefail
+
+# -------- Constants --------
+VERSION="0.1.0"
+APP_NAME="gpt-creator"
+
+# Defaults (override via env)
+CODEX_BIN="${CODEX_BIN:-codex}"             # your local Codex client binary
+CODEX_MODEL="${CODEX_MODEL:-gpt-5-high}"    # default model
+EDITOR_CMD="${EDITOR_CMD:-code}"            # used by `run open` fallback
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+DC_BIN="${DC_BIN:-docker compose}"          # docker compose v2
+MYSQL_BIN="${MYSQL_BIN:-mysql}"
+
+# Colors (TTY-only)
+if [[ -t 1 ]]; then
+  c_reset=$'\033[0m'; c_dim=$'\033[2m'; c_bold=$'\033[1m'
+  c_red=$'\033[31m'; c_yellow=$'\033[33m'; c_cyan=$'\033[36m'; c_green=$'\033[32m'
+else
+  c_reset=; c_dim=; c_bold=; c_red=; c_yellow=; c_cyan=; c_green=
+fi
+
+# -------- Logging / helpers --------
+die() { echo "${c_red}✖${c_reset} $*" >&2; exit 1; }
+info(){ echo "${c_cyan}➜${c_reset} $*"; }
+ok()  { echo "${c_green}✔${c_reset} $*"; }
+warn(){ echo "${c_yellow}!${c_reset} $*"; }
+
+abs_path() {
+  # portable realpath
+  python3 - "$1" <<'PY' 2>/dev/null || perl -MCwd=abs_path -e 'print abs_path(shift)."\n"' "$1" || echo "$1"
+import os,sys; print(os.path.abspath(sys.argv[1]))
+PY
+}
+
+require_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"; }
+
+is_dir_empty() { [ -z "$(find "$1" -mindepth 1 -print -quit 2>/dev/null)" ]; }
+
+# -------- Usage --------
+usage() {
+cat <<EOF
+${APP_NAME} v${VERSION}
+
+Usage:
+  ${APP_NAME} create-project <path>
+  ${APP_NAME} scan [--project <path>]
+  ${APP_NAME} normalize [--project <path>]
+  ${APP_NAME} plan [--project <path>]
+  ${APP_NAME} generate <api|web|admin|db|docker|all> [--project <path>]
+  ${APP_NAME} db <provision|import|seed> [--project <path>]
+  ${APP_NAME} run <up|down|logs|open> [--project <path>]
+  ${APP_NAME} verify <acceptance|nfr|all> [--project <path>]
+  ${APP_NAME} iterate [--project <path>] [--jira <file>]
+  ${APP_NAME} version
+  ${APP_NAME} help
+
+Global opts:
+  --project <path>    Project root (defaults to CWD)
+  -h, --help          Show help
+  -v, --version       Show version
+
+Environment (override defaults):
+  CODEX_BIN, CODEX_MODEL, DOCKER_BIN, DC_BIN, MYSQL_BIN, EDITOR_CMD
+EOF
+}
+
+# -------- Project context --------
+ensure_ctx() {
+  local root="${1:-}"
+  if [[ -z "${root}" ]]; then root="${PROJECT_ROOT:-$PWD}"; fi
+  PROJECT_ROOT="$(abs_path "$root")"
+  GC_DIR="${PROJECT_ROOT}/.gpt-creator"
+  STAGE_DIR="${GC_DIR}/staging"
+  NORM_DIR="${GC_DIR}/normalized"
+  PLAN_DIR="${GC_DIR}/plans"
+  LOG_DIR="${GC_DIR}/logs"
+  ART_DIR="${GC_DIR}/artifacts"
+  mkdir -p "$GC_DIR" "$STAGE_DIR" "$NORM_DIR" "$PLAN_DIR" "$LOG_DIR" "$ART_DIR"
+}
+
+# -------- Codex wrapper (invoke your local client safely) --------
+codex_call() {
+  # Usage: codex_call <task_name> <input_paths...>
+  local task="${1:?task}"; shift || true
+  local prompt="${GC_DIR}/prompts/${task}.md"
+  mkdir -p "${GC_DIR}/prompts"
+  [[ -f "$prompt" ]] || cat >"$prompt" <<'PROMPT'
+# Instruction
+You are an expert full‑stack generator. Read the supplied docs and produce only the requested code or files.
+
+# Style
+- Stack: NestJS (Node 20), MySQL 8, Vue 3, Vite, Docker Compose.
+- Turkish-first UI labels.
+- WCAG 2.2 AA, security best practices.
+
+# Output rules
+- Be deterministic and idempotent.
+- Include file paths and content blocks.
+- No explanations.
+PROMPT
+
+  require_cmd "$CODEX_BIN"
+  info "Codex: ${task} → model=${CODEX_MODEL}"
+  # Pipe docs (if any) + prompt to codex; exact CLI may vary — adjust as needed.
+  # We keep a log of the raw exchange.
+  local stamp out="${ART_DIR}/${task}-$(date +%Y%m%d-%H%M%S).out"
+  stamp="$(date -Is)"
+  {
+    echo "### ${task} @ ${stamp}"
+    for f in "$@"; do
+      [[ -f "$f" ]] && { echo -e "\n--- FILE:${f} ---\n"; sed -e 's/\r$//' "$f"; }
+    done
+    echo -e "\n--- PROMPT:${prompt} ---\n"; cat "$prompt"
+  } | "$CODEX_BIN" chat --model "$CODEX_MODEL" --stdin >"$out"
+  ok "Codex output → ${out}"
+}
+
+# -------- Commands --------
+
+cmd_create_project() {
+  local path="${1:-}"; [[ -n "$path" ]] || die "create-project requires a path"
+  ensure_ctx "$path"
+  mkdir -p "$PROJECT_ROOT"
+  info "Project root: ${PROJECT_ROOT}"
+  [[ -d "$PROJECT_ROOT" ]] || die "Cannot create ${PROJECT_ROOT}"
+  # Skeleton (non-destructive)
+  mkdir -p "${PROJECT_ROOT}/apps/api" "${PROJECT_ROOT}/apps/web" "${PROJECT_ROOT}/apps/admin" \
+           "${PROJECT_ROOT}/infra" "${PROJECT_ROOT}/docs"
+  touch "${PROJECT_ROOT}/.env.example"
+  ok "Initialized folders"
+
+  # Pipeline (lightweight placeholders; safe to re-run)
+  cmd_scan "--project" "$PROJECT_ROOT"
+  cmd_normalize "--project" "$PROJECT_ROOT"
+  cmd_plan "--project" "$PROJECT_ROOT"
+  info "Run generation when ready:"
+  echo "  ${APP_NAME} generate all --project \"${PROJECT_ROOT}\""
+}
+
+cmd_scan() {
+  local root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) root="$(abs_path "$2")"; shift 2;;
+      *) break;;
+    esac
+  done
+  ensure_ctx "$root"
+  info "Scanning ${PROJECT_ROOT} for inputs…"
+  local manifest="${GC_DIR}/manifest.tsv"
+  : > "$manifest"
+
+  # patterns (case-insensitive)
+  shopt -s globstar nullglob nocaseglob
+  declare -A kinds=(
+    [PDR]="*pdr*.*"
+    [SDS]="*sds*.*"
+    [RFP]="*rfp*.*"
+    [OPENAPI]="openapi.* *.openapi.* *.yaml *.yml"
+    [SQL]="*sql_dump*.sql *.sql"
+    [MERMAID]="*.mmd"
+    [JIRA]="*jira*task*.md *jira*.md"
+    [UI_WEBSITE]="*website*ui*page*.md *ui*pages*.md"
+    [SAMPLES_ROOT]="page_samples"
+    [SAMPLES_BACK]="page_samples/backoffice_pages/**/*"
+    [SAMPLES_SITE]="page_samples/website_pages/**/*"
+    [SAMPLES_STYLE]="page_samples/style.css style.css **/style.css"
+    [HTML_SAMPLES]="**/*.html"
+    [CSS_SAMPLES]="**/*.css"
+  )
+
+  for kind in "${!kinds[@]}"; do
+    for pat in ${kinds[$kind]}; do
+      for f in "${PROJECT_ROOT}"/$pat; do
+        [[ -f "$f" || -d "$f" ]] || continue
+        printf "%s\t%s\n" "$kind" "$(abs_path "$f")" >> "$manifest"
+      done
+    done
+  done
+  shopt -u globstar nocaseglob
+
+  if [[ -s "$manifest" ]]; then
+    ok "Manifest → ${manifest}"
+  else
+    warn "No inputs found. You can still proceed; add files then re-run: ${APP_NAME} scan"
+  fi
+}
+
+cmd_normalize() {
+  local root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) root="$(abs_path "$2")"; shift 2;;
+      *) break;;
+    esac
+  done
+  ensure_ctx "$root"
+  local manifest="${GC_DIR}/manifest.tsv"
+  [[ -f "$manifest" ]] || { warn "No manifest; running scan…"; cmd_scan --project "$PROJECT_ROOT"; }
+  mkdir -p "${NORM_DIR}/docs" "${NORM_DIR}/samples/site" "${NORM_DIR}/samples/admin"
+  info "Normalizing inputs…"
+
+  # Copy with canonical names (best-effort)
+  awk -F'\t' '
+    BEGIN{IGNORECASE=1}
+    {kind=$1; path=$2}
+    kind=="PDR"      {out="docs/PDR.md"}
+    kind=="SDS"      {out="docs/SDS.md"}
+    kind=="RFP"      {out="docs/RFP.md"}
+    kind=="OPENAPI"  {out="docs/openapi.yaml"}
+    kind=="SQL"      {out="docs/schema.sql"}
+    kind=="MERMAID"  {base=gensub(/^.*\//,"","g",path); out="docs/diagrams/" base}
+    kind=="JIRA"     {out="docs/jira-tasks.md"}
+    kind=="UI_WEBSITE"{out="docs/website-ui-pages.md"}
+    kind=="SAMPLES_STYLE"{out="samples/style.css"}
+    kind=="SAMPLES_BACK"{base=gensub(/^.*\//,"","g",path); out="samples/admin/" base}
+    kind=="SAMPLES_SITE"{base=gensub(/^.*\//,"","g",path); out="samples/site/" base}
+    kind=="HTML_SAMPLES"{base=gensub(/^.*\//,"","g",path); out="samples/site/" base}
+    kind=="CSS_SAMPLES"{base=gensub(/^.*\//,"","g",path); out="samples/" base}
+    out!="" {printf("%s\t%s\n", path, out)}
+  ' "$manifest" | while IFS=$'\t' read -r src rel; do
+      local dst="${NORM_DIR}/${rel}"
+      mkdir -p "$(dirname "$dst")"
+      if [[ -d "$src" ]]; then
+        rsync -a --delete "$src"/ "$dst"/ 2>/dev/null || true
+      else
+        cp -f "$src" "$dst"
+      fi
+  done
+
+  ok "Normalized → ${NORM_DIR}"
+}
+
+cmd_plan() {
+  local root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) root="$(abs_path "$2")"; shift 2;;
+      *) break;;
+    esac
+  done
+  ensure_ctx "$root"
+  mkdir -p "$PLAN_DIR"
+  local plan="${PLAN_DIR}/build-plan.md"
+  if [[ ! -f "$plan" ]]; then
+cat >"$plan" <<'MD'
+# Build Plan (draft)
+- Read docs in .gpt-creator/normalized/docs
+- Confirm OpenAPI & DB schema alignment
+- Generate: API (NestJS), Web (Vue 3), Admin (Vue 3), Docker Compose
+- Provision DB; import/seed
+- Run & verify acceptance/NFRs; iterate over Jira tasks
+MD
+  fi
+  ok "Plan scaffold → ${plan}"
+}
+
+cmd_generate() {
+  local facet="${1:-}"; shift || true
+  [[ -n "$facet" ]] || die "generate requires a facet: api|web|admin|db|docker|all"
+  local root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) root="$(abs_path "$2")"; shift 2;;
+      *) break;;
+    esac
+  done
+  ensure_ctx "$root"
+  info "Generate: ${facet}"
+  case "$facet" in
+    api|web|admin|db|docker)
+      codex_call "generate-${facet}" \
+        "${NORM_DIR}/docs/PDR.md" \
+        "${NORM_DIR}/docs/SDS.md" \
+        "${NORM_DIR}/docs/openapi.yaml" \
+        "${NORM_DIR}/docs/schema.sql" \
+        "${PLAN_DIR}/build-plan.md" || true
+      ;;
+    all)
+      for f in api web admin db docker; do
+        cmd_generate "$f" --project "$PROJECT_ROOT"
+      done
+      ;;
+    *) die "Unknown facet: ${facet}";;
+  esac
+  ok "Generation triggered (${facet})"
+}
+
+cmd_db() {
+  local action="${1:-}"; shift || true
+  [[ -n "$action" ]] || die "db requires: provision|import|seed"
+  local root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) root="$(abs_path "$2")"; shift 2;;
+      *) break;;
+    esac
+  done
+  ensure_ctx "$root"
+
+  case "$action" in
+    provision)
+      require_cmd "$DOCKER_BIN"
+      info "Starting MySQL 8 (docker) if not running…"
+      ${DC_BIN} -f "${PROJECT_ROOT}/infra/compose.yaml" up -d db || warn "Ensure compose.yaml exists."
+      ;;
+    import)
+      local sql="${NORM_DIR}/docs/schema.sql"
+      [[ -f "$sql" ]] || die "No normalized SQL at ${sql}"
+      info "Importing SQL → ${sql}"
+      ${MYSQL_BIN} -h "${DB_HOST:-127.0.0.1}" -P "${DB_PORT:-3306}" -u "${DB_USER:-root}" ${DB_PASSWORD:+-p"${DB_PASSWORD}"} "${DB_NAME:-bhavani}" < "$sql" || warn "Import failed. Check credentials."
+      ;;
+    seed)
+      info "Seeding database (stub)… Add your seeds under apps/api/prisma/seed.ts or similar."
+      ;;
+    *) die "Unknown db action: ${action}";;
+  esac
+  ok "db ${action} done"
+}
+
+cmd_run() {
+  local action="${1:-}"; shift || true
+  [[ -n "$action" ]] || die "run requires: up|down|logs|open"
+  local root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) root="$(abs_path "$2")"; shift 2;;
+      *) break;;
+    esac
+  done
+  ensure_ctx "$root"
+  case "$action" in
+    up)   ${DC_BIN} -f "${PROJECT_ROOT}/infra/compose.yaml" up -d || warn "compose.yaml missing";;
+    down) ${DC_BIN} -f "${PROJECT_ROOT}/infra/compose.yaml" down || true;;
+    logs) ${DC_BIN} -f "${PROJECT_ROOT}/infra/compose.yaml" logs -f || true;;
+    open)
+      if command -v open >/dev/null 2>&1; then open "http://localhost:5173" || open "http://localhost:3000" || true
+      else $EDITOR_CMD "${PROJECT_ROOT}" || true
+      fi
+      ;;
+    *) die "Unknown run action: ${action}";;
+  esac
+}
+
+cmd_verify() {
+  local kind="${1:-all}"; shift || true
+  local root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) root="$(abs_path "$2")"; shift 2;;
+      *) break;;
+    esac
+  done
+  ensure_ctx "$root"
+  info "Verifying: ${kind}"
+  # Placeholder checks
+  [[ -f "${NORM_DIR}/docs/PDR.md" ]] || warn "PDR missing"
+  [[ -f "${NORM_DIR}/docs/SDS.md" ]] || warn "SDS missing"
+  ok "Basic verification complete"
+}
+
+cmd_iterate() {
+  local root="" jira=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) root="$(abs_path "$2")"; shift 2;;
+      --jira) jira="$(abs_path "$2")"; shift 2;;
+      *) break;;
+    esac
+  done
+  ensure_ctx "$root"
+  [[ -n "$jira" ]] || jira="${NORM_DIR}/docs/jira-tasks.md"
+  [[ -f "$jira" ]] || die "Jira tasks file not found: ${jira}"
+  codex_call "iterate-jira" "$jira" "${PLAN_DIR}/build-plan.md" || true
+  ok "Iteration round triggered"
+}
+
+# -------- Router --------
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    help|-h|--help) usage;;
+    version|-v|--version) echo "${APP_NAME} ${VERSION}";;
+    create-project) cmd_create_project "$@";;
+    scan)           cmd_scan "$@";;
+    normalize)      cmd_normalize "$@";;
+    plan)           cmd_plan "$@";;
+    generate)       cmd_generate "$@";;
+    db)             cmd_db "$@";;
+    run)            cmd_run "$@";;
+    verify)         cmd_verify "$@";;
+    iterate)        cmd_iterate "$@";;
+    *) die "Unknown command: ${cmd}. See '${APP_NAME} help'";;
+  esac
+}
+
+main "$@"

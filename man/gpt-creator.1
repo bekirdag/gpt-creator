@@ -1,0 +1,119 @@
+.\" =========================================================================
+.\" gpt-creator(1) — CLI for bootstrapping projects with Codex
+.\" =========================================================================
+.TH gpt-creator 1 "2025-09-23" "gpt-creator" "User Commands"
+.SH NAME
+gpt-creator \- scaffold and iteratively build full‑stack projects from docs using Codex
+.SH SYNOPSIS
+.B gpt-creator
+[\-h|\-\-help] [\-\-version]
+.br
+.B gpt-creator create-project
+.I /path/to/project
+[\-\-non-interactive] [\-\-yes] [\-\-verbose]
+.br
+.B gpt-creator scan
+[\-\-root DIR] [patterns...]
+.br
+.B gpt-creator normalize
+[\-\-root DIR]
+.br
+.B gpt-creator plan
+[\-\-root DIR] [\-\-out FILE]
+.br
+.B gpt-creator generate
+{api|web|admin|db|docker} [\-\-root DIR]
+.br
+.B gpt-creator db
+{provision|import|seed} [\-\-root DIR]
+.br
+.B gpt-creator run
+{up|down|logs|open} [\-\-root DIR]
+.br
+.B gpt-creator verify
+[\-\-root DIR]
+.br
+.B gpt-creator iterate
+[\-\-root DIR] [\-\-jira FILE]
+.SH DESCRIPTION
+\fBgpt-creator\fR is a global CLI that discovers product documents (PDR/SDS/RFP,
+OpenAPI, SQL dumps, Mermaid diagrams, Jira tasks, page samples), normalizes them
+into a staging layout, builds a plan, and drives the Codex client to generate a
+NestJS + Vue 3 + MySQL system with Docker orchestration.
+.PP
+The \fBcreate-project\fR command is a one‑shot orchestrator that runs the full
+pipeline: \fBscan\fR → \fBnormalize\fR → \fBplan\fR → \fBgenerate\fR → \fBdb\fR → \fBrun\fR → \fBverify\fR.
+.SH GLOBAL OPTIONS
+.TP
+.B \-h, \-\-help
+Show help.
+.TP
+.B \-\-version
+Show version.
+.TP
+.B \-v, \-\-verbose
+Verbose output (repeatable).
+.SH SUBCOMMANDS
+.TP
+.B create-project
+Run the full pipeline on a target directory.
+.TP
+.B scan
+Fuzzy discovery of inputs: PDR, SDS, RFP, OpenAPI, SQL dumps, Mermaid (*.mmd),
+Jira tasks, and page samples (HTML/CSS).
+.TP
+.B normalize
+Stage and rename discovered files into an internal canonical layout.
+.TP
+.B plan
+Synthesize a build plan from the docs (APIs, entities, routes, tasks).
+.TP
+.B generate
+Codegen in focused scopes: \fBapi\fR | \fBweb\fR | \fBadmin\fR | \fBdb\fR | \fBdocker\fR.
+.TP
+.B db
+Provision MySQL, import schema/dumps, and seed baseline data.
+.TP
+.B run
+Docker Compose wrappers: \fBup\fR, \fBdown\fR, \fBlogs\fR, \fBopen\fR.
+.TP
+.B verify
+Acceptance & NFR checks: routes render, filters work, Lighthouse, AA basics.
+.TP
+.B iterate
+Loop Codex over Jira tasks until green.
+.SH ENVIRONMENT
+.TP
+.B OPENAI_API_KEY
+API key for Codex / GPT‑5‑high usage.
+.TP
+.B CODEX_BASE_URL
+Override Codex API base (optional).
+.TP
+.B GPT_CREATOR_CONFIG
+Path to config file (default: \fI~/.config/gpt-creator/config.yaml\fR).
+.TP
+.B DOCKER_HOST, MYSQL_* 
+Standard Docker/MySQL variables honored by helpers.
+.SH FILES
+.I ~/.config/gpt-creator/config.yaml
+\- CLI configuration.
+.br
+.I ~/.cache/gpt-creator/
+\- cache and run artifacts.
+.SH EXIT STATUS
+Zero for success; non‑zero on error.
+.SH EXAMPLES
+Initialize a project:
+.PP
+.nf
+gpt-creator create-project ~/work/yoga
+.fi
+.PP
+Only (re)generate the API:
+.PP
+.nf
+gpt-creator generate api --root ~/work/yoga
+.fi
+.SH SEE ALSO
+docker(1), docker-compose(1), mysql(1), node(1)

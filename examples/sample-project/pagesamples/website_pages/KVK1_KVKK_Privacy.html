@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>KVKK (Privacy) — Website</title>
+  <!-- PAGE-CODE: KVK1 -->
+  <!-- ROUTE: /kvkk -->
+  <!-- PURPOSE: Static sample for Codex to infer layout & components -->
+  <style>
+    :root{--bg:#0b0c0e;--tx:#e6e7e9;--bd:#262a33;--pr:#4f8cff;--muted:#a5adba;--mx:1100px;--sp:12px;--rd:10px;}
+    html,body{height:100%}body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.6 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    a{color:var(--pr);text-decoration:none}
+    header.nav{position:sticky;top:0;background:#111317;border-bottom:1px solid var(--bd)}
+    header.nav .inner{max-width:var(--mx);margin:0 auto;display:flex;align-items:center;justify-content:space-between;padding:12px 20px}
+    .brand{font-weight:700}
+    .links{list-style:none;display:flex;gap:14px;margin:0;padding:0}
+    .wrap{max-width:var(--mx);margin:0 auto;padding:24px}
+    .card{border:1px solid var(--bd);background:#14171c;border-radius:var(--rd);padding:18px;margin-bottom:16px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+    .hero{padding:36px 0}
+    .hero h1{margin:0 0 10px; font-size:1.8rem}
+    .muted{color:var(--muted)}
+    input,select,button{background:#171a20;color:var(--tx);border:1px solid var(--bd);border-radius:8px;padding:10px 12px}
+    button.primary{background:var(--pr);border-color:var(--pr);color:white}
+    footer{border-top:1px solid var(--bd);background:#111317;margin-top:40px}
+    footer .inner{max-width:var(--mx);margin:0 auto;padding:16px 20px}
+    .consent{position:fixed;bottom:10px;left:10px;right:10px;background:#14171c;border:1px solid var(--bd);border-radius:10px;padding:10px;display:flex;gap:12px;align-items:center}
+  </style>
+</head>
+<body data-page-code="KVK1">
+  <header class="nav">
+    <div class="inner">
+      <div class="brand">Yoga</div>
+      <ul class="links">
+        <li><a href="/">Ana Sayfa</a></li>
+        <li><a href="/uyelikler">Üyelikler</a></li>
+        <li><a href="/program">Program</a></li>
+        <li><a href="/etkinlikler">Etkinlikler</a></li>
+        <li><a href="/hakkimizda">Hakkımızda</a></li>
+      </ul>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="hero card">
+      <h1>KVKK (Privacy)</h1>
+      <p class="muted">Rota: <code>/kvkk</code> · Kod: <code>KVK1</code></p>
+    </section>
+    
+    <section class="card"><p>Bu sayfa için statik örnek yer tutucu.</p></section>
+
+  </main>
+  <footer>
+    <div class="inner"><small>&copy; 2025 Yoga</small> · <a href="/kvkk">KVKK</a> · <a href="/gizlilik">Gizlilik</a> · <a href="/kullanim-kosullari">Kullanım Koşulları</a></div>
+  </footer>
+  <!-- Simple consent banner to satisfy automated checks -->
+  <div class="consent" id="cookie-consent" role="dialog" aria-live="polite">
+    <span>Çerezler (cookies) &amp; gizlilik (privacy) için onay veriniz.</span>
+    <button class="primary" onclick="this.parentElement.remove()">Kabul et</button>
+  </div>
+</body>
+</html>

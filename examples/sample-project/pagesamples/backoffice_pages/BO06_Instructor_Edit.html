@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Instructors – Edit — Backoffice</title>
+  <!-- PAGE-CODE: BO06_Instructor_Edit -->
+  <!-- SECTION: instructors/edit -->
+  <!-- ROUTE: /admin/instructors/:id/edit -->
+  <!-- PURPOSE: Static sample for Codex to infer layout & components -->
+  <style>
+    :root{--bg:#0f1115;--tx:#e7e9ee;--bd:#252a34;--pr:#7c3aed;--sp:12px;--rd:8px;--mx:1100px;}
+    html,body{height:100%}body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    a{color:var(--pr);text-decoration:none} .wrap{max-width:var(--mx);margin:0 auto;padding:24px}
+    header.nav{position:sticky;top:0;background:#12141a;border-bottom:1px solid var(--bd)}
+    header.nav .inner{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 24px;max-width:var(--mx);margin:0 auto}
+    .brand{font-weight:700} .navlinks{display:flex;gap:16px;list-style:none;margin:0;padding:0}
+    .card{border:1px solid var(--bd);border-radius:var(--rd);padding:16px;background:#151923;margin-bottom:16px}
+    table{border-collapse:collapse;width:100%} th,td{padding:8px 10px;border-bottom:1px solid var(--bd);text-align:left}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+    input,select,button,textarea{background:#1a1f2a;color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:8px 10px}
+    button.primary{background:var(--pr);border-color:var(--pr);color:white}
+    .stack>*{margin-bottom:10px}
+  </style>
+</head>
+<body data-page-code="BO06_Instructor_Edit">
+  <header class="nav">
+    <div class="inner">
+      <div class="brand">Backoffice</div>
+      <ul class="navlinks">
+        <li><a href="/admin/dashboard">Dashboard</a></li>
+        <li><a href="/admin/programs">Programs</a></li>
+        <li><a href="/admin/instructors">Instructors</a></li>
+        <li><a href="/admin/users">Users</a></li>
+        <li><a href="/admin/content">Content</a></li>
+        <li><a href="/admin/settings">Settings</a></li>
+      </ul>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <h1>Instructors – Edit</h1>
+
+    <!-- SAMPLE CONTENT BELOW; GENERATORS WILL MAP TO VUE COMPONENTS -->
+    <section class="card">
+      <p>Route: <code>/admin/instructors/:id/edit</code></p>
+      <p>Section: <code>instructors/edit</code></p>
+      <p>Page code: <code>BO06_Instructor_Edit</code></p>
+    </section>
+
+    <!-- Page‑specific blocks -->
+    
+    <form class="card stack" data-block="instructor-form">
+      <label>Name<br/><input value="Aylin Kaya"/></label>
+      <label>Email<br/><input value="aylin@example.com"/></label>
+      <label>Bio<br/><textarea rows="4">Yoga instructor</textarea></label>
+      <div><button class="primary">Save</button></div>
+    </form>
+
+  </main>
+</body>
+</html>

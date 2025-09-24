@@ -1,0 +1,15 @@
+-- init.sql.tmpl — MySQL initialization
+-- Placeholders: {{DB_NAME}}, {{DB_USER}}, {{DB_PASSWORD}}
+
+CREATE DATABASE IF NOT EXISTS `{{DB_NAME}}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- Create application user if not exists
+CREATE USER IF NOT EXISTS '{{DB_USER}}'@'%' IDENTIFIED BY '{{DB_PASSWORD}}';
+
+-- Grant privileges on the app database
+GRANT ALL PRIVILEGES ON `{{DB_NAME}}`.* TO '{{DB_USER}}'@'%';
+
+-- Recommended SQL modes
+SET GLOBAL sql_mode = 'STRICT_TRANS_TABLES,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
+
+FLUSH PRIVILEGES;

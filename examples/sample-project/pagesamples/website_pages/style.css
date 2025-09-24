@@ -1,0 +1,48 @@
+/* Shared stylesheet for website_pages/ and backoffice_pages/ samples.
+   Generators can derive design tokens & component mappings from here. */
+
+:root{
+  --bg:#0b0c0e; --text:#e6e7e9; --muted:#a5adba; --border:#262a33;
+  --surface-1:#111317; --surface-2:#171a20; --primary:#4f8cff;
+  --danger:#ef4444; --warning:#f59e0b; --success:#10b981;
+  --space-1:.25rem; --space-2:.5rem; --space-3:.75rem; --space-4:1rem; --space-5:1.5rem; --space-6:2rem;
+  --radius-1:4px; --radius-2:6px; --radius-3:10px;
+  --font-sans: ui-sans-serif, -apple-system, Segoe UI, Roboto, Arial, 'Noto Sans', sans-serif;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-sans);line-height:1.6}
+a{color:var(--primary);text-decoration:none}
+.container{max-width:1200px;margin-inline:auto;padding:var(--space-4)}
+
+.muted{color:var(--muted)}
+.stack>*{margin-bottom:var(--space-3)}
+.grid{display:grid;gap:var(--space-4);grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+
+.card{border:1px solid var(--border);background:var(--surface-1);border-radius:var(--radius-3);padding:var(--space-4)}
+.badge{display:inline-block;padding:0 .5em;border:1px solid var(--border);border-radius:999px;background:var(--surface-2);font-size:.8em}
+
+input,select,textarea{background:var(--surface-2);color:var(--text);border:1px solid var(--border);
+  border-radius:var(--radius-2);padding:var(--space-2) var(--space-3);width:100%}
+button{border:1px solid var(--border);border-radius:var(--radius-2);padding:var(--space-2) var(--space-3);
+  cursor:pointer;background:var(--surface-2);color:var(--text)}
+button.primary{background:var(--primary);border-color:var(--primary);color:#fff}
+button.ghost{background:transparent}
+
+table{border-collapse:collapse;width:100%}
+th,td{padding:var(--space-2) var(--space-3);border-bottom:1px solid var(--border);text-align:left}
+thead th{font-size:.9rem;color:var(--muted)}
+
+header.nav{position:sticky;top:0;background:var(--surface-1);border-bottom:1px solid var(--border);z-index:10}
+header.nav .inner{max-width:1200px;margin:0 auto;padding:var(--space-2) var(--space-4);
+  display:flex;align-items:center;justify-content:space-between}
+header.nav .brand{font-weight:700}
+header.nav .links{list-style:none;display:flex;gap:var(--space-3);margin:0;padding:0}
+
+footer.site{border-top:1px solid var(--border);background:var(--surface-1);margin-top:var(--space-6)}
+footer.site .inner{max-width:1200px;margin:0 auto;padding:var(--space-4)}
+
+.consent{position:fixed;left:10px;right:10px;bottom:10px;background:var(--surface-1);
+  border:1px solid var(--border);border-radius:var(--radius-3);padding:var(--space-3);
+  display:flex;gap:var(--space-3);align-items:center}

@@ -1,0 +1,24 @@
+# openapi-generator.yml.tmpl — configuration for OpenAPI Generator
+# Docs: https://openapi-generator.tech/docs/configuration
+
+# Path to your spec (relative to repo root or adjust in runtime)
+inputSpec: ./openapi.yaml
+
+# Example client generation (TypeScript Axios)
+generatorName: typescript-axios
+output: ./generated/client
+
+# Additional properties for TS Axios
+additionalProperties:
+  npmName: "@your-org/api-client"
+  npmVersion: "0.1.0"
+  withSeparateModelsAndApi: true
+  snapshot: true
+  useSingleRequestParameter: true
+  supportsES6: true
+  modelPropertyNaming: original
+  enumPropertyNaming: original
+  useSwaggerDeprecated: true
+
+# Optional: files to ignore (see .openapi-ignore.tmpl)
+ignoreFileOverride: ./templates/openapi/.openapi-ignore

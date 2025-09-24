@@ -1,0 +1,9 @@
+# Dockerfile for API (NestJS) container
+FROM node:20-alpine
+WORKDIR /workspace
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+EXPOSE 3000
+CMD ["npm", "run", "start:prod"]

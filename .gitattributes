@@ -1,0 +1,16 @@
+# Normalize line endings everywhere
+* text=auto eol=lf
+
+# Treat common source files explicitly as text
+*.{js,jsx,ts,tsx,mjs,cjs,vue,css,scss,html,md,mdx,json,yml,yaml,sh} text eol=lf
+
+# Reviewable SVGs as text; other assets as binary
+*.svg text
+*.{png,jpg,jpeg,gif,webp,ico} binary
+*.{woff,woff2,ttf,eot}        binary
+*.pdf                          binary
+
+# GitHub linguist hints (keeps stats clean)
+dist/**     linguist-generated
+build/**    linguist-generated
+coverage/** linguist-generated

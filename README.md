@@ -8,13 +8,13 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 
 ## Features at a Glance
 
-- **Single-command bootstrap**: `gpt-creator create-project <path>` orchestrates scan → normalize → plan → generate → db → run → verify.
+- **Single-command bootstrap**: `gpt-creator create-project <path>` orchestrates scan → normalize → plan → generate → db → run, then runs acceptance verification. Additional NFR checks remain available via `verify all`.
 - **Fuzzy discovery**: Locates artifacts across diverse naming conventions (e.g., `*PDR*.md`, `openapi.*`, `sql_dump*.sql`, `*.mmd`, HTML/CSS samples).
 - **Deterministic staging**: Copies inputs into `.gpt-creator/staging/inputs/` with canonical names and provenance tracking.
-- **Planning outputs**: Produces route/entity summaries and task hints under `.gpt-creator/staging/plan/`.
-- **Template-driven generation**: Renders NestJS, Vue 3, Prisma, and Docker templates into `/apps/**` and `/docker`.
-- **Verification gates**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks.
-- **Iteration loop**: Parses Jira markdown tasks and relays them to Codex for incremental fixes.
+- **Planning outputs**: Produces route/entity summaries and task hints under `.gpt-creator/staging/plan/` as scaffolding for further design work.
+- **Template-driven generation**: Renders baseline NestJS, Vue 3, Prisma, and Docker scaffolds into `/apps/**` and `/docker`, ready for manual extension or Codex-driven augmentation.
+- **Verification toolkit**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks that you can run on demand.
+- **Iteration helpers**: Parses Jira markdown tasks and prepares Codex prompts; you review/apply Codex output before re-running verification.
 
 ---
 
@@ -71,6 +71,7 @@ Keep the repo on your `PATH`, or invoke `./bin/gpt-creator` directly.
    ```
    - A `.gpt-creator` workspace is created under the project root.
    - Generated code lands in `/apps/api`, `/apps/web`, `/apps/admin`, `/db`, `/docker`.
+   - The command finishes after acceptance checks (`verify acceptance`); run `verify all` to execute the extended NFR suite.
 3. **Inspect outputs**:
    - `.gpt-creator/staging/discovery.yaml` for scan results
    - `.gpt-creator/staging/plan/` for route/entity summaries and tasks
@@ -119,6 +120,7 @@ gpt-creator generate all --project /path/to/project
   - `db/` (MySQL init + seed scripts)
   - `docker/` (Dockerfiles, Compose, nginx)
 - `.tmpl` files receive `DB_NAME`, `DB_USER`, `DB_PASSWORD` substitutions based on env/defaults.
+- Outputs are scaffolds; wire business logic, DTOs, and UI flows manually or via Codex responses.
 
 ### 5. Database Helpers
 ```
@@ -153,6 +155,7 @@ gpt-creator iterate --project /path/to/project --jira docs/jira.md
 ```
 - Converts Jira markdown headings/checkboxes into tasks (`jira-tasks.json`).
 - Invokes Codex with the staged context and (optionally) reruns `verify all` unless `--no-verify` is supplied.
+- Review and apply Codex output manually; the CLI does not auto-apply patches.
 
 ---
 
@@ -211,4 +214,3 @@ See `docs/ROADMAP.md` for upcoming milestones.
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
-

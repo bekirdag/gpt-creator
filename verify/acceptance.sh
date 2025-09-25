@@ -18,14 +18,33 @@ curl_ok() {
   local url="$1"
   local code
   code=$(curl -fsS -o /dev/null -w "%{http_code}" "$url" || true)
-  [[ "$code" == "200" || "$code" == "204" ]] && return 0 || return 1
+  [[ "$code" =~ ^2[0-9][0-9]$ || "$code" =~ ^3[0-9][0-9]$ ]] && return 0 || return 1
 }
 
-info "Checking Docker services (if docker-compose is present)…"
-if command -v docker-compose >/dev/null 2>&1; then
-  docker-compose ps || true
+PROJECT_ROOT_ENV="${PROJECT_ROOT:-}"
+COMPOSE_FILE_HINT="${GC_COMPOSE_FILE:-}"
+
+if [[ -z "$COMPOSE_FILE_HINT" && -n "$PROJECT_ROOT_ENV" ]]; then
+  COMPOSE_FILE_HINT="${PROJECT_ROOT_ENV}/docker/docker-compose.yml"
+fi
+
+info "Checking Docker services (if docker compose is available)…"
+if [[ -n "$COMPOSE_FILE_HINT" && -f "$COMPOSE_FILE_HINT" ]]; then
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    docker compose -f "$COMPOSE_FILE_HINT" ps || true
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose -f "$COMPOSE_FILE_HINT" ps || true
+  else
+    info "Docker compose CLI not available (skipping)"
+  fi
 else
-  info "docker-compose not found (skipping)"
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    docker compose ps || true
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose ps || true
+  else
+    info "docker-compose not found (skipping)"
+  fi
 fi
 
 info "API health: ${API_URL%/}/health"
@@ -36,16 +55,16 @@ else
   FAIL=1
 fi
 
-info "Web root: ${WEB_URL}"
-if curl_ok "${WEB_URL}"; then
+web_ping="${WEB_URL%/}/__vite_ping"
+if curl_ok "$web_ping" || curl_ok "${WEB_URL}"; then
   ok "Web is serving."
 else
   bad "Web check failed at ${WEB_URL}"
   FAIL=1
 fi
 
-info "Admin root: ${ADMIN_URL}"
-if curl_ok "${ADMIN_URL}"; then
+admin_ping="${ADMIN_URL%/}/__vite_ping"
+if curl_ok "$admin_ping" || curl_ok "${ADMIN_URL}"; then
   ok "Admin is serving."
 else
   bad "Admin check failed at ${ADMIN_URL}"

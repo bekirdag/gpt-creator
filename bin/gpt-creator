@@ -1241,6 +1241,7 @@ cmd_verify() {
   esac
 
   local pass=0 fail=0 skip=0
+  local compose_file="${PROJECT_ROOT}/docker/docker-compose.yml"
   run_check() {
     local label="$1"; shift
     if "$@"; then
@@ -1260,7 +1261,9 @@ cmd_verify() {
   for name in "${check_names[@]}"; do
     case "$name" in
       acceptance)
-        run_check "acceptance" bash "$verify_root/acceptance.sh" "${api_base}" "${web_url}" "${admin_url}"
+        run_check "acceptance" \
+          env PROJECT_ROOT="$PROJECT_ROOT" GC_COMPOSE_FILE="$compose_file" \
+          bash "$verify_root/acceptance.sh" "${api_base}" "${web_url}" "${admin_url}"
         ;;
       openapi)
         local spec=""
@@ -1302,7 +1305,19 @@ PROMPT
   fi
   if command -v "$CODEX_BIN" >/dev/null 2>&1; then
     info "Codex ${task} → model=${CODEX_MODEL}"
-    "$CODEX_BIN" chat --model "$CODEX_MODEL" --prompt-file "$prompt_file" --stdin < /dev/null || warn "Codex invocation returned non-zero."
+    local codex_help
+    codex_help="$("$CODEX_BIN" --help 2>&1 || true)"
+    if [[ "$codex_help" == *"--prompt-file"* || "$codex_help" == *"chat [options]"* ]]; then
+      "$CODEX_BIN" chat --model "$CODEX_MODEL" --prompt-file "$prompt_file" --stdin < /dev/null || warn "Codex invocation returned non-zero."
+    else
+      local prompt
+      prompt="$(<"$prompt_file")"
+      local args=("--model" "$CODEX_MODEL")
+      if [[ -n "${CODEX_PROFILE:-}" ]]; then
+        args+=("--profile" "$CODEX_PROFILE")
+      fi
+      "$CODEX_BIN" "${args[@]}" "$prompt" || warn "Codex invocation returned non-zero."
+    fi
   else
     warn "Codex binary (${CODEX_BIN}) not found — skipping ${task}."
   fi

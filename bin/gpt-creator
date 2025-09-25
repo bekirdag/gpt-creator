@@ -175,6 +175,8 @@ tasks = []
 current = None
 section = None
 
+dashes = r'[\-\u2012\u2013\u2014\u2015]'
+
 
 def normalise_list(value: str):
     cleaned = value.replace('+', ',').replace('/', ',').replace('&', ',')
@@ -202,15 +204,18 @@ def flush_current():
     section = None
 
 
-  for raw in lines:
+for raw in lines:
     stripped = raw.strip()
     if not stripped:
         if current is not None and section == 'description':
             current['description_lines'].append('')
         continue
 
-    epic_heading = re.match(r'^##\s+Epic\s+([A-Za-z0-9_.-]+)\s+[–-]\s+(.*)$', stripped)
-    epic_bold = re.match(r'^\*\*([Ee][0-9A-Za-z_.-]+)\*\*\s*[–-]\s*(.*)$', stripped)
+    if stripped.lower() in {'**epic**', '**story**', '### **story**'}:
+        continue
+
+    epic_heading = re.match(r'^##\s+Epic\s+([A-Za-z0-9_.-]+)\s+' + dashes + r'\s+(.*)$', stripped)
+    epic_bold = re.match(r'^\*\*([Ee][A-Za-z0-9_.:-]+)\s*' + dashes + r'\s*(.+?)\*\*$', stripped)
     if epic_heading or epic_bold:
         flush_current()
         if epic_heading:
@@ -221,8 +226,8 @@ def flush_current():
         story_title = ""
         continue
 
-    story_heading = re.match(r'^###\s+Story\s+([A-Za-z0-9_.-]+)\s+[–-]\s+(.*)$', stripped)
-    story_bold = re.match(r'^\*\*([Ss][0-9A-Za-z_.-]+)\*\*\s*[–-]\s*(.*)$', stripped)
+    story_heading = re.match(r'^###\s+Story\s+([A-Za-z0-9_.-]+)\s+' + dashes + r'\s+(.*)$', stripped)
+    story_bold = re.match(r'^\*\*([Ss][A-Za-z0-9_.:-]+)\s*' + dashes + r'\s*(.+?)\*\*$', stripped)
     if story_heading or story_bold:
         flush_current()
         if story_heading:
@@ -231,7 +236,7 @@ def flush_current():
             story_id, story_title = story_bold.group(1).strip(), story_bold.group(2).strip()
         continue
 
-    task_match = re.match(r'^\*\*([A-Za-z0-9_.:-]+)\*\*\s+[–-]\s+(.*)$', stripped)
+    task_match = re.match(r'^\*\*([Tt][A-Za-z0-9_.:-]+)\s*' + dashes + r'\s*(.+?)\*\*$', stripped)
     if task_match:
         flush_current()
         task_id, task_title = task_match.groups()

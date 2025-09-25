@@ -699,8 +699,14 @@ cmd_run() {
       local web_url="${GC_WEB_URL:-http://localhost:8080/}"
       local admin_url="${GC_ADMIN_URL:-http://localhost:8080/admin/}"
       wait_for_endpoint "${api_base%/}/health" "API /health" 40 3 || true
-      wait_for_endpoint "${web_url%/}/" "Web" 40 3 || true
-      wait_for_endpoint "${admin_url%/}/" "Admin" 40 3 || true
+      local web_ping="${web_url%/}/__vite_ping"
+      if ! wait_for_endpoint "$web_ping" "Web (vite ping)" 40 3; then
+        wait_for_endpoint "${web_url%/}/" "Web" 20 3 || true
+      fi
+      local admin_ping="${admin_url%/}/__vite_ping"
+      if ! wait_for_endpoint "$admin_ping" "Admin (vite ping)" 40 3; then
+        wait_for_endpoint "${admin_url%/}/" "Admin" 20 3 || true
+      fi
       ;;
     down)
       [[ -f "$compose_file" ]] || die "Compose file not found at ${compose_file}"

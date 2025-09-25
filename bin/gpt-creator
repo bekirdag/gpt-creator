@@ -80,6 +80,7 @@ gc_create_env_if_missing() {
   slug="$(basename "${PROJECT_ROOT:-$PWD}")"
   slug="${slug//[^a-zA-Z0-9]/_}"
   slug="${slug,,}"
+  slug="${slug:0:12}"
   [[ -n "$slug" ]] || slug="app"
   local db_name="${slug}_db"
   local db_user="gc_${slug}_user"
@@ -717,6 +718,14 @@ cmd_generate() {
         GC_DB_HOST_PORT="$(find_free_port "$preferred")"
         info "MySQL host port mapped to ${GC_DB_HOST_PORT}"
       fi
+      DB_HOST_PORT="$GC_DB_HOST_PORT"
+      MYSQL_HOST_PORT="$GC_DB_HOST_PORT"
+      gc_set_env_var DB_HOST_PORT "$GC_DB_HOST_PORT"
+      gc_set_env_var MYSQL_HOST_PORT "$GC_DB_HOST_PORT"
+      gc_set_env_var GC_DB_HOST_PORT "$GC_DB_HOST_PORT"
+      local local_url="mysql://${GC_DB_USER}:${GC_DB_PASSWORD}@127.0.0.1:${GC_DB_HOST_PORT}/${GC_DB_NAME}"
+      gc_set_env_var DATABASE_URL "$local_url"
+      gc_load_env
       copy_template_tree "$templates/docker" "$out"
       ok "Docker assets scaffolded → ${out}"
       ;;
@@ -755,7 +764,12 @@ cmd_db() {
       sql_file="$(find "$INPUT_DIR/sql" -maxdepth 2 -type f -name '*.sql' | head -n1 || true)"
       [[ -n "$sql_file" ]] || die "No staged SQL found under ${INPUT_DIR}/sql"
       info "Importing SQL from ${sql_file}"
-      ${MYSQL_BIN} -h "${DB_HOST:-127.0.0.1}" -P "${DB_PORT:-3306}" -u "${DB_USER:-root}" ${DB_PASSWORD:+-p"${DB_PASSWORD}"} "${DB_NAME:-app}" < "$sql_file"
+      local host="${DB_HOST:-127.0.0.1}"
+      local port="${DB_HOST_PORT:-${GC_DB_HOST_PORT:-${DB_PORT:-3306}}}"
+      local user="${DB_ROOT_USER:-root}"
+      local pass="${DB_ROOT_PASSWORD:-${GC_DB_ROOT_PASSWORD:-}}"
+      local database="${DB_NAME:-$GC_DB_NAME}"
+      ${MYSQL_BIN} -h "$host" -P "$port" -u "$user" ${pass:+-p"${pass}"} "$database" < "$sql_file"
       ok "Database import finished"
       ;;
     seed)

@@ -71,6 +71,7 @@ Keep the repo on your `PATH`, or invoke `./bin/gpt-creator` directly.
    ```
    - A `.gpt-creator` workspace is created under the project root.
    - Generated code lands in `/apps/api`, `/apps/web`, `/apps/admin`, `/db`, `/docker`.
+   - A `.env` file with random database credentials is created automatically; reuse it for local scripts and CI secrets.
    - The command finishes after acceptance checks (`verify acceptance`); run `verify all` to execute the extended NFR suite.
 3. **Inspect outputs**:
    - `.gpt-creator/staging/discovery.yaml` for scan results
@@ -128,6 +129,7 @@ gpt-creator db provision   # docker compose up db
 @gpt-creator db import      # mysql < staging/inputs/sql/*.sql
 @gpt-creator db seed        # placeholder for custom seeds
 ```
+- The `.env` file already holds the DB host/user/password (including the mapped host port), so these commands work without extra setup.
 
 ### 6. Run Stack
 ```

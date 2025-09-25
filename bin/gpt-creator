@@ -65,6 +65,38 @@ docker_compose() {
   fi
 }
 
+wait_for_endpoint() {
+  local url="$1" label="$2"
+  local attempts="${3:-30}" delay="${4:-2}"
+  local i=1
+  while (( i <= attempts )); do
+    if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+      ok "${label} ready → ${url}"
+      return 0
+    fi
+    sleep "$delay"
+    ((i++)) || true
+  done
+  warn "${label} not ready after $((attempts * delay))s → ${url}"
+  return 1
+}
+
+render_template_file() {
+  local src="$1" dest="$2"
+  local db_name="${GC_DB_NAME:-${DB_NAME:-app}}"
+  local db_user="${GC_DB_USER:-${DB_USER:-app}}"
+  local db_pass="${GC_DB_PASSWORD:-${DB_PASSWORD:-app_pass}}"
+  python3 - <<'PY' "$src" "$dest" "$db_name" "$db_user" "$db_pass"
+import pathlib, sys
+src, dest, db_name, db_user, db_pass = sys.argv[1:6]
+text = pathlib.Path(src).read_text()
+text = text.replace('{{DB_NAME}}', db_name)
+text = text.replace('{{DB_USER}}', db_user)
+text = text.replace('{{DB_PASSWORD}}', db_pass)
+pathlib.Path(dest).write_text(text)
+PY
+}
+
 # ---------- Scan helpers ----------
 has_pattern() { LC_ALL=C grep -E -i -m 1 -q -- "$1" "$2" 2>/dev/null; }
 classify_file() {
@@ -498,14 +530,19 @@ copy_template_tree() {
     local rel="${dir#$src}"
     mkdir -p "$dest/$rel"
   done
-  find "$src" -type f ! -name '.DS_Store' | while IFS= read -r file; do
+  find "$src" -type f | while IFS= read -r file; do
+    local base="$(basename "$file")"
+    [[ "$base" == '.DS_Store' ]] && continue
     local rel="${file#$src/}"
     local target="$dest/$rel"
     if [[ "$target" == *.tmpl ]]; then
       target="${target%.tmpl}"
+      mkdir -p "$(dirname "$target")"
+      render_template_file "$file" "$target"
+    else
+      mkdir -p "$(dirname "$target")"
+      cp "$file" "$target"
     fi
-    mkdir -p "$(dirname "$target")"
-    cp "$file" "$target"
   done
 }
 
@@ -616,6 +653,12 @@ cmd_run() {
       [[ -f "$compose_file" ]] || die "Compose file not found at ${compose_file}; generate docker assets first."
       docker_compose -f "$compose_file" up -d
       ok "Stack is starting (check docker compose ps)"
+      local api_base="${GC_API_BASE_URL:-http://localhost:3000/api/v1}"
+      local web_url="${GC_WEB_URL:-http://localhost:8080/}"
+      local admin_url="${GC_ADMIN_URL:-http://localhost:8080/admin/}"
+      wait_for_endpoint "${api_base%/}/health" "API /health" 40 3 || true
+      wait_for_endpoint "${web_url%/}/" "Web" 40 3 || true
+      wait_for_endpoint "${admin_url%/}/" "Admin" 40 3 || true
       ;;
     down)
       [[ -f "$compose_file" ]] || die "Compose file not found at ${compose_file}"

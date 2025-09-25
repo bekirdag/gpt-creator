@@ -43,7 +43,15 @@ APP_BIN="$APP_DIR/bin/gpt-creator"
 LINK_PATH="$BIN_DIR/gpt-creator"
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
-as_root()   { if [[ -w "$1" ]]; then shift; "$@"; else sudo "$@"; fi; }
+as_root() {
+  local target="$1"
+  shift
+  if [[ -w "$target" ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
 
 ver_major() { echo "${1#v}" | awk -F. '{print $1}'; }
 

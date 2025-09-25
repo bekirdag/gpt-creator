@@ -36,7 +36,8 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This installer targets macOS (Darwin)." >&2; exit 1
 fi
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_DIR="$(cd "$SCRIPTS_DIR/.." && pwd -P)"
 APP_DIR="$PREFIX/lib/gpt-creator"
 BIN_DIR="$PREFIX/bin"
 APP_BIN="$APP_DIR/bin/gpt-creator"
@@ -96,11 +97,11 @@ install_files() {
       as_root "$PREFIX" cp -R "$REPO_DIR"/. "$APP_DIR"/
     }
 
-  # Ensure executable bit set on CLI entrypoint
-  if [[ -f "$APP_BIN" ]]; then
+  # Ensure CLI entrypoint is up to date
+  if [[ -f "$APP_BIN" ]] && ! grep -q "placeholder" "$APP_BIN"; then
     as_root "$PREFIX" chmod +x "$APP_BIN"
   else
-    echo "› Copying CLI entrypoint to $APP_BIN"
+    echo "› Installing CLI entrypoint to $APP_BIN"
     as_root "$PREFIX" mkdir -p "$(dirname "$APP_BIN")"
     as_root "$PREFIX" install -m 0755 "$REPO_DIR/bin/gpt-creator" "$APP_BIN"
   fi

@@ -5,7 +5,19 @@
 
 set -Eeuo pipefail
 
-CLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+resolve_cli_root() {
+  local source="${BASH_SOURCE[0]}"
+  while [[ -L "$source" ]]; do
+    local dir
+    dir="$(cd "$(dirname "$source")" && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" != /* ]] && source="$dir/$source"
+  done
+  cd "$(dirname "$source")/.." && pwd
+}
+
+CLI_ROOT="$(resolve_cli_root)"
+unset -f resolve_cli_root
 VERSION="0.2.0"
 APP_NAME="gpt-creator"
 

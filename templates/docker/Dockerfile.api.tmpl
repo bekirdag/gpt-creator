@@ -1,9 +1,16 @@
 # Dockerfile for API (NestJS) container
 FROM node:20-alpine
-WORKDIR /workspace
-COPY package*.json ./
+
+WORKDIR /workspace/apps/api
+
+# install dependencies
+COPY apps/api/package*.json ./
 RUN npm install
-COPY . .
+
+# copy source
+COPY apps/api ./
+
 RUN npm run build
+
 EXPOSE 3000
 CMD ["npm", "run", "start:prod"]

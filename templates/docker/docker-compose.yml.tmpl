@@ -10,7 +10,7 @@ services:
       MYSQL_USER: yoga
       MYSQL_PASSWORD: yoga
     ports:
-      - "${MYSQL_HOST_PORT:-3307}:3306"
+      - "{{DB_HOST_PORT}}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
       interval: 5s
@@ -31,11 +31,12 @@ services:
       NODE_ENV: development
       DATABASE_URL: mysql://yoga:yoga@db:3306/yoga_app
       PORT: 3000
+    command: sh -c "npm install && npm run start:dev"
     ports:
       - "3000:3000"
     volumes:
       - ../apps/api:/workspace/apps/api
-      - ../package.json:/workspace/package.json
+      - api_node_modules:/workspace/apps/api/node_modules
 
   web:
     build:
@@ -45,10 +46,12 @@ services:
     environment:
       NODE_ENV: development
       VITE_API_BASE: http://localhost:3000/api/v1
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     ports:
       - "5173:5173"
     volumes:
       - ../apps/web:/workspace/apps/web
+      - web_node_modules:/workspace/apps/web/node_modules
 
   admin:
     build:
@@ -58,10 +61,12 @@ services:
     environment:
       NODE_ENV: development
       VITE_API_BASE: http://localhost:3000/api/v1
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     ports:
       - "5174:5173"
     volumes:
       - ../apps/admin:/workspace/apps/admin
+      - admin_node_modules:/workspace/apps/admin/node_modules
 
   proxy:
     image: nginx:alpine
@@ -77,3 +82,6 @@ services:
 
 volumes:
   db_data: {}
+  api_node_modules: {}
+  web_node_modules: {}
+  admin_node_modules: {}

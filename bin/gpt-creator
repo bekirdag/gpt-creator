@@ -77,6 +77,29 @@ docker_compose() {
   fi
 }
 
+port_in_use() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -an 2>/dev/null | grep -E "\.${port} .*LISTEN" >/dev/null && return 0
+  fi
+  return 1
+}
+
+find_free_port() {
+  local start="${1:-3306}"
+  local port="$start"; local limit=$((start+100))
+  while (( port <= limit )); do
+    if ! port_in_use "$port"; then
+      echo "$port"
+      return 0
+    fi
+    ((port++)) || true
+  done
+  echo "$start"  # fallback
+}
+
 wait_for_endpoint() {
   local url="$1" label="$2"
   local attempts="${3:-30}" delay="${4:-2}"
@@ -98,13 +121,15 @@ render_template_file() {
   local db_name="${GC_DB_NAME:-${DB_NAME:-app}}"
   local db_user="${GC_DB_USER:-${DB_USER:-app}}"
   local db_pass="${GC_DB_PASSWORD:-${DB_PASSWORD:-app_pass}}"
-  python3 - <<'PY' "$src" "$dest" "$db_name" "$db_user" "$db_pass"
+  local db_host_port="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-3306}}"
+  python3 - <<'PY' "$src" "$dest" "$db_name" "$db_user" "$db_pass" "$db_host_port"
 import pathlib, sys
-src, dest, db_name, db_user, db_pass = sys.argv[1:6]
+src, dest, db_name, db_user, db_pass, db_host_port = sys.argv[1:7]
 text = pathlib.Path(src).read_text()
 text = text.replace('{{DB_NAME}}', db_name)
 text = text.replace('{{DB_USER}}', db_user)
 text = text.replace('{{DB_PASSWORD}}', db_pass)
+text = text.replace('{{DB_HOST_PORT}}', db_host_port)
 pathlib.Path(dest).write_text(text)
 PY
 }
@@ -599,6 +624,11 @@ cmd_generate() {
     docker)
       local out="$PROJECT_ROOT/docker"
       mkdir -p "$out"
+      if [[ -z "${GC_DB_HOST_PORT:-}" ]]; then
+        local preferred="${DB_HOST_PORT:-${MYSQL_HOST_PORT:-3306}}"
+        GC_DB_HOST_PORT="$(find_free_port "$preferred")"
+        info "MySQL host port mapped to ${GC_DB_HOST_PORT}"
+      fi
       copy_template_tree "$templates/docker" "$out"
       ok "Docker assets scaffolded → ${out}"
       ;;

@@ -119,7 +119,7 @@ gpt-creator generate all --project /path/to/project
   - `apps/web` and `apps/admin` (Vue 3 + Vite)
   - `db/` (MySQL init + seed scripts)
   - `docker/` (Dockerfiles, Compose, nginx)
-- `.tmpl` files receive `DB_NAME`, `DB_USER`, `DB_PASSWORD` substitutions based on env/defaults.
+- `.tmpl` files receive `DB_NAME`, `DB_USER`, `DB_PASSWORD`, and an auto-selected MySQL host port (first free port ≥ 3306).
 - Outputs are scaffolds; wire business logic, DTOs, and UI flows manually or via Codex responses.
 
 ### 5. Database Helpers
@@ -133,7 +133,7 @@ gpt-creator db provision   # docker compose up db
 ```
 gpt-creator run up --project /path/to/project
 ```
-- Launches Docker Compose and waits on `/health`, web `/`, admin `/admin/` before returning. Use `run logs`, `run down`, or `run open` for troubleshooting.
+- Launches Docker Compose and waits on `/health`, web `/`, admin `/admin/` before returning. Use `run logs`, `run down`, or `run open` for troubleshooting. If port 3306 is taken, the generator already mapped the database to the next free host port and recorded it in `docker/docker-compose.yml`. The web/admin/API services run in watch mode and each container executes `npm install` on startup, mounting node_modules onto named volumes so you can edit files on the host without rebuilding images.
 
 ### 7. Verify
 ```

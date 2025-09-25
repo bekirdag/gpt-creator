@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
-# gpt-creator — global CLI for scaffolding & orchestrating AI-assisted builds
+# gpt-creator — scaffolding & orchestration CLI
+# Aligns with Product Definition & Requirements (PDR v0.2)
 # Usage: gpt-creator <command> [args]
-# License: MIT
 
 set -Eeuo pipefail
 
-# -------- Constants --------
-VERSION="0.1.0"
+CLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
+VERSION="0.2.0"
 APP_NAME="gpt-creator"
 
 # Defaults (override via env)
-CODEX_BIN="${CODEX_BIN:-codex}"             # your local Codex client binary
-CODEX_MODEL="${CODEX_MODEL:-gpt-5-high}"    # default model
-EDITOR_CMD="${EDITOR_CMD:-code}"            # used by `run open` fallback
+CODEX_BIN="${CODEX_BIN:-codex}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5-high}"
+EDITOR_CMD="${EDITOR_CMD:-code}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
-DC_BIN="${DC_BIN:-docker compose}"          # docker compose v2
 MYSQL_BIN="${MYSQL_BIN:-mysql}"
 
 # Colors (TTY-only)
@@ -25,122 +24,106 @@ else
   c_reset=; c_dim=; c_bold=; c_red=; c_yellow=; c_cyan=; c_green=
 fi
 
-# -------- Logging / helpers --------
+ts() { date +"%Y-%m-%dT%H:%M:%S"; }
 die() { echo "${c_red}✖${c_reset} $*" >&2; exit 1; }
 info(){ echo "${c_cyan}➜${c_reset} $*"; }
 ok()  { echo "${c_green}✔${c_reset} $*"; }
 warn(){ echo "${c_yellow}!${c_reset} $*"; }
 
 abs_path() {
-  # portable realpath
   python3 - "$1" <<'PY' 2>/dev/null || perl -MCwd=abs_path -e 'print abs_path(shift)."\n"' "$1" || echo "$1"
 import os,sys; print(os.path.abspath(sys.argv[1]))
 PY
 }
 
-require_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"; }
-
-is_dir_empty() { [ -z "$(find "$1" -mindepth 1 -print -quit 2>/dev/null)" ]; }
-
-# -------- Usage --------
-usage() {
-cat <<EOF
-${APP_NAME} v${VERSION}
-
-Usage:
-  ${APP_NAME} create-project <path>
-  ${APP_NAME} scan [--project <path>]
-  ${APP_NAME} normalize [--project <path>]
-  ${APP_NAME} plan [--project <path>]
-  ${APP_NAME} generate <api|web|admin|db|docker|all> [--project <path>]
-  ${APP_NAME} db <provision|import|seed> [--project <path>]
-  ${APP_NAME} run <up|down|logs|open> [--project <path>]
-  ${APP_NAME} verify <acceptance|nfr|all> [--project <path>]
-  ${APP_NAME} iterate [--project <path>] [--jira <file>]
-  ${APP_NAME} version
-  ${APP_NAME} help
-
-Global opts:
-  --project <path>    Project root (defaults to CWD)
-  -h, --help          Show help
-  -v, --version       Show version
-
-Environment (override defaults):
-  CODEX_BIN, CODEX_MODEL, DOCKER_BIN, DC_BIN, MYSQL_BIN, EDITOR_CMD
-EOF
+to_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
-# -------- Project context --------
+# Context directories inside project
 ensure_ctx() {
   local root="${1:-}"
   if [[ -z "${root}" ]]; then root="${PROJECT_ROOT:-$PWD}"; fi
   PROJECT_ROOT="$(abs_path "$root")"
   GC_DIR="${PROJECT_ROOT}/.gpt-creator"
-  STAGE_DIR="${GC_DIR}/staging"
-  NORM_DIR="${GC_DIR}/normalized"
-  PLAN_DIR="${GC_DIR}/plans"
+  STAGING_DIR="${GC_DIR}/staging"
+  INPUT_DIR="${STAGING_DIR}/inputs"
+  PLAN_DIR="${STAGING_DIR}/plan"
   LOG_DIR="${GC_DIR}/logs"
   ART_DIR="${GC_DIR}/artifacts"
-  mkdir -p "$GC_DIR" "$STAGE_DIR" "$NORM_DIR" "$PLAN_DIR" "$LOG_DIR" "$ART_DIR"
+  mkdir -p "$GC_DIR" "$STAGING_DIR" "$INPUT_DIR" "$PLAN_DIR" "$LOG_DIR" "$ART_DIR"
 }
 
-# -------- Codex wrapper (invoke your local client safely) --------
-codex_call() {
-  # Usage: codex_call <task_name> <input_paths...>
-  local task="${1:?task}"; shift || true
-  local prompt="${GC_DIR}/prompts/${task}.md"
-  mkdir -p "${GC_DIR}/prompts"
-  [[ -f "$prompt" ]] || cat >"$prompt" <<'PROMPT'
-# Instruction
-You are an expert full‑stack generator. Read the supplied docs and produce only the requested code or files.
-
-# Style
-- Stack: NestJS (Node 20), MySQL 8, Vue 3, Vite, Docker Compose.
-- Turkish-first UI labels.
-- WCAG 2.2 AA, security best practices.
-
-# Output rules
-- Be deterministic and idempotent.
-- Include file paths and content blocks.
-- No explanations.
-PROMPT
-
-  require_cmd "$CODEX_BIN"
-  info "Codex: ${task} → model=${CODEX_MODEL}"
-  # Pipe docs (if any) + prompt to codex; exact CLI may vary — adjust as needed.
-  # We keep a log of the raw exchange.
-  local stamp out="${ART_DIR}/${task}-$(date +%Y%m%d-%H%M%S).out"
-  stamp="$(date -Is)"
-  {
-    echo "### ${task} @ ${stamp}"
-    for f in "$@"; do
-      [[ -f "$f" ]] && { echo -e "\n--- FILE:${f} ---\n"; sed -e 's/\r$//' "$f"; }
-    done
-    echo -e "\n--- PROMPT:${prompt} ---\n"; cat "$prompt"
-  } | "$CODEX_BIN" chat --model "$CODEX_MODEL" --stdin >"$out"
-  ok "Codex output → ${out}"
+# docker compose helper (prefers "docker compose" then docker-compose)
+docker_compose() {
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    docker compose "$@"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    docker-compose "$@"
+  else
+    die "docker compose is not available. Install Docker Desktop or docker-compose."
+  fi
 }
 
-# -------- Commands --------
+# ---------- Scan helpers ----------
+has_pattern() { LC_ALL=C grep -E -i -m 1 -q -- "$1" "$2" 2>/dev/null; }
+classify_file() {
+  local path="$1"
+  local name="${path##*/}"
+  local lower="$(to_lower "$name")"
+  local path_norm="$(to_lower "$path")"
+  local ext="${lower##*.}"
+  local type="" conf=0
 
-cmd_create_project() {
-  local path="${1:-}"; [[ -n "$path" ]] || die "create-project requires a path"
-  ensure_ctx "$path"
-  mkdir -p "$PROJECT_ROOT"
-  info "Project root: ${PROJECT_ROOT}"
-  [[ -d "$PROJECT_ROOT" ]] || die "Cannot create ${PROJECT_ROOT}"
-  # Skeleton (non-destructive)
-  mkdir -p "${PROJECT_ROOT}/apps/api" "${PROJECT_ROOT}/apps/web" "${PROJECT_ROOT}/apps/admin" \
-           "${PROJECT_ROOT}/infra" "${PROJECT_ROOT}/docs"
-  touch "${PROJECT_ROOT}/.env.example"
-  ok "Initialized folders"
+  case "$ext" in
+    md)
+      if [[ "$lower" == *pdr* ]]; then type="pdr"; conf=0.95
+      elif [[ "$lower" == *sds* ]]; then type="sds"; conf=0.92
+      elif [[ "$lower" == *rfp* ]]; then type="rfp"; conf=0.9
+      elif [[ "$lower" == *jira* ]]; then type="jira"; conf=0.88
+      elif [[ "$lower" == *ui*pages* || "$lower" == *website*ui*pages* ]]; then type="ui_pages"; conf=0.85
+      elif has_pattern '\bJIRA\b|Issue Key' "$path"; then type="jira"; conf=0.6
+      fi
+      ;;
+    yml|yaml|json)
+      if has_pattern '^[[:space:]]*openapi[[:space:]]*:[[:space:]]*3' "$path" || has_pattern '"openapi"[[:space:]]*:' "$path" || has_pattern '"swagger"[[:space:]]*:' "$path"; then
+        type="openapi"; conf=0.94
+      fi
+      ;;
+    sql)
+      type="sql"; conf=0.65
+      if has_pattern 'CREATE[[:space:]]+TABLE' "$path"; then conf=0.8; fi
+      ;;
+    mmd)
+      type="mermaid"; conf=0.7
+      ;;
+    html)
+      local is_html=0
+      if [[ "$path_norm" == *"page_samples"* || "$path_norm" == *"page-samples"* ]]; then
+        is_html=1
+      elif echo "$lower" | grep -Eq '(abo|auth|prg|evt|ctn)[0-9]+\.html'; then
+        is_html=1
+      fi
+      if [[ $is_html -eq 1 ]]; then
+        type="page_sample_html"; conf=0.7
+      fi
+      ;;
+    css)
+      local is_css=0
+      if [[ "$path_norm" == *"page_samples"* || "$path_norm" == *"samples"* ]]; then
+        is_css=1
+      elif [[ "$lower" == *style.css ]]; then
+        is_css=1
+      fi
+      if [[ $is_css -eq 1 ]]; then
+        type="page_sample_css"; conf=0.6
+      fi
+      ;;
+  esac
 
-  # Pipeline (lightweight placeholders; safe to re-run)
-  cmd_scan "--project" "$PROJECT_ROOT"
-  cmd_normalize "--project" "$PROJECT_ROOT"
-  cmd_plan "--project" "$PROJECT_ROOT"
-  info "Run generation when ready:"
-  echo "  ${APP_NAME} generate all --project \"${PROJECT_ROOT}\""
+  if [[ -n "$type" ]]; then
+    printf '%s|%.2f\n' "$type" "$conf"
+  fi
 }
 
 cmd_scan() {
@@ -152,44 +135,51 @@ cmd_scan() {
     esac
   done
   ensure_ctx "$root"
-  info "Scanning ${PROJECT_ROOT} for inputs…"
-  local manifest="${GC_DIR}/manifest.tsv"
-  : > "$manifest"
 
-  # patterns (case-insensitive)
-  shopt -s globstar nullglob nocaseglob
-  declare -A kinds=(
-    [PDR]="*pdr*.*"
-    [SDS]="*sds*.*"
-    [RFP]="*rfp*.*"
-    [OPENAPI]="openapi.* *.openapi.* *.yaml *.yml"
-    [SQL]="*sql_dump*.sql *.sql"
-    [MERMAID]="*.mmd"
-    [JIRA]="*jira*task*.md *jira*.md"
-    [UI_WEBSITE]="*website*ui*page*.md *ui*pages*.md"
-    [SAMPLES_ROOT]="page_samples"
-    [SAMPLES_BACK]="page_samples/backoffice_pages/**/*"
-    [SAMPLES_SITE]="page_samples/website_pages/**/*"
-    [SAMPLES_STYLE]="page_samples/style.css style.css **/style.css"
-    [HTML_SAMPLES]="**/*.html"
-    [CSS_SAMPLES]="**/*.css"
-  )
+  info "Scanning ${PROJECT_ROOT} for project artifacts…"
+  local manifest="${GC_DIR}/scan.tsv"
+  local tmp="${manifest}.tmp"
+  printf "type\tconfidence\tpath\n" > "$tmp"
 
-  for kind in "${!kinds[@]}"; do
-    for pat in ${kinds[$kind]}; do
-      for f in "${PROJECT_ROOT}"/$pat; do
-        [[ -f "$f" || -d "$f" ]] || continue
-        printf "%s\t%s\n" "$kind" "$(abs_path "$f")" >> "$manifest"
-      done
-    done
-  done
-  shopt -u globstar nocaseglob
+  while IFS= read -r -d '' f; do
+    local hit
+    hit="$(classify_file "$f")" || true
+    if [[ -n "$hit" ]]; then
+      local type conf
+      IFS='|' read -r type conf <<<"$hit"
+      printf "%s\t%.2f\t%s\n" "$type" "$conf" "$f" >> "$tmp"
+    fi
+  done < <(find "$PROJECT_ROOT" \
+      \( -name '.git' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name '.venv' -o -name '.gpt-creator' \) -prune -o -type f -print0)
 
-  if [[ -s "$manifest" ]]; then
-    ok "Manifest → ${manifest}"
-  else
-    warn "No inputs found. You can still proceed; add files then re-run: ${APP_NAME} scan"
-  fi
+  mv "$tmp" "$manifest"
+
+  local scan_json="${STAGING_DIR}/scan.json"
+  python3 - <<'PY' "$manifest" "$PROJECT_ROOT" "$scan_json"
+import csv, json, sys, time, pathlib
+manifest, root, out = sys.argv[1:4]
+rows = []
+with open(manifest, newline='') as fh:
+    reader = csv.DictReader(fh, delimiter='\t')
+    for row in reader:
+        if not row['type']:
+            continue
+        rows.append({
+            "type": row['type'],
+            "confidence": float(row['confidence'] or 0),
+            "path": str(pathlib.Path(row['path']).resolve())
+        })
+scan = {
+    "project_root": str(pathlib.Path(root).resolve()),
+    "generated_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+    "artifacts": rows
+}
+pathlib.Path(out).parent.mkdir(parents=True, exist_ok=True)
+with open(out, 'w') as fh:
+    json.dump(scan, fh, indent=2)
+print(out)
+PY
+  ok "Scan manifest → ${scan_json}"
 }
 
 cmd_normalize() {
@@ -201,40 +191,114 @@ cmd_normalize() {
     esac
   done
   ensure_ctx "$root"
-  local manifest="${GC_DIR}/manifest.tsv"
-  [[ -f "$manifest" ]] || { warn "No manifest; running scan…"; cmd_scan --project "$PROJECT_ROOT"; }
-  mkdir -p "${NORM_DIR}/docs" "${NORM_DIR}/samples/site" "${NORM_DIR}/samples/admin"
-  info "Normalizing inputs…"
 
-  # Copy with canonical names (best-effort)
-  awk -F'\t' '
-    BEGIN{IGNORECASE=1}
-    {kind=$1; path=$2}
-    kind=="PDR"      {out="docs/PDR.md"}
-    kind=="SDS"      {out="docs/SDS.md"}
-    kind=="RFP"      {out="docs/RFP.md"}
-    kind=="OPENAPI"  {out="docs/openapi.yaml"}
-    kind=="SQL"      {out="docs/schema.sql"}
-    kind=="MERMAID"  {base=gensub(/^.*\//,"","g",path); out="docs/diagrams/" base}
-    kind=="JIRA"     {out="docs/jira-tasks.md"}
-    kind=="UI_WEBSITE"{out="docs/website-ui-pages.md"}
-    kind=="SAMPLES_STYLE"{out="samples/style.css"}
-    kind=="SAMPLES_BACK"{base=gensub(/^.*\//,"","g",path); out="samples/admin/" base}
-    kind=="SAMPLES_SITE"{base=gensub(/^.*\//,"","g",path); out="samples/site/" base}
-    kind=="HTML_SAMPLES"{base=gensub(/^.*\//,"","g",path); out="samples/site/" base}
-    kind=="CSS_SAMPLES"{base=gensub(/^.*\//,"","g",path); out="samples/" base}
-    out!="" {printf("%s\t%s\n", path, out)}
-  ' "$manifest" | while IFS=$'\t' read -r src rel; do
-      local dst="${NORM_DIR}/${rel}"
-      mkdir -p "$(dirname "$dst")"
-      if [[ -d "$src" ]]; then
-        rsync -a --delete "$src"/ "$dst"/ 2>/dev/null || true
-      else
-        cp -f "$src" "$dst"
-      fi
-  done
+  local scan_json="${STAGING_DIR}/scan.json"
+  if [[ ! -f "$scan_json" ]]; then
+    warn "No scan.json found, running scan first."
+    cmd_scan --project "$PROJECT_ROOT"
+  fi
 
-  ok "Normalized → ${NORM_DIR}"
+  scan_json="${STAGING_DIR}/scan.json"
+  python3 - <<'PY' "$scan_json" "$INPUT_DIR" "$PLAN_DIR"
+import json, sys, shutil, pathlib, time
+scan_path, input_dir, plan_dir = sys.argv[1:4]
+input_dir = pathlib.Path(input_dir)
+plan_dir = pathlib.Path(plan_dir)
+input_dir.mkdir(parents=True, exist_ok=True)
+plan_dir.mkdir(parents=True, exist_ok=True)
+
+data = json.load(open(scan_path))
+project_root = pathlib.Path(data.get('project_root', '.')).resolve()
+artifacts = data.get('artifacts', [])
+
+unique_types = {"pdr", "sds", "rfp", "jira", "ui_pages", "openapi"}
+unique = {}
+for entry in artifacts:
+    t = entry.get('type')
+    if t in unique_types:
+        if t not in unique or entry['confidence'] > unique[t]['confidence']:
+            unique[t] = entry
+
+multi_map = {
+    "sql": pathlib.Path('sql'),
+    "mermaid": pathlib.Path('mermaid'),
+    "page_sample_html": pathlib.Path('page_samples'),
+    "page_sample_css": pathlib.Path('page_samples')
+}
+collected = {key: [] for key in multi_map}
+for entry in artifacts:
+    t = entry.get('type')
+    if t in multi_map:
+        collected[t].append(entry)
+
+provenance = []
+
+def copy_file(src_path, rel_dest, entry):
+    src = pathlib.Path(src_path)
+    dest = input_dir / rel_dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest)
+    provenance.append({
+        "type": entry.get('type'),
+        "source": str(src),
+        "destination": str(dest.relative_to(input_dir)),
+        "confidence": entry.get('confidence', 0)
+    })
+
+name_map = {
+    "pdr": pathlib.Path('pdr.md'),
+    "sds": pathlib.Path('sds.md'),
+    "rfp": pathlib.Path('rfp.md'),
+    "jira": pathlib.Path('jira.md'),
+    "ui_pages": pathlib.Path('ui-pages.md')
+}
+
+for t, entry in unique.items():
+    src = entry['path']
+    if t == 'openapi':
+        suffix = pathlib.Path(src).suffix.lower()
+        if suffix in {'.yaml', '.yml'}:
+            rel = pathlib.Path('openapi.yaml')
+        elif suffix == '.json':
+            rel = pathlib.Path('openapi.json')
+        else:
+            rel = pathlib.Path('openapi.src')
+    else:
+        rel = name_map[t]
+    copy_file(src, rel, entry)
+
+for t, entries in collected.items():
+    dest_root = multi_map[t]
+    for entry in entries:
+        src = pathlib.Path(entry['path'])
+        try:
+            rel = src.resolve().relative_to(project_root)
+        except ValueError:
+            rel = pathlib.Path(src.name)
+        rel = dest_root / rel
+        copy_file(src, rel, entry)
+
+# discovery.yaml (summary)
+import io
+from textwrap import indent
+summary = io.StringIO()
+summary.write('generated_at: %s\n' % time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+summary.write('project_root: %s\n' % project_root)
+summary.write('artifacts:\n')
+for entry in artifacts:
+    summary.write('  - type: %s\n' % entry.get('type'))
+    summary.write('    confidence: %.2f\n' % entry.get('confidence', 0))
+    summary.write('    path: %s\n' % entry.get('path'))
+(input_dir / '..' / 'discovery.yaml').resolve().write_text(summary.getvalue())
+
+prov = {
+    'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+    'entries': provenance
+}
+(plan_dir / 'provenance.json').write_text(json.dumps(prov, indent=2))
+PY
+
+  ok "Normalized inputs → ${INPUT_DIR}"
 }
 
 cmd_plan() {
@@ -246,19 +310,203 @@ cmd_plan() {
     esac
   done
   ensure_ctx "$root"
-  mkdir -p "$PLAN_DIR"
-  local plan="${PLAN_DIR}/build-plan.md"
-  if [[ ! -f "$plan" ]]; then
-cat >"$plan" <<'MD'
-# Build Plan (draft)
-- Read docs in .gpt-creator/normalized/docs
-- Confirm OpenAPI & DB schema alignment
-- Generate: API (NestJS), Web (Vue 3), Admin (Vue 3), Docker Compose
-- Provision DB; import/seed
-- Run & verify acceptance/NFRs; iterate over Jira tasks
-MD
-  fi
-  ok "Plan scaffold → ${plan}"
+
+  local openapi=""
+  for cand in "$INPUT_DIR/openapi.yaml" "$INPUT_DIR/openapi.yml" "$INPUT_DIR/openapi.json" "$INPUT_DIR/openapi.src"; do
+    [[ -f "$cand" ]] && { openapi="$cand"; break; }
+  done
+  local sql_dir="$INPUT_DIR/sql"
+
+  python3 - <<'PY' "$openapi" "$sql_dir" "$PLAN_DIR"
+import json, os, re, sys, time, pathlib
+from collections import OrderedDict
+openapi_path, sql_dir, plan_dir = sys.argv[1:4]
+plan_dir = pathlib.Path(plan_dir)
+plan_dir.mkdir(parents=True, exist_ok=True)
+
+routes = []
+schemas = []
+openapi_loaded = False
+if openapi_path:
+    try:
+        text = pathlib.Path(openapi_path).read_text()
+        if openapi_path.endswith('.json'):
+            data = json.loads(text)
+            openapi_loaded = True
+        else:
+            try:
+                import yaml  # type: ignore
+                data = yaml.safe_load(text)  # type: ignore
+                openapi_loaded = True
+            except Exception:
+                data = None
+        if openapi_loaded and isinstance(data, dict):
+            for path, methods in (data.get('paths') or {}).items():
+                if isinstance(methods, dict):
+                    for method, body in methods.items():
+                        if not isinstance(body, dict):
+                            continue
+                        routes.append({
+                            'method': method.upper(),
+                            'path': path,
+                            'summary': body.get('summary') or ''
+                        })
+            schemas = list((data.get('components') or {}).get('schemas') or {})
+        else:
+            raise ValueError('fallback parser')
+    except Exception:
+        routes = []
+        schemas = []
+        text = pathlib.Path(openapi_path).read_text() if openapi_path else ''
+        current_path = None
+        for line in text.splitlines():
+            if re.match(r'^\s*/[^\s]+:\s*$', line):
+                current_path = line.strip().rstrip(':')
+                continue
+            if current_path:
+                m = re.match(r'^\s{2,}(get|post|put|patch|delete|options|head):\s*$', line, re.I)
+                if m:
+                    routes.append({'method': m.group(1).upper(), 'path': current_path, 'summary': ''})
+                    continue
+                if re.match(r'^\S', line):
+                    current_path = None
+
+        in_components = False
+        in_schemas = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if re.match(r'^components:\s*$', stripped):
+                in_components = True
+                in_schemas = False
+                continue
+            if in_components and re.match(r'^schemas:\s*$', stripped):
+                in_schemas = True
+                continue
+            indent = len(line) - len(line.lstrip(' '))
+            if in_schemas:
+                if indent <= 2 and not stripped.startswith('#') and not stripped.startswith('schemas:'):
+                    in_schemas = False
+                    continue
+                if indent == 4 and re.match(r'^[A-Za-z0-9_.-]+:\s*$', stripped):
+                    name = stripped.split(':', 1)[0]
+                    schemas.append(name)
+
+sql_tables = []
+sql_dir_path = pathlib.Path(sql_dir)
+if sql_dir and sql_dir_path.is_dir():
+    for sql_file in sql_dir_path.rglob('*.sql'):
+        try:
+            text = sql_file.read_text()
+        except Exception:
+            continue
+        for m in re.finditer(r'CREATE\s+TABLE\s+`?([A-Za-z0-9_]+)`?', text, flags=re.IGNORECASE):
+            sql_tables.append(m.group(1))
+
+schema_set = {s.lower() for s in schemas}
+table_set = {t.lower() for t in sql_tables}
+only_in_openapi = sorted(schema_set - table_set)
+only_in_sql = sorted(table_set - schema_set)
+
+routes_path = plan_dir / 'routes.md'
+entities_path = plan_dir / 'entities.md'
+tasks_path = plan_dir / 'tasks.json'
+plan_todo = plan_dir / 'PLAN_TODO.md'
+
+def write_routes():
+    lines = ['# Routes', '']
+    if routes:
+        for item in sorted(routes, key=lambda r: (r['path'], r['method'])):
+            summary = f" — {item['summary']}" if item.get('summary') else ''
+            lines.append(f"- `{item['method']} {item['path']}`{summary}")
+    else:
+        lines.append('No routes detected — ensure openapi.yaml is present in staging/inputs.')
+    routes_path.write_text('\n'.join(lines) + '\n')
+
+
+def write_entities():
+    lines = ['# Entities', '']
+    lines.append('## OpenAPI Schemas')
+    if schemas:
+        for name in sorted(schemas):
+            lines.append(f'- {name}')
+    else:
+        lines.append('- (none found)')
+    lines.append('')
+    lines.append('## SQL Tables')
+    if sql_tables:
+        for name in sorted(sql_tables):
+            lines.append(f'- {name}')
+    else:
+        lines.append('- (none found)')
+    lines.append('')
+    lines.append('## Detected deltas')
+    if only_in_openapi:
+        lines.append('- Only in OpenAPI: ' + ', '.join(only_in_openapi))
+    if only_in_sql:
+        lines.append('- Only in SQL: ' + ', '.join(only_in_sql))
+    if not only_in_openapi and not only_in_sql:
+        lines.append('- None (schemas and tables aligned on name)')
+    entities_path.write_text('\n'.join(lines) + '\n')
+
+
+def write_tasks():
+    tasks = []
+    if only_in_openapi:
+        tasks.append({
+            'id': 'align-openapi-sql',
+            'title': 'Align OpenAPI schemas with SQL tables',
+            'details': f"Create tables or update schemas for: {', '.join(only_in_openapi)}"
+        })
+    if only_in_sql:
+        tasks.append({
+            'id': 'document-sql-gap',
+            'title': 'Document SQL tables missing from OpenAPI',
+            'details': f"Expose or document SQL tables not covered by API: {', '.join(only_in_sql)}"
+        })
+    tasks_path.write_text(json.dumps({'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'tasks': tasks}, indent=2))
+
+
+def write_plan_todo():
+    lines = [
+        '# Build Plan',
+        '',
+        '- Validate discovery outputs under `staging/inputs`.',
+        '- Review `routes.md` & `entities.md` for coverage and deltas.',
+        '- Implement generation steps for API, DB, Web, Admin, Docker.',
+        '- Run `gpt-creator generate all --project <path>` if not already executed.',
+        '- Bring the stack up with `gpt-creator run up` and smoke test.',
+        '- Execute `gpt-creator verify all` to satisfy acceptance & NFR gates.',
+        '- Iterate on Jira tasks using `gpt-creator iterate` until checks pass.'
+    ]
+    plan_todo.write_text('\n'.join(lines) + '\n')
+
+write_routes()
+write_entities()
+write_tasks()
+write_plan_todo()
+PY
+
+  ok "Plan artifacts created under ${PLAN_DIR}"
+}
+
+copy_template_tree() {
+  local src="$1" dest="$2"
+  [[ -d "$src" ]] || die "Template directory not found: $src"
+  find "$src" -type d ! -name '.DS_Store' | while IFS= read -r dir; do
+    local rel="${dir#$src}"
+    mkdir -p "$dest/$rel"
+  done
+  find "$src" -type f ! -name '.DS_Store' | while IFS= read -r file; do
+    local rel="${file#$src/}"
+    local target="$dest/$rel"
+    if [[ "$target" == *.tmpl ]]; then
+      target="${target%.tmpl}"
+    fi
+    mkdir -p "$(dirname "$target")"
+    cp "$file" "$target"
+  done
 }
 
 cmd_generate() {
@@ -272,24 +520,47 @@ cmd_generate() {
     esac
   done
   ensure_ctx "$root"
-  info "Generate: ${facet}"
+  local templates="$CLI_ROOT/templates"
+
   case "$facet" in
-    api|web|admin|db|docker)
-      codex_call "generate-${facet}" \
-        "${NORM_DIR}/docs/PDR.md" \
-        "${NORM_DIR}/docs/SDS.md" \
-        "${NORM_DIR}/docs/openapi.yaml" \
-        "${NORM_DIR}/docs/schema.sql" \
-        "${PLAN_DIR}/build-plan.md" || true
+    api)
+      local out="$PROJECT_ROOT/apps/api"
+      mkdir -p "$out"
+      copy_template_tree "$templates/api/nestjs" "$out"
+      ok "API scaffolded → ${out}"
+      ;;
+    web)
+      local out="$PROJECT_ROOT/apps/web"
+      mkdir -p "$out"
+      copy_template_tree "$templates/web/vue3" "$out"
+      ok "Web scaffolded → ${out}"
+      ;;
+    admin)
+      local out="$PROJECT_ROOT/apps/admin"
+      mkdir -p "$out"
+      copy_template_tree "$templates/admin/vue3" "$out"
+      ok "Admin scaffolded → ${out}"
+      ;;
+    db)
+      local out="$PROJECT_ROOT/db"
+      mkdir -p "$out"
+      copy_template_tree "$templates/db/mysql" "$out"
+      ok "DB artifacts scaffolded → ${out}"
+      ;;
+    docker)
+      local out="$PROJECT_ROOT/docker"
+      mkdir -p "$out"
+      copy_template_tree "$templates/docker" "$out"
+      ok "Docker assets scaffolded → ${out}"
       ;;
     all)
-      for f in api web admin db docker; do
+      for f in api db web admin docker; do
         cmd_generate "$f" --project "$PROJECT_ROOT"
       done
+      return 0
       ;;
     *) die "Unknown facet: ${facet}";;
   esac
-  ok "Generation triggered (${facet})"
 }
 
 cmd_db() {
@@ -303,25 +574,28 @@ cmd_db() {
     esac
   done
   ensure_ctx "$root"
+  local compose_file="$PROJECT_ROOT/docker/docker-compose.yml"
 
   case "$action" in
     provision)
-      require_cmd "$DOCKER_BIN"
-      info "Starting MySQL 8 (docker) if not running…"
-      ${DC_BIN} -f "${PROJECT_ROOT}/infra/compose.yaml" up -d db || warn "Ensure compose.yaml exists."
+      [[ -f "$compose_file" ]] || die "Compose file not found at ${compose_file}; run 'gpt-creator generate docker'."
+      info "Starting database service via docker compose"
+      docker_compose -f "$compose_file" up -d db
+      ok "MySQL container provisioned"
       ;;
     import)
-      local sql="${NORM_DIR}/docs/schema.sql"
-      [[ -f "$sql" ]] || die "No normalized SQL at ${sql}"
-      info "Importing SQL → ${sql}"
-      ${MYSQL_BIN} -h "${DB_HOST:-127.0.0.1}" -P "${DB_PORT:-3306}" -u "${DB_USER:-root}" ${DB_PASSWORD:+-p"${DB_PASSWORD}"} "${DB_NAME:-bhavani}" < "$sql" || warn "Import failed. Check credentials."
+      local sql_file
+      sql_file="$(find "$INPUT_DIR/sql" -maxdepth 2 -type f -name '*.sql' | head -n1 || true)"
+      [[ -n "$sql_file" ]] || die "No staged SQL found under ${INPUT_DIR}/sql"
+      info "Importing SQL from ${sql_file}"
+      ${MYSQL_BIN} -h "${DB_HOST:-127.0.0.1}" -P "${DB_PORT:-3306}" -u "${DB_USER:-root}" ${DB_PASSWORD:+-p"${DB_PASSWORD}"} "${DB_NAME:-app}" < "$sql_file"
+      ok "Database import finished"
       ;;
     seed)
-      info "Seeding database (stub)… Add your seeds under apps/api/prisma/seed.ts or similar."
+      info "Database seed step is a placeholder — add seeds under db/ or prisma directory."
       ;;
     *) die "Unknown db action: ${action}";;
   esac
-  ok "db ${action} done"
 }
 
 cmd_run() {
@@ -335,13 +609,28 @@ cmd_run() {
     esac
   done
   ensure_ctx "$root"
+  local compose_file="$PROJECT_ROOT/docker/docker-compose.yml"
+
   case "$action" in
-    up)   ${DC_BIN} -f "${PROJECT_ROOT}/infra/compose.yaml" up -d || warn "compose.yaml missing";;
-    down) ${DC_BIN} -f "${PROJECT_ROOT}/infra/compose.yaml" down || true;;
-    logs) ${DC_BIN} -f "${PROJECT_ROOT}/infra/compose.yaml" logs -f || true;;
+    up)
+      [[ -f "$compose_file" ]] || die "Compose file not found at ${compose_file}; generate docker assets first."
+      docker_compose -f "$compose_file" up -d
+      ok "Stack is starting (check docker compose ps)"
+      ;;
+    down)
+      [[ -f "$compose_file" ]] || die "Compose file not found at ${compose_file}"
+      docker_compose -f "$compose_file" down
+      ok "Stack shut down"
+      ;;
+    logs)
+      [[ -f "$compose_file" ]] || die "Compose file not found at ${compose_file}"
+      docker_compose -f "$compose_file" logs -f
+      ;;
     open)
-      if command -v open >/dev/null 2>&1; then open "http://localhost:5173" || open "http://localhost:3000" || true
-      else $EDITOR_CMD "${PROJECT_ROOT}" || true
+      if command -v open >/dev/null 2>&1; then
+        open "http://localhost:8080" || open "http://localhost:5173" || true
+      else
+        ${EDITOR_CMD} "$PROJECT_ROOT" || true
       fi
       ;;
     *) die "Unknown run action: ${action}";;
@@ -351,52 +640,207 @@ cmd_run() {
 cmd_verify() {
   local kind="${1:-all}"; shift || true
   local root=""
+  local api_base="${GC_API_BASE_URL:-http://localhost:3000/api/v1}"
+  local api_health="${GC_API_HEALTH_URL:-}"
+  local web_url="${GC_WEB_URL:-http://localhost:8080/}"
+  local admin_url="${GC_ADMIN_URL:-http://localhost:8080/admin/}"
+
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project) root="$(abs_path "$2")"; shift 2;;
+      --api-url) api_base="$2"; shift 2;;
+      --api-health) api_health="$2"; shift 2;;
+      --web-url) web_url="$2"; shift 2;;
+      --admin-url) admin_url="$2"; shift 2;;
       *) break;;
     esac
   done
   ensure_ctx "$root"
-  info "Verifying: ${kind}"
-  # Placeholder checks
-  [[ -f "${NORM_DIR}/docs/PDR.md" ]] || warn "PDR missing"
-  [[ -f "${NORM_DIR}/docs/SDS.md" ]] || warn "SDS missing"
-  ok "Basic verification complete"
+
+  if [[ -z "$api_health" ]]; then
+    local trimmed_base="${api_base%/}"
+    api_health="${trimmed_base}/health"
+  fi
+
+  local verify_root="$CLI_ROOT/verify"
+  [[ -d "$verify_root" ]] || die "verify scripts directory missing at ${verify_root}"
+
+  local -a check_names
+  case "$kind" in
+    acceptance) check_names=(acceptance) ;;
+    nfr) check_names=(openapi a11y lighthouse consent program_filters) ;;
+    all) check_names=(acceptance openapi a11y lighthouse consent program_filters) ;;
+    *) die "Unknown verify target: ${kind}";;
+  esac
+
+  local pass=0 fail=0 skip=0
+  run_check() {
+    local label="$1"; shift
+    if "$@"; then
+      ((pass++))
+    else
+      local status=$?
+      if [[ $status -eq 3 ]]; then
+        ((skip++))
+        warn "${label} check skipped (missing dependency)"
+      else
+        ((fail++))
+        warn "${label} check failed (exit ${status})"
+      fi
+    fi
+  }
+
+  for name in "${check_names[@]}"; do
+    case "$name" in
+      acceptance)
+        run_check "acceptance" bash "$verify_root/acceptance.sh" "${api_base}" "${web_url}" "${admin_url}"
+        ;;
+      openapi)
+        local spec=""
+        for cand in "$INPUT_DIR/openapi.yaml" "$INPUT_DIR/openapi.yml" "$INPUT_DIR/openapi.json"; do
+          [[ -f "$cand" ]] && { spec="$cand"; break; }
+        done
+        run_check "openapi" bash "$verify_root/check-openapi.sh" "${spec}" ;;
+      a11y)
+        run_check "a11y" bash "$verify_root/check-a11y.sh" "${web_url}" "${admin_url}"
+        ;;
+      lighthouse)
+        run_check "lighthouse" bash "$verify_root/check-lighthouse.sh" "${web_url}" "${admin_url}"
+        ;;
+      consent)
+        run_check "consent" bash "$verify_root/check-consent.sh" "${web_url}"
+        ;;
+      program_filters)
+        run_check "program-filters" bash "$verify_root/check-program-filters.sh" "${api_base}"
+        ;;
+    esac
+  done
+
+  if (( fail > 0 )); then
+    die "Verify failed — pass=${pass} fail=${fail} skip=${skip}"
+  fi
+  ok "Verify complete — pass=${pass} skip=${skip}"
+}
+
+codex_call() {
+  local task="${1:?task}"; shift || true
+  local prompt_dir="${GC_DIR}/prompts"
+  mkdir -p "$prompt_dir"
+  local prompt_file="${prompt_dir}/${task}.md"
+  if [[ ! -f "$prompt_file" ]]; then
+    cat >"$prompt_file" <<'PROMPT'
+# Instruction
+You are Codex (gpt-5-high) assisting the gpt-creator pipeline. Apply requested changes deterministically.
+PROMPT
+  fi
+  if command -v "$CODEX_BIN" >/dev/null 2>&1; then
+    info "Codex ${task} → model=${CODEX_MODEL}"
+    "$CODEX_BIN" chat --model "$CODEX_MODEL" --prompt-file "$prompt_file" --stdin < /dev/null || warn "Codex invocation returned non-zero."
+  else
+    warn "Codex binary (${CODEX_BIN}) not found — skipping ${task}."
+  fi
 }
 
 cmd_iterate() {
-  local root="" jira=""
+  local root="" jira="" reverify=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project) root="$(abs_path "$2")"; shift 2;;
       --jira) jira="$(abs_path "$2")"; shift 2;;
+      --no-verify) reverify=0; shift;;
       *) break;;
     esac
   done
   ensure_ctx "$root"
-  [[ -n "$jira" ]] || jira="${NORM_DIR}/docs/jira-tasks.md"
+  [[ -n "$jira" ]] || jira="${INPUT_DIR}/jira.md"
   [[ -f "$jira" ]] || die "Jira tasks file not found: ${jira}"
-  codex_call "iterate-jira" "$jira" "${PLAN_DIR}/build-plan.md" || true
-  ok "Iteration round triggered"
+
+  local tasks_json="${PLAN_DIR}/jira-tasks.json"
+  python3 - <<'PY' "$jira" "$tasks_json"
+import json, re, sys, time
+jira_path, out_path = sys.argv[1:3]
+lines = open(jira_path).read().splitlines()
+tasks = []
+current = None
+for line in lines:
+    if re.match(r'^#+\s+', line):
+        if current:
+            tasks.append(current)
+        current = {'title': line.lstrip('# ').strip(), 'details': ''}
+    elif re.match(r'^-\s+\[ \]\s+', line):
+        if current:
+            tasks.append(current)
+        current = {'title': line.split('[ ]', 1)[1].strip(), 'details': ''}
+    else:
+        if current is None:
+            continue
+        current['details'] = (current.get('details', '') + '\n' + line).strip()
+if current:
+    tasks.append(current)
+json.dump({'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'tasks': tasks}, open(out_path, 'w'), indent=2)
+PY
+
+  ok "Parsed Jira tasks → ${tasks_json}"
+  codex_call "iterate" "$jira" "$PLAN_DIR/tasks.json"
+  if [[ "$reverify" -eq 1 ]]; then
+    info "Re-running verify after iteration"
+    cmd_verify all --project "$PROJECT_ROOT"
+  fi
 }
 
-# -------- Router --------
+cmd_create_project() {
+  local path="${1:-}"; [[ -n "$path" ]] || die "create-project requires a path"
+  ensure_ctx "$path"
+  mkdir -p "$PROJECT_ROOT"
+  info "Project root: ${PROJECT_ROOT}"
+
+  cmd_scan --project "$PROJECT_ROOT"
+  cmd_normalize --project "$PROJECT_ROOT"
+  cmd_plan --project "$PROJECT_ROOT"
+  cmd_generate all --project "$PROJECT_ROOT"
+  cmd_db provision --project "$PROJECT_ROOT" || warn "Database provision step reported an error"
+  cmd_run up --project "$PROJECT_ROOT" || warn "Stack start reported an error"
+  cmd_verify acceptance --project "$PROJECT_ROOT" || warn "Acceptance checks failing — review stack health."
+  ok "Project bootstrap complete"
+}
+
+usage() {
+cat <<EOF
+${APP_NAME} v${VERSION}
+
+Usage:
+  ${APP_NAME} create-project <path>
+  ${APP_NAME} scan [--project <path>]
+  ${APP_NAME} normalize [--project <path>]
+  ${APP_NAME} plan [--project <path>]
+  ${APP_NAME} generate <api|web|admin|db|docker|all> [--project <path>]
+  ${APP_NAME} db <provision|import|seed> [--project <path>]
+  ${APP_NAME} run <up|down|logs|open> [--project <path>]
+  ${APP_NAME} verify <acceptance|nfr|all> [--project <path>] [--api-url API_BASE] [--api-health URL] [--web-url URL] [--admin-url URL]
+  ${APP_NAME} iterate [--project <path>] [--jira <file>] [--no-verify]
+  ${APP_NAME} version
+  ${APP_NAME} help
+
+Environment overrides:
+  CODEX_BIN, CODEX_MODEL, DOCKER_BIN, MYSQL_BIN, EDITOR_CMD, GC_API_HEALTH_URL, GC_WEB_URL, GC_ADMIN_URL
+EOF
+}
+
 main() {
   local cmd="${1:-help}"; shift || true
   case "$cmd" in
-    help|-h|--help) usage;;
-    version|-v|--version) echo "${APP_NAME} ${VERSION}";;
-    create-project) cmd_create_project "$@";;
-    scan)           cmd_scan "$@";;
-    normalize)      cmd_normalize "$@";;
-    plan)           cmd_plan "$@";;
-    generate)       cmd_generate "$@";;
-    db)             cmd_db "$@";;
-    run)            cmd_run "$@";;
-    verify)         cmd_verify "$@";;
-    iterate)        cmd_iterate "$@";;
-    *) die "Unknown command: ${cmd}. See '${APP_NAME} help'";;
+    help|-h|--help) usage ;;
+    version|-v|--version) echo "${APP_NAME} ${VERSION}" ;;
+    create-project) cmd_create_project "$@" ;;
+    scan)           cmd_scan "$@" ;;
+    normalize)      cmd_normalize "$@" ;;
+    plan)           cmd_plan "$@" ;;
+    generate)       cmd_generate "$@" ;;
+    db)             cmd_db "$@" ;;
+    run)            cmd_run "$@" ;;
+    verify)         cmd_verify "$@" ;;
+    iterate)        cmd_iterate "$@" ;;
+    *) die "Unknown command: ${cmd}. See '${APP_NAME} help'" ;;
   esac
 }
 

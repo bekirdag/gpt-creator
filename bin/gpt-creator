@@ -769,12 +769,92 @@ cmd_db() {
       sql_file="$(find "$INPUT_DIR/sql" -maxdepth 2 -type f -name '*.sql' | head -n1 || true)"
       [[ -n "$sql_file" ]] || die "No staged SQL found under ${INPUT_DIR}/sql"
       info "Importing SQL from ${sql_file}"
+      local database="${DB_NAME:-$GC_DB_NAME}"
+      local root_user="${DB_ROOT_USER:-root}"
+      local root_pass="${DB_ROOT_PASSWORD:-${GC_DB_ROOT_PASSWORD:-}}"
+      local app_user="${DB_USER:-$GC_DB_USER}"
+      local app_pass="${DB_PASSWORD:-$GC_DB_PASSWORD}"
+      local cleanup_files=()
+      trap 'for f in "${cleanup_files[@]}"; do [[ -n "$f" && -f "$f" ]] && rm -f "$f"; done' RETURN
+      local rendered_sql
+      rendered_sql="$(mktemp "${STAGING_DIR}/import-XXXXXX.sql")"
+      cleanup_files+=("$rendered_sql")
+      python3 - <<'PY' "$sql_file" "$rendered_sql" "$database" "$app_user" "$app_pass"
+import pathlib, re, sys
+src, dest, db_name, app_user, app_pass = sys.argv[1:6]
+text = pathlib.Path(src).read_text()
+
+text = text.replace('{{DB_NAME}}', db_name)
+text = text.replace('{{DB_USER}}', app_user)
+text = text.replace('{{DB_PASSWORD}}', app_pass)
+
+text = re.sub(r'^\s*USE\s+`?[^`]+`?;', lambda _m: f"USE `{db_name}`;", text, flags=re.IGNORECASE | re.MULTILINE)
+text = re.sub(r'CREATE\s+DATABASE\s+IF\s+NOT\s+EXISTS\s+`[^`]+`', lambda _m: f"CREATE DATABASE IF NOT EXISTS `{db_name}`", text, flags=re.IGNORECASE)
+text = re.sub(r'ON\s+`[^`]+`\.\*\s+TO', lambda _m: f"ON `{db_name}`.* TO", text, flags=re.IGNORECASE)
+text = re.sub(r"(CREATE\s+USER[^']*')([^']+)(')", lambda m: f"{m.group(1)}{app_user}{m.group(3)}", text, flags=re.IGNORECASE)
+text = re.sub(r"(IDENTIFIED\s+BY\s+')([^']+)(')", lambda m: f"{m.group(1)}{app_pass}{m.group(3)}", text, flags=re.IGNORECASE)
+text = re.sub(r"(TO\s+')([^']+)('@)", lambda m: f"{m.group(1)}{app_user}{m.group(3)}", text, flags=re.IGNORECASE)
+
+pathlib.Path(dest).write_text(text)
+PY
+      sql_file="$rendered_sql"
+      if [[ -f "$compose_file" ]]; then
+        if docker_compose -f "$compose_file" ps >/dev/null 2>&1; then
+          local import_ok=0
+          info "Using docker-compose db service for import"
+          docker_compose -f "$compose_file" up -d db >/dev/null 2>&1 || true
+          if [[ -n "$root_pass" ]]; then
+            if docker_compose -f "$compose_file" exec -T db mysql -u"${root_user}" -p"${root_pass}" "${database}" < "${sql_file}"; then
+              import_ok=1
+            else
+              warn "Root import failed; retrying as ${DB_USER:-$GC_DB_USER}"
+            fi
+          else
+            if docker_compose -f "$compose_file" exec -T db mysql -u"${root_user}" "${database}" < "${sql_file}"; then
+              import_ok=1
+            fi
+          fi
+          if [[ "$import_ok" -ne 1 ]]; then
+            local app_user="${DB_USER:-$GC_DB_USER}"
+            local app_pass="${DB_PASSWORD:-$GC_DB_PASSWORD}"
+            if docker_compose -f "$compose_file" exec -T db mysql -u"${app_user}" ${app_pass:+-p"${app_pass}"} "${database}" < "${sql_file}"; then
+              import_ok=1
+            fi
+          fi
+          if [[ "$import_ok" -ne 1 ]]; then
+            local init_sql="${INPUT_DIR}/sql/db/init.sql"
+            if [[ -f "$init_sql" ]]; then
+              readarray -t __gc_fallback <<<"$(python3 - "$init_sql" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+user = re.search(r"CREATE USER IF NOT EXISTS '([^']+)'", text)
+password = re.search(r"IDENTIFIED BY '([^']+)'", text)
+if user and password:
+    print(user.group(1))
+    print(password.group(1))
+PY
+)"
+              if (( ${#__gc_fallback[@]} == 2 )); then
+                local fallback_user="${__gc_fallback[0]}"
+                local fallback_pass="${__gc_fallback[1]}"
+                unset __gc_fallback
+                if docker_compose -f "$compose_file" exec -T db mysql -u"${fallback_user}" ${fallback_pass:+-p"${fallback_pass}"} "${database}" < "${sql_file}"; then
+                  import_ok=1
+                fi
+              fi
+            fi
+          fi
+          if [[ "$import_ok" -eq 1 ]]; then
+            ok "Database import finished"
+            return 0
+          else
+            die "Container import failed"
+          fi
+        fi
+      fi
       local host="${DB_HOST:-127.0.0.1}"
       local port="${DB_HOST_PORT:-${GC_DB_HOST_PORT:-${DB_PORT:-3306}}}"
-      local user="${DB_ROOT_USER:-root}"
-      local pass="${DB_ROOT_PASSWORD:-${GC_DB_ROOT_PASSWORD:-}}"
-      local database="${DB_NAME:-$GC_DB_NAME}"
-      ${MYSQL_BIN} -h "$host" -P "$port" -u "$user" ${pass:+-p"${pass}"} "$database" < "$sql_file"
+      ${MYSQL_BIN} -h "$host" -P "$port" -u "$root_user" ${root_pass:+-p"${root_pass}"} "$database" < "$sql_file"
       ok "Database import finished"
       ;;
     seed)

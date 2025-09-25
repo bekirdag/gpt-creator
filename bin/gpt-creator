@@ -1342,7 +1342,7 @@ PROMPT
       if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
         args+=(-c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"")
       fi
-      args+=(--full-auto --skip-git-repo-check)
+      args+=(--full-auto --sandbox workspace-write --skip-git-repo-check)
       if [[ -n "$output_file" ]]; then
         mkdir -p "$(dirname "$output_file")"
         args+=(--output-last-message "$output_file")
@@ -1380,26 +1380,103 @@ cmd_iterate() {
   local tasks_json_local="${PLAN_DIR}/jira-tasks.local.json"
   python3 - <<'PY' "$jira" "$tasks_json_local"
 import json, re, sys, time
+from pathlib import Path
+
 jira_path, out_path = sys.argv[1:3]
-lines = open(jira_path).read().splitlines()
+lines = Path(jira_path).read_text().splitlines()
+
 tasks = []
+story_id = ""
+story_title = ""
 current = None
-for line in lines:
-    if re.match(r'^#+\s+', line):
+
+def parse_list(value: str):
+    cleaned = value.replace('+', ',').replace('/', ',').replace('&', ',')
+    candidates = [part.strip() for part in re.split(r',|;|\\band\\b', cleaned) if part.strip()]
+    seen = set()
+    ordered = []
+    for item in candidates:
+        key = item.lower()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(item)
+    return ordered
+
+def flush_current():
+    if not current:
+        return
+    description = "\n".join(current['description_lines']).strip()
+    task_obj = {
+        'id': current['id'],
+        'title': current['title'],
+        'story_id': current['story_id'],
+        'story_title': current['story_title'],
+        'estimate': current['estimate'],
+        'tags': current['tags'],
+        'assignees': current['assignees'],
+        'description': description,
+    }
+    tasks.append(task_obj)
+
+for raw in lines:
+    stripped = raw.strip()
+    if not stripped:
         if current:
-            tasks.append(current)
-        current = {'title': line.lstrip('# ').strip(), 'details': ''}
-    elif re.match(r'^-\s+\[ \]\s+', line):
-        if current:
-            tasks.append(current)
-        current = {'title': line.split('[ ]', 1)[1].strip(), 'details': ''}
-    else:
-        if current is None:
-            continue
-        current['details'] = (current.get('details', '') + '\n' + line).strip()
-if current:
-    tasks.append(current)
-json.dump({'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'tasks': tasks}, open(out_path, 'w'), indent=2)
+            current['description_lines'].append('')
+        continue
+
+    story_match = re.match(r'^\*\*(S[0-9A-Za-z\.\-]+)\s*[—-]\s*(.*?)\*\*$', stripped)
+    if story_match:
+        story_id, story_title = story_match.groups()
+        story_id = story_id.strip()
+        story_title = story_title.strip()
+        continue
+    if stripped.lower().startswith('### **story'):
+        continue
+
+    task_match = re.match(r'^\*\*(T[0-9A-Za-z\.\-]+)\s*[—-]\s*(.*?)\*\*$', stripped)
+    if task_match:
+        flush_current()
+        task_id, task_title = task_match.groups()
+        current = {
+            'id': task_id.strip(),
+            'title': task_title.strip(),
+            'story_id': story_id,
+            'story_title': story_title,
+            'estimate': '',
+            'tags': [],
+            'assignees': [],
+            'description_lines': [],
+        }
+        remainder = stripped[task_match.end():].strip()
+        if remainder:
+            current['description_lines'].append(remainder)
+        continue
+
+    if current is None:
+        continue
+
+    assignee_match = re.search(r'\*\*Assignee:\*\*\s*([^•]+)', stripped)
+    if assignee_match:
+        current['assignees'] = parse_list(assignee_match.group(1))
+
+    tags_match = re.search(r'\*\*Tags:\*\*\s*([^•]+)', stripped)
+    if tags_match:
+        current['tags'] = parse_list(tags_match.group(1))
+
+    estimate_match = re.search(r'\*\*Estimate:\*\*\s*([^•]+)', stripped)
+    if estimate_match:
+        current['estimate'] = estimate_match.group(1).strip()
+
+    current['description_lines'].append(raw)
+
+flush_current()
+
+payload = {
+    'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+    'tasks': tasks
+}
+Path(out_path).write_text(json.dumps(payload, indent=2) + '\n')
 PY
 
   ok "Parsed Jira tasks (local parser) → ${tasks_json_local}"
@@ -1415,8 +1492,9 @@ You are a structured-data assistant. Convert the following Jira backlog markdown
 
 ## Requirements
 - Output **only** valid JSON (no prose, no code fences).
-- Structure: { "tasks": [ { "title": str, "details": str, "estimate": str, "tags": [str], "assignees": [str] } ] }.
-- Preserve bullet details verbatim where helpful.
+- Structure: { "tasks": [ { "id": str, "title": str, "story_id": str, "story_title": str, "assignees": [str], "tags": [str], "estimate": str, "description": str } ] }.
+- Each task begins with a bold identifier such as **T18.5.2**; treat every such block as a separate task. Include the parent story identifier/title when available.
+- Preserve bullet details verbatim inside the description.
 - Use empty strings/arrays when information is missing.
 - Do not include explanatory text.
 
@@ -1469,17 +1547,26 @@ index_path = out / 'tasks-order.txt'
 with index_path.open('w') as idx:
     for i, task in enumerate(tasks, 1):
         title = (task.get('title') or '').strip() or f'Task {i}'
-        details = (task.get('details') or '').strip() or '(No additional details provided.)'
+        task_id = (task.get('id') or '').strip()
+        description = (task.get('description') or '').strip() or '(No additional details provided.)'
         estimate = (task.get('estimate') or '').strip()
         tags = ', '.join(task.get('tags') or [])
         assignees = ', '.join(task.get('assignees') or [])
+        story_bits = [part for part in [(task.get('story_id') or '').strip(), (task.get('story_title') or '').strip()] if part]
         prompt_path = out / f'task-{i:02d}.md'
         idx.write(str(prompt_path) + '\n')
         lines = []
-        lines.append(f"# Task {i}: {title}")
+        if task_id and not title.startswith(task_id):
+            lines.append(f"# Task {i}: {task_id} — {title}")
+        else:
+            lines.append(f"# Task {i}: {title}")
         lines.append('')
         lines.append('## Context')
         lines.append(f'- Working directory: {project_root}')
+        if task_id:
+            lines.append(f'- Task ID: {task_id}')
+        if story_bits:
+            lines.append(f"- Story: {' — '.join(story_bits)}")
         if assignees:
             lines.append(f'- Assignees: {assignees}')
         if estimate:
@@ -1487,8 +1574,8 @@ with index_path.open('w') as idx:
         if tags:
             lines.append(f'- Tags: {tags}')
         lines.append('')
-        lines.append('## Jira Details')
-        lines.append(details)
+        lines.append('## Jira Description')
+        lines.append(description)
         lines.append('')
         lines.append('## Instructions')
         lines.append('- Outline your plan before modifying files.')

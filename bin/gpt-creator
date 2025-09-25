@@ -1299,16 +1299,23 @@ codex_call() {
   local prompt_dir="${GC_DIR}/prompts"
   mkdir -p "$prompt_dir"
 
-  local override_prompt=""
+  local prompt_file=""
+  local output_file=""
+
   if [[ $# -gt 0 && -f "$1" ]]; then
-    override_prompt="$1"
+    prompt_file="$1"
     shift || true
   fi
 
-  local prompt_file
-  if [[ -n "$override_prompt" ]]; then
-    prompt_file="$override_prompt"
-  else
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --prompt) prompt_file="$2"; shift 2;;
+      --output) output_file="$2"; shift 2;;
+      *) break;;
+    esac
+  done
+
+  if [[ -z "$prompt_file" ]]; then
     prompt_file="${prompt_dir}/${task}.md"
     if [[ ! -f "$prompt_file" ]]; then
       cat >"$prompt_file" <<'PROMPT'
@@ -1317,6 +1324,7 @@ You are Codex (gpt-5-codex) assisting the gpt-creator pipeline. Apply requested 
 PROMPT
     fi
   fi
+
   if command -v "$CODEX_BIN" >/dev/null 2>&1; then
     info "Codex ${task} → model=${CODEX_MODEL}"
     local fallback_model="${CODEX_FALLBACK_MODEL:-gpt-5-codex}"
@@ -1334,10 +1342,14 @@ PROMPT
       if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
         args+=(-c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"")
       fi
-      args+=(--skip-git-repo-check -)
+      args+=(--full-auto --skip-git-repo-check)
+      if [[ -n "$output_file" ]]; then
+        mkdir -p "$(dirname "$output_file")"
+        args+=(--output-last-message "$output_file")
+      fi
       "$CODEX_BIN" "${args[@]}" < "$prompt_file"
+      return $?
     }
-
     if run_codex_model "$CODEX_MODEL"; then
       :
     elif [[ "$CODEX_MODEL" != "$fallback_model" ]]; then
@@ -1365,8 +1377,8 @@ cmd_iterate() {
   [[ -n "$jira" ]] || jira="${INPUT_DIR}/jira.md"
   [[ -f "$jira" ]] || die "Jira tasks file not found: ${jira}"
 
-  local tasks_json="${PLAN_DIR}/jira-tasks.json"
-  python3 - <<'PY' "$jira" "$tasks_json"
+  local tasks_json_local="${PLAN_DIR}/jira-tasks.local.json"
+  python3 - <<'PY' "$jira" "$tasks_json_local"
 import json, re, sys, time
 jira_path, out_path = sys.argv[1:3]
 lines = open(jira_path).read().splitlines()
@@ -1390,52 +1402,157 @@ if current:
 json.dump({'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'tasks': tasks}, open(out_path, 'w'), indent=2)
 PY
 
-  ok "Parsed Jira tasks → ${tasks_json}"
-  local iterate_prompt="${PLAN_DIR}/iterate-prompt.md"
-  python3 - <<'PY' "$PROJECT_ROOT" "$jira" "$tasks_json" "$iterate_prompt"
-import json, pathlib, sys, textwrap
+  ok "Parsed Jira tasks (local parser) → ${tasks_json_local}"
+  local tasks_json="${tasks_json_local}"
 
-project_root, jira_source, tasks_path, prompt_path = sys.argv[1:5]
-data = json.load(open(tasks_path))
-tasks = data.get('tasks', [])
+  local codex_parse_prompt="${PLAN_DIR}/iterate-codex-parse.md"
+  local codex_raw_json="${PLAN_DIR}/jira-tasks.codex.raw.txt"
+  local codex_json="${PLAN_DIR}/jira-tasks.codex.json"
+  {
+    cat >"$codex_parse_prompt" <<'PROMPT'
+# Instruction
+You are a structured-data assistant. Convert the following Jira backlog markdown into strict JSON.
 
-lines = []
-lines.append('# Instruction')
-lines.append('You are Codex (gpt-5-codex) assisting the gpt-creator pipeline. Execute the Jira tasks below autonomously and deterministically.')
+## Requirements
+- Output **only** valid JSON (no prose, no code fences).
+- Structure: { "tasks": [ { "title": str, "details": str, "estimate": str, "tags": [str], "assignees": [str] } ] }.
+- Preserve bullet details verbatim where helpful.
+- Use empty strings/arrays when information is missing.
+- Do not include explanatory text.
 
-lines.append('\n## Operating Mode')
-lines.append('- Do not wait for additional user input; assume approval to proceed.')
-lines.append('- Work on the tasks sequentially in the order provided.')
-lines.append('- Before modifying files, outline your plan briefly, then implement the changes.')
-lines.append('- Use git only for diffing/context; do not create commits.')
-lines.append('- Run any necessary local commands cautiously and report their output succinctly.')
+## Jira Markdown
+PROMPT
+    cat "$jira" >>"$codex_parse_prompt"
+    cat >>"$codex_parse_prompt" <<'PROMPT'
+## End Markdown
+PROMPT
+  }
 
-lines.append('\n## Project Context')
-lines.append(f'- Working directory: {project_root}')
-lines.append(f'- Jira source: {jira_source}')
-lines.append(f'- Parsed tasks: {tasks_path}')
+  if codex_call "iterate-parse" --prompt "$codex_parse_prompt" --output "$codex_raw_json"; then
+    if python3 - <<'PY' "$codex_raw_json" "$codex_json"
+import json, pathlib, re, sys
+raw_path, out_path = sys.argv[1:3]
+text = pathlib.Path(raw_path).read_text().strip()
+if not text:
+    raise SystemExit(1)
+if text.startswith('```'):
+    text = re.sub(r'^```[a-zA-Z0-9_-]*\s*', '', text)
+    text = re.sub(r'```\s*$', '', text)
+data = json.loads(text)
+if isinstance(data, list):
+    data = {'tasks': data}
+elif 'tasks' not in data:
+    data = {'tasks': [data]}
+pathlib.Path(out_path).write_text(json.dumps(data, indent=2) + '\n')
+PY
+      then
+      ok "Codex parsed Jira tasks → ${codex_json}"
+      tasks_json="$codex_json"
+    else
+      warn "Codex JSON output invalid; falling back to local parser results."
+    fi
+  else
+    warn "Codex parsing step failed; using local parser output."
+  fi
 
-lines.append('\n## Jira Tasks')
-if not tasks:
-    lines.append('No tasks were discovered.')
-else:
-    for idx, task in enumerate(tasks, start=1):
-        title = task.get('title', '').strip()
-        details = task.get('details', '').strip()
-        lines.append(f'{idx}. {title}')
-        if details:
-            formatted = '\n'.join(f'    {line}' if line else '' for line in details.splitlines())
-            lines.append('    Details:')
-            lines.append(formatted)
+  local iterate_dir="${PLAN_DIR}/iterate"
+  mkdir -p "$iterate_dir"
+  local order_file="${iterate_dir}/tasks-order.txt"
 
-lines.append('\n## Output Requirements')
-lines.append('- For each task, provide a short heading (e.g., "Task 1"), describe the actions you take, and show relevant diffs or command results.')
-lines.append('- After all tasks, summarise the overall changes and note any follow-up items.')
-
-pathlib.Path(prompt_path).write_text('\n'.join(lines) + '\n')
+  python3 - <<'PY' "$tasks_json" "$iterate_dir" "$PROJECT_ROOT"
+import json, pathlib, sys
+source, out_dir, project_root = sys.argv[1:4]
+tasks = json.load(open(source)).get('tasks', [])
+out = pathlib.Path(out_dir)
+out.mkdir(parents=True, exist_ok=True)
+index_path = out / 'tasks-order.txt'
+with index_path.open('w') as idx:
+    for i, task in enumerate(tasks, 1):
+        title = (task.get('title') or '').strip() or f'Task {i}'
+        details = (task.get('details') or '').strip() or '(No additional details provided.)'
+        estimate = (task.get('estimate') or '').strip()
+        tags = ', '.join(task.get('tags') or [])
+        assignees = ', '.join(task.get('assignees') or [])
+        prompt_path = out / f'task-{i:02d}.md'
+        idx.write(str(prompt_path) + '\n')
+        lines = []
+        lines.append(f"# Task {i}: {title}")
+        lines.append('')
+        lines.append('## Context')
+        lines.append(f'- Working directory: {project_root}')
+        if assignees:
+            lines.append(f'- Assignees: {assignees}')
+        if estimate:
+            lines.append(f'- Estimate: {estimate}')
+        if tags:
+            lines.append(f'- Tags: {tags}')
+        lines.append('')
+        lines.append('## Jira Details')
+        lines.append(details)
+        lines.append('')
+        lines.append('## Instructions')
+        lines.append('- Outline your plan before modifying files.')
+        lines.append('- Implement the task in the repository; commits are not required.')
+        lines.append('- Show relevant diffs (git snippets) and command results.')
+        lines.append('- Verify acceptance criteria for this task.')
+        lines.append('- If blocked, explain why and propose next steps.')
+        lines.append('')
+        lines.append('## Output Format')
+        lines.append('- Begin with a heading `Task {i}`.')
+        lines.append('- Summarise changes, tests, and outstanding follow-ups.')
+        prompt_path.write_text('\n'.join(lines) + '\n')
 PY
 
-  codex_call "iterate" "$iterate_prompt"
+  if [[ -s "$order_file" ]]; then
+    while IFS= read -r prompt_path; do
+      [[ -z "$prompt_path" ]] && continue
+      local base_name="$(basename "$prompt_path" .md)"
+      local output_path="${prompt_path%.md}.output.md"
+      info "Running Codex for ${base_name}"
+      codex_call "$base_name" --prompt "$prompt_path" --output "$output_path" || warn "Codex task ${base_name} returned non-zero"
+    done < "$order_file"
+  else
+    warn "No Jira tasks to process after parsing."
+  fi
+
+  local summary_prompt="${iterate_dir}/summary.md"
+  local summary_output="${iterate_dir}/summary.output.md"
+  python3 - <<'PY' "$tasks_json" "$order_file" "$summary_prompt"
+import json, pathlib, sys
+tasks = json.load(open(sys.argv[1])).get('tasks', [])
+order_file = pathlib.Path(sys.argv[2])
+prompt_path = pathlib.Path(sys.argv[3])
+lines = ['# Summary Request', '', 'Summarise the completed Jira work and list follow-up actions.']
+lines.append('')
+lines.append('## Task Reports')
+if order_file.exists():
+    for i, prompt in enumerate(order_file.read_text().splitlines(), 1):
+        if not prompt:
+            continue
+        title = tasks[i-1].get('title') if i-1 < len(tasks) else f'Task {i}'
+        out_path = pathlib.Path(prompt).with_suffix('.output.md')
+        lines.append(f'- Task {i}: {title}')
+        if out_path.exists():
+            content = out_path.read_text().strip()
+            if content:
+                snippet = content[:2000]
+                lines.append('  ```')
+                lines.append(snippet)
+                lines.append('  ```')
+        else:
+            lines.append('  (No output captured)')
+else:
+    lines.append('- No outputs available.')
+lines.append('')
+lines.append('## Output Requirements')
+lines.append('- Provide an overall summary of work completed.')
+lines.append('- List follow-up items or blockers.')
+lines.append('- Use markdown headings and bullet lists.')
+prompt_path.write_text('\n'.join(lines) + '\n')
+PY
+
+  codex_call "iterate-summary" --prompt "$summary_prompt" --output "$summary_output" || warn "Codex summary step returned non-zero"
+
   if [[ "$reverify" -eq 1 ]]; then
     info "Re-running verify after iteration"
     cmd_verify all --project "$PROJECT_ROOT"

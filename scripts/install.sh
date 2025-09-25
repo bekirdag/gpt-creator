@@ -96,18 +96,13 @@ install_files() {
       as_root "$PREFIX" cp -R "$REPO_DIR"/. "$APP_DIR"/
     }
 
-  # Ensure an executable exists
-  if [[ ! -x "$APP_BIN" ]]; then
-    echo "› Creating minimal CLI wrapper at $APP_BIN"
-    as_root "$PREFIX" mkdir -p "$(dirname "$APP_BIN")"
-    as_root "$PREFIX" tee "$APP_BIN" >/dev/null <<'WRAP'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-echo "gpt-creator placeholder: CLI not yet implemented in this repo."
-echo "Expected entrypoint at: bin/gpt-creator"
-exit 1
-WRAP
+  # Ensure executable bit set on CLI entrypoint
+  if [[ -f "$APP_BIN" ]]; then
     as_root "$PREFIX" chmod +x "$APP_BIN"
+  else
+    echo "› Copying CLI entrypoint to $APP_BIN"
+    as_root "$PREFIX" mkdir -p "$(dirname "$APP_BIN")"
+    as_root "$PREFIX" install -m 0755 "$REPO_DIR/bin/gpt-creator" "$APP_BIN"
   fi
 }
 

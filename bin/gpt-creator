@@ -107,7 +107,9 @@ APP_NAME="gpt-creator"
 
 # Defaults (override via env)
 CODEX_BIN="${CODEX_BIN:-codex}"
-CODEX_MODEL="${CODEX_MODEL:-gpt-5-high}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5-codex}"
+CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-gpt-5-codex}"
+CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-high}"
 EDITOR_CMD="${EDITOR_CMD:-code}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 MYSQL_BIN="${MYSQL_BIN:-mysql}"
@@ -1305,18 +1307,32 @@ PROMPT
   fi
   if command -v "$CODEX_BIN" >/dev/null 2>&1; then
     info "Codex ${task} → model=${CODEX_MODEL}"
-    local codex_help
-    codex_help="$("$CODEX_BIN" --help 2>&1 || true)"
-    if [[ "$codex_help" == *"--prompt-file"* || "$codex_help" == *"chat [options]"* ]]; then
-      "$CODEX_BIN" chat --model "$CODEX_MODEL" --prompt-file "$prompt_file" --stdin < /dev/null || warn "Codex invocation returned non-zero."
-    else
-      local prompt
-      prompt="$(<"$prompt_file")"
-      local args=("--model" "$CODEX_MODEL")
+    local fallback_model="${CODEX_FALLBACK_MODEL:-o4-mini}"
+    local run_codex_model
+    run_codex_model() {
+      local model="$1"
+      shift || true
+      local args=(exec --model "$model")
       if [[ -n "${CODEX_PROFILE:-}" ]]; then
-        args+=("--profile" "$CODEX_PROFILE")
+        args+=(--profile "$CODEX_PROFILE")
       fi
-      "$CODEX_BIN" "${args[@]}" "$prompt" || warn "Codex invocation returned non-zero."
+      if [[ -n "${PROJECT_ROOT:-}" ]]; then
+        args+=(--cd "$PROJECT_ROOT")
+      fi
+      if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
+        args+=(-c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"")
+      fi
+      args+=(--skip-git-repo-check -)
+      "$CODEX_BIN" "${args[@]}" < "$prompt_file"
+    }
+
+    if run_codex_model "$CODEX_MODEL"; then
+      :
+    elif [[ "$CODEX_MODEL" != "$fallback_model" ]]; then
+      warn "Codex model ${CODEX_MODEL} failed; retrying with ${fallback_model}."
+      run_codex_model "$fallback_model" || warn "Codex invocation returned non-zero."
+    else
+      warn "Codex invocation returned non-zero."
     fi
   else
     warn "Codex binary (${CODEX_BIN}) not found — skipping ${task}."

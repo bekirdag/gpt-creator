@@ -85,17 +85,25 @@ install_files() {
   echo "› Installing files to $APP_DIR …"
   as_root "$PREFIX" mkdir -p "$APP_DIR"
   # Copy only what's needed (bin + templates + scripts + docs); falls back to repo if structure differs.
-  rsync -a --delete \
-    --include '/bin/' --include '/bin/*' \
-    --include '/templates/***' \
-    --include '/scripts/***' \
-    --include '/docs/***' \
-    --include '/README*' \
-    --exclude='*' \
-    "$REPO_DIR"/ "$APP_DIR"/ || {
-      echo "rsync minimal copy failed; copying full repo…"
-      as_root "$PREFIX" cp -R "$REPO_DIR"/. "$APP_DIR"/
-    }
+  local rsync_args=(
+    -a
+    --delete
+    --omit-dir-times
+    --no-perms
+    --no-owner
+    --no-group
+    --include '/bin/' --include '/bin/*'
+    --include '/templates/***'
+    --include '/scripts/***'
+    --include '/docs/***'
+    --include '/README*'
+    --exclude '*'
+  )
+
+  if ! as_root "$PREFIX" rsync "${rsync_args[@]}" "$REPO_DIR"/ "$APP_DIR"/; then
+    echo "rsync minimal copy failed; copying full repo…"
+    as_root "$PREFIX" cp -R "$REPO_DIR"/. "$APP_DIR"/
+  fi
 
   # Ensure CLI entrypoint is up to date
   if [[ -f "$APP_BIN" ]] && ! grep -q "placeholder" "$APP_BIN"; then

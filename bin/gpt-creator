@@ -18,6 +18,89 @@ resolve_cli_root() {
 
 CLI_ROOT="$(resolve_cli_root)"
 unset -f resolve_cli_root
+
+gc_env_file() { echo "${PROJECT_ROOT:-$PWD}/.env"; }
+
+gc_random_string() {
+  python3 - <<'PY'
+import secrets, string
+alphabet = string.ascii_letters + string.digits
+print(''.join(secrets.choice(alphabet) for _ in range(32)))
+PY
+}
+
+gc_set_env_var() {
+  local key="$1" value="$2"
+  local env_file="$(gc_env_file)"
+  python3 - <<'PY' "$env_file" "$key" "$value"
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+if path.exists():
+    lines = path.read_text().splitlines()
+else:
+    lines = []
+for idx, line in enumerate(lines):
+    if line.startswith(f"{key}="):
+        lines[idx] = f"{key}={value}"
+        break
+else:
+    lines.append(f"{key}={value}")
+path.write_text('\n'.join(lines) + '\n')
+PY
+}
+
+gc_load_env() {
+  local env_file="$(gc_env_file)"
+  if [[ -f "$env_file" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$env_file"
+    set +a
+  fi
+  GC_DB_NAME="${GC_DB_NAME:-${DB_NAME:-app}}"
+  GC_DB_USER="${GC_DB_USER:-${DB_USER:-app}}"
+  GC_DB_PASSWORD="${GC_DB_PASSWORD:-${DB_PASSWORD:-app_pass}}"
+  GC_DB_ROOT_PASSWORD="${GC_DB_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-root}}"
+  GC_DB_HOST_PORT="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-${DB_PORT:-3306}}}"
+  DB_NAME="${DB_NAME:-$GC_DB_NAME}"
+  DB_USER="${DB_USER:-$GC_DB_USER}"
+  DB_PASSWORD="${DB_PASSWORD:-$GC_DB_PASSWORD}"
+  DB_ROOT_PASSWORD="${DB_ROOT_PASSWORD:-$GC_DB_ROOT_PASSWORD}"
+  DB_HOST_PORT="${DB_HOST_PORT:-$GC_DB_HOST_PORT}"
+}
+
+gc_create_env_if_missing() {
+  local env_file="$(gc_env_file)"
+  if [[ -f "$env_file" ]]; then
+    return
+  fi
+  local slug
+  slug="$(basename "${PROJECT_ROOT:-$PWD}")"
+  slug="${slug//[^a-zA-Z0-9]/_}"
+  slug="${slug,,}"
+  [[ -n "$slug" ]] || slug="app"
+  local db_name="${slug}_db"
+  local db_user="gc_${slug}_user"
+  local db_password="$(gc_random_string)"
+  local db_root_password="$(gc_random_string)"
+  cat > "$env_file" <<EOF
+# gpt-creator environment
+DB_NAME=${db_name}
+DB_USER=${db_user}
+DB_PASSWORD=${db_password}
+DB_ROOT_USER=root
+DB_ROOT_PASSWORD=${db_root_password}
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_HOST_PORT=3306
+DATABASE_URL=mysql://${db_user}:${db_password}@127.0.0.1:3306/${db_name}
+VITE_API_BASE=http://localhost:3000/api/v1
+EOF
+  chmod 600 "$env_file" || true
+}
+
 VERSION="0.2.0"
 APP_NAME="gpt-creator"
 
@@ -64,6 +147,8 @@ ensure_ctx() {
   LOG_DIR="${GC_DIR}/logs"
   ART_DIR="${GC_DIR}/artifacts"
   mkdir -p "$GC_DIR" "$STAGING_DIR" "$INPUT_DIR" "$PLAN_DIR" "$LOG_DIR" "$ART_DIR"
+  gc_create_env_if_missing
+  gc_load_env
 }
 
 # docker compose helper (prefers "docker compose" then docker-compose)
@@ -122,14 +207,17 @@ render_template_file() {
   local db_user="${GC_DB_USER:-${DB_USER:-app}}"
   local db_pass="${GC_DB_PASSWORD:-${DB_PASSWORD:-app_pass}}"
   local db_host_port="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-3306}}"
-  python3 - <<'PY' "$src" "$dest" "$db_name" "$db_user" "$db_pass" "$db_host_port"
+  local db_root_pass="${GC_DB_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-root}}"
+  python3 - <<'PY' "$src" "$dest" "$db_name" "$db_user" "$db_pass" "$db_host_port" "$db_root_pass"
 import pathlib, sys
-src, dest, db_name, db_user, db_pass, db_host_port = sys.argv[1:7]
+src, dest, db_name, db_user, db_pass, db_host_port, db_root_pass = sys.argv[1:7]
 text = pathlib.Path(src).read_text()
 text = text.replace('{{DB_NAME}}', db_name)
 text = text.replace('{{DB_USER}}', db_user)
 text = text.replace('{{DB_PASSWORD}}', db_pass)
 text = text.replace('{{DB_HOST_PORT}}', db_host_port)
+text = text.replace('{{DB_ROOT_PASSWORD}}', db_root_pass)
+text = text.replace('{{DB_ROOT_USER}}', 'root')
 pathlib.Path(dest).write_text(text)
 PY
 }

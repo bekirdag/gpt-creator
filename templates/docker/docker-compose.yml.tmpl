@@ -5,14 +5,14 @@ services:
     image: mysql:8.0
     container_name: yoga_db
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: yoga_app
-      MYSQL_USER: yoga
-      MYSQL_PASSWORD: yoga
+      MYSQL_ROOT_PASSWORD: {{DB_ROOT_PASSWORD}}
+      MYSQL_DATABASE: {{DB_NAME}}
+      MYSQL_USER: {{DB_USER}}
+      MYSQL_PASSWORD: {{DB_PASSWORD}}
     ports:
       - "{{DB_HOST_PORT}}:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p{{DB_ROOT_PASSWORD}}"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -29,7 +29,7 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: development
-      DATABASE_URL: mysql://yoga:yoga@db:3306/yoga_app
+      DATABASE_URL: mysql://{{DB_USER}}:{{DB_PASSWORD}}@db:3306/{{DB_NAME}}
       PORT: 3000
     command: sh -c "npm install && npm run start:dev"
     ports:
@@ -45,7 +45,7 @@ services:
     container_name: yoga_web
     environment:
       NODE_ENV: development
-      VITE_API_BASE: http://localhost:3000/api/v1
+      VITE_API_BASE: ${VITE_API_BASE:-http://localhost:3000/api/v1}
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     ports:
       - "5173:5173"
@@ -60,7 +60,7 @@ services:
     container_name: yoga_admin
     environment:
       NODE_ENV: development
-      VITE_API_BASE: http://localhost:3000/api/v1
+      VITE_API_BASE: ${VITE_API_BASE:-http://localhost:3000/api/v1}
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     ports:
       - "5174:5173"

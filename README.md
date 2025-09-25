@@ -133,7 +133,7 @@ gpt-creator db provision   # docker compose up db
 ```
 gpt-creator run up --project /path/to/project
 ```
-- Launches Docker Compose and waits on `/health`, web `/`, admin `/admin/` before returning. Use `run logs`, `run down`, or `run open` for troubleshooting. If port 3306 is taken, the generator already mapped the database to the next free host port and recorded it in `docker/docker-compose.yml`. The web/admin/API services run in watch mode and each container executes `npm install` on startup, mounting node_modules onto named volumes so you can edit files on the host without rebuilding images.
+- Launches Docker Compose and waits on `/health`, web `/`, admin `/admin/` before returning. Use `run logs`, `run down`, or `run open` for troubleshooting. If port 3306 is taken, the generator already mapped the database to the next free host port and recorded it in `docker/docker-compose.yml`. The web/admin/API services run in watch mode and each container executes `npm install` on startup, mounting node_modules onto named volumes for host editing. The proxy can return a 404 until the Vite servers finish booting; re-run the readiness helper once a minute or hit the direct Vite port (`5173`/`5174`) to confirm it is live.
 
 ### 7. Verify
 ```

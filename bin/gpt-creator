@@ -1385,17 +1385,20 @@ from pathlib import Path
 jira_path, out_path = sys.argv[1:3]
 lines = Path(jira_path).read_text().splitlines()
 
-tasks = []
+epic_id = ""
+epic_title = ""
 story_id = ""
 story_title = ""
+tasks = []
 current = None
+section = None
 
-def parse_list(value: str):
+def normalise_list(value: str):
     cleaned = value.replace('+', ',').replace('/', ',').replace('&', ',')
-    candidates = [part.strip() for part in re.split(r',|;|\\band\\b', cleaned) if part.strip()]
+    parts = [part.strip() for part in re.split(r',|;|\\band\\b', cleaned, flags=re.I) if part.strip()]
     seen = set()
     ordered = []
-    for item in candidates:
+    for item in parts:
         key = item.lower()
         if key not in seen:
             seen.add(key)
@@ -1403,26 +1406,51 @@ def parse_list(value: str):
     return ordered
 
 def flush_current():
+    global current, section
     if not current:
         return
     description = "\n".join(current['description_lines']).strip()
+    acceptance = []
+    for item in current['acceptance_criteria']:
+        text = item.strip()
+        if text and text not in acceptance:
+            acceptance.append(text)
+    dependencies = normalise_list(', '.join(current['dependencies'])) if current['dependencies'] else []
+    assignees = normalise_list(', '.join(current['assignees'])) if current['assignees'] else []
+    tags = normalise_list(', '.join(current['tags'])) if current['tags'] else []
     task_obj = {
-        'id': current['id'],
-        'title': current['title'],
+        'epic_id': current['epic_id'],
+        'epic_title': current['epic_title'],
         'story_id': current['story_id'],
         'story_title': current['story_title'],
+        'id': current['id'],
+        'title': current['title'],
+        'assignees': assignees,
+        'tags': tags,
         'estimate': current['estimate'],
-        'tags': current['tags'],
-        'assignees': current['assignees'],
         'description': description,
+        'acceptance_criteria': acceptance,
+        'dependencies': dependencies,
     }
     tasks.append(task_obj)
+    current = None
+    section = None
 
 for raw in lines:
     stripped = raw.strip()
     if not stripped:
-        if current:
+        if current and section == 'description':
             current['description_lines'].append('')
+        continue
+
+    epic_match = re.match(r'^\*\*(E[0-9A-Za-z\.\-]+)\s*[—-]\s*(.*?)\*\*$', stripped)
+    if epic_match:
+        epic_id, epic_title = epic_match.groups()
+        epic_id = epic_id.strip()
+        epic_title = epic_title.strip()
+        continue
+
+    if stripped.lower().startswith('### **story'):
         continue
 
     story_match = re.match(r'^\*\*(S[0-9A-Za-z\.\-]+)\s*[—-]\s*(.*?)\*\*$', stripped)
@@ -1431,44 +1459,93 @@ for raw in lines:
         story_id = story_id.strip()
         story_title = story_title.strip()
         continue
-    if stripped.lower().startswith('### **story'):
-        continue
 
     task_match = re.match(r'^\*\*(T[0-9A-Za-z\.\-]+)\s*[—-]\s*(.*?)\*\*$', stripped)
     if task_match:
         flush_current()
         task_id, task_title = task_match.groups()
         current = {
-            'id': task_id.strip(),
-            'title': task_title.strip(),
+            'epic_id': epic_id,
+            'epic_title': epic_title,
             'story_id': story_id,
             'story_title': story_title,
-            'estimate': '',
-            'tags': [],
+            'id': task_id.strip(),
+            'title': task_title.strip(),
             'assignees': [],
+            'tags': [],
+            'estimate': '',
             'description_lines': [],
+            'acceptance_criteria': [],
+            'dependencies': [],
         }
+        section = None
         remainder = stripped[task_match.end():].strip()
         if remainder:
             current['description_lines'].append(remainder)
+            section = 'description'
         continue
 
     if current is None:
         continue
 
-    assignee_match = re.search(r'\*\*Assignee:\*\*\s*([^•]+)', stripped)
-    if assignee_match:
-        current['assignees'] = parse_list(assignee_match.group(1))
+    if '**Description:**' in stripped:
+        section = 'description'
+        after = stripped.split('**Description:**', 1)[1].strip()
+        if after:
+            current['description_lines'].append(after)
+        continue
 
-    tags_match = re.search(r'\*\*Tags:\*\*\s*([^•]+)', stripped)
-    if tags_match:
-        current['tags'] = parse_list(tags_match.group(1))
+    if '**Acceptance Criteria:**' in stripped:
+        section = 'ac'
+        after = stripped.split('**Acceptance Criteria:**', 1)[1].strip()
+        if after:
+            current['acceptance_criteria'].append(after)
+        continue
 
-    estimate_match = re.search(r'\*\*Estimate:\*\*\s*([^•]+)', stripped)
-    if estimate_match:
-        current['estimate'] = estimate_match.group(1).strip()
+    if '**Dependencies:**' in stripped:
+        section = 'dependencies'
+        after = stripped.split('**Dependencies:**', 1)[1].strip()
+        if after:
+            current['dependencies'] = normalise_list(after)
+        continue
 
-    current['description_lines'].append(raw)
+    if section == 'ac':
+        if stripped.startswith('*') or stripped.startswith('-'):
+            current['acceptance_criteria'].append(stripped.lstrip('*- ').rstrip())
+            continue
+        else:
+            section = None
+
+    if section == 'dependencies':
+        if stripped.startswith('*') or stripped.startswith('-'):
+            current['dependencies'].extend(normalise_list(stripped.lstrip('*- ')))
+            continue
+        else:
+            section = None
+
+    segments = [seg.strip() for seg in re.split(r'[·•]', stripped) if seg.strip()]
+    meta_consumed = False
+    for seg in segments:
+        plain = seg.replace('**', '')
+        lower = plain.lower()
+        if lower.startswith('assignee:'):
+            value = plain.split(':', 1)[1].strip()
+            if value:
+                current['assignees'] = normalise_list(value)
+                meta_consumed = True
+        elif lower.startswith('tags:'):
+            value = plain.split(':', 1)[1].strip()
+            if value:
+                current['tags'] = normalise_list(value)
+                meta_consumed = True
+        elif lower.startswith('estimate:'):
+            value = plain.split(':', 1)[1].strip()
+            if value and not current['estimate']:
+                current['estimate'] = value
+                meta_consumed = True
+
+    if section == 'description' or (not meta_consumed and section is None):
+        current['description_lines'].append(raw)
 
 flush_current()
 
@@ -1492,9 +1569,9 @@ You are a structured-data assistant. Convert the following Jira backlog markdown
 
 ## Requirements
 - Output **only** valid JSON (no prose, no code fences).
-- Structure: { "tasks": [ { "id": str, "title": str, "story_id": str, "story_title": str, "assignees": [str], "tags": [str], "estimate": str, "description": str } ] }.
-- Each task begins with a bold identifier such as **T18.5.2**; treat every such block as a separate task. Include the parent story identifier/title when available.
-- Preserve bullet details verbatim inside the description.
+- Structure: { "tasks": [ { "epic_id": str, "epic_title": str, "story_id": str, "story_title": str, "id": str, "title": str, "assignees": [str], "tags": [str], "estimate": str, "description": str, "acceptance_criteria": [str], "dependencies": [str] } ] }.
+- Each task begins with a bold identifier such as **T18.5.2**; treat every such block as a separate task and capture its parent story/epic when present.
+- Preserve bullet details verbatim inside the description and acceptance criteria lists. Do not repeat metadata (assignee/tags/estimate) inside the description.
 - Use empty strings/arrays when information is missing.
 - Do not include explanatory text.
 
@@ -1574,8 +1651,19 @@ with index_path.open('w') as idx:
         if tags:
             lines.append(f'- Tags: {tags}')
         lines.append('')
-        lines.append('## Jira Description')
-        lines.append(description)
+        lines.append('## Description')
+        lines.append(description or '(No additional details provided.)')
+        lines.append('')
+        if task.get('acceptance_criteria'):
+            lines.append('## Acceptance Criteria')
+            for ac in task['acceptance_criteria']:
+                lines.append(f'- {ac}')
+            lines.append('')
+        if task.get('dependencies'):
+            lines.append('## Dependencies')
+            for dep in task['dependencies']:
+                lines.append(f'- {dep}')
+            lines.append('')
         lines.append('')
         lines.append('## Instructions')
         lines.append('- Outline your plan before modifying files.')

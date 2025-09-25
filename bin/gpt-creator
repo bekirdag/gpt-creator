@@ -714,11 +714,15 @@ cmd_generate() {
     docker)
       local out="$PROJECT_ROOT/docker"
       mkdir -p "$out"
-      if [[ -z "${GC_DB_HOST_PORT:-}" ]]; then
-        local preferred="${DB_HOST_PORT:-${MYSQL_HOST_PORT:-3306}}"
-        GC_DB_HOST_PORT="$(find_free_port "$preferred")"
-        info "MySQL host port mapped to ${GC_DB_HOST_PORT}"
+      local preferred="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-${MYSQL_HOST_PORT:-3306}}}"
+      if port_in_use "$preferred"; then
+        local next; next="$(find_free_port "$preferred")"
+        if [[ "$next" != "$preferred" ]]; then
+          info "Port $preferred in use; remapping MySQL to $next"
+          preferred="$next"
+        fi
       fi
+      GC_DB_HOST_PORT="$preferred"
       DB_HOST_PORT="$GC_DB_HOST_PORT"
       MYSQL_HOST_PORT="$GC_DB_HOST_PORT"
       gc_set_env_var DB_HOST_PORT "$GC_DB_HOST_PORT"

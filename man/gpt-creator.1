@@ -33,6 +33,12 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 .B gpt-creator verify
 [\-\-root DIR]
 .br
+.B gpt-creator task-convert
+[\-\-project DIR] [\-\-jira FILE] [\-\-force]
+.br
+.B gpt-creator work-on-tasks
+[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-no-verify]
+.br
 .B gpt-creator iterate
 [\-\-root DIR] [\-\-jira FILE]
 .SH DESCRIPTION
@@ -80,8 +86,14 @@ Docker Compose wrappers: \fBup\fR, \fBdown\fR, \fBlogs\fR, \fBopen\fR.
 .B verify
 Acceptance & NFR checks: routes render, filters work, Lighthouse, AA basics.
 .TP
+.B task-convert
+Convert Jira markdown into per-story JSON files under \fI.gpt-creator/staging/plan/tasks/\fR, producing a manifest that supports resumable processing.
+.TP
+.B work-on-tasks
+Drive Codex over the converted story JSONs, writing run artifacts and maintaining progress in \fI.gpt-creator/staging/plan/work/state.json\fR.
+.TP
 .B iterate
-Loop Codex over Jira tasks until green.
+Legacy Jira loop (one-shot parse + Codex run). Prefer \fBtask-convert\fR + \fBwork-on-tasks\fR for resumable flows.
 .SH ENVIRONMENT
 .TP
 .B OPENAI_API_KEY

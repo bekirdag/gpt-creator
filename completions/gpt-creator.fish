@@ -1,6 +1,6 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project scan normalize plan generate db run verify iterate help version
+set -l subcmds create-project scan normalize plan generate db run verify task-convert work-on-tasks iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
@@ -26,6 +26,16 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from run" -l project -r
 # verify
 complete -c gpt-creator -n "__fish_seen_subcommand_from verify" -a "acceptance nfr all" -d "Verify kind"
 complete -c gpt-creator -n "__fish_seen_subcommand_from verify" -l project -r
+
+# task-convert
+complete -c gpt-creator -n "__fish_seen_subcommand_from task-convert" -l jira -r -d "Jira tasks file"
+complete -c gpt-creator -n "__fish_seen_subcommand_from task-convert" -l force -d "Rebuild all story JSONs"
+
+# work-on-tasks
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l story -r -d "Start from story id or slug"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l from-story -r -d "Alias for --story"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l fresh -d "Ignore saved progress"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l no-verify -d "Skip verify"
 
 # iterate
 complete -c gpt-creator -n "__fish_seen_subcommand_from iterate" -l jira -r -d "Jira tasks file"

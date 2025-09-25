@@ -14,7 +14,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Planning outputs**: Produces route/entity summaries and task hints under `.gpt-creator/staging/plan/` as scaffolding for further design work.
 - **Template-driven generation**: Renders baseline NestJS, Vue 3, Prisma, and Docker scaffolds into `/apps/**` and `/docker`, ready for manual extension or Codex-driven augmentation.
 - **Verification toolkit**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks that you can run on demand.
-- **Iteration helpers**: Parses Jira markdown tasks and prepares Codex prompts; you review/apply Codex output before re-running verification.
+- **Iteration helpers**: `task-convert` turns Jira markdown into per-story JSON (with manifest + resumable progress), `work-on-tasks` executes story chunks via Codex, and the legacy `iterate` command remains for the one-shot flow.
 
 ---
 
@@ -151,13 +151,28 @@ Runs:
 
 Scripts exit with `0` on success, `3` when a dependency is missing, or non-zero on failure.
 
-### 8. Iterate (Jira loop)
+### 8. Task Conversion
+```
+gpt-creator task-convert --project /path/to/project --jira docs/jira.md
+```
+- Parses Jira markdown once and writes per-story JSON files under `.gpt-creator/staging/plan/tasks/stories/`.
+- Produces a manifest (`manifest.json`) capturing story order, hashes, and relative paths. Existing story files are skipped unless the content hash changes (or `--force` is supplied).
+- Progress is durable: if conversion is interrupted, rerunning the command resumes from the manifest and only rebuilds changed stories.
+
+### 9. Work on Tasks (resumable Codex loop)
+```
+gpt-creator work-on-tasks --project /path/to/project
+```
+- Reads the manifest from the previous step and generates Codex prompts per story/task, storing run artifacts in `.gpt-creator/staging/plan/work/runs/<timestamp>/`.
+- Saves progress to `.gpt-creator/staging/plan/work/state.json`; on restart it resumes at the first incomplete story unless `--fresh` is provided.
+- Use `--story ST-123` (or slug) to jump to a specific story and `--no-verify` to skip the automatic `verify all` invocation after a successful run.
+- Review Codex outputs and apply the suggested diffs manually; the CLI only orchestrates prompting and logging.
+
+### 10. Iterate (legacy Jira loop)
 ```
 gpt-creator iterate --project /path/to/project --jira docs/jira.md
 ```
-- Converts Jira markdown headings/checkboxes into tasks (`jira-tasks.json`).
-- Invokes Codex with the staged context and (optionally) reruns `verify all` unless `--no-verify` is supplied.
-- Review and apply Codex output manually; the CLI does not auto-apply patches.
+- Legacy one-shot that parses Jira markdown, runs Codex per task, and (optionally) re-runs `verify all`. The newer `task-convert` + `work-on-tasks` flow offers better resumability and organization.
 
 ---
 

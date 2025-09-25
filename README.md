@@ -164,9 +164,10 @@ gpt-creator task-convert --project /path/to/project --jira docs/jira.md
 gpt-creator work-on-tasks --project /path/to/project
 ```
 - Reads the manifest from the previous step and generates Codex prompts per story/task, storing run artifacts in `.gpt-creator/staging/plan/work/runs/<timestamp>/`.
+- Expects Codex responses in JSON (plan + `changes` array); diffs and file payloads are applied automatically via `git apply`/direct writes before moving to the next task.
 - Saves progress to `.gpt-creator/staging/plan/work/state.json`; on restart it resumes at the first incomplete story unless `--fresh` is provided.
 - Use `--story ST-123` (or slug) to jump to a specific story and `--no-verify` to skip the automatic `verify all` invocation after a successful run.
-- Review Codex outputs and apply the suggested diffs manually; the CLI only orchestrates prompting and logging.
+- Review the generated commits/diffs afterwards and run project tests as needed.
 
 ### 10. Iterate (legacy Jira loop)
 ```

@@ -1616,6 +1616,97 @@ PROMPT
   fi
 }
 
+gc_apply_codex_changes() {
+  local output_file="${1:?output file required}"
+  local project_root="${2:?project root required}"
+  python3 - <<'PY' "$output_file" "$project_root"
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+output_path = Path(sys.argv[1])
+project_root = Path(sys.argv[2])
+
+if not output_path.exists():
+    print("no-output", flush=True)
+    sys.exit(0)
+
+raw = output_path.read_text(encoding='utf-8').strip()
+if not raw:
+    print("empty-output", flush=True)
+    sys.exit(0)
+
+start = raw.find('{')
+end = raw.rfind('}')
+if start == -1 or end == -1 or end <= start:
+    raise SystemExit("JSON not found in Codex output")
+
+payload = json.loads(raw[start:end+1])
+
+changes = payload.get('changes') or []
+written = []
+patched = []
+
+def ensure_within_root(path: Path) -> Path:
+    try:
+        full = (project_root / path).resolve(strict=False)
+        project = project_root.resolve(strict=True)
+    except FileNotFoundError:
+        project = project_root.resolve()
+        full = (project_root / path).resolve(strict=False)
+    if not str(full).startswith(str(project)):
+        raise ValueError(f"Path {path} escapes project root")
+    return full
+
+for change in changes:
+    ctype = change.get('type')
+    path = change.get('path')
+    if not path:
+        raise ValueError('Change entry missing path')
+    if ctype == 'file':
+        content = change.get('content', '')
+        dest = ensure_within_root(Path(path))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(content, encoding='utf-8')
+        written.append(str(dest.relative_to(project_root)))
+    elif ctype == 'patch':
+        diff = change.get('diff')
+        if not diff:
+            raise ValueError(f"Patch change for {path} missing diff")
+        proc = subprocess.run(
+            ['git', 'apply', '--whitespace=nowarn', '-'],
+            input=diff.encode('utf-8'),
+            cwd=str(project_root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if proc.returncode != 0:
+            sys.stderr.write(proc.stderr.decode('utf-8'))
+            raise SystemExit(f"git apply failed for {path}")
+        patched.append(path)
+    else:
+        raise ValueError(f"Unknown change type: {ctype}")
+
+summary = {
+    'written': written,
+    'patched': patched,
+    'commands': payload.get('commands') or [],
+    'notes': payload.get('notes') or [],
+}
+print('APPLIED')
+for path in written:
+    print(f"WRITE {path}")
+for path in patched:
+    print(f"PATCH {path}")
+for cmd in summary['commands']:
+    print(f"CMD {cmd}")
+for note in summary['notes']:
+    print(f"NOTE {note}")
+PY
+}
+
 cmd_task_convert() {
   local root="" jira="" force=0
   while [[ $# -gt 0 ]]; do
@@ -1919,9 +2010,26 @@ lines.append("")
 lines.append("## Instructions")
 lines.append("- Draft a short plan before modifying files.")
 lines.append("- Apply changes directly in the repository; commits are not required.")
-lines.append("- Provide relevant diffs and command outputs in the response.")
+lines.append("- Respond with structured JSON described below — no markdown fencing or prose outside the JSON.")
 lines.append("- Verify acceptance criteria before finishing.")
-lines.append("- If blocked, explain why and suggest next steps.")
+lines.append("- If blocked, explain why and suggest next steps inside the JSON response.")
+
+lines.append("")
+lines.append("## Output JSON schema")
+lines.append("Return a single JSON object with keys exactly as follows (omit null/empty collections when not needed):")
+lines.append("{")
+lines.append("  \"plan\": [\"short step-by-step plan items...\"],")
+lines.append("  \"changes\": [")
+lines.append("    { \"type\": \"patch\", \"path\": \"relative/file/path\", \"diff\": \"UNIFIED_DIFF\" },")
+lines.append("    { \"type\": \"file\", \"path\": \"relative/file/path\", \"content\": \"entire file content\" }")
+lines.append("  ],")
+lines.append("  \"commands\": [\"optional shell commands to run (e.g., npm install)\"],")
+lines.append("  \"notes\": [\"follow-up items or blockers\"]")
+lines.append("}")
+lines.append("- Use UTF-8, escape newlines as \n inside JSON strings.")
+lines.append("- Diff entries must be valid unified diffs (git apply compatible) against the current workspace.")
+lines.append("- File entries provide the complete desired file content (for new or fully rewritten files).")
+lines.append("- Do not emit markdown fences, commentary, or additional text outside the JSON object.")
 
 if context_tail_path and context_tail_path.exists():
     tail_text = context_tail_path.read_text(encoding='utf-8').splitlines()
@@ -2131,6 +2239,26 @@ PY
 
       local call_name="story-${slug}-task-${task_number}"
       if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
+        local apply_output
+        if ! apply_output="$(gc_apply_codex_changes "$output_path" "$PROJECT_ROOT")"; then
+          warn "  Failed to apply changes for ${call_name}; inspect ${output_path}."
+          work_failed=1
+          break
+        fi
+        if [[ "$apply_output" == "no-output" || "$apply_output" == "empty-output" ]]; then
+          warn "  Codex produced no actionable JSON for ${call_name}."
+          work_failed=1
+          break
+        fi
+        while IFS= read -r change_line; do
+          case "$change_line" in
+            APPLIED) info "    Changes applied." ;;
+            WRITE\ *) info "    Wrote ${change_line#WRITE }" ;;
+            PATCH\ *) info "    Patched ${change_line#PATCH }" ;;
+            CMD\ *) info "    Suggested command: ${change_line#CMD }" ;;
+            NOTE\ *) warn "    Note: ${change_line#NOTE }" ;;
+          esac
+        done <<<"$apply_output"
         gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
       else
         warn "  Codex execution failed for ${call_name}; progress saved."

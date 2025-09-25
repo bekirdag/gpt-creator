@@ -90,7 +90,7 @@ Acceptance & NFR checks: routes render, filters work, Lighthouse, AA basics.
 Convert Jira markdown into per-story JSON files under \fI.gpt-creator/staging/plan/tasks/\fR, producing a manifest that supports resumable processing.
 .TP
 .B work-on-tasks
-Drive Codex over the converted story JSONs, writing run artifacts and maintaining progress in \fI.gpt-creator/staging/plan/work/state.json\fR.
+Drive Codex over the converted story JSONs, apply returned JSON diff/file instructions automatically, and record progress in \fI.gpt-creator/staging/plan/work/state.json\fR.
 .TP
 .B iterate
 Legacy Jira loop (one-shot parse + Codex run). Prefer \fBtask-convert\fR + \fBwork-on-tasks\fR for resumable flows.

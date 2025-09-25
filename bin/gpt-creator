@@ -224,6 +224,343 @@ pathlib.Path(dest).write_text(text)
 PY
 }
 
+gc_render_sql() {
+  local src="$1" dest="$2" database="$3" app_user="$4" app_pass="$5"
+  python3 - <<'PY' "$src" "$dest" "$database" "$app_user" "$app_pass"
+import pathlib, re, sys
+src, dest, db_name, app_user, app_pass = sys.argv[1:6]
+text = pathlib.Path(src).read_text()
+
+text = text.replace('{{DB_NAME}}', db_name)
+text = text.replace('{{DB_USER}}', app_user)
+text = text.replace('{{DB_PASSWORD}}', app_pass)
+
+def rewrite_add_column_if_not_exists(sql):
+    alter_pattern = re.compile(r'ALTER\s+TABLE\s+(`?)([A-Za-z_][A-Za-z0-9_]*)\1\s+(.*?);', re.IGNORECASE | re.DOTALL)
+    parts = []
+    last_idx = 0
+
+    def find_clause_end(body, start_idx):
+        depth = 0
+        i = start_idx
+        while i < len(body):
+            ch = body[i]
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                if depth > 0:
+                    depth -= 1
+            elif ch == ',' and depth == 0:
+                return i
+            elif ch == ';' and depth == 0:
+                return i
+            i += 1
+        return len(body)
+
+    def split_clauses(body):
+        clauses = []
+        current = []
+        depth = 0
+        for ch in body:
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                if depth > 0:
+                    depth -= 1
+            if ch == ',' and depth == 0:
+                clauses.append(''.join(current))
+                current = []
+                continue
+            current.append(ch)
+        tail = ''.join(current)
+        if tail.strip():
+            clauses.append(tail)
+        return clauses
+
+    add_col_pattern = re.compile(r'ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(`?)([A-Za-z_][A-Za-z0-9_]*)\1\s+', re.IGNORECASE)
+    add_key_pattern = re.compile(r'ADD\s+(UNIQUE\s+)?KEY\s+(`?)([A-Za-z_][A-Za-z0-9_]*)\2', re.IGNORECASE)
+    add_constraint_pattern = re.compile(r'ADD\s+CONSTRAINT\s+(`?)([A-Za-z_][A-Za-z0-9_]*)\1\s+FOREIGN\s+KEY', re.IGNORECASE)
+
+    for match in alter_pattern.finditer(sql):
+        table_name = match.group(2)
+        body = match.group(3)
+        clauses = split_clauses(body)
+
+        column_additions = []
+        index_additions = []
+        constraint_additions = []
+        leftover_clauses = []
+
+        for clause in clauses:
+            clause_stripped = clause.strip()
+            if not clause_stripped:
+                continue
+            col_match = add_col_pattern.match(clause_stripped)
+            if col_match:
+                definition = clause_stripped[col_match.end():].strip().rstrip(',')
+                col_name = col_match.group(2)
+                quote = col_match.group(1) or ''
+                column_additions.append((col_name, quote, definition))
+                continue
+            key_match = add_key_pattern.match(clause_stripped)
+            if key_match:
+                index_name = key_match.group(3)
+                index_additions.append((clause_stripped, index_name))
+                continue
+            constraint_match = add_constraint_pattern.match(clause_stripped)
+            if constraint_match:
+                constraint_name = constraint_match.group(2)
+                constraint_additions.append((clause_stripped, constraint_name))
+                continue
+            leftover_clauses.append(clause.rstrip())
+
+        if not (column_additions or index_additions or constraint_additions):
+            continue
+
+        parts.append(sql[last_idx:match.start()])
+
+        dynamic_sql = []
+        for col_name, quote, definition in column_additions:
+            column_token = f"{quote}{col_name}{quote}"
+            ddl = f"ALTER TABLE `{table_name}` ADD COLUMN {column_token} {definition}".strip()
+            ddl_escaped = ddl.replace("'", "''")
+            dynamic_sql.append(
+                "SET @ddl := (\n"
+                "  SELECT IF(\n"
+                "    EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '"
+                + table_name + "' AND COLUMN_NAME = '" + col_name + "'),\n"
+                "    'DO 0',\n"
+                "    '" + ddl_escaped + "'\n"
+                "  )\n"
+                ");\nPREPARE stmt FROM @ddl;\nEXECUTE stmt;\nDEALLOCATE PREPARE stmt;\n"
+            )
+
+        for clause_text, index_name in index_additions:
+            ddl = f"ALTER TABLE `{table_name}` {clause_text}".strip()
+            ddl_escaped = ddl.replace("'", "''")
+            dynamic_sql.append(
+                "SET @ddl := (\n"
+                "  SELECT IF(\n"
+                "    EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '"
+                + table_name + "' AND INDEX_NAME = '" + index_name + "'),\n"
+                "    'DO 0',\n"
+                "    '" + ddl_escaped + "'\n"
+                "  )\n"
+                ");\nPREPARE stmt FROM @ddl;\nEXECUTE stmt;\nDEALLOCATE PREPARE stmt;\n"
+            )
+
+        for clause_text, constraint_name in constraint_additions:
+            ddl = f"ALTER TABLE `{table_name}` {clause_text}".strip()
+            ddl_escaped = ddl.replace("'", "''")
+            dynamic_sql.append(
+                "SET @ddl := (\n"
+                "  SELECT IF(\n"
+                "    EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '"
+                + table_name + "' AND CONSTRAINT_NAME = '" + constraint_name + "'),\n"
+                "    'DO 0',\n"
+                "    '" + ddl_escaped + "'\n"
+                "  )\n"
+                ");\nPREPARE stmt FROM @ddl;\nEXECUTE stmt;\nDEALLOCATE PREPARE stmt;\n"
+            )
+
+        if leftover_clauses:
+            remaining_body = ',\n'.join(leftover_clauses)
+            dynamic_sql.append(f"ALTER TABLE `{table_name}`\n{remaining_body}\n;")
+
+        parts.append('\n'.join(dynamic_sql))
+        last_idx = match.end()
+
+    parts.append(sql[last_idx:])
+    return ''.join(parts)
+
+text = rewrite_add_column_if_not_exists(text)
+
+old_slug_update = """UPDATE instructors
+SET slug = LOWER(
+  REPLACE(
+    REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+      TRIM(COALESCE(NULLIF(display_name,''), CONCAT(TRIM(first_name),' ',TRIM(last_name)))),
+      'ç','c'),'ğ','g'),'ı','i'),'ö','o'),'ş','s'),'ü','u'
+    )
+  , ' ', '-')
+)
+WHERE slug IS NULL;"""
+
+new_slug_update = """UPDATE instructors
+SET slug = LOWER(
+  REPLACE(
+    REPLACE(
+      REPLACE(
+        REPLACE(
+          REPLACE(
+            REPLACE(
+              REPLACE(
+                TRIM(COALESCE(NULLIF(display_name,''), CONCAT(TRIM(first_name),' ',TRIM(last_name)))),
+                'ç','c'),
+              'ğ','g'),
+            'ı','i'),
+          'ö','o'),
+        'ş','s'),
+      'ü','u'),
+    ' ', '-')
+)
+WHERE slug IS NULL;"""
+
+text = text.replace(old_slug_update, new_slug_update)
+
+old_unique_block = """ALTER TABLE instructors
+  MODIFY slug VARCHAR(120) NOT NULL,
+  ADD UNIQUE KEY uq_instructors_slug (slug);"""
+
+new_unique_block = """ALTER TABLE instructors
+  MODIFY slug VARCHAR(120) NOT NULL;
+
+SET @ddl := (
+  SELECT IF(
+    EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'instructors' AND INDEX_NAME = 'uq_instructors_slug'),
+    'DO 0',
+    'ALTER TABLE `instructors` ADD UNIQUE KEY `uq_instructors_slug` (`slug`)' 
+  )
+);
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;"""
+
+text = text.replace(old_unique_block, new_unique_block)
+
+text = re.sub(r'^\s*USE\s+`?[^`]+`?;', lambda _m: f"USE `{db_name}`;", text, flags=re.IGNORECASE | re.MULTILINE)
+text = re.sub(r'CREATE\s+DATABASE\s+IF\s+NOT\s+EXISTS\s+`[^`]+`', lambda _m: f"CREATE DATABASE IF NOT EXISTS `{db_name}`", text, flags=re.IGNORECASE)
+text = re.sub(r'ON\s+`[^`]+`\.\*\s+TO', lambda _m: f"ON `{db_name}`.* TO", text, flags=re.IGNORECASE)
+text = re.sub(r"(CREATE\s+USER[^']*')([^']+)(')", lambda m: f"{m.group(1)}{app_user}{m.group(3)}", text, flags=re.IGNORECASE)
+text = re.sub(r"(IDENTIFIED\s+BY\s+')([^']+)(')", lambda m: f"{m.group(1)}{app_pass}{m.group(3)}", text, flags=re.IGNORECASE)
+text = re.sub(r"(TO\s+')([^']+)('@)", lambda m: f"{m.group(1)}{app_user}{m.group(3)}", text, flags=re.IGNORECASE)
+
+def wrap_add_column(match):
+    prefix, name = match.group(1), match.group(2)
+    if name.startswith('`') and name.endswith('`'):
+        return match.group(0)
+    return f"{prefix}`{name}`"
+
+text = re.sub(r"(?i)(ADD\s+COLUMN\s+)([A-Za-z_][A-Za-z0-9_]*)", wrap_add_column, text)
+
+for ident in ("row_number", "field_name", "error_code"):
+    pattern = re.compile(rf"(?<![`'])\b{re.escape(ident)}\b(?![`'])", re.IGNORECASE)
+    text = pattern.sub(lambda m: f"`{m.group(0)}`", text)
+
+def drop_check_constraint(src_text, name):
+    pattern = re.compile(rf"CONSTRAINT\s+{re.escape(name)}\s+CHECK\s*\(", re.IGNORECASE)
+    while True:
+        match = pattern.search(src_text)
+        if not match:
+            return src_text
+        start = match.start()
+        comma_idx = src_text.rfind(',', 0, start)
+        if comma_idx == -1:
+            comma_idx = start
+        depth = 1
+        i = match.end()
+        while i < len(src_text):
+            ch = src_text[i]
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            i += 1
+        else:
+            return src_text
+        src_text = src_text[:comma_idx] + src_text[i:]
+
+for constraint in ("ck_seo_target", "ck_legal_rev_publish"):
+    text = drop_check_constraint(text, constraint)
+
+pathlib.Path(dest).write_text(text)
+PY
+}
+
+gc_temp_file() {
+  local dir="$1" prefix="$2" suffix="$3"
+  python3 - <<'PY' "$dir" "$prefix" "$suffix"
+import os, sys, tempfile, pathlib
+dir_path, prefix, suffix = sys.argv[1:4]
+path = pathlib.Path(dir_path)
+path.mkdir(parents=True, exist_ok=True)
+fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=str(path))
+os.close(fd)
+print(temp_path)
+PY
+}
+
+gc_execute_sql() {
+  local compose_file="$1" sql_file="$2" database="$3"
+  local root_user="$4" root_pass="$5" app_user="$6" app_pass="$7" fallback_init="$8" label="$9"
+  local import_ok=0
+  [[ -n "$label" ]] || label="operation"
+  local container_host="127.0.0.1"
+
+  if [[ -f "$compose_file" ]]; then
+    if docker_compose -f "$compose_file" ps >/dev/null 2>&1; then
+      info "Using docker-compose db service for ${label}"
+      docker_compose -f "$compose_file" up -d db >/dev/null 2>&1 || true
+      if [[ -n "$root_pass" ]]; then
+        if docker_compose -f "$compose_file" exec -T db mysql -h"${container_host}" -u"${root_user}" -p"${root_pass}" "${database}" < "${sql_file}"; then
+          import_ok=1
+        else
+          warn "Root ${label} failed; retrying as ${app_user}"
+        fi
+      else
+        if docker_compose -f "$compose_file" exec -T db mysql -h"${container_host}" -u"${root_user}" "${database}" < "${sql_file}"; then
+          import_ok=1
+        fi
+      fi
+      if [[ "$import_ok" -ne 1 ]]; then
+        if docker_compose -f "$compose_file" exec -T db mysql -h"${container_host}" -u"${app_user}" ${app_pass:+-p"${app_pass}"} "${database}" < "${sql_file}"; then
+          import_ok=1
+        fi
+      fi
+      if [[ "$import_ok" -ne 1 && -n "$fallback_init" && -f "$fallback_init" ]]; then
+        local fallback_output fallback_user fallback_pass
+        fallback_output="$(python3 - "$fallback_init" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+user = re.search(r"CREATE USER IF NOT EXISTS '([^']+)'", text)
+password = re.search(r"IDENTIFIED BY '([^']+)'", text)
+if user and password:
+    print(user.group(1))
+    print(password.group(1))
+PY
+)"
+        if [[ -n "$fallback_output" ]]; then
+          IFS=$'\n' read -r fallback_user fallback_pass _ <<<"$fallback_output"
+          unset IFS
+          if [[ -n "$fallback_user" && -n "$fallback_pass" ]]; then
+            if docker_compose -f "$compose_file" exec -T db mysql -h"${container_host}" -u"${fallback_user}" ${fallback_pass:+-p"${fallback_pass}"} "${database}" < "${sql_file}"; then
+              import_ok=1
+            fi
+          fi
+        fi
+      fi
+      if [[ "$import_ok" -eq 1 ]]; then
+        return 0
+      fi
+    fi
+  fi
+
+  local host="${DB_HOST:-127.0.0.1}"
+  local port="${DB_HOST_PORT:-${GC_DB_HOST_PORT:-${DB_PORT:-3306}}}"
+  if ${MYSQL_BIN} -h "$host" -P "$port" -u "$root_user" ${root_pass:+-p"${root_pass}"} "$database" < "$sql_file"; then
+    return 0
+  fi
+
+  if ${MYSQL_BIN} -h "$host" -P "$port" -u "$app_user" ${app_pass:+-p"${app_pass}"} "$database" < "$sql_file"; then
+    return 0
+  fi
+
+  return 1
+}
+
 # ---------- Scan helpers ----------
 has_pattern() { LC_ALL=C grep -E -i -m 1 -q -- "$1" "$2" 2>/dev/null; }
 classify_file() {
@@ -775,90 +1112,42 @@ cmd_db() {
       local app_user="${DB_USER:-$GC_DB_USER}"
       local app_pass="${DB_PASSWORD:-$GC_DB_PASSWORD}"
       local cleanup_files=()
-      trap 'for f in "${cleanup_files[@]}"; do [[ -n "$f" && -f "$f" ]] && rm -f "$f"; done' RETURN
+      trap 'for f in "${cleanup_files[@]}"; do [[ -n "$f" && -f "$f" ]] && rm -f "$f"; done; trap - RETURN' RETURN
       local rendered_sql
-      rendered_sql="$(mktemp "${STAGING_DIR}/import-XXXXXX.sql")"
+      rendered_sql="$(gc_temp_file "$STAGING_DIR" "import-" ".sql")"
       cleanup_files+=("$rendered_sql")
-      python3 - <<'PY' "$sql_file" "$rendered_sql" "$database" "$app_user" "$app_pass"
-import pathlib, re, sys
-src, dest, db_name, app_user, app_pass = sys.argv[1:6]
-text = pathlib.Path(src).read_text()
-
-text = text.replace('{{DB_NAME}}', db_name)
-text = text.replace('{{DB_USER}}', app_user)
-text = text.replace('{{DB_PASSWORD}}', app_pass)
-
-text = re.sub(r'^\s*USE\s+`?[^`]+`?;', lambda _m: f"USE `{db_name}`;", text, flags=re.IGNORECASE | re.MULTILINE)
-text = re.sub(r'CREATE\s+DATABASE\s+IF\s+NOT\s+EXISTS\s+`[^`]+`', lambda _m: f"CREATE DATABASE IF NOT EXISTS `{db_name}`", text, flags=re.IGNORECASE)
-text = re.sub(r'ON\s+`[^`]+`\.\*\s+TO', lambda _m: f"ON `{db_name}`.* TO", text, flags=re.IGNORECASE)
-text = re.sub(r"(CREATE\s+USER[^']*')([^']+)(')", lambda m: f"{m.group(1)}{app_user}{m.group(3)}", text, flags=re.IGNORECASE)
-text = re.sub(r"(IDENTIFIED\s+BY\s+')([^']+)(')", lambda m: f"{m.group(1)}{app_pass}{m.group(3)}", text, flags=re.IGNORECASE)
-text = re.sub(r"(TO\s+')([^']+)('@)", lambda m: f"{m.group(1)}{app_user}{m.group(3)}", text, flags=re.IGNORECASE)
-
-pathlib.Path(dest).write_text(text)
-PY
-      sql_file="$rendered_sql"
-      if [[ -f "$compose_file" ]]; then
-        if docker_compose -f "$compose_file" ps >/dev/null 2>&1; then
-          local import_ok=0
-          info "Using docker-compose db service for import"
-          docker_compose -f "$compose_file" up -d db >/dev/null 2>&1 || true
-          if [[ -n "$root_pass" ]]; then
-            if docker_compose -f "$compose_file" exec -T db mysql -u"${root_user}" -p"${root_pass}" "${database}" < "${sql_file}"; then
-              import_ok=1
-            else
-              warn "Root import failed; retrying as ${DB_USER:-$GC_DB_USER}"
-            fi
-          else
-            if docker_compose -f "$compose_file" exec -T db mysql -u"${root_user}" "${database}" < "${sql_file}"; then
-              import_ok=1
-            fi
-          fi
-          if [[ "$import_ok" -ne 1 ]]; then
-            local app_user="${DB_USER:-$GC_DB_USER}"
-            local app_pass="${DB_PASSWORD:-$GC_DB_PASSWORD}"
-            if docker_compose -f "$compose_file" exec -T db mysql -u"${app_user}" ${app_pass:+-p"${app_pass}"} "${database}" < "${sql_file}"; then
-              import_ok=1
-            fi
-          fi
-          if [[ "$import_ok" -ne 1 ]]; then
-            local init_sql="${INPUT_DIR}/sql/db/init.sql"
-            if [[ -f "$init_sql" ]]; then
-              readarray -t __gc_fallback <<<"$(python3 - "$init_sql" <<'PY'
-import re, sys
-text = open(sys.argv[1]).read()
-user = re.search(r"CREATE USER IF NOT EXISTS '([^']+)'", text)
-password = re.search(r"IDENTIFIED BY '([^']+)'", text)
-if user and password:
-    print(user.group(1))
-    print(password.group(1))
-PY
-)"
-              if (( ${#__gc_fallback[@]} == 2 )); then
-                local fallback_user="${__gc_fallback[0]}"
-                local fallback_pass="${__gc_fallback[1]}"
-                unset __gc_fallback
-                if docker_compose -f "$compose_file" exec -T db mysql -u"${fallback_user}" ${fallback_pass:+-p"${fallback_pass}"} "${database}" < "${sql_file}"; then
-                  import_ok=1
-                fi
-              fi
-            fi
-          fi
-          if [[ "$import_ok" -eq 1 ]]; then
-            ok "Database import finished"
-            return 0
-          else
-            die "Container import failed"
-          fi
-        fi
+      gc_render_sql "$sql_file" "$rendered_sql" "$database" "$app_user" "$app_pass"
+      local init_sql="${INPUT_DIR}/sql/db/init.sql"
+      if gc_execute_sql "$compose_file" "$rendered_sql" "$database" "$root_user" "$root_pass" "$app_user" "$app_pass" "$init_sql" "import"; then
+        ok "Database import finished"
+      else
+        die "Database import failed"
       fi
-      local host="${DB_HOST:-127.0.0.1}"
-      local port="${DB_HOST_PORT:-${GC_DB_HOST_PORT:-${DB_PORT:-3306}}}"
-      ${MYSQL_BIN} -h "$host" -P "$port" -u "$root_user" ${root_pass:+-p"${root_pass}"} "$database" < "$sql_file"
-      ok "Database import finished"
       ;;
     seed)
-      info "Database seed step is a placeholder — add seeds under db/ or prisma directory."
+      local seed_file="${PROJECT_ROOT}/db/seed.sql"
+      [[ -f "$seed_file" ]] || die "Seed file not found: ${seed_file}"
+      info "Seeding database from ${seed_file}"
+      local database="${DB_NAME:-$GC_DB_NAME}"
+      local root_user="${DB_ROOT_USER:-root}"
+      local root_pass="${DB_ROOT_PASSWORD:-${GC_DB_ROOT_PASSWORD:-}}"
+      local app_user="${DB_USER:-$GC_DB_USER}"
+      local app_pass="${DB_PASSWORD:-$GC_DB_PASSWORD}"
+      local cleanup_files=()
+      trap 'for f in "${cleanup_files[@]}"; do [[ -n "$f" && -f "$f" ]] && rm -f "$f"; done; trap - RETURN' RETURN
+      local rendered_seed
+      rendered_seed="$(gc_temp_file "$STAGING_DIR" "seed-" ".sql")"
+      cleanup_files+=("$rendered_seed")
+      gc_render_sql "$seed_file" "$rendered_seed" "$database" "$app_user" "$app_pass"
+      local fallback_init="${PROJECT_ROOT}/db/init.sql"
+      if [[ ! -f "$fallback_init" ]]; then
+        fallback_init="${INPUT_DIR}/sql/db/init.sql"
+      fi
+      if gc_execute_sql "$compose_file" "$rendered_seed" "$database" "$root_user" "$root_pass" "$app_user" "$app_pass" "$fallback_init" "seed"; then
+        ok "Database seed applied"
+      else
+        die "Database seed failed"
+      fi
       ;;
     *) die "Unknown db action: ${action}";;
   esac

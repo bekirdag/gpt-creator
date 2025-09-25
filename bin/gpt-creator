@@ -78,9 +78,9 @@ gc_create_env_if_missing() {
   fi
   local slug
   slug="$(basename "${PROJECT_ROOT:-$PWD}")"
-  slug="${slug//[^a-zA-Z0-9]/_}"
-  slug="${slug,,}"
-  slug="${slug:0:12}"
+  slug=$(printf '%s' "$slug" | tr -c '[:alnum:]' '_')
+  slug=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')
+  slug=$(printf '%.12s' "$slug")
   [[ -n "$slug" ]] || slug="app"
   local db_name="${slug}_db"
   local db_user="gc_${slug}_user"
@@ -211,14 +211,15 @@ render_template_file() {
   local db_root_pass="${GC_DB_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-root}}"
   python3 - <<'PY' "$src" "$dest" "$db_name" "$db_user" "$db_pass" "$db_host_port" "$db_root_pass"
 import pathlib, sys
-src, dest, db_name, db_user, db_pass, db_host_port, db_root_pass = sys.argv[1:7]
+args = sys.argv[1:]
+src, dest, db_name, db_user, db_pass, db_host_port = args[:6]
+db_root_pass = args[6] if len(args) > 6 else ''
 text = pathlib.Path(src).read_text()
 text = text.replace('{{DB_NAME}}', db_name)
 text = text.replace('{{DB_USER}}', db_user)
 text = text.replace('{{DB_PASSWORD}}', db_pass)
 text = text.replace('{{DB_HOST_PORT}}', db_host_port)
 text = text.replace('{{DB_ROOT_PASSWORD}}', db_root_pass)
-text = text.replace('{{DB_ROOT_USER}}', 'root')
 pathlib.Path(dest).write_text(text)
 PY
 }

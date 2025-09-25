@@ -1298,16 +1298,28 @@ codex_call() {
   local task="${1:?task}"; shift || true
   local prompt_dir="${GC_DIR}/prompts"
   mkdir -p "$prompt_dir"
-  local prompt_file="${prompt_dir}/${task}.md"
-  if [[ ! -f "$prompt_file" ]]; then
-    cat >"$prompt_file" <<'PROMPT'
+
+  local override_prompt=""
+  if [[ $# -gt 0 && -f "$1" ]]; then
+    override_prompt="$1"
+    shift || true
+  fi
+
+  local prompt_file
+  if [[ -n "$override_prompt" ]]; then
+    prompt_file="$override_prompt"
+  else
+    prompt_file="${prompt_dir}/${task}.md"
+    if [[ ! -f "$prompt_file" ]]; then
+      cat >"$prompt_file" <<'PROMPT'
 # Instruction
-You are Codex (gpt-5-high) assisting the gpt-creator pipeline. Apply requested changes deterministically.
+You are Codex (gpt-5-codex) assisting the gpt-creator pipeline. Apply requested changes deterministically.
 PROMPT
+    fi
   fi
   if command -v "$CODEX_BIN" >/dev/null 2>&1; then
     info "Codex ${task} → model=${CODEX_MODEL}"
-    local fallback_model="${CODEX_FALLBACK_MODEL:-o4-mini}"
+    local fallback_model="${CODEX_FALLBACK_MODEL:-gpt-5-codex}"
     local run_codex_model
     run_codex_model() {
       local model="$1"
@@ -1379,7 +1391,51 @@ json.dump({'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), '
 PY
 
   ok "Parsed Jira tasks → ${tasks_json}"
-  codex_call "iterate" "$jira" "$PLAN_DIR/tasks.json"
+  local iterate_prompt="${PLAN_DIR}/iterate-prompt.md"
+  python3 - <<'PY' "$PROJECT_ROOT" "$jira" "$tasks_json" "$iterate_prompt"
+import json, pathlib, sys, textwrap
+
+project_root, jira_source, tasks_path, prompt_path = sys.argv[1:5]
+data = json.load(open(tasks_path))
+tasks = data.get('tasks', [])
+
+lines = []
+lines.append('# Instruction')
+lines.append('You are Codex (gpt-5-codex) assisting the gpt-creator pipeline. Execute the Jira tasks below autonomously and deterministically.')
+
+lines.append('\n## Operating Mode')
+lines.append('- Do not wait for additional user input; assume approval to proceed.')
+lines.append('- Work on the tasks sequentially in the order provided.')
+lines.append('- Before modifying files, outline your plan briefly, then implement the changes.')
+lines.append('- Use git only for diffing/context; do not create commits.')
+lines.append('- Run any necessary local commands cautiously and report their output succinctly.')
+
+lines.append('\n## Project Context')
+lines.append(f'- Working directory: {project_root}')
+lines.append(f'- Jira source: {jira_source}')
+lines.append(f'- Parsed tasks: {tasks_path}')
+
+lines.append('\n## Jira Tasks')
+if not tasks:
+    lines.append('No tasks were discovered.')
+else:
+    for idx, task in enumerate(tasks, start=1):
+        title = task.get('title', '').strip()
+        details = task.get('details', '').strip()
+        lines.append(f'{idx}. {title}')
+        if details:
+            formatted = '\n'.join(f'    {line}' if line else '' for line in details.splitlines())
+            lines.append('    Details:')
+            lines.append(formatted)
+
+lines.append('\n## Output Requirements')
+lines.append('- For each task, provide a short heading (e.g., "Task 1"), describe the actions you take, and show relevant diffs or command results.')
+lines.append('- After all tasks, summarise the overall changes and note any follow-up items.')
+
+pathlib.Path(prompt_path).write_text('\n'.join(lines) + '\n')
+PY
+
+  codex_call "iterate" "$iterate_prompt"
   if [[ "$reverify" -eq 1 ]]; then
     info "Re-running verify after iteration"
     cmd_verify all --project "$PROJECT_ROOT"

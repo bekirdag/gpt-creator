@@ -1657,17 +1657,23 @@ if start == -1 or end == -1 or end <= start:
 
 fragment = raw[start:end+1]
 
-# Sanitize stray backslash escapes (e.g., "\\." → valid JSON)
 import re
-fragment = re.sub(r'\\([^"\\/bfnrtu])', r'\\\\\1', fragment)
-try:
-    payload = json.loads(fragment)
-except json.JSONDecodeError:
-    decoder = json.JSONDecoder(strict=False)
+fragment = re.sub(r'\\"(?=[}\]\n])', r'\\""', fragment)
+
+while True:
     try:
-        payload = decoder.decode(fragment)
+        payload = json.loads(fragment)
+        break
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"Failed to decode Codex JSON: {exc}") from exc
+        if 'Invalid \\escape' in exc.msg:
+            fragment = fragment[:exc.pos] + '\\' + fragment[exc.pos:]
+            continue
+        decoder = json.JSONDecoder(strict=False)
+        try:
+            payload = decoder.decode(fragment)
+            break
+        except json.JSONDecodeError:
+            raise SystemExit(f"Failed to decode Codex JSON: {exc}") from exc
 
 changes = payload.get('changes') or []
 written = []
@@ -1708,9 +1714,34 @@ for change in changes:
             check=False,
         )
         if proc.returncode != 0:
-            sys.stderr.write(proc.stderr.decode('utf-8'))
-            raise SystemExit(f"git apply failed for {path}")
-        patched.append(path)
+            git_err = proc.stderr.decode('utf-8')
+            fallback = subprocess.run(
+                ['patch', '-p1', '--forward', '--silent'],
+                input=diff.encode('utf-8'),
+                cwd=str(project_root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+            if fallback.returncode != 0:
+                # check if patch already applied
+                already = subprocess.run(
+                    ['git', 'apply', '--reverse', '--check', '-'],
+                    input=diff.encode('utf-8'),
+                    cwd=str(project_root),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+                if already.returncode == 0:
+                    patched.append(path + ' (already applied)')
+                    continue
+                sys.stderr.write(git_err)
+                sys.stderr.write(fallback.stderr.decode('utf-8'))
+                raise SystemExit(f"git/patch apply failed for {path}")
+            patched.append(path + ' (patch)')
+        else:
+            patched.append(path)
     else:
         raise ValueError(f"Unknown change type: {ctype}")
 

@@ -1637,12 +1637,37 @@ if not raw:
     print("empty-output", flush=True)
     sys.exit(0)
 
+# Remove code fences if present
+if '```' in raw:
+    cleaned = []
+    fenced = False
+    for line in raw.splitlines():
+        marker = line.strip()
+        if marker.startswith('```'):
+            fenced = not fenced
+            continue
+        if not fenced:
+            cleaned.append(line)
+    raw = '\n'.join(cleaned).strip()
+
 start = raw.find('{')
 end = raw.rfind('}')
 if start == -1 or end == -1 or end <= start:
     raise SystemExit("JSON not found in Codex output")
 
-payload = json.loads(raw[start:end+1])
+fragment = raw[start:end+1]
+
+# Sanitize stray backslash escapes (e.g., "\\." → valid JSON)
+import re
+fragment = re.sub(r'\\([^"\\/bfnrtu])', r'\\\\\1', fragment)
+try:
+    payload = json.loads(fragment)
+except json.JSONDecodeError:
+    decoder = json.JSONDecoder(strict=False)
+    try:
+        payload = decoder.decode(fragment)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Failed to decode Codex JSON: {exc}") from exc
 
 changes = payload.get('changes') or []
 written = []

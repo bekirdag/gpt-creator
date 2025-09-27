@@ -2463,6 +2463,7 @@ EOHELP
   local processed_any=0
   local processed_total=0
   local batch_limit_reached=0
+  local any_changes=0
 
   while IFS=$'\t' read -r sequence rel_path slug story_id story_title epic_id epic_title total_tasks next_task completed status; do
     if [[ -z "${sequence}${rel_path}${slug}${story_id}${story_title}${epic_id}${epic_title}" ]]; then
@@ -2544,8 +2545,8 @@ EOHELP
         while IFS= read -r change_line; do
           case "$change_line" in
             APPLIED) info "    Changes applied." ;;
-            WRITE\ *) info "    Wrote ${change_line#WRITE }" ;;
-            PATCH\ *) info "    Patched ${change_line#PATCH }" ;;
+            WRITE\ *) info "    Wrote ${change_line#WRITE }"; any_changes=1 ;;
+            PATCH\ *) info "    Patched ${change_line#PATCH }"; any_changes=1 ;;
             CMD\ *) info "    Suggested command: ${change_line#CMD }" ;;
             NOTE\ *) warn "    Note: ${change_line#NOTE }" ;;
           esac
@@ -2756,10 +2757,14 @@ PY
   fi
 
   if [[ $work_failed -eq 0 && $batch_limit_reached -eq 0 && $no_verify -eq 0 ]]; then
-    info "Re-running verify after work run"
-    if ! cmd_verify all --project "$PROJECT_ROOT"; then
-      warn "Verify command reported failures."
-      work_failed=1
+    if (( any_changes == 0 )); then
+      info "No repository changes detected; skipping verify."
+    else
+      info "Re-running verify after work run"
+      if ! cmd_verify all --project "$PROJECT_ROOT"; then
+        warn "Verify command reported failures."
+        work_failed=1
+      fi
     fi
   fi
 

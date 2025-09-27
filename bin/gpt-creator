@@ -2557,6 +2557,7 @@ EOHELP
     gc_update_work_state "$state_file" "$slug" "in-progress" "$next_task_int" "$total_tasks_int" "$run_stamp"
 
     local task_index
+    local story_failed=0
     for (( task_index = next_task_int; task_index < total_tasks_int; task_index++ )); do
       if (( batch_size > 0 && processed_total >= batch_size )); then
         batch_limit_reached=1
@@ -2664,9 +2665,6 @@ REM
             rm -f "$prompt_path" "$output_path"
           fi
           codex_ok=1
-          if (( break_after_update )); then
-            continue
-          fi
         else
           warn "  Codex execution failed for ${call_name}; progress saved."
           manual_followups=1
@@ -2679,21 +2677,28 @@ REM
         break
       done
 
+      if (( codex_ok == 0 )); then
+        story_failed=1
+        break
+      fi
+
       ((processed_total++))
+
+      if (( break_after_update )); then
+        continue
+      fi
+
       if (( sleep_between > 0 )); then
         sleep "$sleep_between"
       fi
 
-      if (( codex_ok == 0 )); then
-        break
-      fi
     done
 
     if (( batch_limit_reached )); then
       break
     fi
 
-    if (( task_index < total_tasks_int )); then
+    if (( story_failed )); then
       warn "Stopping at story ${slug} due to previous error."
       break
     fi

@@ -16,3 +16,4 @@ gpt-creator iterate --root DIR [--jira tasks.md]  # deprecated
 Common flow:
 1) `create-project` (runs everything) or hand‑run: scan → normalize → plan → generate → db → run → verify.
 2) Snapshot Jira markdown with `create-tasks`, then execute the backlog via `work-on-tasks`. The legacy `iterate` command is deprecated.
+   - Use `--batch-size` to pause after a fixed number of tasks and `--sleep-between` to insert delays if Codex runs are exhausting local resources.

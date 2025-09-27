@@ -57,7 +57,9 @@ _gpt_creator() {
         '--from-story=[Alias for --story]' \
         '--fresh[Ignore saved progress]' \
         '--no-verify[Skip final verify run]' \
-        '--keep-artifacts[Retain Codex prompt/output artifacts]'
+        '--keep-artifacts[Retain Codex prompt/output artifacts]' \
+        '--batch-size=[Process at most this many tasks in one run]' \
+        '--sleep-between=[Pause seconds between tasks]'
       ;;
     iterate)
       _arguments \

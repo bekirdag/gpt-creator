@@ -95,6 +95,7 @@ Deprecated alias of \fBcreate-tasks\fR retained for backwards compatibility.
 .B work-on-tasks
 Drive Codex over the converted story JSONs, apply returned JSON diff/file instructions automatically, and record progress in \fI.gpt-creator/staging/plan/work/state.json\fR.
 Artifacts (prompt/output pairs) are removed after each successful task to limit memory use unless \fB--keep-artifacts\fR is supplied.
+Use \fB--batch-size\fR to pause after a fixed number of tasks and \fB--sleep-between\fR to insert delays between Codex runs when conserving resources.
 .TP
 .B iterate
 Deprecated legacy Jira loop. The command runs with a deprecation warning; prefer \fBcreate-tasks\fR followed by \fBwork-on-tasks\fR.

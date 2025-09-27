@@ -2212,6 +2212,7 @@ PY
 
 cmd_work_on_tasks() {
   local root="" resume=1 story_filter="" no_verify=0 keep_artifacts=0
+  local batch_size=0 sleep_between=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project) root="$(abs_path "$2")"; shift 2;;
@@ -2219,6 +2220,8 @@ cmd_work_on_tasks() {
       --fresh) resume=0; shift;;
       --no-verify) no_verify=1; shift;;
       --keep-artifacts) keep_artifacts=1; shift;;
+      --batch-size) batch_size="${2:-0}"; shift 2;;
+      --sleep-between) sleep_between="${2:-0}"; shift 2;;
       -h|--help)
         cat <<'EOHELP'
 Usage: gpt-creator work-on-tasks [options]
@@ -2226,17 +2229,24 @@ Usage: gpt-creator work-on-tasks [options]
 Execute previously converted story JSON tasks using Codex, with resumable progress.
 
 Options:
-  --project PATH   Project root (defaults to current directory)
-  --story ID|SLUG  Start from the matching story id or slug (inclusive)
-  --fresh          Ignore saved progress and start from the first story
-  --no-verify      Skip running gpt-creator verify after tasks complete
-  --keep-artifacts Retain Codex prompt/output files for each task (default cleans up)
+  --project PATH       Project root (defaults to current directory)
+  --story ID|SLUG      Start from the matching story id or slug (inclusive)
+  --fresh              Ignore saved progress and start from the first story
+  --no-verify          Skip running gpt-creator verify after tasks complete
+  --keep-artifacts     Retain Codex prompt/output files for each task (default cleans up)
+  --batch-size NUM     Process at most NUM tasks this run, then pause (default: unlimited)
+  --sleep-between SEC  Sleep SEC seconds between tasks (default: 0)
 EOHELP
         return 0
         ;;
       *) break;;
     esac
   done
+
+  [[ "$batch_size" =~ ^[0-9]+$ ]] || die "Invalid --batch-size value: ${batch_size}"
+  [[ "$sleep_between" =~ ^[0-9]+$ ]] || die "Invalid --sleep-between value: ${sleep_between}"
+  batch_size=$((batch_size))
+  sleep_between=$((sleep_between))
 
   ensure_ctx "$root"
   local tasks_dir="${PLAN_DIR}/tasks"
@@ -2267,6 +2277,8 @@ EOHELP
 
   local work_failed=0
   local processed_any=0
+  local processed_total=0
+  local batch_limit_reached=0
 
   while IFS=$'\t' read -r sequence rel_path slug story_id story_title epic_id epic_title total_tasks next_task completed status; do
     if [[ -z "${sequence}${rel_path}${slug}${story_id}${story_title}${epic_id}${epic_title}" ]]; then
@@ -2309,6 +2321,10 @@ EOHELP
 
     local task_index
     for (( task_index = next_task_int; task_index < total_tasks_int; task_index++ )); do
+      if (( batch_size > 0 && processed_total >= batch_size )); then
+        batch_limit_reached=1
+        break
+      fi
       local task_number
       printf -v task_number "%03d" $((task_index + 1))
       local prompt_path="${story_run_dir}/prompts/task_${task_number}.prompt.md"
@@ -2326,16 +2342,19 @@ EOHELP
       info "  Task ${task_number}: ${task_id:-no-id} — ${task_title:-(untitled)}"
 
       local call_name="story-${slug}-task-${task_number}"
+      local codex_ok=1
       if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
         local apply_output
         if ! apply_output="$(gc_apply_codex_changes "$output_path" "$PROJECT_ROOT")"; then
           warn "  Failed to apply changes for ${call_name}; inspect ${output_path}."
           work_failed=1
+          codex_ok=0
           break
         fi
         if [[ "$apply_output" == "no-output" || "$apply_output" == "empty-output" ]]; then
           warn "  Codex produced no actionable JSON for ${call_name}."
           work_failed=1
+          codex_ok=0
           break
         fi
         while IFS= read -r change_line; do
@@ -2354,9 +2373,22 @@ EOHELP
       else
         warn "  Codex execution failed for ${call_name}; progress saved."
         work_failed=1
+        codex_ok=0
+      fi
+
+      ((processed_total++))
+      if (( sleep_between > 0 )); then
+        sleep "$sleep_between"
+      fi
+
+      if (( codex_ok == 0 )); then
         break
       fi
     done
+
+    if (( batch_limit_reached )); then
+      break
+    fi
 
     if (( task_index < total_tasks_int )); then
       warn "Stopping at story ${slug} due to previous error."
@@ -2455,7 +2487,7 @@ PY
     return 0
   fi
 
-  if [[ $work_failed -eq 0 && $no_verify -eq 0 ]]; then
+  if [[ $work_failed -eq 0 && $batch_limit_reached -eq 0 && $no_verify -eq 0 ]]; then
     info "Re-running verify after work run"
     if ! cmd_verify all --project "$PROJECT_ROOT"; then
       warn "Verify command reported failures."
@@ -2463,8 +2495,16 @@ PY
     fi
   fi
 
+  if (( batch_limit_reached )); then
+    info "Batch size limit hit after ${processed_total} task(s); rerun to continue from the next pending task."
+  fi
+
   if [[ $work_failed -eq 0 ]]; then
-    ok "work-on-tasks complete → ${run_dir}"
+    if (( batch_limit_reached )); then
+      ok "work-on-tasks paused → ${run_dir}"
+    else
+      ok "work-on-tasks complete → ${run_dir}"
+    fi
   else
     warn "work-on-tasks completed with issues — inspect ${run_dir}"
     return 1

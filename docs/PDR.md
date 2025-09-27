@@ -103,6 +103,7 @@ Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
 **FR‑7 Jira backlog execution**  
 - `create-tasks` parses Jira markdown into per-story JSON snapshots + manifest.
 - `work-on-tasks` drives Codex over those stories, applies returned patches, resumes progress, and optionally re-verifies.
+- `work-on-tasks` accepts batching/pacing flags (`--batch-size`, `--sleep-between`) to manage long-running Codex sessions.
 - Legacy `iterate` remains for backward compatibility, emitting a warning that points users to the new flow.
 
 ---

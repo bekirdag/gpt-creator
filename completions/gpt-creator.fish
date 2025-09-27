@@ -41,6 +41,8 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l from-s
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l fresh -d "Ignore saved progress"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l no-verify -d "Skip verify"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l keep-artifacts -d "Retain Codex prompt/output artifacts"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l batch-size -r -d "Process at most this many tasks"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l sleep-between -r -d "Pause seconds between tasks"
 
 # iterate (deprecated)
 complete -c gpt-creator -n "__fish_seen_subcommand_from iterate" -l jira -r -d "Jira tasks file"

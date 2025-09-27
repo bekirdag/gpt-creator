@@ -2583,6 +2583,7 @@ EOHELP
       local prompt_augmented=0
       local keep_output=$keep_artifacts
       local parse_error_final=0
+      local break_after_update=0
       while (( attempt < max_attempts )); do
         ((attempt++))
         if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
@@ -2631,6 +2632,7 @@ REM
               keep_output=1
               codex_ok=1
               parse_error_final=1
+              break_after_update=1
             fi
           fi
 
@@ -2639,6 +2641,9 @@ REM
             rm -f "$prompt_path" "$output_path"
           fi
           codex_ok=1
+          if (( break_after_update )); then
+            break
+          fi
         else
           warn "  Codex execution failed for ${call_name}; progress saved."
           work_failed=1

@@ -1621,6 +1621,97 @@ PROMPT
   fi
 }
 
+ensure_node_runtime() {
+  local root_dir="${1:-$PROJECT_ROOT}"
+  local target_version="20.10.0"
+  local runtime_root="${PLAN_DIR}/.runtime"
+  local archive_dir="node-v${target_version}"
+
+  # If current node already satisfies v20.x with sufficient minor, skip.
+  if command -v node >/dev/null 2>&1; then
+    local current
+    current="$(node -v 2>/dev/null | sed 's/^v//')"
+    if [[ "$current" == 20.* ]]; then
+      local minor="${current#20.}"
+      minor="${minor%%.*}"
+      local patch="${current#20.${minor}.}"
+      [[ -z "$patch" ]] && patch=0
+      if (( 10#${minor:-0} > 10 )) || { (( 10#${minor:-0} == 10 )) && (( 10#${patch:-0} >= 0 )); }; then
+        return
+      fi
+    fi
+  fi
+
+  mkdir -p "$runtime_root"
+
+  local os_name="$(uname -s)"
+  local arch_name="$(uname -m)"
+  local os_tag="" arch_tag="" ext="tar.xz"
+
+  case "$os_name" in
+    Darwin)
+      os_tag="darwin"
+      ext="tar.gz"
+      ;;
+    Linux)
+      os_tag="linux"
+      ;;
+    *)
+      warn "Unsupported OS (${os_name}) for automatic Node runtime; continuing with system Node."
+      return
+      ;;
+  esac
+
+  case "$arch_name" in
+    x86_64|amd64)
+      arch_tag="x64"
+      ;;
+    arm64|aarch64)
+      arch_tag="arm64"
+      ;;
+    *)
+      warn "Unsupported CPU architecture (${arch_name}) for automatic Node runtime; continuing with system Node."
+      return
+      ;;
+  esac
+
+  local archive_name="node-v${target_version}-${os_tag}-${arch_tag}"
+  local target_dir="${runtime_root}/${archive_name}"
+
+  if [[ ! -d "$target_dir" ]]; then
+    local url="https://nodejs.org/dist/v${target_version}/${archive_name}.${ext}"
+    info "Downloading Node.js ${target_version} (${os_tag}-${arch_tag})"
+    local tmp_archive
+    tmp_archive="$(mktemp "${runtime_root}/node-${target_version}.XXXXXX")"
+    if ! curl -fsSL "$url" -o "$tmp_archive"; then
+      warn "Failed to download Node.js runtime from ${url}; continuing with system Node."
+      rm -f "$tmp_archive"
+      return
+    fi
+    mkdir -p "$runtime_root"
+    if [[ "$ext" == "tar.gz" ]]; then
+      tar -xzf "$tmp_archive" -C "$runtime_root"
+    else
+      tar -xJf "$tmp_archive" -C "$runtime_root"
+    fi
+    rm -f "$tmp_archive"
+  fi
+
+  if [[ ! -d "$target_dir" ]]; then
+    warn "Node runtime directory ${target_dir} missing after download; continuing with system Node."
+    return
+  fi
+
+  export PATH="${target_dir}/bin:${PATH}"
+  export NODE_HOME="$target_dir"
+  export npm_config_cache="${runtime_root}/npm-cache"
+  export PNPM_HOME="${runtime_root}/pnpm-home"
+  mkdir -p "$npm_config_cache" "$PNPM_HOME"
+  export PATH="${PNPM_HOME}:${PATH}"
+  export GC_NODE_RUNTIME="${target_dir}"
+  ok "Node.js runtime pinned to ${target_version}"
+}
+
 ensure_node_dependencies() {
   local root_dir="${1:-$PROJECT_ROOT}"
   local sentinel="${PLAN_DIR}/.deps-installed"
@@ -1628,6 +1719,8 @@ ensure_node_dependencies() {
   if [[ -f "$sentinel" ]]; then
     return
   fi
+
+  ensure_node_runtime "$root_dir"
 
   local installer_desc=""
   local -a installer_cmd=()

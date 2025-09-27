@@ -36,7 +36,7 @@
 - **Full‑stack Dev:** Align API to spec + DB dump; scaffold FE pages.  
 - **QA:** Run verify suite on PRs; ensure NFR thresholds.
 
-Core flow: _Folder → create-project → stack up → verify → iterate (Jira) → pass_.
+Core flow: _Folder → create-project → stack up → verify → create-tasks → work-on-tasks → pass_.
 
 ---
 
@@ -67,7 +67,7 @@ Discovery emits `/staging/scan.json` with type, path, confidence.
 ## 6. Architecture (High Level)
 
 ```
-scan → normalize → plan → generate → db → run → verify → iterate
+scan → normalize → plan → generate → db → run → verify → create-tasks → work-on-tasks
 ```
 
 Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
@@ -78,7 +78,7 @@ Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
 
 **FR‑1 CLI**  
 - `create-project <path>` orchestrates all phases; fails fast with actionable errors.  
-- Subcommands: `scan`, `normalize`, `plan`, `generate [api|web|admin|db|docker]`, `db [provision|import|seed]`, `run [compose-up|logs|open]`, `verify`, `iterate`, `help`, `version`.
+- Subcommands: `scan`, `normalize`, `plan`, `generate [api|web|admin|db|docker]`, `db [provision|import|seed]`, `run [compose-up|logs|open]`, `verify`, `create-tasks`, `work-on-tasks`, `iterate` (deprecated), `help`, `version`.
 
 **FR‑2 Normalize**  
 - Copies inputs to `/staging/inputs` with canonical names; keeps provenance in `/staging/plan/provenance.json`.
@@ -100,8 +100,10 @@ Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
 - Runs acceptance (`/health`, web root, admin `/admin/`), OpenAPI validation, pa11y, Lighthouse, consent check, and program‑filters check.  
 - Gating thresholds (see §8 and §9).
 
-**FR‑7 Iterate (Jira)**  
-- Parses Jira markdown, converts each item to a Codex task with context (diffs, plan, failing checks), applies patch, re‑runs verify.
+**FR‑7 Jira backlog execution**  
+- `create-tasks` parses Jira markdown into per-story JSON snapshots + manifest.
+- `work-on-tasks` drives Codex over those stories, applies returned patches, resumes progress, and optionally re-verifies.
+- Legacy `iterate` remains for backward compatibility, emitting a warning that points users to the new flow.
 
 ---
 
@@ -193,7 +195,7 @@ Generated apps live under `/apps/{api,web,admin}` in the target project.
 - **M1** End‑to‑end success on sample project.  
 - **M2** OpenAPI‑first resource generation.  
 - **M3** Pages → Vue mapping heuristics.  
-- **M4** Jira iterate loop with auto‑patch & re‑verify.
+- **M4** Jira create-tasks + work-on-tasks loop with auto‑patch & re‑verify.
 
 ---
 
@@ -201,7 +203,7 @@ Generated apps live under `/apps/{api,web,admin}` in the target project.
 
 - **Staging**: normalized copy of inputs used for deterministic generation.  
 - **Verify**: suite of acceptance & NFR checks used as gates.  
-- **Iterate**: Codex‑driven task execution from Jira file.
+- **Iterate**: Deprecated legacy command kept for compatibility; prints a warning directing to `create-tasks` + `work-on-tasks`.
 
 ---
 

@@ -16,6 +16,11 @@ resolve_cli_root() {
   cd "$(dirname "$source")/.." && pwd
 }
 
+cmd_task_convert() {
+  warn "'task-convert' is deprecated; use 'create-tasks' instead. Running create-tasks now."
+  cmd_create_tasks "$@"
+}
+
 CLI_ROOT="$(resolve_cli_root)"
 unset -f resolve_cli_root
 
@@ -1866,7 +1871,7 @@ for note in summary['notes']:
 PY
 }
 
-cmd_task_convert() {
+cmd_create_tasks() {
   local root="" jira="" force=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1875,7 +1880,7 @@ cmd_task_convert() {
       --force) force=1; shift;;
       -h|--help)
         cat <<'EOUSAGE'
-Usage: gpt-creator task-convert [--project PATH] [--jira FILE] [--force]
+Usage: gpt-creator create-tasks [--project PATH] [--jira FILE] [--force]
 
 Convert Jira markdown tasks into per-story JSON files under .gpt-creator/staging/plan/tasks.
 
@@ -2237,7 +2242,7 @@ EOHELP
   local tasks_dir="${PLAN_DIR}/tasks"
   local stories_dir="${tasks_dir}/stories"
   local manifest="${tasks_dir}/manifest.json"
-  [[ -f "$manifest" ]] || die "Task manifest not found. Run 'gpt-creator task-convert' first."
+  [[ -f "$manifest" ]] || die "Task manifest not found. Run 'gpt-creator create-tasks' first."
   [[ -d "$stories_dir" ]] || die "Stories directory missing at ${stories_dir}"
 
   local state_dir="${PLAN_DIR}/work"
@@ -2468,6 +2473,8 @@ PY
 
 
 cmd_iterate() {
+  warn "'iterate' is deprecated; prefer 'gpt-creator create-tasks' followed by 'gpt-creator work-on-tasks'."
+
   local root="" jira="" reverify=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -2661,6 +2668,8 @@ PY
   fi
 }
 
+
+
 cmd_create_project() {
   local path="${1:-}"; [[ -n "$path" ]] || die "create-project requires a path"
   ensure_ctx "$path"
@@ -2690,9 +2699,9 @@ Usage:
   ${APP_NAME} db <provision|import|seed> [--project <path>]
   ${APP_NAME} run <up|down|logs|open> [--project <path>]
   ${APP_NAME} verify <acceptance|nfr|all> [--project <path>] [--api-url API_BASE] [--api-health URL] [--web-url URL] [--admin-url URL]
-  ${APP_NAME} task-convert [--project <path>] [--jira <file>] [--force]
+  ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
   ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]
-  ${APP_NAME} iterate [--project <path>] [--jira <file>] [--no-verify]
+  ${APP_NAME} iterate [--project <path>] [--jira <file>] [--no-verify] (deprecated)
   ${APP_NAME} version
   ${APP_NAME} help
 
@@ -2714,6 +2723,7 @@ main() {
     db)             cmd_db "$@" ;;
     run)            cmd_run "$@" ;;
     verify)         cmd_verify "$@" ;;
+    create-tasks)   cmd_create_tasks "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;
     work-on-tasks)  cmd_work_on_tasks "$@" ;;
     iterate)        cmd_iterate "$@" ;;

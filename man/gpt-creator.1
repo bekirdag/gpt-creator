@@ -33,14 +33,14 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 .B gpt-creator verify
 [\-\-root DIR]
 .br
-.B gpt-creator task-convert
+.B gpt-creator create-tasks
 [\-\-project DIR] [\-\-jira FILE] [\-\-force]
 .br
 .B gpt-creator work-on-tasks
 [\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-no-verify] [\-\-keep-artifacts]
 .br
 .B gpt-creator iterate
-[\-\-root DIR] [\-\-jira FILE]
+[\-\-root DIR] [\-\-jira FILE] (deprecated)
 .SH DESCRIPTION
 \fBgpt-creator\fR is a global CLI that discovers product documents (PDR/SDS/RFP,
 OpenAPI, SQL dumps, Mermaid diagrams, Jira tasks, page samples), normalizes them
@@ -86,15 +86,18 @@ Docker Compose wrappers: \fBup\fR, \fBdown\fR, \fBlogs\fR, \fBopen\fR.
 .B verify
 Acceptance & NFR checks: routes render, filters work, Lighthouse, AA basics.
 .TP
-.B task-convert
+.B create-tasks
 Convert Jira markdown into per-story JSON files under \fI.gpt-creator/staging/plan/tasks/\fR, producing a manifest that supports resumable processing.
+.TP
+.B task-convert
+Deprecated alias of \fBcreate-tasks\fR retained for backwards compatibility.
 .TP
 .B work-on-tasks
 Drive Codex over the converted story JSONs, apply returned JSON diff/file instructions automatically, and record progress in \fI.gpt-creator/staging/plan/work/state.json\fR.
 Artifacts (prompt/output pairs) are removed after each successful task to limit memory use unless \fB--keep-artifacts\fR is supplied.
 .TP
 .B iterate
-Legacy Jira loop (one-shot parse + Codex run). Prefer \fBtask-convert\fR + \fBwork-on-tasks\fR for resumable flows.
+Deprecated legacy Jira loop. The command runs with a deprecation warning; prefer \fBcreate-tasks\fR followed by \fBwork-on-tasks\fR.
 .SH ENVIRONMENT
 .TP
 .B OPENAI_API_KEY

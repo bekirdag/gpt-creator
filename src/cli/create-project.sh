@@ -43,7 +43,7 @@ Next steps (automated in future steps):
 3. Generate schema & migrations (MySQL 8).
 4. Generate Vue 3 website & admin shells from UI pages and CSS tokens.
 5. Wire Docker Compose for local dev (API, MySQL, Admin, Web, Proxy).
-6. Run acceptance checks, iterate on Jira items.
+6. Run acceptance checks, then drive Jira via create-tasks/work-on-tasks.
 
 EOF
 

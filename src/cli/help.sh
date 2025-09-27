@@ -35,12 +35,15 @@ Usage:
   gpt-creator db (provision|import|seed) [options]
   gpt-creator run (compose up|logs|open) [options]
   gpt-creator verify [options]
-  gpt-creator iterate [options]
+  gpt-creator create-tasks [options]
+  gpt-creator work-on-tasks [options]
+  gpt-creator iterate [options]  # deprecated
   gpt-creator help
   gpt-creator version
 
 Tips:
   • Use 'gpt-creator create-project …' for one-shot discovery → normalize → plan → generate → run.
   • 'verify' pings API/Web/Admin, checks MySQL, and ensures docs are present in staging.
-  • 'iterate' loops over Jira tasks, invoking Codex with the normalized context.
+  • 'create-tasks' snapshots Jira markdown; 'work-on-tasks' executes those stories with Codex.
+  • 'iterate' is deprecated; it runs the legacy loop but prints a warning that suggests the commands above.
 EOF

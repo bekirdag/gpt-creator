@@ -9,7 +9,7 @@ _gpt_creator()
     prev="${COMP_WORDS[COMP_CWORD-1]}"
   }
 
-  local subcmds="create-project scan normalize plan generate db run verify task-convert work-on-tasks iterate help version"
+  local subcmds="create-project scan normalize plan generate db run verify create-tasks work-on-tasks iterate help version"
   local global_opts="--project -h --help -v --version"
 
   # find the subcommand (first non-option token)
@@ -29,13 +29,13 @@ _gpt_creator()
       # complete directories
       COMPREPLY=( $(compgen -d -- "$cur") )
       ;;
-    scan|normalize|plan|iterate|verify|run|db|generate|task-convert|work-on-tasks)
+    scan|normalize|plan|iterate|verify|run|db|generate|create-tasks|work-on-tasks|task-convert)
       case "$prev" in
         --project) COMPREPLY=( $(compgen -d -- "$cur") ); return 0;;
         --jira) COMPREPLY=( $(compgen -f -- "$cur") ); return 0;;
       esac
       case "$cmd" in
-        task-convert)
+        create-tasks|task-convert)
           COMPREPLY=( $(compgen -W "--project --jira --force ${global_opts}" -- "$cur") )
           ;;
         work-on-tasks)

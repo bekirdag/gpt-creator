@@ -1,6 +1,6 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project scan normalize plan generate db run verify task-convert work-on-tasks iterate help version
+set -l subcmds create-project scan normalize plan generate db run verify create-tasks work-on-tasks iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
@@ -27,7 +27,11 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from run" -l project -r
 complete -c gpt-creator -n "__fish_seen_subcommand_from verify" -a "acceptance nfr all" -d "Verify kind"
 complete -c gpt-creator -n "__fish_seen_subcommand_from verify" -l project -r
 
-# task-convert
+# create-tasks
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l jira -r -d "Jira tasks file"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l force -d "Rebuild all story JSONs"
+
+# task-convert (deprecated alias)
 complete -c gpt-creator -n "__fish_seen_subcommand_from task-convert" -l jira -r -d "Jira tasks file"
 complete -c gpt-creator -n "__fish_seen_subcommand_from task-convert" -l force -d "Rebuild all story JSONs"
 
@@ -38,7 +42,7 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l fresh 
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l no-verify -d "Skip verify"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l keep-artifacts -d "Retain Codex prompt/output artifacts"
 
-# iterate
+# iterate (deprecated)
 complete -c gpt-creator -n "__fish_seen_subcommand_from iterate" -l jira -r -d "Jira tasks file"
 complete -c gpt-creator -n "__fish_seen_subcommand_from iterate" -l project -r
 

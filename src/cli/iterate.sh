@@ -25,6 +25,8 @@ warn(){ printf "\033[33m[%s][WARN]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 err(){  printf "\033[31m[%s][ERROR]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 
+warn "'gpt-creator iterate' is deprecated. Use 'gpt-creator create-tasks' followed by 'gpt-creator work-on-tasks'."
+
 usage() {
   cat <<'EOF'
 Usage: gpt-creator iterate [options]

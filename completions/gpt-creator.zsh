@@ -12,9 +12,10 @@ _gpt_creator() {
     'db:DB ops (provision|import|seed)'
     'run:Run via docker compose'
     'verify:Acceptance/NFR checks'
-    'task-convert:Convert Jira tasks into per-story JSONs'
+    'create-tasks:Convert Jira tasks into per-story JSONs'
     'work-on-tasks:Execute story JSON tasks with Codex'
-    'iterate:Loop over Jira tasks'
+    'task-convert:[deprecated] Alias for create-tasks'
+    'iterate:[deprecated] Legacy Jira loop'
     'help:Show help'
     'version:Show version'
   )
@@ -45,7 +46,7 @@ _gpt_creator() {
     verify)
       _values 'verify-kind' acceptance nfr all
       ;;
-    task-convert)
+    create-tasks|task-convert)
       _arguments \
         '--jira=[Jira tasks file]:file:_files' \
         '--force[Rebuild all story JSONs]'

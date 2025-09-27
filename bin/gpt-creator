@@ -435,6 +435,52 @@ PY
   fi
 }
 
+gc_count_pending_tasks() {
+  local manifest_path="${1:?manifest path required}"
+  local state_path="${2:?state path required}"
+  python3 - <<'PY' "$manifest_path" "$state_path"
+import json
+import sys
+from pathlib import Path
+
+man_path = Path(sys.argv[1])
+state_path = Path(sys.argv[2])
+
+try:
+    manifest = json.loads(man_path.read_text(encoding='utf-8'))
+except Exception:
+    manifest = {}
+
+stories = manifest.get('stories', []) or []
+
+state = {}
+if state_path.exists():
+    try:
+        state = json.loads(state_path.read_text(encoding='utf-8'))
+    except Exception:
+        state = {}
+
+stories_state = state.get('stories', {})
+pending = 0
+
+for entry in stories:
+    try:
+        total = int(entry.get('task_count') or 0)
+    except Exception:
+        total = 0
+    slug = (entry.get('slug') or '').strip()
+    info = stories_state.get(slug) or {}
+    try:
+        completed = int(info.get('completed_tasks') or 0)
+    except Exception:
+        completed = 0
+    if completed < total:
+        pending += max(total - completed, 0)
+
+print(pending)
+PY
+}
+
 # docker compose helper (prefers "docker compose" then docker-compose)
 docker_compose() {
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
@@ -2676,53 +2722,8 @@ PY
 
   local pending_tasks=0
   if (( memory_cycle )); then
-    if pending_tasks=$(python3 - "$manifest" "$state_file" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-manifest_path = Path(sys.argv[1])
-state_path = Path(sys.argv[2])
-
-try:
-    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-except Exception:
-    manifest = {}
-
-stories = manifest.get('stories', []) or []
-
-state = {}
-if state_path.exists():
-    try:
-        state = json.loads(state_path.read_text(encoding='utf-8'))
-    except Exception:
-        state = {}
-
-stories_state = state.get('stories', {})
-
-pending = 0
-for entry in stories:
-    try:
-        total = int(entry.get('task_count') or 0)
-    except Exception:
-        total = 0
-    slug = (entry.get('slug') or '').strip()
-    completed = 0
-    info = stories_state.get(slug) or {}
-    try:
-        completed = int(info.get('completed_tasks') or 0)
-    except Exception:
-        completed = 0
-    if completed < total:
-        pending += max(total - completed, 0)
-
-print(pending)
-PY
-    ); then
-      [[ "$pending_tasks" =~ ^[0-9]+$ ]] || pending_tasks=0
-    else
-      pending_tasks=0
-    fi
+    pending_tasks="$(gc_count_pending_tasks "$manifest" "$state_file")"
+    [[ "$pending_tasks" =~ ^[0-9]+$ ]] || pending_tasks=0
 
     if (( work_failed == 0 )); then
       if (( processed_total > 0 )) && (( pending_tasks > 0 )); then
@@ -2758,7 +2759,36 @@ PY
     fi
   fi
 
-  if [[ $work_failed -eq 0 && $batch_limit_reached -eq 0 && $no_verify -eq 0 ]]; then
+  local remaining_tasks=0
+  if (( work_failed == 0 )); then
+    remaining_tasks="$(gc_count_pending_tasks "$manifest" "$state_file")"
+    [[ "$remaining_tasks" =~ ^[0-9]+$ ]] || remaining_tasks=0
+  fi
+
+  if (( work_failed == 0 && memory_cycle == 0 && batch_limit_reached == 0 && batch_size == 0 && processed_total > 0 && remaining_tasks > 0 )); then
+    if [[ -n "$story_filter" ]]; then
+      info "Remaining tasks detected beyond filtered story; rerun with a broader filter to continue."
+    else
+      info "${remaining_tasks} task(s) remain; continuing work-on-tasks automatically."
+      local -a restart_cmd=("$0" work-on-tasks)
+      if [[ -n "$PROJECT_ROOT" ]]; then
+        restart_cmd+=(--project "$PROJECT_ROOT")
+      fi
+      if (( no_verify )); then
+        restart_cmd+=(--no-verify)
+      fi
+      if (( keep_artifacts )); then
+        restart_cmd+=(--keep-artifacts)
+      fi
+      if (( sleep_between > 0 )); then
+        restart_cmd+=(--sleep-between "$sleep_between")
+      fi
+      info "Restarting work-on-tasks to process remaining backlog."
+      exec "${restart_cmd[@]}"
+    fi
+  fi
+
+  if [[ $work_failed -eq 0 && $batch_limit_reached -eq 0 && $no_verify -eq 0 && $remaining_tasks -eq 0 ]]; then
     if (( any_changes == 0 )); then
       info "No repository changes detected; skipping verify."
     else

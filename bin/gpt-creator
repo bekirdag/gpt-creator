@@ -341,7 +341,8 @@ gc_build_context_file() {
   {
     echo "# Project Context (auto-generated)"
     echo
-    shopt -s nullglob globstar
+    shopt -s nullglob
+    shopt -s globstar 2>/dev/null || true
     local f
     for f in \
       "$staging_dir"/pdr.* \
@@ -362,7 +363,8 @@ gc_build_context_file() {
         echo "(binary or non-text file; path: $f)"
       fi
     done
-    shopt -u nullglob globstar
+    shopt -u globstar 2>/dev/null || true
+    shopt -u nullglob || true
   } >"$dest_file"
 }
 
@@ -2584,20 +2586,36 @@ EOHELP
       local keep_output=$keep_artifacts
       local parse_error_final=0
       local break_after_update=0
+      local updated_state_for_task=0
       while (( attempt < max_attempts )); do
         ((attempt++))
         if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
+          if [[ ! -s "$output_path" ]]; then
+            warn "  Codex produced no output for ${call_name}; manual review required."
+            manual_followups=1
+            keep_output=1
+            gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+            updated_state_for_task=1
+            codex_ok=1
+            break
+          fi
           local apply_output
           if ! apply_output="$(gc_apply_codex_changes "$output_path" "$PROJECT_ROOT")"; then
-            warn "  Failed to apply changes for ${call_name}; inspect ${output_path}."
-            work_failed=1
-            codex_ok=0
+            warn "  Failed to apply changes for ${call_name}; manual review required (see ${output_path})."
+            manual_followups=1
+            keep_output=1
+            gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+            updated_state_for_task=1
+            codex_ok=1
             break
           fi
           if [[ "$apply_output" == "no-output" || "$apply_output" == "empty-output" ]]; then
-            warn "  Codex produced no actionable JSON for ${call_name}."
-            work_failed=1
-            codex_ok=0
+            warn "  Codex produced no actionable JSON for ${call_name}; manual review required."
+            manual_followups=1
+            keep_output=1
+            gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+            updated_state_for_task=1
+            codex_ok=1
             break
           fi
           local apply_status="ok"
@@ -2630,24 +2648,33 @@ REM
               warn "  Codex output was invalid JSON after retry; manual review required (see ${output_path})."
               manual_followups=1
               keep_output=1
+              gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+              updated_state_for_task=1
               codex_ok=1
               parse_error_final=1
               break_after_update=1
             fi
           fi
 
-          gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+          if (( updated_state_for_task == 0 )); then
+            gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+            updated_state_for_task=1
+          fi
           if (( keep_output == 0 )); then
             rm -f "$prompt_path" "$output_path"
           fi
           codex_ok=1
           if (( break_after_update )); then
-            break
+            continue
           fi
         else
           warn "  Codex execution failed for ${call_name}; progress saved."
-          work_failed=1
-          codex_ok=0
+          manual_followups=1
+          keep_output=1
+          gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+          updated_state_for_task=1
+          codex_ok=1
+          break
         fi
         break
       done
@@ -2790,7 +2817,8 @@ PY
         fi
         restart_cmd+=(--batch-size 1 --memory-cycle)
         info "Restarting work-on-tasks to continue processing."
-        exec "${restart_cmd[@]}"
+        "${restart_cmd[@]}"
+        return $?
       elif (( pending_tasks == 0 )); then
         gc_trim_memory "memory-cycle-final"
         batch_limit_reached=0
@@ -2827,7 +2855,8 @@ PY
         restart_cmd+=(--sleep-between "$sleep_between")
       fi
       info "Restarting work-on-tasks to process remaining backlog."
-      exec "${restart_cmd[@]}"
+      "${restart_cmd[@]}"
+      return $?
     fi
   fi
 

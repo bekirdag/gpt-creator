@@ -104,6 +104,7 @@ Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
 - `create-tasks` parses Jira markdown into per-story JSON snapshots + manifest.
 - `work-on-tasks` drives Codex over those stories, applies returned patches, resumes progress, and optionally re-verifies.
 - `work-on-tasks` accepts batching/pacing flags (`--batch-size`, `--sleep-between`) to manage long-running Codex sessions.
+- Dependencies for Node workspaces are installed automatically (preferring pnpm) before processing tasks; failures are surfaced but do not halt execution.
 - Legacy `iterate` remains for backward compatibility, emitting a warning that points users to the new flow.
 
 ---

@@ -1621,6 +1621,48 @@ PROMPT
   fi
 }
 
+ensure_node_dependencies() {
+  local root_dir="${1:-$PROJECT_ROOT}"
+  local sentinel="${PLAN_DIR}/.deps-installed"
+
+  if [[ -f "$sentinel" ]]; then
+    return
+  fi
+
+  local installer_desc=""
+  local -a installer_cmd=()
+
+  if [[ -f "$root_dir/pnpm-lock.yaml" || -f "$root_dir/pnpm-workspace.yaml" ]]; then
+    if command -v pnpm >/dev/null 2>&1; then
+      installer_desc="pnpm workspace"
+      installer_cmd=(pnpm install --frozen-lockfile)
+    fi
+  fi
+
+  if [[ ${#installer_cmd[@]} -eq 0 && -f "$root_dir/package.json" ]]; then
+    if command -v pnpm >/dev/null 2>&1; then
+      installer_desc="pnpm"
+      installer_cmd=(pnpm install)
+    elif command -v npm >/dev/null 2>&1; then
+      installer_desc="npm"
+      installer_cmd=(npm install)
+    fi
+  fi
+
+  if [[ ${#installer_cmd[@]} -eq 0 ]]; then
+    return
+  fi
+
+  info "Ensuring Node.js dependencies via ${installer_desc}"
+  if (cd "$root_dir" && "${installer_cmd[@]}" >/tmp/gc_deps_install.log 2>&1); then
+    mkdir -p "$(dirname "$sentinel")"
+    touch "$sentinel"
+    ok "Dependencies installed"
+  else
+    warn "Dependency installation via ${installer_desc} failed; inspect /tmp/gc_deps_install.log. Continuing anyway."
+  fi
+}
+
 gc_apply_codex_changes() {
   local output_file="${1:?output file required}"
   local project_root="${2:?project root required}"
@@ -2172,13 +2214,15 @@ if dependencies:
 
 lines.append("")
 lines.append("## Instructions")
-lines.append("- Draft a short plan before modifying files.")
-lines.append("- Apply changes directly in the repository; commits are not required.")
-lines.append("- Respond with structured JSON described below — no markdown fencing or prose outside the JSON.")
-lines.append("- Verify acceptance criteria before finishing.")
-lines.append("- If blocked, explain why and suggest next steps inside the JSON response.")
+  lines.append("- Draft a short plan before modifying files.")
+  lines.append("- Apply changes directly in the repository; commits are not required.")
+  lines.append("- Respond with structured JSON described below — no markdown fencing or prose outside the JSON.")
+  lines.append("- Verify acceptance criteria before finishing.")
+  lines.append("- If blocked, explain why and suggest next steps inside the JSON response.")
+  lines.append("- Prefer pnpm for install/build scripts; avoid npm/yarn unless explicitly required.")
+  lines.append("- Assume limited network access; note any commands that cannot run for that reason instead of failing silently.")
 
-lines.append("")
+  lines.append("")
 lines.append("## Output JSON schema")
 lines.append("Return a single JSON object with keys exactly as follows (omit null/empty collections when not needed):")
 lines.append("{")
@@ -2254,6 +2298,8 @@ EOHELP
   local manifest="${tasks_dir}/manifest.json"
   [[ -f "$manifest" ]] || die "Task manifest not found. Run 'gpt-creator create-tasks' first."
   [[ -d "$stories_dir" ]] || die "Stories directory missing at ${stories_dir}"
+
+  ensure_node_dependencies "$PROJECT_ROOT"
 
   local state_dir="${PLAN_DIR}/work"
   local runs_dir="${state_dir}/runs"

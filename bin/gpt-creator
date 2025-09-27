@@ -2589,7 +2589,7 @@ EOHELP
       local break_after_update=0
       local updated_state_for_task=0
       while (( attempt < max_attempts )); do
-        ((attempt++))
+        (( ++attempt ))
         if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
           if [[ ! -s "$output_path" ]]; then
             warn "  Codex produced no output for ${call_name}; manual review required."
@@ -2682,7 +2682,7 @@ REM
         break
       fi
 
-      ((processed_total++))
+      (( ++processed_total ))
 
       if (( break_after_update )); then
         continue
@@ -2797,7 +2797,7 @@ PY
 
   local pending_tasks=0
   if (( memory_cycle )); then
-    pending_tasks="$(gc_count_pending_tasks "$manifest" "$state_file")"
+    pending_tasks="$(gc_count_pending_tasks "$manifest" "$state_file" || echo 0)"
     [[ "$pending_tasks" =~ ^[0-9]+$ ]] || pending_tasks=0
 
     if (( work_failed == 0 )); then
@@ -2837,7 +2837,7 @@ PY
 
   local remaining_tasks=0
   if (( work_failed == 0 )); then
-    remaining_tasks="$(gc_count_pending_tasks "$manifest" "$state_file")"
+    remaining_tasks="$(gc_count_pending_tasks "$manifest" "$state_file" || echo 0)"
     [[ "$remaining_tasks" =~ ^[0-9]+$ ]] || remaining_tasks=0
   fi
 

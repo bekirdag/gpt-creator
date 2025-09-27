@@ -412,6 +412,29 @@ state_path.write_text(json.dumps(state, indent=2) + '\n')
 PY
 }
 
+gc_trim_memory() {
+  local phase="${1:-memory-cycle}"
+  info "[memory] Reclaiming resources (${phase})"
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY' >/dev/null 2>&1 || true
+import gc
+gc.collect()
+PY
+  fi
+
+  if command -v purge >/dev/null 2>&1; then
+    purge >/dev/null 2>&1 || true
+  elif command -v sync >/dev/null 2>&1; then
+    sync || true
+  fi
+
+  if command -v docker >/dev/null 2>&1; then
+    docker container prune -f >/dev/null 2>&1 || true
+    docker image prune -f >/dev/null 2>&1 || true
+  fi
+}
+
 # docker compose helper (prefers "docker compose" then docker-compose)
 docker_compose() {
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
@@ -2361,7 +2384,7 @@ PY
 }
 
 cmd_work_on_tasks() {
-  local root="" resume=1 story_filter="" no_verify=0 keep_artifacts=0
+  local root="" resume=1 story_filter="" no_verify=0 keep_artifacts=0 memory_cycle=0
   local batch_size=0 sleep_between=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -2370,6 +2393,7 @@ cmd_work_on_tasks() {
       --fresh) resume=0; shift;;
       --no-verify) no_verify=1; shift;;
       --keep-artifacts) keep_artifacts=1; shift;;
+      --memory-cycle) memory_cycle=1; shift;;
       --batch-size) batch_size="${2:-0}"; shift 2;;
       --sleep-between) sleep_between="${2:-0}"; shift 2;;
       -h|--help)
@@ -2384,6 +2408,7 @@ Options:
   --fresh              Ignore saved progress and start from the first story
   --no-verify          Skip running gpt-creator verify after tasks complete
   --keep-artifacts     Retain Codex prompt/output files for each task (default cleans up)
+  --memory-cycle       Process one task at a time, prune caches, and auto-resume to limit memory usage
   --batch-size NUM     Process at most NUM tasks this run, then pause (default: unlimited)
   --sleep-between SEC  Sleep SEC seconds between tasks (default: 0)
 EOHELP
@@ -2397,6 +2422,13 @@ EOHELP
   [[ "$sleep_between" =~ ^[0-9]+$ ]] || die "Invalid --sleep-between value: ${sleep_between}"
   batch_size=$((batch_size))
   sleep_between=$((sleep_between))
+
+  if (( memory_cycle )); then
+    if (( batch_size == 0 || batch_size > 1 )); then
+      info "Memory-cycle enabled; forcing --batch-size 1 for iterative runs."
+    fi
+    batch_size=1
+  fi
 
   ensure_ctx "$root"
   local tasks_dir="${PLAN_DIR}/tasks"
@@ -2637,6 +2669,90 @@ PY
   if (( processed_any == 0 )); then
     info "No stories to process (already complete)."
     return 0
+  fi
+
+  local pending_tasks=0
+  if (( memory_cycle )); then
+    if pending_tasks=$(python3 - "$manifest" "$state_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+state_path = Path(sys.argv[2])
+
+try:
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+except Exception:
+    manifest = {}
+
+stories = manifest.get('stories', []) or []
+
+state = {}
+if state_path.exists():
+    try:
+        state = json.loads(state_path.read_text(encoding='utf-8'))
+    except Exception:
+        state = {}
+
+stories_state = state.get('stories', {})
+
+pending = 0
+for entry in stories:
+    try:
+        total = int(entry.get('task_count') or 0)
+    except Exception:
+        total = 0
+    slug = (entry.get('slug') or '').strip()
+    completed = 0
+    info = stories_state.get(slug) or {}
+    try:
+        completed = int(info.get('completed_tasks') or 0)
+    except Exception:
+        completed = 0
+    if completed < total:
+        pending += max(total - completed, 0)
+
+print(pending)
+PY
+    ); then
+      [[ "$pending_tasks" =~ ^[0-9]+$ ]] || pending_tasks=0
+    else
+      pending_tasks=0
+    fi
+
+    if (( work_failed == 0 )); then
+      if (( processed_total > 0 )) && (( pending_tasks > 0 )); then
+        gc_trim_memory "memory-cycle"
+        info "Memory-cycle paused after ${processed_total} task(s); ${pending_tasks} pending."
+        local -a restart_cmd=("$0" work-on-tasks)
+        if [[ -n "$PROJECT_ROOT" ]]; then
+          restart_cmd+=(--project "$PROJECT_ROOT")
+        fi
+        if [[ -n "$story_filter" ]]; then
+          restart_cmd+=(--story "$story_filter")
+        fi
+        if (( no_verify )); then
+          restart_cmd+=(--no-verify)
+        fi
+        if (( keep_artifacts )); then
+          restart_cmd+=(--keep-artifacts)
+        fi
+        if (( sleep_between > 0 )); then
+          restart_cmd+=(--sleep-between "$sleep_between")
+        fi
+        restart_cmd+=(--batch-size 1 --memory-cycle)
+        info "Restarting work-on-tasks to continue processing."
+        exec "${restart_cmd[@]}"
+      elif (( pending_tasks == 0 )); then
+        gc_trim_memory "memory-cycle-final"
+        batch_limit_reached=0
+      else
+        gc_trim_memory "memory-cycle"
+      fi
+    else
+      gc_trim_memory "memory-cycle-error"
+    fi
   fi
 
   if [[ $work_failed -eq 0 && $batch_limit_reached -eq 0 && $no_verify -eq 0 ]]; then

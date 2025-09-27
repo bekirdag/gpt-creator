@@ -37,7 +37,7 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 [\-\-project DIR] [\-\-jira FILE] [\-\-force]
 .br
 .B gpt-creator work-on-tasks
-[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-no-verify] [\-\-keep-artifacts]
+[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-no-verify] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC]
 .br
 .B gpt-creator iterate
 [\-\-root DIR] [\-\-jira FILE] (deprecated)
@@ -96,6 +96,7 @@ Deprecated alias of \fBcreate-tasks\fR retained for backwards compatibility.
 Drive Codex over the converted story JSONs, apply returned JSON diff/file instructions automatically, and record progress in \fI.gpt-creator/staging/plan/work/state.json\fR.
 Artifacts (prompt/output pairs) are removed after each successful task to limit memory use unless \fB--keep-artifacts\fR is supplied.
 Use \fB--batch-size\fR to pause after a fixed number of tasks and \fB--sleep-between\fR to insert delays between Codex runs when conserving resources.
+\fB--memory-cycle\fR processes one task per invocation, performs a best-effort memory trim (including Docker cache pruning), and automatically restarts the command so long backlogs stay within bounded RAM.
 .TP
 .B iterate
 Deprecated legacy Jira loop. The command runs with a deprecation warning; prefer \fBcreate-tasks\fR followed by \fBwork-on-tasks\fR.

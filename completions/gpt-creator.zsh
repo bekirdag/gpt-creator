@@ -58,6 +58,7 @@ _gpt_creator() {
         '--fresh[Ignore saved progress]' \
         '--no-verify[Skip final verify run]' \
         '--keep-artifacts[Retain Codex prompt/output artifacts]' \
+        '--memory-cycle[Process one task per cycle and restart automatically]' \
         '--batch-size=[Process at most this many tasks in one run]' \
         '--sleep-between=[Pause seconds between tasks]'
       ;;

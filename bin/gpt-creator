@@ -1911,6 +1911,7 @@ while True:
                     f"Codex output could not be parsed as JSON; review {rel_dump}."
                 ],
             }
+            print('STATUS parse-error')
             print(f"RAW {rel_dump}")
             break
 
@@ -2575,39 +2576,72 @@ EOHELP
       info "  Task ${task_number}: ${task_id:-no-id} — ${task_title:-(untitled)}"
 
       local call_name="story-${slug}-task-${task_number}"
-      local codex_ok=1
-      if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
-        local apply_output
-        if ! apply_output="$(gc_apply_codex_changes "$output_path" "$PROJECT_ROOT")"; then
-          warn "  Failed to apply changes for ${call_name}; inspect ${output_path}."
+      local codex_ok=0
+      local attempt=0
+      local max_attempts=2
+      local prompt_augmented=0
+      while (( attempt < max_attempts )); do
+        ((attempt++))
+        if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
+          local apply_output
+          if ! apply_output="$(gc_apply_codex_changes "$output_path" "$PROJECT_ROOT")"; then
+            warn "  Failed to apply changes for ${call_name}; inspect ${output_path}."
+            work_failed=1
+            codex_ok=0
+            break
+          fi
+          if [[ "$apply_output" == "no-output" || "$apply_output" == "empty-output" ]]; then
+            warn "  Codex produced no actionable JSON for ${call_name}."
+            work_failed=1
+            codex_ok=0
+            break
+          fi
+          local apply_status="ok"
+          while IFS= read -r change_line; do
+            case "$change_line" in
+              STATUS\ *) apply_status="${change_line#STATUS }" ;;
+              APPLIED) info "    Changes applied." ;;
+              WRITE\ *) info "    Wrote ${change_line#WRITE }"; any_changes=1 ;;
+              PATCH\ *) info "    Patched ${change_line#PATCH }"; any_changes=1 ;;
+              CMD\ *) info "    Suggested command: ${change_line#CMD }" ;;
+              NOTE\ *) warn "    Note: ${change_line#NOTE }" ;;
+            esac
+          done <<<"$apply_output"
+
+          if [[ "$apply_status" == "parse-error" ]]; then
+            if (( attempt < max_attempts )); then
+              warn "  Codex returned invalid JSON; retrying (attempt $((attempt + 1)) of ${max_attempts})."
+              if (( prompt_augmented == 0 )); then
+                cat >>"$prompt_path" <<'REM'
+
+## Reminder
+- Output a single JSON object exactly as described above; do not include any explanatory text outside the JSON.
+- If no changes are required, return the JSON with an empty `changes` array and clear notes explaining why.
+- Diff entries must remain valid unified diffs.
+REM
+                prompt_augmented=1
+              fi
+              continue
+            else
+              warn "  Codex output was invalid JSON after retry; inspect ${output_path}."
+              work_failed=1
+              codex_ok=0
+              break
+            fi
+          fi
+
+          gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+          if (( keep_artifacts == 0 )); then
+            rm -f "$prompt_path" "$output_path"
+          fi
+          codex_ok=1
+        else
+          warn "  Codex execution failed for ${call_name}; progress saved."
           work_failed=1
           codex_ok=0
-          break
         fi
-        if [[ "$apply_output" == "no-output" || "$apply_output" == "empty-output" ]]; then
-          warn "  Codex produced no actionable JSON for ${call_name}."
-          work_failed=1
-          codex_ok=0
-          break
-        fi
-        while IFS= read -r change_line; do
-          case "$change_line" in
-            APPLIED) info "    Changes applied." ;;
-            WRITE\ *) info "    Wrote ${change_line#WRITE }"; any_changes=1 ;;
-            PATCH\ *) info "    Patched ${change_line#PATCH }"; any_changes=1 ;;
-            CMD\ *) info "    Suggested command: ${change_line#CMD }" ;;
-            NOTE\ *) warn "    Note: ${change_line#NOTE }" ;;
-          esac
-        done <<<"$apply_output"
-        gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
-        if (( keep_artifacts == 0 )); then
-          rm -f "$prompt_path" "$output_path"
-        fi
-      else
-        warn "  Codex execution failed for ${call_name}; progress saved."
-        work_failed=1
-        codex_ok=0
-      fi
+        break
+      done
 
       ((processed_total++))
       if (( sleep_between > 0 )); then

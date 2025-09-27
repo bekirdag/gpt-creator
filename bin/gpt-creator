@@ -2513,6 +2513,7 @@ EOHELP
   local processed_total=0
   local batch_limit_reached=0
   local any_changes=0
+  local manual_followups=0
 
   while IFS=$'\t' read -r sequence rel_path slug story_id story_title epic_id epic_title total_tasks next_task completed status; do
     if [[ -z "${sequence}${rel_path}${slug}${story_id}${story_title}${epic_id}${epic_title}" ]]; then
@@ -2580,6 +2581,8 @@ EOHELP
       local attempt=0
       local max_attempts=2
       local prompt_augmented=0
+      local keep_output=$keep_artifacts
+      local parse_error_final=0
       while (( attempt < max_attempts )); do
         ((attempt++))
         if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
@@ -2623,15 +2626,16 @@ REM
               fi
               continue
             else
-              warn "  Codex output was invalid JSON after retry; inspect ${output_path}."
-              work_failed=1
-              codex_ok=0
-              break
+              warn "  Codex output was invalid JSON after retry; manual review required (see ${output_path})."
+              manual_followups=1
+              keep_output=1
+              codex_ok=1
+              parse_error_final=1
             fi
           fi
 
           gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
-          if (( keep_artifacts == 0 )); then
+          if (( keep_output == 0 )); then
             rm -f "$prompt_path" "$output_path"
           fi
           codex_ok=1
@@ -2843,6 +2847,9 @@ PY
       ok "work-on-tasks paused → ${run_dir}"
     else
       ok "work-on-tasks complete → ${run_dir}"
+    fi
+    if (( manual_followups )); then
+      warn "Manual review needed for some tasks — see notes above and preserved output artifacts."
     fi
   else
     warn "work-on-tasks completed with issues — inspect ${run_dir}"

@@ -37,7 +37,7 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 [\-\-project DIR] [\-\-jira FILE] [\-\-force]
 .br
 .B gpt-creator work-on-tasks
-[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-no-verify]
+[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-no-verify] [\-\-keep-artifacts]
 .br
 .B gpt-creator iterate
 [\-\-root DIR] [\-\-jira FILE]
@@ -91,6 +91,7 @@ Convert Jira markdown into per-story JSON files under \fI.gpt-creator/staging/pl
 .TP
 .B work-on-tasks
 Drive Codex over the converted story JSONs, apply returned JSON diff/file instructions automatically, and record progress in \fI.gpt-creator/staging/plan/work/state.json\fR.
+Artifacts (prompt/output pairs) are removed after each successful task to limit memory use unless \fB--keep-artifacts\fR is supplied.
 .TP
 .B iterate
 Legacy Jira loop (one-shot parse + Codex run). Prefer \fBtask-convert\fR + \fBwork-on-tasks\fR for resumable flows.

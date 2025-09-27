@@ -39,7 +39,7 @@ _gpt_creator()
           COMPREPLY=( $(compgen -W "--project --jira --force ${global_opts}" -- "$cur") )
           ;;
         work-on-tasks)
-          COMPREPLY=( $(compgen -W "--project --story --from-story --fresh --no-verify ${global_opts}" -- "$cur") )
+          COMPREPLY=( $(compgen -W "--project --story --from-story --fresh --no-verify --keep-artifacts ${global_opts}" -- "$cur") )
           ;;
         generate)
           COMPREPLY=( $(compgen -W "api web admin db docker all ${global_opts}" -- "$cur") )

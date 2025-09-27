@@ -55,7 +55,8 @@ _gpt_creator() {
         '--story=[Start from story id or slug]' \
         '--from-story=[Alias for --story]' \
         '--fresh[Ignore saved progress]' \
-        '--no-verify[Skip final verify run]'
+        '--no-verify[Skip final verify run]' \
+        '--keep-artifacts[Retain Codex prompt/output artifacts]'
       ;;
     iterate)
       _arguments \

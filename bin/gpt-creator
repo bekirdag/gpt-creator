@@ -1899,6 +1899,8 @@ for change in changes:
         diff = change.get('diff')
         if not diff:
             raise ValueError(f"Patch change for {path} missing diff")
+        if not diff.endswith('\n'):
+            diff += '\n'
         proc = subprocess.run(
             ['git', 'apply', '--whitespace=nowarn', '-'],
             input=diff.encode('utf-8'),

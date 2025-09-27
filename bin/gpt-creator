@@ -1773,7 +1773,8 @@ for change in changes:
 
                 new_content = None
                 diff_lines = diff.splitlines()
-                if any(line.startswith('--- /dev/null') for line in diff_lines):
+                multi_file = sum(1 for line in diff_lines if line.startswith('diff --git ')) > 1
+                if not multi_file and any(line.startswith('--- /dev/null') for line in diff_lines):
                     capture = False
                     content_lines = []
                     for line in diff_lines:
@@ -1798,15 +1799,18 @@ for change in changes:
                             new_content += '\n'
                 if new_content is not None:
                     dest = ensure_within_root(Path(path))
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    if dest.exists():
-                        existing = dest.read_text(encoding='utf-8')
-                        if existing == new_content:
-                            patched.append(path + ' (already exists)')
-                            continue
-                    dest.write_text(new_content, encoding='utf-8')
-                    patched.append(path + ' (reconstructed)')
-                    continue
+                    if dest.exists() and dest.is_dir():
+                        new_content = None
+                    else:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        if dest.exists():
+                            existing = dest.read_text(encoding='utf-8')
+                            if existing == new_content:
+                                patched.append(path + ' (already exists)')
+                                continue
+                        dest.write_text(new_content, encoding='utf-8')
+                        patched.append(path + ' (reconstructed)')
+                        continue
 
                 if new_content is None:
                     try:

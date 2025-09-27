@@ -1695,6 +1695,7 @@ while True:
 changes = payload.get('changes') or []
 written = []
 patched = []
+manual_notes = []
 
 def ensure_within_root(path: Path) -> Path:
     try:
@@ -1825,9 +1826,18 @@ for change in changes:
                     except Exception:
                         pass
 
+                manual_patch = output_path.with_suffix(output_path.suffix + f".{len(manual_notes)+1}.patch")
+                manual_patch.write_text(diff, encoding='utf-8')
+                relative_manual = manual_patch
+                try:
+                    relative_manual = manual_patch.relative_to(project_root)
+                except ValueError:
+                    pass
+                manual_notes.append(f"Patch for {path} could not be applied automatically. Review and apply {relative_manual} manually.")
+                patched.append(path + ' (manual)')
                 sys.stderr.write(git_err)
                 sys.stderr.write(fallback.stderr.decode('utf-8'))
-                raise SystemExit(f"git/patch apply failed for {path}")
+                continue
             patched.append(path + ' (patch)')
         else:
             patched.append(path)
@@ -1838,7 +1848,7 @@ summary = {
     'written': written,
     'patched': patched,
     'commands': payload.get('commands') or [],
-    'notes': payload.get('notes') or [],
+    'notes': (payload.get('notes') or []) + manual_notes,
 }
 print('APPLIED')
 for path in written:

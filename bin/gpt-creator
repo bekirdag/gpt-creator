@@ -1673,7 +1673,24 @@ while True:
             payload = decoder.decode(fragment)
             break
         except json.JSONDecodeError:
-            raise SystemExit(f"Failed to decode Codex JSON: {exc}") from exc
+            raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
+            raw_dump.parent.mkdir(parents=True, exist_ok=True)
+            raw_dump.write_text(raw, encoding='utf-8')
+            rel_dump = raw_dump
+            try:
+                rel_dump = raw_dump.relative_to(project_root)
+            except ValueError:
+                rel_dump = raw_dump
+            payload = {
+                'plan': [],
+                'changes': [],
+                'commands': [],
+                'notes': [
+                    f"Codex output could not be parsed as JSON; review {rel_dump}."
+                ],
+            }
+            print(f"RAW {rel_dump}")
+            break
 
 changes = payload.get('changes') or []
 written = []
@@ -1715,6 +1732,22 @@ for change in changes:
         )
         if proc.returncode != 0:
             git_err = proc.stderr.decode('utf-8')
+
+            three_way = subprocess.run(
+                ['git', 'apply', '--3way', '--whitespace=nowarn', '-'],
+                input=diff.encode('utf-8'),
+                cwd=str(project_root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+            if three_way.returncode == 0:
+                patched.append(path + ' (3way)')
+                continue
+
+            git_err += three_way.stderr.decode('utf-8')
+
             fallback = subprocess.run(
                 ['patch', '-p1', '--forward', '--silent'],
                 input=diff.encode('utf-8'),

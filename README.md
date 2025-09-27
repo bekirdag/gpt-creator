@@ -165,6 +165,7 @@ gpt-creator create-tasks --project /path/to/project --jira docs/jira.md
 
 ### 9. Work on Tasks (resumable Codex loop)
 ```
+export PNPM_HOME="$HOME/.local/share/pnpm"  # keep pnpm toolchain outside the workspace
 gpt-creator work-on-tasks --project /path/to/project
 ```
 - Reads the manifest from `create-tasks` and generates Codex prompts per story/task, storing run artifacts in `.gpt-creator/staging/plan/work/runs/<timestamp>/`.

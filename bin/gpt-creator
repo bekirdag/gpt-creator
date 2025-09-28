@@ -1922,6 +1922,45 @@ written = []
 patched = []
 manual_notes = []
 
+def rewrite_patch_paths(diff_text: str) -> str:
+    mapping = {
+        'api/': 'apps/api/',
+        'web/': 'apps/web/',
+        'admin/': 'apps/admin/',
+        'site/': 'apps/web/',
+    }
+
+    def rewrite_path(path: str) -> str:
+        for old, new in mapping.items():
+            if path.startswith(old) and not path.startswith(new):
+                return new + path[len(old):]
+        return path
+
+    lines = diff_text.splitlines()
+    rewritten = []
+    for line in lines:
+        if line.startswith('diff --git a/'):
+            parts = line.split()
+            if len(parts) >= 4:
+                a_path = parts[2][2:]
+                b_path = parts[3][2:]
+                new_a = rewrite_path(a_path)
+                new_b = rewrite_path(b_path)
+                if new_a != a_path or new_b != b_path:
+                    line = f"diff --git a/{new_a} b/{new_b}"
+        elif line.startswith('--- a/'):
+            path = line[6:]
+            new_path = rewrite_path(path)
+            if new_path != path:
+                line = f"--- a/{new_path}"
+        elif line.startswith('+++ b/'):
+            path = line[6:]
+            new_path = rewrite_path(path)
+            if new_path != path:
+                line = f"+++ b/{new_path}"
+        rewritten.append(line)
+    return '\n'.join(rewritten)
+
 def ensure_within_root(path: Path) -> Path:
     try:
         full = (project_root / path).resolve(strict=False)
@@ -1948,6 +1987,7 @@ for change in changes:
         diff = change.get('diff')
         if not diff:
             raise ValueError(f"Patch change for {path} missing diff")
+        diff = rewrite_patch_paths(diff)
         if not diff.endswith('\n'):
             diff += '\n'
         proc = subprocess.run(

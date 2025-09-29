@@ -1961,6 +1961,18 @@ def rewrite_patch_paths(diff_text: str) -> str:
         rewritten.append(line)
     return '\n'.join(rewritten)
 
+def ensure_diff_headers(diff_text: str, path: str) -> str:
+    if 'diff --git ' in diff_text:
+        return diff_text
+
+    lines = diff_text.splitlines()
+    header = [
+        f'diff --git a/{path} b/{path}',
+        f'--- a/{path}',
+        f'+++ b/{path}',
+    ]
+    return '\n'.join(header + lines)
+
 def ensure_within_root(path: Path) -> Path:
     try:
         full = (project_root / path).resolve(strict=False)
@@ -1988,6 +2000,7 @@ for change in changes:
         if not diff:
             raise ValueError(f"Patch change for {path} missing diff")
         diff = rewrite_patch_paths(diff)
+        diff = ensure_diff_headers(diff, path)
         if not diff.endswith('\n'):
             diff += '\n'
         proc = subprocess.run(

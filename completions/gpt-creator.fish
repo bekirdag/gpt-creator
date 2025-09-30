@@ -29,11 +29,11 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from verify" -l project -r
 
 # create-tasks
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l jira -r -d "Jira tasks file"
-complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l force -d "Rebuild all story JSONs"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l force -d "Rebuild tasks database (ignore saved progress)"
 
 # task-convert (deprecated alias)
 complete -c gpt-creator -n "__fish_seen_subcommand_from task-convert" -l jira -r -d "Jira tasks file"
-complete -c gpt-creator -n "__fish_seen_subcommand_from task-convert" -l force -d "Rebuild all story JSONs"
+complete -c gpt-creator -n "__fish_seen_subcommand_from task-convert" -l force -d "Rebuild tasks database (legacy alias)"
 
 # work-on-tasks
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l story -r -d "Start from story id or slug"

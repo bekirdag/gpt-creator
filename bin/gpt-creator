@@ -334,6 +334,451 @@ Path(out_path).write_text(json.dumps(payload, indent=2) + '\n', encoding='utf-8'
 PY
 }
 
+gc_build_tasks_db() {
+  local tasks_json="${1:?tasks json path required}"
+  local db_path="${2:?sqlite db path required}"
+  local force_flag="${3:-0}"
+  python3 - <<'PY' "$tasks_json" "$db_path" "$force_flag"
+import json
+import re
+import sqlite3
+import sys
+import time
+from collections import OrderedDict
+from pathlib import Path
+
+tasks_json_path = Path(sys.argv[1])
+db_path = Path(sys.argv[2])
+force = sys.argv[3] == '1'
+
+payload = json.loads(tasks_json_path.read_text(encoding='utf-8'))
+all_tasks = payload.get('tasks') or []
+generated_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+def slugify(text: str) -> str:
+    slug = re.sub(r'[^a-z0-9]+', '-', (text or '').lower()).strip('-')
+    return slug or 'item'
+
+def story_key_for(task: dict) -> str:
+    return '|'.join([
+        (task.get('story_id') or '').strip(),
+        (task.get('story_title') or '').strip(),
+        (task.get('epic_id') or '').strip(),
+        (task.get('epic_title') or '').strip(),
+    ])
+
+grouped = OrderedDict()
+for task in all_tasks:
+    key = story_key_for(task)
+    grouped.setdefault(key, {
+        'story_id': (task.get('story_id') or '').strip(),
+        'story_title': (task.get('story_title') or '').strip(),
+        'epic_id': (task.get('epic_id') or '').strip(),
+        'epic_title': (task.get('epic_title') or '').strip(),
+        'tasks': []
+    })
+    grouped[key]['tasks'].append(task)
+
+db_path.parent.mkdir(parents=True, exist_ok=True)
+conn = sqlite3.connect(str(db_path))
+conn.row_factory = sqlite3.Row
+cur = conn.cursor()
+cur.execute('PRAGMA foreign_keys = ON')
+cur.execute('PRAGMA journal_mode = WAL')
+
+def list_to_text(values):
+    return ', '.join(str(item).strip() for item in values if str(item).strip()) if values else None
+
+def as_text(value):
+    if isinstance(value, list):
+        return list_to_text(value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text else None
+
+def ensure_table():
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS metadata (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS epics (
+          epic_key TEXT PRIMARY KEY,
+          epic_id TEXT,
+          title TEXT,
+          slug TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS stories (
+          story_slug TEXT PRIMARY KEY,
+          story_key TEXT UNIQUE,
+          story_id TEXT,
+          story_title TEXT,
+          epic_key TEXT,
+          epic_title TEXT,
+          sequence INTEGER,
+          status TEXT,
+          completed_tasks INTEGER,
+          total_tasks INTEGER,
+          last_run TEXT,
+          updated_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(epic_key) REFERENCES epics(epic_key)
+        )
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS tasks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          story_slug TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          task_id TEXT,
+          title TEXT,
+          description TEXT,
+          estimate TEXT,
+          assignees_json TEXT,
+          tags_json TEXT,
+          acceptance_json TEXT,
+          dependencies_json TEXT,
+          tags_text TEXT,
+          story_points TEXT,
+          dependencies_text TEXT,
+          assignee_text TEXT,
+          document_reference TEXT,
+          idempotency TEXT,
+          rate_limits TEXT,
+          rbac TEXT,
+          messaging_workflows TEXT,
+          performance_targets TEXT,
+          observability TEXT,
+          acceptance_text TEXT,
+          endpoints TEXT,
+          sample_create_request TEXT,
+          sample_create_response TEXT,
+          user_story_ref_id TEXT,
+          epic_ref_id TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          started_at TEXT,
+          completed_at TEXT,
+          last_run TEXT,
+          story_id TEXT,
+          story_title TEXT,
+          epic_key TEXT,
+          epic_title TEXT,
+          updated_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(story_slug, position),
+          FOREIGN KEY(story_slug) REFERENCES stories(story_slug)
+        )
+    ''')
+
+ensure_table()
+
+def column_exists(table: str, column: str) -> bool:
+    cur.execute(f"PRAGMA table_info({table})")
+    return any(row['name'] == column for row in cur.fetchall())
+
+def ensure_column(table: str, column: str, definition: str):
+    if not column_exists(table, column):
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+ensure_column('stories', 'completed_tasks', 'INTEGER')
+ensure_column('stories', 'total_tasks', 'INTEGER')
+ensure_column('stories', 'status', "TEXT DEFAULT 'pending'")
+ensure_column('stories', 'last_run', 'TEXT')
+ensure_column('stories', 'epic_title', 'TEXT')
+
+ensure_column('tasks', 'story_id', 'TEXT')
+ensure_column('tasks', 'story_title', 'TEXT')
+ensure_column('tasks', 'epic_key', 'TEXT')
+ensure_column('tasks', 'epic_title', 'TEXT')
+ensure_column('tasks', 'status', "TEXT DEFAULT 'pending'")
+ensure_column('tasks', 'started_at', 'TEXT')
+ensure_column('tasks', 'completed_at', 'TEXT')
+ensure_column('tasks', 'last_run', 'TEXT')
+ensure_column('tasks', 'tags_text', 'TEXT')
+ensure_column('tasks', 'story_points', 'TEXT')
+ensure_column('tasks', 'dependencies_text', 'TEXT')
+ensure_column('tasks', 'assignee_text', 'TEXT')
+ensure_column('tasks', 'document_reference', 'TEXT')
+ensure_column('tasks', 'idempotency', 'TEXT')
+ensure_column('tasks', 'rate_limits', 'TEXT')
+ensure_column('tasks', 'rbac', 'TEXT')
+ensure_column('tasks', 'messaging_workflows', 'TEXT')
+ensure_column('tasks', 'performance_targets', 'TEXT')
+ensure_column('tasks', 'observability', 'TEXT')
+ensure_column('tasks', 'acceptance_text', 'TEXT')
+ensure_column('tasks', 'endpoints', 'TEXT')
+ensure_column('tasks', 'sample_create_request', 'TEXT')
+ensure_column('tasks', 'sample_create_response', 'TEXT')
+ensure_column('tasks', 'user_story_ref_id', 'TEXT')
+ensure_column('tasks', 'epic_ref_id', 'TEXT')
+
+prior_story_slugs = {}
+prior_story_state = {}
+prior_task_state = {}
+
+if not force:
+    try:
+        for row in cur.execute('SELECT story_slug, story_key, status, completed_tasks, total_tasks, last_run, updated_at, created_at FROM stories'):
+            story_slug = row['story_slug']
+            story_key = row['story_key']
+            if story_key:
+                prior_story_slugs[story_key] = story_slug
+            prior_story_state[story_slug] = {
+                'status': row['status'] or 'pending',
+                'completed_tasks': int(row['completed_tasks'] or 0),
+                'total_tasks': int(row['total_tasks'] or 0),
+                'last_run': row['last_run'],
+                'updated_at': row['updated_at'],
+                'created_at': row['created_at'],
+            }
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        for row in cur.execute('SELECT story_slug, position, task_id, status, started_at, completed_at, last_run FROM tasks'):
+            base = {
+                'status': row['status'] or 'pending',
+                'started_at': row['started_at'],
+                'completed_at': row['completed_at'],
+                'last_run': row['last_run'],
+            }
+            prior_task_state[('pos', row['story_slug'], row['position'])] = base
+            task_id = (row['task_id'] or '').strip().lower()
+            if task_id:
+                prior_task_state[('id', row['story_slug'], task_id)] = base
+    except sqlite3.OperationalError:
+        pass
+
+cur.execute('DELETE FROM tasks')
+cur.execute('DELETE FROM stories')
+cur.execute('DELETE FROM epics')
+
+used_story_slugs = set(prior_story_slugs.values())
+used_story_slugs.discard('')
+
+def assign_story_slug(preferred: str, story_key: str) -> str:
+    if not preferred:
+        preferred = 'story'
+    slug = slugify(preferred)
+    if story_key in prior_story_slugs:
+        return prior_story_slugs[story_key]
+    base = slug or 'story'
+    slug = base
+    i = 2
+    while slug in used_story_slugs:
+        slug = f"{base}-{i}"
+        i += 1
+    used_story_slugs.add(slug)
+    return slug
+
+epics_inserted = {}
+story_count = 0
+task_count = 0
+restored_stories = 0
+restored_tasks = 0
+
+for sequence, (story_key, info) in enumerate(grouped.items(), start=1):
+    tasks = info['tasks']
+    if not tasks:
+        continue
+    story_id = info['story_id']
+    story_title = info['story_title']
+    epic_id = info['epic_id']
+    epic_title = info['epic_title']
+
+    preferred_slug_source = story_id or story_title or epic_id or f'story-{sequence}'
+    story_slug = assign_story_slug(preferred_slug_source, story_key)
+    restored = story_slug in prior_story_state
+    if restored:
+        restored_stories += 1
+
+    epic_key = (epic_id or epic_title or '').strip()
+    if not epic_key:
+        epic_key = None
+    else:
+        epic_slug = slugify(epic_key)
+        if epic_key not in epics_inserted:
+            cur.execute('''
+                INSERT OR REPLACE INTO epics(epic_key, epic_id, title, slug, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+            ''', (
+                epic_key,
+                epic_id or None,
+                epic_title or None,
+                epic_slug,
+                generated_at,
+                generated_at,
+            ))
+            epics_inserted[epic_key] = True
+
+    completed_tasks = 0
+    story_status = 'pending'
+    story_total = len(tasks)
+
+    for position, task in enumerate(tasks):
+        task_id = (task.get('id') or '').strip()
+        description = (task.get('description') or '').strip()
+        estimate = (task.get('estimate') or '').strip()
+        assignees = task.get('assignees') or []
+        tags = task.get('tags') or []
+        acceptance = task.get('acceptance_criteria') or []
+        dependencies = task.get('dependencies') or []
+
+        key_id = ('id', story_slug, task_id.lower()) if task_id else None
+        key_pos = ('pos', story_slug, position)
+        restore = None
+        if key_id and key_id in prior_task_state and not force:
+            restore = prior_task_state[key_id]
+        elif key_pos in prior_task_state and not force:
+            restore = prior_task_state[key_pos]
+
+        status = (restore or {}).get('status') or 'pending'
+        started_at = (restore or {}).get('started_at')
+        completed_at = (restore or {}).get('completed_at')
+        last_run = (restore or {}).get('last_run')
+
+        if status == 'complete':
+            completed_tasks += 1
+
+        if restore:
+            restored_tasks += 1
+
+        tags_text = list_to_text(tags)
+        dependencies_text = list_to_text(dependencies)
+        assignee_text = list_to_text(assignees)
+        story_points = as_text(task.get('story_points')) or (estimate if estimate else None)
+        document_reference = as_text(task.get('document_reference') or task.get('document_ref'))
+        idempotency_text = as_text(task.get('idempotency'))
+        rate_limits = as_text(task.get('rate_limits'))
+        rbac_text = as_text(task.get('rbac') or task.get('rbac_requirements'))
+        messaging_workflows = as_text(task.get('messaging_workflows') or task.get('messaging_and_workflows'))
+        performance_targets = as_text(task.get('performance_targets'))
+        observability = as_text(task.get('observability'))
+        acceptance_text = '\n'.join(item.strip() for item in acceptance if item.strip()) if acceptance else None
+        if not acceptance_text:
+            acceptance_text = as_text(task.get('acceptance_text'))
+        endpoints = as_text(task.get('endpoints'))
+        sample_create_request = as_text(task.get('sample_create_request') or task.get('sample_request'))
+        sample_create_response = as_text(task.get('sample_create_response') or task.get('sample_response'))
+        user_story_ref_id = as_text(task.get('user_story_ref_id') or task.get('user_story_reference_id') or story_id)
+        epic_ref_id = as_text(task.get('epic_ref_id') or task.get('epic_reference_id') or epic_id)
+
+        cur.execute('''
+            INSERT INTO tasks (
+              story_slug, position, task_id, title, description, estimate,
+              assignees_json, tags_json, acceptance_json, dependencies_json,
+              tags_text, story_points, dependencies_text, assignee_text,
+              document_reference, idempotency, rate_limits, rbac,
+              messaging_workflows, performance_targets, observability,
+              acceptance_text, endpoints, sample_create_request, sample_create_response,
+              user_story_ref_id, epic_ref_id,
+              status, started_at, completed_at, last_run,
+              story_id, story_title, epic_key, epic_title,
+              updated_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            story_slug,
+            position,
+            task_id or None,
+            (task.get('title') or '').strip() or None,
+            description or None,
+            estimate or None,
+            json.dumps(assignees, ensure_ascii=False),
+            json.dumps(tags, ensure_ascii=False),
+            json.dumps(acceptance, ensure_ascii=False),
+            json.dumps(dependencies, ensure_ascii=False),
+            tags_text,
+            story_points,
+            dependencies_text,
+            assignee_text,
+            document_reference,
+            idempotency_text,
+            rate_limits,
+            rbac_text,
+            messaging_workflows,
+            performance_targets,
+            observability,
+            acceptance_text,
+            endpoints,
+            sample_create_request,
+            sample_create_response,
+            user_story_ref_id,
+            epic_ref_id,
+            status,
+            started_at,
+            completed_at,
+            last_run,
+            story_id or None,
+            story_title or None,
+            epic_key,
+            epic_title or None,
+            generated_at,
+            generated_at,
+        ))
+
+    if completed_tasks >= story_total and story_total > 0:
+        story_status = 'complete'
+    elif completed_tasks > 0:
+        story_status = 'in-progress'
+    else:
+        story_status = 'pending'
+
+    if restored and not force:
+        state = prior_story_state.get(story_slug, {})
+        if state:
+            story_status = state.get('status') or story_status
+            restored_completed = int(state.get('completed_tasks') or completed_tasks)
+            completed_tasks = max(completed_tasks, restored_completed)
+            story_total = state.get('total_tasks') or story_total
+
+    cur.execute('''
+        INSERT OR REPLACE INTO stories (
+          story_slug, story_key, story_id, story_title,
+          epic_key, epic_title, sequence, status,
+          completed_tasks, total_tasks, last_run,
+          updated_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        story_slug,
+        story_key,
+        story_id or None,
+        story_title or None,
+        epic_key,
+        epic_title or None,
+        sequence,
+        story_status,
+        completed_tasks,
+        story_total,
+        (prior_story_state.get(story_slug) or {}).get('last_run') if restored and not force else None,
+        generated_at,
+        (prior_story_state.get(story_slug) or {}).get('created_at', generated_at) if restored and not force else generated_at,
+    ))
+
+    story_count += 1
+    task_count += story_total
+
+cur.execute('INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)', ('generated_at', generated_at))
+cur.execute('INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)', ('source', str(tasks_json_path)))
+
+conn.commit()
+conn.close()
+
+print(f'STORIES {story_count}')
+print(f'TASKS {task_count}')
+print(f'RESTORED_STORIES {restored_stories}')
+print(f'RESTORED_TASKS {restored_tasks}')
+PY
+}
+
 gc_build_context_file() {
   local dest_file="${1:?context destination required}"
   local staging_dir="${2:-$GC_STAGING_DIR}"
@@ -369,48 +814,103 @@ gc_build_context_file() {
 }
 
 gc_update_work_state() {
-  local state_file="${1:?state file required}"
+  local db_path="${1:?tasks database path required}"
   local story_slug="${2:?story slug required}"
   local status="${3:?status required}"
   local completed="${4:-0}"
   local total="${5:-0}"
-  local run_stamp="${6:-}"
-  python3 - <<'PY' "$state_file" "$story_slug" "$status" "$completed" "$total" "$run_stamp"
-import json
+  local run_stamp="${6:-manual}"
+  python3 - <<'PY' "$db_path" "$story_slug" "$status" "$completed" "$total" "$run_stamp"
+import sqlite3
 import sys
 import time
-from pathlib import Path
 
-state_path = Path(sys.argv[1])
-slug = sys.argv[2]
-status = sys.argv[3]
-completed = int(sys.argv[4] or 0)
-total = int(sys.argv[5] or 0)
-run_stamp = sys.argv[6] or 'manual'
+db_path, story_slug, status, completed, total, run_stamp = sys.argv[1:7]
+completed = int(completed or 0)
+total = int(total or 0)
+run_stamp = run_stamp or 'manual'
+timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
-if state_path.exists():
-    try:
-        state = json.loads(state_path.read_text())
-    except Exception:
-        state = {}
-else:
-    state = {}
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+cur.execute(
+    """
+    UPDATE stories
+       SET status = ?,
+           completed_tasks = ?,
+           total_tasks = ?,
+           last_run = ?,
+           updated_at = ?
+     WHERE story_slug = ?
+    """,
+    (status, completed, total, run_stamp, timestamp, story_slug)
+)
+if cur.rowcount == 0:
+    cur.execute(
+        """
+        INSERT INTO stories (story_slug, story_key, status, completed_tasks, total_tasks, last_run, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (story_slug, story_slug, status, completed, total, run_stamp, timestamp, timestamp)
+    )
+conn.commit()
+conn.close()
+PY
+}
 
-stories = state.setdefault('stories', {})
-entry = stories.setdefault(slug, {})
-entry.update({
-    'status': status,
-    'completed_tasks': completed,
-    'total_tasks': total,
-    'run': run_stamp,
-    'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-})
+gc_update_task_state() {
+  local db_path="${1:?tasks database path required}"
+  local story_slug="${2:?story slug required}"
+  local position="${3:?task position required}"
+  local status="${4:?status required}"
+  local run_stamp="${5:-manual}"
+  python3 - <<'PY' "$db_path" "$story_slug" "$position" "$status" "$run_stamp"
+import sqlite3
+import sys
+import time
 
-state['last_run'] = run_stamp
-state['last_updated'] = entry['updated_at']
+db_path, story_slug, position, status, run_stamp = sys.argv[1:6]
+position = int(position)
+run_stamp = run_stamp or 'manual'
+timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
-state_path.parent.mkdir(parents=True, exist_ok=True)
-state_path.write_text(json.dumps(state, indent=2) + '\n')
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+cur = conn.cursor()
+row = cur.execute(
+    'SELECT id, status, started_at, completed_at FROM tasks WHERE story_slug = ? AND position = ?',
+    (story_slug, position)
+).fetchone()
+
+if row is not None:
+    fields = [
+        ('status', status),
+        ('last_run', run_stamp),
+        ('updated_at', timestamp),
+    ]
+
+    started_at = row['started_at']
+    completed_at = row['completed_at']
+
+    if status == 'in-progress' and not started_at:
+        fields.append(('started_at', timestamp))
+    elif status == 'complete':
+        if not started_at:
+            fields.append(('started_at', timestamp))
+        fields.append(('completed_at', timestamp))
+    elif status == 'pending':
+        fields.append(('started_at', None))
+        fields.append(('completed_at', None))
+    elif status == 'blocked':
+        if not started_at:
+            fields.append(('started_at', timestamp))
+
+    set_clause = ', '.join(f"{col} = ?" for col, _ in fields)
+    params = [value for _, value in fields] + [story_slug, position]
+    cur.execute(f'UPDATE tasks SET {set_clause} WHERE story_slug = ? AND position = ?', params)
+
+conn.commit()
+conn.close()
 PY
 }
 
@@ -438,47 +938,17 @@ PY
 }
 
 gc_count_pending_tasks() {
-  local manifest_path="${1:?manifest path required}"
-  local state_path="${2:?state path required}"
-  python3 - <<'PY' "$manifest_path" "$state_path"
-import json
+  local db_path="${1:?tasks database path required}"
+  python3 - <<'PY' "$db_path"
+import sqlite3
 import sys
-from pathlib import Path
 
-man_path = Path(sys.argv[1])
-state_path = Path(sys.argv[2])
-
-try:
-    manifest = json.loads(man_path.read_text(encoding='utf-8'))
-except Exception:
-    manifest = {}
-
-stories = manifest.get('stories', []) or []
-
-state = {}
-if state_path.exists():
-    try:
-        state = json.loads(state_path.read_text(encoding='utf-8'))
-    except Exception:
-        state = {}
-
-stories_state = state.get('stories', {})
-pending = 0
-
-for entry in stories:
-    try:
-        total = int(entry.get('task_count') or 0)
-    except Exception:
-        total = 0
-    slug = (entry.get('slug') or '').strip()
-    info = stories_state.get(slug) or {}
-    try:
-        completed = int(info.get('completed_tasks') or 0)
-    except Exception:
-        completed = 0
-    if completed < total:
-        pending += max(total - completed, 0)
-
+db_path = sys.argv[1]
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+row = cur.execute("SELECT COUNT(*) FROM tasks WHERE LOWER(COALESCE(status, 'pending')) != 'complete'").fetchone()
+pending = row[0] if row else 0
+conn.close()
 print(pending)
 PY
 }
@@ -2157,12 +2627,12 @@ cmd_create_tasks() {
         cat <<'EOUSAGE'
 Usage: gpt-creator create-tasks [--project PATH] [--jira FILE] [--force]
 
-Convert Jira markdown tasks into per-story JSON files under .gpt-creator/staging/plan/tasks.
+Convert Jira markdown tasks into a project-scoped SQLite database stored under .gpt-creator/staging/plan/tasks.
 
 Options:
   --project PATH  Project root (defaults to current directory)
   --jira FILE     Jira markdown source (defaults to staging/inputs/jira.md)
-  --force         Rebuild all story JSON files even if they already exist
+  --force         Rebuild the tasks database without restoring prior progress metadata
 EOUSAGE
         return 0
         ;;
@@ -2175,275 +2645,231 @@ EOUSAGE
   [[ -f "$jira" ]] || die "Jira tasks file not found: ${jira}"
 
   local tasks_dir="${PLAN_DIR}/tasks"
-  local stories_dir="${tasks_dir}/stories"
-  local manifest="${tasks_dir}/manifest.json"
   local parsed_local="${tasks_dir}/parsed.local.json"
-  mkdir -p "$stories_dir"
+  local tasks_db="${tasks_dir}/tasks.db"
+  mkdir -p "$tasks_dir"
 
   info "Parsing Jira backlog → ${parsed_local}"
   gc_parse_jira_tasks "$jira" "$parsed_local"
 
-  local stats
-  if ! stats="$(python3 - "$parsed_local" "$stories_dir" "$manifest" "$force" <<'PY'
-import hashlib
-import json
-import re
-import sys
-import time
-from pathlib import Path
-
-parsed_path = Path(sys.argv[1])
-stories_dir = Path(sys.argv[2])
-manifest_path = Path(sys.argv[3])
-force_flag = sys.argv[4] == '1'
-
-stories_dir.mkdir(parents=True, exist_ok=True)
-
-data = json.loads(parsed_path.read_text(encoding='utf-8'))
-all_tasks = data.get('tasks', [])
-if not isinstance(all_tasks, list):
-    all_tasks = []
-
-try:
-    prior_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-except Exception:
-    prior_manifest = {}
-
-prior_entries = prior_manifest.get('stories', []) or []
-prior_by_key = {entry.get('key'): entry for entry in prior_entries if entry.get('key')}
-used_slugs = set(entry.get('slug') for entry in prior_entries if entry.get('slug'))
-
-def slugify(text: str) -> str:
-    base = re.sub(r'[^a-z0-9]+', '-', (text or '').lower()).strip('-')
-    return base or 'story'
-
-def assign_slug(preferred: str) -> str:
-    base = slugify(preferred)
-    slug = base
-    counter = 2
-    while slug in used_slugs:
-        slug = f"{base}-{counter}"
-        counter += 1
-    used_slugs.add(slug)
-    return slug
-
-group_map = {}
-order = []
-for task in all_tasks:
-    key = (
-        (task.get('story_id') or '').strip(),
-        (task.get('story_title') or '').strip(),
-        (task.get('epic_id') or '').strip(),
-        (task.get('epic_title') or '').strip(),
-    )
-    if key not in group_map:
-        story_id, story_title, epic_id, epic_title = key
-        group_map[key] = {
-            'story_id': story_id,
-            'story_title': story_title,
-            'epic_id': epic_id,
-            'epic_title': epic_title,
-            'tasks': []
-        }
-        order.append(group_map[key])
-    group_map[key]['tasks'].append(task)
-
-converted = 0
-skipped = 0
-sequence = 0
-manifest_entries = []
-new_files = set()
-
-for group in order:
-    tasks = group['tasks']
-    if not tasks:
-        continue
-    sequence += 1
-    story_id = group['story_id']
-    story_title = group['story_title']
-    epic_id = group['epic_id']
-    epic_title = group['epic_title']
-    key_str = '|'.join([
-        story_id or '',
-        story_title or '',
-        epic_id or '',
-        epic_title or ''
-    ])
-
-    preferred_slug_source = story_id or story_title or epic_id or f'story-{sequence}'
-    prior_entry = prior_by_key.get(key_str)
-    if prior_entry and prior_entry.get('slug'):
-        slug = prior_entry['slug']
-        used_slugs.add(slug)
-    else:
-        slug = assign_slug(preferred_slug_source)
-
-    story_path = Path('stories') / f"{slug}.json"
-    absolute_path = stories_dir / f"{slug}.json"
-    new_files.add(absolute_path.resolve())
-
-    story_payload = {
-        'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-        'story': {
-            'epic_id': epic_id,
-            'epic_title': epic_title,
-            'story_id': story_id,
-            'story_title': story_title,
-            'sequence': sequence,
-        },
-        'tasks': tasks,
-    }
-
-    story_hash = hashlib.sha1(json.dumps(story_payload, sort_keys=True).encode('utf-8')).hexdigest()
-    should_write = True
-    if not force_flag and prior_entry and prior_entry.get('hash') == story_hash and absolute_path.exists():
-        should_write = False
-    if should_write:
-        absolute_path.parent.mkdir(parents=True, exist_ok=True)
-        absolute_path.write_text(json.dumps(story_payload, indent=2) + '\n', encoding='utf-8')
-        converted += 1
-    else:
-        skipped += 1
-
-    manifest_entries.append({
-        'sequence': sequence,
-        'slug': slug,
-        'path': str(story_path),
-        'story_id': story_id,
-        'story_title': story_title,
-        'epic_id': epic_id,
-        'epic_title': epic_title,
-        'task_count': len(tasks),
-        'task_ids': [t.get('id') for t in tasks if t.get('id')],
-        'hash': story_hash,
-        'key': key_str,
-    })
-
-# Remove orphaned story files
-for json_file in stories_dir.glob('*.json'):
-    if json_file.resolve() not in new_files:
-        json_file.unlink(missing_ok=True)
-
-manifest_payload = {
-    'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-    'source': str(parsed_path.resolve()),
-    'story_count': sequence,
-    'stories': manifest_entries,
-}
-manifest_path.parent.mkdir(parents=True, exist_ok=True)
-manifest_path.write_text(json.dumps(manifest_payload, indent=2) + '\n', encoding='utf-8')
-
-print(f"TOTAL {sequence}")
-print(f"CONVERTED {converted}")
-print(f"SKIPPED {skipped}")
-PY
-)"; then
-    die "Failed to convert Jira tasks into story JSON files"
+  info "Building tasks database → ${tasks_db}"
+  local db_stats
+  if ! db_stats="$(gc_build_tasks_db "$parsed_local" "$tasks_db" "$force")"; then
+    die "Failed to build Jira tasks SQLite database"
   fi
 
-  local total=0 converted=0 skipped=0
+  local story_count=0 task_count=0 restored_stories=0 restored_tasks=0
   while IFS= read -r line; do
     case "$line" in
-      TOTAL\ *) total="${line#TOTAL }" ;;
-      CONVERTED\ *) converted="${line#CONVERTED }" ;;
-      SKIPPED\ *) skipped="${line#SKIPPED }" ;;
+      STORIES\ *) story_count="${line#STORIES }" ;;
+      TASKS\ *) task_count="${line#TASKS }" ;;
+      RESTORED_STORIES\ *) restored_stories="${line#RESTORED_STORIES }" ;;
+      RESTORED_TASKS\ *) restored_tasks="${line#RESTORED_TASKS }" ;;
     esac
-  done <<<"$stats"
+  done <<<"$db_stats"
 
-  info "Stories: ${total:-0} (converted: ${converted:-0}, skipped: ${skipped:-0})"
-  ok "Manifest updated → ${manifest}"
+  info "Stories: ${story_count:-0} (restored: ${restored_stories:-0})"
+  info "Tasks: ${task_count:-0} (restored statuses: ${restored_tasks:-0})"
+  ok "Tasks database updated → ${tasks_db}"
+
+  local legacy_manifest="${tasks_dir}/manifest.json"
+  local legacy_stories="${tasks_dir}/stories"
+  if [[ -f "$legacy_manifest" || -d "$legacy_stories" ]]; then
+    warn "Legacy task manifest/JSON artifacts detected under ${tasks_dir}; they are no longer used now that tasks live in SQLite. Remove them when convenient to avoid confusion."
+  fi
 }
 
 gc_write_task_prompt() {
-  local story_file="${1:?story json required}"
-  local task_index="${2:?task index required}"
-  local prompt_path="${3:?prompt path required}"
-  local context_tail="${4:-}"
-  local model_name="${5:-$CODEX_MODEL}"
-  local project_root="${6:-$PROJECT_ROOT}"
-  python3 - "$story_file" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" <<'PY'
+  local db_path="${1:?tasks db path required}"
+  local story_slug="${2:?story slug required}"
+  local task_index="${3:?task index required}"
+  local prompt_path="${4:?prompt path required}"
+  local context_tail="${5:-}"
+  local model_name="${6:-$CODEX_MODEL}"
+  local project_root="${7:-$PROJECT_ROOT}"
+  python3 - "$db_path" "$story_slug" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" <<'PY'
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
-story_path = Path(sys.argv[1])
-task_index = int(sys.argv[2])
-prompt_path = Path(sys.argv[3])
-context_tail_path = Path(sys.argv[4]) if sys.argv[4] else None
-model_name = sys.argv[5]
-project_root = sys.argv[6]
+DB_PATH, STORY_SLUG, TASK_INDEX, PROMPT_PATH, CONTEXT_TAIL_PATH, MODEL_NAME, PROJECT_ROOT = sys.argv[1:8]
+TASK_INDEX = int(TASK_INDEX)
 
-data = json.loads(story_path.read_text(encoding='utf-8'))
-story_meta = data.get('story', {})
-tasks = data.get('tasks', [])
-if task_index < 0 or task_index >= len(tasks):
+conn = sqlite3.connect(DB_PATH)
+conn.row_factory = sqlite3.Row
+cur = conn.cursor()
+
+story_row = cur.execute(
+    'SELECT story_id, story_title, epic_key, epic_title, sequence FROM stories WHERE story_slug = ?',
+    (STORY_SLUG,)
+).fetchone()
+if story_row is None:
+    raise SystemExit(f"Story slug not found: {STORY_SLUG}")
+
+task_rows = cur.execute(
+    'SELECT task_id, title, description, estimate, assignees_json, tags_json, acceptance_json, dependencies_json, '
+    'tags_text, story_points, dependencies_text, assignee_text, document_reference, idempotency, rate_limits, rbac, '
+    'messaging_workflows, performance_targets, observability, acceptance_text, endpoints, sample_create_request, '
+    'sample_create_response, user_story_ref_id, epic_ref_id '
+    'FROM tasks WHERE story_slug = ? ORDER BY position ASC',
+    (STORY_SLUG,)
+).fetchall()
+conn.close()
+
+if TASK_INDEX < 0 or TASK_INDEX >= len(task_rows):
     raise SystemExit(2)
 
-task = tasks[task_index]
+task = task_rows[TASK_INDEX]
+
+def parse_json_list(value):
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
+    except Exception:
+        pass
+    return []
 
 def clean(value: str) -> str:
     return (value or '').strip()
 
+assignees = parse_json_list(task['assignees_json'])
+tags = parse_json_list(task['tags_json'])
+acceptance = parse_json_list(task['acceptance_json'])
+dependencies = parse_json_list(task['dependencies_json'])
+
+description = clean(task['description'])
+if description:
+    description_lines = description.splitlines()
+else:
+    description_lines = []
+
+tags_text = clean(task['tags_text'])
+story_points = clean(task['story_points'])
+dependencies_text = clean(task['dependencies_text'])
+assignee_text = clean(task['assignee_text'])
+document_reference = clean(task['document_reference'])
+idempotency_text = clean(task['idempotency'])
+rate_limits = clean(task['rate_limits'])
+rbac_text = clean(task['rbac'])
+messaging_workflows = clean(task['messaging_workflows'])
+performance_targets = clean(task['performance_targets'])
+observability_text = clean(task['observability'])
+acceptance_text_extra = (task['acceptance_text'] or '').strip() if task['acceptance_text'] else ''
+endpoints_text = (task['endpoints'] or '').strip() if task['endpoints'] else ''
+sample_create_request = (task['sample_create_request'] or '').strip() if task['sample_create_request'] else ''
+sample_create_response = (task['sample_create_response'] or '').strip() if task['sample_create_response'] else ''
+user_story_ref_id = clean(task['user_story_ref_id'])
+epic_ref_id = clean(task['epic_ref_id'])
+
 lines = []
-lines.append(f"# You are Codex (model: {model_name})")
+lines.append(f"# You are Codex (model: {MODEL_NAME})")
 lines.append("")
-lines.append("You are assisting the Bhavani Yoga delivery team. Implement the task precisely using the repository at: " + (project_root or '.'))
+lines.append("You are assisting the Bhavani Yoga delivery team. Implement the task precisely using the repository at: " + (PROJECT_ROOT or '.'))
 lines.append("")
 lines.append("## Story")
-epic_id = clean(story_meta.get('epic_id', ''))
-epic_title = clean(story_meta.get('epic_title', ''))
+
+epic_id = clean(story_row['epic_key'])
+epic_title = clean(story_row['epic_title'])
 if epic_id or epic_title:
-    epic_line = "- Epic: " + " — ".join(part for part in [epic_id, epic_title] if part)
-    lines.append(epic_line)
-story_id = clean(story_meta.get('story_id', ''))
-story_title = clean(story_meta.get('story_title', ''))
-sequence = story_meta.get('sequence')
+    parts = [part for part in [epic_id, epic_title] if part]
+    lines.append("- Epic: " + " — ".join(parts))
+
+story_id = clean(story_row['story_id'])
+story_title = clean(story_row['story_title'])
 if story_id or story_title:
-    story_parts = [story_id, story_title]
-    lines.append("- Story: " + " — ".join(part for part in story_parts if part))
+    parts = [part for part in [story_id, story_title] if part]
+    lines.append("- Story: " + " — ".join(parts))
+sequence = story_row['sequence']
 if sequence:
     lines.append(f"- Story order: {sequence}")
 
 lines.append("")
 lines.append("## Task")
-task_id = clean(task.get('id', ''))
-task_title = clean(task.get('title', ''))
+task_id = clean(task['task_id'])
+task_title = clean(task['title'])
 if task_id:
     lines.append(f"- Task ID: {task_id}")
 if task_title:
     lines.append(f"- Title: {task_title}")
-estimate = clean(task.get('estimate', ''))
+estimate = clean(task['estimate'])
 if estimate:
     lines.append(f"- Estimate: {estimate}")
-assignees = [clean(a) for a in task.get('assignees', []) if clean(a)]
 if assignees:
     lines.append("- Assignees: " + ", ".join(assignees))
-tags = [clean(t) for t in task.get('tags', []) if clean(t)]
+elif assignee_text:
+    lines.append(f"- Assignee: {assignee_text}")
 if tags:
     lines.append("- Tags: " + ", ".join(tags))
+elif tags_text:
+    lines.append(f"- Tags: {tags_text}")
+if story_points and story_points != estimate:
+    lines.append(f"- Story points: {story_points}")
+elif story_points and not estimate:
+    lines.append(f"- Story points: {story_points}")
+if document_reference:
+    lines.append(f"- Document reference: {document_reference}")
+if idempotency_text:
+    lines.append(f"- Idempotency: {idempotency_text}")
+if rate_limits:
+    lines.append(f"- Rate limits: {rate_limits}")
+if rbac_text:
+    lines.append(f"- RBAC: {rbac_text}")
+if messaging_workflows:
+    lines.append(f"- Messaging & workflows: {messaging_workflows}")
+if performance_targets:
+    lines.append(f"- Performance targets: {performance_targets}")
+if observability_text:
+    lines.append(f"- Observability: {observability_text}")
+if user_story_ref_id and user_story_ref_id.lower() != story_id.lower():
+    lines.append(f"- User story reference ID: {user_story_ref_id}")
+if epic_ref_id and epic_ref_id.lower() != epic_id.lower():
+    lines.append(f"- Epic reference ID: {epic_ref_id}")
 
 lines.append("")
 lines.append("### Description")
-description = task.get('description') or ''
-description = description.strip()
-if description:
-    lines.extend(description.splitlines())
+if description_lines:
+    lines.extend(description_lines)
 else:
     lines.append("(No additional description provided.)")
 
-acceptance = [clean(item) for item in task.get('acceptance_criteria', []) if clean(item)]
 if acceptance:
     lines.append("")
     lines.append("### Acceptance Criteria")
     for item in acceptance:
         lines.append(f"- {item}")
+elif acceptance_text_extra:
+    lines.append("")
+    lines.append("### Acceptance Criteria")
+    lines.extend(acceptance_text_extra.splitlines())
 
-dependencies = [clean(item) for item in task.get('dependencies', []) if clean(item)]
 if dependencies:
     lines.append("")
     lines.append("### Dependencies")
     for dep in dependencies:
         lines.append(f"- {dep}")
+elif dependencies_text:
+    lines.append("")
+    lines.append("### Dependencies")
+    lines.extend(dependencies_text.splitlines())
+
+if endpoints_text:
+    lines.append("")
+    lines.append("### Endpoints")
+    lines.extend(endpoints_text.splitlines())
+
+if sample_create_request:
+    lines.append("")
+    lines.append("### Sample Create Request")
+    lines.extend(sample_create_request.splitlines())
+
+if sample_create_response:
+    lines.append("")
+    lines.append("### Sample Create Response")
+    lines.extend(sample_create_response.splitlines())
 
 lines.append("")
 lines.append("## Instructions")
@@ -2467,23 +2893,25 @@ lines.append("  ],")
 lines.append("  \"commands\": [\"optional shell commands to run (e.g., pnpm install)\"],")
 lines.append("  \"notes\": [\"follow-up items or blockers\"]")
 lines.append("}")
-lines.append("- Use UTF-8, escape newlines as \n inside JSON strings.")
+lines.append("- Use UTF-8, escape newlines as \\n inside JSON strings.")
 lines.append("- Diff entries must be valid unified diffs (git apply compatible) against the current workspace.")
 lines.append("- File entries provide the complete desired file content (for new or fully rewritten files).")
 lines.append("- Do not emit markdown fences, commentary, or additional text outside the JSON object.")
 
-if context_tail_path and context_tail_path.exists():
-    tail_text = context_tail_path.read_text(encoding='utf-8').splitlines()
-    lines.append("")
-    lines.append("## Shared Context (truncated)")
-    lines.append("")
-    lines.extend(tail_text)
+if CONTEXT_TAIL_PATH:
+    context_path = Path(CONTEXT_TAIL_PATH)
+    if context_path.exists():
+        tail_text = context_path.read_text(encoding='utf-8').splitlines()
+        lines.append("")
+        lines.append("## Shared Context (truncated)")
+        lines.append("")
+        lines.extend(tail_text)
 
+prompt_path = Path(PROMPT_PATH)
 prompt_path.parent.mkdir(parents=True, exist_ok=True)
 prompt_path.write_text("\n".join(lines) + "\n", encoding='utf-8')
 
-title_preview = task_title.replace('\t', ' ').replace('\n', ' ')
-print(f"{task_id}\t{title_preview}")
+print(f"{task_id}\t{task_title}")
 PY
 }
 
@@ -2504,7 +2932,7 @@ cmd_work_on_tasks() {
         cat <<'EOHELP'
 Usage: gpt-creator work-on-tasks [options]
 
-Execute previously converted story JSON tasks using Codex, with resumable progress.
+Execute tasks from the project SQLite backlog using Codex, with resumable progress.
 
 Options:
   --project PATH       Project root (defaults to current directory)
@@ -2536,16 +2964,13 @@ EOHELP
 
   ensure_ctx "$root"
   local tasks_dir="${PLAN_DIR}/tasks"
-  local stories_dir="${tasks_dir}/stories"
-  local manifest="${tasks_dir}/manifest.json"
-  [[ -f "$manifest" ]] || die "Task manifest not found. Run 'gpt-creator create-tasks' first."
-  [[ -d "$stories_dir" ]] || die "Stories directory missing at ${stories_dir}"
+  local tasks_db="${tasks_dir}/tasks.db"
+  [[ -f "$tasks_db" ]] || die "Task database not found. Run 'gpt-creator create-tasks' first."
 
   ensure_node_dependencies "$PROJECT_ROOT"
 
   local state_dir="${PLAN_DIR}/work"
   local runs_dir="${state_dir}/runs"
-  local state_file="${state_dir}/state.json"
   mkdir -p "$runs_dir"
 
   local run_stamp="$(date +%Y%m%d_%H%M%S)"
@@ -2570,8 +2995,8 @@ EOHELP
   local any_changes=0
   local manual_followups=0
 
-  while IFS=$'\t' read -r sequence rel_path slug story_id story_title epic_id epic_title total_tasks next_task completed status; do
-    if [[ -z "${sequence}${rel_path}${slug}${story_id}${story_title}${epic_id}${epic_title}" ]]; then
+  while IFS=$'\t' read -r sequence slug story_id story_title epic_id epic_title total_tasks next_task completed status; do
+    if [[ -z "${sequence}${slug}${story_id}${story_title}${epic_id}${epic_title}" ]]; then
       continue
     fi
 
@@ -2582,14 +3007,6 @@ EOHELP
     local next_task_int=0
     [[ -n "$next_task" ]] && next_task_int=$((next_task))
 
-    local rel_clean="${rel_path#stories/}"
-    local story_file="${stories_dir}/${rel_clean}"
-    if [[ ! -f "$story_file" ]]; then
-      warn "Story JSON missing: ${story_file}"
-      work_failed=1
-      continue
-    fi
-
     printf -v story_prefix "%03d" "${sequence:-0}"
     [[ -n "$slug" ]] || slug="story-${story_prefix}"
     local story_run_dir="${run_dir}/story_${story_prefix}_${slug}"
@@ -2599,7 +3016,7 @@ EOHELP
 
     if (( total_tasks_int == 0 )); then
       info "  No tasks for this story; marking complete."
-      gc_update_work_state "$state_file" "$slug" "complete" 0 0 "$run_stamp"
+      gc_update_work_state "$tasks_db" "$slug" "complete" 0 0 "$run_stamp"
       if (( keep_artifacts == 0 )); then
         rmdir "${story_run_dir}/prompts" 2>/dev/null || true
         rmdir "${story_run_dir}/out" 2>/dev/null || true
@@ -2607,7 +3024,7 @@ EOHELP
       continue
     fi
 
-    gc_update_work_state "$state_file" "$slug" "in-progress" "$next_task_int" "$total_tasks_int" "$run_stamp"
+    gc_update_work_state "$tasks_db" "$slug" "in-progress" "$next_task_int" "$total_tasks_int" "$run_stamp"
 
     local task_index
     local story_failed=0
@@ -2622,7 +3039,7 @@ EOHELP
       local output_path="${story_run_dir}/out/task_${task_number}.out.md"
 
       local prompt_meta
-      if ! prompt_meta="$(gc_write_task_prompt "$story_file" "$task_index" "$prompt_path" "$context_tail" "$CODEX_MODEL" "$PROJECT_ROOT")"; then
+      if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$task_index" "$prompt_path" "$context_tail" "$CODEX_MODEL" "$PROJECT_ROOT")"; then
         warn "  Failed to build prompt for task index ${task_index}"
         work_failed=1
         break
@@ -2641,6 +3058,7 @@ EOHELP
       local parse_error_final=0
       local break_after_update=0
       local updated_state_for_task=0
+      gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
       while (( attempt < max_attempts )); do
         (( ++attempt ))
         if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
@@ -2648,7 +3066,7 @@ EOHELP
             warn "  Codex produced no output for ${call_name}; manual review required."
             manual_followups=1
             keep_output=1
-            gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+            gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
             updated_state_for_task=1
             codex_ok=1
             break
@@ -2658,7 +3076,7 @@ EOHELP
             warn "  Failed to apply changes for ${call_name}; manual review required (see ${output_path})."
             manual_followups=1
             keep_output=1
-            gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+            gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
             updated_state_for_task=1
             codex_ok=1
             break
@@ -2667,7 +3085,7 @@ EOHELP
             warn "  Codex produced no actionable JSON for ${call_name}; manual review required."
             manual_followups=1
             keep_output=1
-            gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+            gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
             updated_state_for_task=1
             codex_ok=1
             break
@@ -2702,7 +3120,7 @@ REM
               warn "  Codex output was invalid JSON after retry; manual review required (see ${output_path})."
               manual_followups=1
               keep_output=1
-              gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+              gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
               updated_state_for_task=1
               codex_ok=1
               parse_error_final=1
@@ -2711,7 +3129,7 @@ REM
           fi
 
           if (( updated_state_for_task == 0 )); then
-            gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+            gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
             updated_state_for_task=1
           fi
           if (( keep_output == 0 )); then
@@ -2722,7 +3140,7 @@ REM
           warn "  Codex execution failed for ${call_name}; progress saved."
           manual_followups=1
           keep_output=1
-          gc_update_work_state "$state_file" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
+          gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
           updated_state_for_task=1
           codex_ok=1
           break
@@ -2731,10 +3149,12 @@ REM
       done
 
       if (( codex_ok == 0 )); then
+        gc_update_task_state "$tasks_db" "$slug" "$task_index" "blocked" "$run_stamp"
         story_failed=1
         break
       fi
 
+      gc_update_task_state "$tasks_db" "$slug" "$task_index" "complete" "$run_stamp"
       (( ++processed_total ))
 
       if (( break_after_update )); then
@@ -2756,90 +3176,95 @@ REM
       break
     fi
 
-    gc_update_work_state "$state_file" "$slug" "complete" "$total_tasks_int" "$total_tasks_int" "$run_stamp"
+    gc_update_work_state "$tasks_db" "$slug" "complete" "$total_tasks_int" "$total_tasks_int" "$run_stamp"
     if (( keep_artifacts == 0 )); then
       rmdir "${story_run_dir}/prompts" 2>/dev/null || true
       rmdir "${story_run_dir}/out" 2>/dev/null || true
     fi
   done < <(
-    python3 - "$manifest" "$state_file" "${story_filter}" "$resume_flag" <<'PY'
-import json
+    python3 - "$tasks_db" "${story_filter}" "$resume_flag" <<'PY'
+import sqlite3
 import sys
-from pathlib import Path
 
-manifest_path = Path(sys.argv[1])
-state_path = Path(sys.argv[2])
-story_filter = (sys.argv[3] or '').strip().lower()
-resume_flag = sys.argv[4] == '1'
+DB_PATH = sys.argv[1]
+story_filter = (sys.argv[2] or '').strip().lower()
+resume_flag = sys.argv[3] == "1"
 
-manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
-stories = manifest.get('stories', []) or []
+conn = sqlite3.connect(DB_PATH)
+conn.row_factory = sqlite3.Row
+cur = conn.cursor()
 
-state = {}
-if resume_flag and state_path.exists():
-    try:
-        state = json.loads(state_path.read_text(encoding='utf-8'))
-    except Exception:
-        state = {}
+stories = cur.execute('SELECT story_slug, story_id, story_title, epic_key, epic_title, sequence, status FROM stories ORDER BY sequence ASC, story_slug ASC').fetchall()
 
-stories_state = state.get('stories', {})
-
-def norm(value: str) -> str:
-    return (value or '').strip().lower()
+def norm(value):
+    return (value or "").strip().lower()
 
 start_allowed = not story_filter
 
-for entry in stories:
-    seq = entry.get('sequence') or entry.get('index') or 0
-    slug = entry.get('slug') or ''
-    story_id = entry.get('story_id') or ''
-    epic_id = entry.get('epic_id') or ''
-    epic_title = entry.get('epic_title') or ''
-    story_title = entry.get('story_title') or ''
-    total = int(entry.get('task_count') or 0)
+for story in stories:
+    slug = story["story_slug"] or ""
+    sequence = story["sequence"] or 0
+    story_id = (story["story_id"] or "").strip()
+    epic_key = (story["epic_key"] or "").strip()
+    epic_title = (story["epic_title"] or "").strip()
+    story_title = (story["story_title"] or "").strip()
+
+    story_title_clean = story_title.replace('\t', ' ').replace('\n', ' ')
+    epic_title_clean = epic_title.replace('\t', ' ').replace('\n', ' ')
+    epic_key_clean = epic_key.replace('\t', ' ').replace('\n', ' ')
+    story_id_clean = story_id.replace('\t', ' ').replace('\n', ' ')
 
     if story_filter and not start_allowed:
-        keys = {norm(story_id), norm(slug), norm(epic_id), norm(str(seq))}
+        keys = {norm(story_id), norm(slug), norm(epic_key), norm(str(sequence))}
         if story_filter in keys:
             start_allowed = True
         else:
             continue
 
-    state_entry = stories_state.get(slug) or {}
-    completed = int(state_entry.get('completed_tasks') or 0)
-    status = state_entry.get('status') or ''
+    task_rows = cur.execute('SELECT position, status FROM tasks WHERE story_slug = ? ORDER BY position ASC', (slug,)).fetchall()
+    total = len(task_rows)
+    completed = 0
+    next_index = 0
+    for row in task_rows:
+        status = (row["status"] or "").strip().lower()
+        if status == "complete":
+            completed += 1
+            continue
+        next_index = row["position"] or 0
+        break
+    else:
+        next_index = total
 
-    if resume_flag and not story_filter and status == 'complete':
+    current_status = (story["status"] or "").strip()
+
+    if resume_flag and not story_filter and current_status.lower() == "complete":
         continue
 
     if resume_flag:
         if total == 0:
-            next_task = 0
+            next_index = 0
         elif completed >= total:
-            next_task = 0 if story_filter else None
-        else:
-            next_task = max(completed, 0)
-        if next_task is None:
-            continue
+            if story_filter:
+                next_index = total
+            else:
+                continue
     else:
-        next_task = 0
+        next_index = 0 if total > 0 else 0
 
-    story_title_clean = story_title.replace('\t', ' ').replace('\n', ' ').strip()
-    epic_title_clean = epic_title.replace('\t', ' ').replace('\n', ' ').strip()
-
-    print('\t'.join([
-        str(seq or 0),
-        entry.get('path') or '',
+    print("	".join([
+        str(sequence),
         slug,
-        story_id,
+        story_id_clean,
         story_title_clean,
-        epic_id,
+        epic_key_clean,
         epic_title_clean,
         str(total),
-        str(next_task),
+        str(next_index),
         str(completed),
-        status
+        current_status,
     ]))
+
+conn.close()
 PY
   )
 
@@ -2850,7 +3275,7 @@ PY
 
   local pending_tasks=0
   if (( memory_cycle )); then
-    pending_tasks="$(gc_count_pending_tasks "$manifest" "$state_file" || echo 0)"
+    pending_tasks="$(gc_count_pending_tasks "$tasks_db" || echo 0)"
     [[ "$pending_tasks" =~ ^[0-9]+$ ]] || pending_tasks=0
 
     if (( work_failed == 0 )); then
@@ -2889,7 +3314,7 @@ PY
 
   local remaining_tasks=0
   if (( work_failed == 0 )); then
-    remaining_tasks="$(gc_count_pending_tasks "$manifest" "$state_file" || echo 0)"
+    remaining_tasks="$(gc_count_pending_tasks "$tasks_db" || echo 0)"
     [[ "$remaining_tasks" =~ ^[0-9]+$ ]] || remaining_tasks=0
   fi
 

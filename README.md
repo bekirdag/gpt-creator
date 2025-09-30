@@ -14,7 +14,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Planning outputs**: Produces route/entity summaries and task hints under `.gpt-creator/staging/plan/` as scaffolding for further design work.
 - **Template-driven generation**: Renders baseline NestJS, Vue 3, Prisma, and Docker scaffolds into `/apps/**` and `/docker`, ready for manual extension or Codex-driven augmentation.
 - **Verification toolkit**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks that you can run on demand.
-- **Iteration helpers**: `create-tasks` turns Jira markdown into per-story JSON (with manifest + resumable progress) and `work-on-tasks` executes story chunks via Codex. The legacy `iterate` command is deprecated.
+- **Iteration helpers**: `create-tasks` converts Jira markdown into a SQLite backlog (preserving task metadata + status), and `work-on-tasks` executes/resumes tasks directly from that database. The legacy `iterate` command is deprecated.
 
 ---
 
@@ -81,8 +81,8 @@ Keep the repo on your `PATH`, or invoke `./bin/gpt-creator` directly.
    gpt-creator create-tasks --project /path/to/project --jira docs/jira.md
    gpt-creator work-on-tasks --project /path/to/project
    ```
-   - `create-tasks` snapshots the Jira markdown into per-story JSON under `.gpt-creator/staging/plan/tasks/`.
-   - `work-on-tasks` walks those stories with Codex, resuming from prior runs as needed.
+  - `create-tasks` snapshots the Jira markdown into `.gpt-creator/staging/plan/tasks/tasks.db` (SQLite backlog with epics/stories/tasks).
+  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically.
    - The legacy `iterate` command is deprecated.
 
 ---
@@ -159,18 +159,19 @@ Scripts exit with `0` on success, `3` when a dependency is missing, or non-zero 
 ```
 gpt-creator create-tasks --project /path/to/project --jira docs/jira.md
 ```
-- Parses Jira markdown once and writes per-story JSON files under `.gpt-creator/staging/plan/tasks/stories/`.
-- Produces a manifest (`manifest.json`) capturing story order, hashes, and relative paths. Existing story files are skipped unless the content hash changes (or `--force` is supplied).
-- Progress is durable: if conversion is interrupted, rerunning the command resumes from the manifest and only rebuilds changed stories.
+- Builds (or refreshes) a project-scoped SQLite database at `.gpt-creator/staging/plan/tasks/tasks.db` with `epics`, `stories`, and `tasks` tables.
+- Preserves story slugs, task ordering, and prior status data unless `--force` is supplied (which regenerates the DB without reusing saved progress).
+- All task attributes (description, assignees, tags, acceptance criteria, dependencies, estimates) are persisted as columns within the `tasks` table for downstream tooling.
+- Captures additional delivery metadata per task (story points, document links, idempotency notes, rate limits, RBAC, messaging/workflows, performance targets, observability, endpoints, sample payloads, and story/epic reference IDs) to support richer automation.
 
 ### 9. Work on Tasks (resumable Codex loop)
 ```
 export PNPM_HOME="$HOME/.local/share/pnpm"  # keep pnpm toolchain outside the workspace
 gpt-creator work-on-tasks --project /path/to/project
 ```
-- Reads the manifest from `create-tasks` and generates Codex prompts per story/task, storing run artifacts in `.gpt-creator/staging/plan/work/runs/<timestamp>/`.
+- Reads pending work directly from the SQLite tasks database and generates Codex prompts per story/task, storing run artifacts in `.gpt-creator/staging/plan/work/runs/<timestamp>/`.
 - Expects Codex responses in JSON (plan + `changes` array); diffs and file payloads are applied automatically via `git apply`/direct writes before moving to the next task.
-- Saves progress to `.gpt-creator/staging/plan/work/state.json`; on restart it resumes at the first incomplete story unless `--fresh` is provided.
+- Saves progress back into the SQLite database (task status + story-level counters); on restart it resumes at the first incomplete story unless `--fresh` is provided.
 - Use `--story ST-123` (or slug) to jump to a specific story and `--no-verify` to skip the automatic `verify all` invocation after a successful run.
 - Cleans prompt/output artifacts after each successful task to keep memory usage low; pass `--keep-artifacts` if you need to retain the raw Codex exchange for auditing.
 - Control resource usage with batching/pacing flags: `--batch-size 10` pauses after 10 tasks (resume with the same command) and `--sleep-between 2` inserts a short delay between tasks.

@@ -87,13 +87,13 @@ Docker Compose wrappers: \fBup\fR, \fBdown\fR, \fBlogs\fR, \fBopen\fR.
 Acceptance & NFR checks: routes render, filters work, Lighthouse, AA basics.
 .TP
 .B create-tasks
-Convert Jira markdown into per-story JSON files under \fI.gpt-creator/staging/plan/tasks/\fR, producing a manifest that supports resumable processing.
+Convert Jira markdown into a project-scoped SQLite backlog at \fI.gpt-creator/staging/plan/tasks/tasks.db\fR, persisting epics, stories, and task metadata (including prior progress) for resumable automation.
 .TP
 .B task-convert
 Deprecated alias of \fBcreate-tasks\fR retained for backwards compatibility.
 .TP
 .B work-on-tasks
-Drive Codex over the converted story JSONs, apply returned JSON diff/file instructions automatically, and record progress in \fI.gpt-creator/staging/plan/work/state.json\fR.
+Drive Codex over tasks sourced from the SQLite backlog, apply returned JSON diff/file instructions automatically, and persist task/story status back into the database for precise resume support.
 Artifacts (prompt/output pairs) are removed after each successful task to limit memory use unless \fB--keep-artifacts\fR is supplied.
 Use \fB--batch-size\fR to pause after a fixed number of tasks and \fB--sleep-between\fR to insert delays between Codex runs when conserving resources.
 \fB--memory-cycle\fR processes one task per invocation, performs a best-effort memory trim (including Docker cache pruning), and automatically restarts the command so long backlogs stay within bounded RAM.

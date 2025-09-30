@@ -101,8 +101,9 @@ Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
 - Gating thresholds (see §8 and §9).
 
 **FR‑7 Jira backlog execution**  
-- `create-tasks` parses Jira markdown into per-story JSON snapshots + manifest.
-- `work-on-tasks` drives Codex over those stories, applies returned patches, resumes progress, and optionally re-verifies.
+- `create-tasks` parses Jira markdown into a SQLite backlog (epics/stories/tasks) stored under `/staging/plan/tasks/tasks.db`, preserving prior slugs and statuses unless forced.
+- Task rows include enriched columns (tags, story points, dependencies, assignee, document references, idempotency, rate limits, RBAC, messaging/workflows, performance targets, observability, endpoints, sample payloads, story/epic refs) for downstream automation.
+- `work-on-tasks` drives Codex over that backlog, applies returned patches, persists progress directly in the database, and optionally re-verifies.
 - `work-on-tasks` accepts batching/pacing flags (`--batch-size`, `--sleep-between`) to manage long-running Codex sessions.
 - Dependencies for Node workspaces are installed automatically (preferring pnpm) before processing tasks; failures are surfaced but do not halt execution.
 - Legacy `iterate` remains for backward compatibility, emitting a warning that points users to the new flow.

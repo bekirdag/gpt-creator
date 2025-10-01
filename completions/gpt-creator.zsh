@@ -11,6 +11,7 @@ _gpt_creator() {
     'generate:Generate code (api|web|admin|db|docker|all)'
     'db:DB ops (provision|import|seed)'
     'run:Run via docker compose'
+    'refresh-stack:Tear down, rebuild, and seed the Docker stack'
     'verify:Acceptance/NFR checks'
     'create-tasks:Convert Jira tasks into a SQLite backlog'
     'work-on-tasks:Execute tasks from the SQLite backlog with Codex'
@@ -65,6 +66,14 @@ _gpt_creator() {
     iterate)
       _arguments \
         '--jira=[Jira tasks file]:file:_files'
+      ;;
+    refresh-stack)
+      _arguments \
+        '--compose=[docker-compose file to use]:file:_files' \
+        '--sql=[SQL dump to import]:file:_files' \
+        '--seed=[Seed SQL file]:file:_files' \
+        '--no-import[Skip database import]' \
+        '--no-seed[Skip seeding]'
       ;;
     create-project)
       _arguments \

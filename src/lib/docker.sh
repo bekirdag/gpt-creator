@@ -9,7 +9,20 @@ GC_LIB_DOCKER_SH=1
 docker_compose() {
   local compose_file="${1:-docker-compose.yml}"
   shift || true
-  docker-compose -f "$compose_file" "$@"
+  local slug="${GC_DOCKER_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-}}"
+  if [[ -z "$slug" ]]; then
+    local root="${GC_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+    slug="${root##*/}"
+    slug="${slug,,}"
+    slug="$(printf '%s' "$slug" | tr -cs 'a-z0-9' '-')"
+    slug="$(printf '%s' "$slug" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+    [[ -n "$slug" ]] || slug="gptcreator"
+  fi
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    COMPOSE_PROJECT_NAME="$slug" docker compose -f "$compose_file" "$@"
+  else
+    docker-compose -p "$slug" -f "$compose_file" "$@"
+  fi
 }
 
 # Pull a Docker image

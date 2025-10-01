@@ -143,6 +143,14 @@ to_lower() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+slugify_name() {
+  local s="${1:-}"
+  s="${s,,}"
+  s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+  s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+  printf '%s\n' "${s:-gptcreator}"
+}
+
 # Context directories inside project
 ensure_ctx() {
   local root="${1:-}"
@@ -157,6 +165,12 @@ ensure_ctx() {
   mkdir -p "$GC_DIR" "$STAGING_DIR" "$INPUT_DIR" "$PLAN_DIR" "$LOG_DIR" "$ART_DIR"
   gc_create_env_if_missing
   gc_load_env
+  local base_name
+  base_name="$(basename "$PROJECT_ROOT")"
+  PROJECT_SLUG="$(slugify_name "${GC_DOCKER_PROJECT_NAME:-$base_name}")"
+  GC_DOCKER_PROJECT_NAME="${GC_DOCKER_PROJECT_NAME:-$PROJECT_SLUG}"
+  COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$GC_DOCKER_PROJECT_NAME}"
+  export GC_DOCKER_PROJECT_NAME COMPOSE_PROJECT_NAME PROJECT_SLUG
 }
 
 gc_parse_jira_tasks() {
@@ -955,10 +969,15 @@ PY
 
 # docker compose helper (prefers "docker compose" then docker-compose)
 docker_compose() {
+  local project_name="${GC_DOCKER_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-}}"
+  if [[ -z "$project_name" ]]; then
+    local base="$(basename "${PROJECT_ROOT:-$PWD}")"
+    project_name="$(slugify_name "$base")"
+  fi
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    docker compose "$@"
+    COMPOSE_PROJECT_NAME="$project_name" docker compose "$@"
   elif command -v docker-compose >/dev/null 2>&1; then
-    docker-compose "$@"
+    docker-compose -p "$project_name" "$@"
   else
     die "docker compose is not available. Install Docker Desktop or docker-compose."
   fi
@@ -1010,17 +1029,20 @@ render_template_file() {
   local db_pass="${GC_DB_PASSWORD:-${DB_PASSWORD:-app_pass}}"
   local db_host_port="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-3306}}"
   local db_root_pass="${GC_DB_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-root}}"
-  python3 - <<'PY' "$src" "$dest" "$db_name" "$db_user" "$db_pass" "$db_host_port" "$db_root_pass"
+  local project_slug="${GC_DOCKER_PROJECT_NAME:-${PROJECT_SLUG:-$(slugify_name "$(basename "${PROJECT_ROOT:-$PWD}")")}}"
+  python3 - <<'PY' "$src" "$dest" "$db_name" "$db_user" "$db_pass" "$db_host_port" "$db_root_pass" "$project_slug"
 import pathlib, sys
 args = sys.argv[1:]
 src, dest, db_name, db_user, db_pass, db_host_port = args[:6]
 db_root_pass = args[6] if len(args) > 6 else ''
+project_slug = args[7] if len(args) > 7 else 'gptcreator'
 text = pathlib.Path(src).read_text()
 text = text.replace('{{DB_NAME}}', db_name)
 text = text.replace('{{DB_USER}}', db_user)
 text = text.replace('{{DB_PASSWORD}}', db_pass)
 text = text.replace('{{DB_HOST_PORT}}', db_host_port)
 text = text.replace('{{DB_ROOT_PASSWORD}}', db_root_pass)
+ text = text.replace('{{PROJECT_SLUG}}', project_slug)
 pathlib.Path(dest).write_text(text)
 PY
 }
@@ -2003,6 +2025,125 @@ cmd_run() {
       ;;
     *) die "Unknown run action: ${action}";;
   esac
+}
+
+cmd_refresh_stack() {
+  local root="" compose_override="" sql_override="" seed_override=""
+  local skip_import=0 skip_seed=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) root="$(abs_path "$2")"; shift 2;;
+      --compose) compose_override="$(abs_path "$2")"; shift 2;;
+      --sql) sql_override="$(abs_path "$2")"; shift 2;;
+      --seed) seed_override="$(abs_path "$2")"; shift 2;;
+      --no-import) skip_import=1; shift;;
+      --no-seed) skip_seed=1; shift;;
+      -h|--help)
+        cat <<'EOHELP'
+Usage: gpt-creator refresh-stack [options]
+
+Tear down, rebuild, and prime the local Docker stack (schema + seeds).
+
+Options:
+  --project PATH   Project root (defaults to current directory)
+  --compose FILE   Override docker-compose file
+  --sql FILE       Explicit SQL dump to import (auto-discovered if omitted)
+  --seed FILE      Seed SQL file to apply after import
+  --no-import      Skip schema import step
+  --no-seed        Skip seeding step
+  -h, --help       Show this help
+EOHELP
+        return 0
+        ;;
+      *) break;;
+    esac
+  done
+
+  ensure_ctx "$root"
+
+  local compose_file="$compose_override"
+  if [[ -z "$compose_file" ]]; then
+    if [[ -f "${PROJECT_ROOT}/docker/compose.yaml" ]]; then
+      compose_file="${PROJECT_ROOT}/docker/compose.yaml"
+    elif [[ -f "${PROJECT_ROOT}/docker-compose.yml" ]]; then
+      compose_file="${PROJECT_ROOT}/docker-compose.yml"
+    else
+      die "Compose file not found. Expected docker/compose.yaml or docker-compose.yml"
+    fi
+  fi
+
+  info "Refreshing Docker stack for ${GC_DOCKER_PROJECT_NAME}"
+
+  info "Stopping existing containers (removing volumes)"
+  docker_compose -f "$compose_file" down -v --remove-orphans || true
+
+  info "Building and starting containers"
+  "$CLI_ROOT/src/cli/run-compose-up.sh" --compose "$compose_file"
+
+  local import_rc=0 seed_rc=0
+
+  if (( skip_import == 0 )); then
+    info "Importing database structure"
+    if [[ -n "$sql_override" ]]; then
+      if [[ ! -f "$sql_override" ]]; then
+        warn "Specified SQL dump not found: ${sql_override}"
+        import_rc=1
+      else
+        if ! "$CLI_ROOT/src/cli/db-import.sh" --compose "$compose_file" --file "$sql_override" -y; then
+          warn "Database import failed"
+          import_rc=1
+        fi
+      fi
+    else
+      if ! "$CLI_ROOT/src/cli/db-import.sh" --compose "$compose_file" -y; then
+        warn "Database import failed (auto-discovery)"
+        import_rc=1
+      fi
+    fi
+  else
+    info "Skipping schema import (--no-import)"
+  fi
+
+  if (( skip_seed == 0 )); then
+    info "Applying database seeds"
+    if [[ -n "$seed_override" ]]; then
+      if [[ ! -f "$seed_override" ]]; then
+        warn "Seed file not found: ${seed_override}"
+        seed_rc=1
+      else
+        if ! "$CLI_ROOT/src/cli/db-seed.sh" --compose "$compose_file" --from "$seed_override"; then
+          warn "Database seeding failed"
+          seed_rc=1
+        fi
+      fi
+    else
+      if ! "$CLI_ROOT/src/cli/db-seed.sh" --compose "$compose_file"; then
+        warn "Database seeding failed"
+        seed_rc=1
+      fi
+    fi
+  else
+    info "Skipping seeding (--no-seed)"
+  fi
+
+  local status=0
+  if (( import_rc != 0 )); then
+    status=1
+  elif (( skip_import == 0 )); then
+    ok "Database schema imported"
+  fi
+  if (( seed_rc != 0 )); then
+    status=1
+  elif (( skip_seed == 0 )); then
+    ok "Database seeds applied"
+  fi
+
+  if (( status == 0 )); then
+    ok "Stack refreshed successfully"
+  else
+    warn "Stack refresh completed with issues; inspect logs above."
+  fi
+  return $status
 }
 
 cmd_verify() {
@@ -3599,6 +3740,7 @@ Usage:
   ${APP_NAME} generate <api|web|admin|db|docker|all> [--project <path>]
   ${APP_NAME} db <provision|import|seed> [--project <path>]
   ${APP_NAME} run <up|down|logs|open> [--project <path>]
+  ${APP_NAME} refresh-stack [options]
   ${APP_NAME} verify <acceptance|nfr|all> [--project <path>] [--api-url API_BASE] [--api-health URL] [--web-url URL] [--admin-url URL]
   ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
   ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]
@@ -3623,6 +3765,7 @@ main() {
     generate)       cmd_generate "$@" ;;
     db)             cmd_db "$@" ;;
     run)            cmd_run "$@" ;;
+    refresh-stack)  cmd_refresh_stack "$@" ;;
     verify)         cmd_verify "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;

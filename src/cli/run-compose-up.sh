@@ -13,6 +13,17 @@ type log >/dev/null 2>&1 || log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"
 type warn >/dev/null 2>&1 || warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
 type die >/dev/null 2>&1 || die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
 type heading >/dev/null 2>&1 || heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
+
+slugify() {
+  local s="${1:-}"
+  s="${s,,}"
+  s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+  s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+  printf '%s\n' "${s:-gptcreator}"
+}
+
+PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_SLUG}"
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--compose <file>] [--open]
@@ -42,10 +53,10 @@ if [[ -z "${COMPOSE_FILE}" ]]; then
 fi
 
 heading "Starting Docker stack"
-docker compose -f "$COMPOSE_FILE" up -d --build
+COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" up -d --build
 
 # Wait for DB readiness (best-effort)
-DB_ID="$(docker compose -f "$COMPOSE_FILE" ps -q db || true)"
+DB_ID="$(COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps -q db || true)"
 if [[ -n "$DB_ID" ]]; then
   log "Waiting for MySQL to be ready…"
   for i in {1..60}; do
@@ -58,7 +69,7 @@ if [[ -n "$DB_ID" ]]; then
 fi
 
 # Show status
-docker compose -f "$COMPOSE_FILE" ps
+COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps
 
 if [[ "$OPEN_AFTER" == "true" ]]; then
   URL="${APP_WEB_URL:-http://localhost:5173}"

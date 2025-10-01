@@ -24,6 +24,23 @@ curl_ok() {
 PROJECT_ROOT_ENV="${PROJECT_ROOT:-}"
 COMPOSE_FILE_HINT="${GC_COMPOSE_FILE:-}"
 
+slugify() {
+  local s="${1:-}"
+  s="${s,,}"
+  s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+  s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+  printf '%s\n' "${s:-gptcreator}"
+}
+
+PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-}}"
+if [[ -z "$PROJECT_SLUG" ]]; then
+  if [[ -n "$PROJECT_ROOT_ENV" ]]; then
+    PROJECT_SLUG="$(slugify "$(basename "$PROJECT_ROOT_ENV")")"
+  else
+    PROJECT_SLUG="$(slugify "$(basename "$ROOT_DIR")")"
+  fi
+fi
+
 if [[ -z "$COMPOSE_FILE_HINT" && -n "$PROJECT_ROOT_ENV" ]]; then
   COMPOSE_FILE_HINT="${PROJECT_ROOT_ENV}/docker/docker-compose.yml"
 fi
@@ -31,17 +48,17 @@ fi
 info "Checking Docker services (if docker compose is available)…"
 if [[ -n "$COMPOSE_FILE_HINT" && -f "$COMPOSE_FILE_HINT" ]]; then
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    docker compose -f "$COMPOSE_FILE_HINT" ps || true
+    COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE_HINT" ps || true
   elif command -v docker-compose >/dev/null 2>&1; then
-    docker-compose -f "$COMPOSE_FILE_HINT" ps || true
+    docker-compose -p "$PROJECT_SLUG" -f "$COMPOSE_FILE_HINT" ps || true
   else
     info "Docker compose CLI not available (skipping)"
   fi
 else
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    docker compose ps || true
+    COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose ps || true
   elif command -v docker-compose >/dev/null 2>&1; then
-    docker-compose ps || true
+    docker-compose -p "$PROJECT_SLUG" ps || true
   else
     info "docker-compose not found (skipping)"
   fi

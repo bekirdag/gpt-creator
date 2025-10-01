@@ -13,6 +13,17 @@ type log >/dev/null 2>&1 || log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"
 type warn >/dev/null 2>&1 || warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
 type die >/dev/null 2>&1 || die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
 type heading >/dev/null 2>&1 || heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
+
+slugify() {
+  local s="${1:-}"
+  s="${s,,}"
+  s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+  s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+  printf '%s\n' "${s:-gptcreator}"
+}
+
+PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_SLUG}"
 usage() {
   cat <<EOF
 Usage: gpt-creator run <command> [options]
@@ -47,11 +58,11 @@ case "$CMD" in
   logs)
     SVC="${1:-api}"; shift || true
     [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
-    exec docker compose -f "$COMPOSE_FILE" logs -f --tail=200 "$SVC"
+    exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" logs -f --tail=200 "$SVC"
     ;;
   ps)
     [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
-    exec docker compose -f "$COMPOSE_FILE" ps
+    exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps
     ;;
   open)
     TARGET="${1:-web}"
@@ -67,11 +78,11 @@ case "$CMD" in
     ;;
   stop)
     [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
-    exec docker compose -f "$COMPOSE_FILE" stop
+    exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" stop
     ;;
   down)
     [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
-    exec docker compose -f "$COMPOSE_FILE" down
+    exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" down
     ;;
   -h|--help)
     usage;;

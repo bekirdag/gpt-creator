@@ -9,7 +9,7 @@ _gpt_creator()
     prev="${COMP_WORDS[COMP_CWORD-1]}"
   }
 
-  local subcmds="create-project scan normalize plan generate db run verify create-tasks work-on-tasks iterate help version"
+  local subcmds="create-project scan normalize plan generate db run refresh-stack verify create-tasks work-on-tasks iterate help version"
   local global_opts="--project -h --help -v --version"
 
   # find the subcommand (first non-option token)
@@ -29,7 +29,7 @@ _gpt_creator()
       # complete directories
       COMPREPLY=( $(compgen -d -- "$cur") )
       ;;
-    scan|normalize|plan|iterate|verify|run|db|generate|create-tasks|work-on-tasks|task-convert)
+    scan|normalize|plan|iterate|verify|run|refresh-stack|db|generate|create-tasks|work-on-tasks|task-convert)
       case "$prev" in
         --project) COMPREPLY=( $(compgen -d -- "$cur") ); return 0;;
         --jira) COMPREPLY=( $(compgen -f -- "$cur") ); return 0;;
@@ -49,6 +49,12 @@ _gpt_creator()
           ;;
         run)
           COMPREPLY=( $(compgen -W "up down logs open ${global_opts}" -- "$cur") )
+          ;;
+        refresh-stack)
+          case "$prev" in
+            --compose|--sql|--seed) COMPREPLY=( $(compgen -f -- "$cur") ); return 0;;
+          esac
+          COMPREPLY=( $(compgen -W "--project --compose --sql --seed --no-import --no-seed ${global_opts}" -- "$cur") )
           ;;
         verify)
           COMPREPLY=( $(compgen -W "acceptance nfr all ${global_opts}" -- "$cur") )

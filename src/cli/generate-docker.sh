@@ -6,6 +6,30 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+slugify() {
+  local s="${1:-}"
+  s="${s,,}"
+  s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+  s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+  printf '%s\n' "${s:-gptcreator}"
+}
+
+PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
+export PROJECT_SLUG
+
+if [[ -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+
+DB_NAME="${DB_NAME:-${GC_DB_NAME:-${PROJECT_SLUG}_app}}"
+DB_USER="${DB_USER:-${GC_DB_USER:-${PROJECT_SLUG}_user}}"
+DB_PASS="${DB_PASSWORD:-${GC_DB_PASSWORD:-${PROJECT_SLUG}_pass}}"
+DB_ROOT_PASS="${DB_ROOT_PASSWORD:-root}"
+DB_HOST_PORT="${DB_HOST_PORT:-3306}"
+
 if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
   source "${ROOT_DIR}/src/constants.sh"
@@ -43,21 +67,22 @@ admin_df="${OUT_PATH}/admin.Dockerfile"
 nginx_conf="${OUT_PATH}/nginx.conf"
 env_example="${ROOT_DIR}/.env.example"
 
-cat > "${compose}" <<'YML'
+cat > "${compose}" <<YML
 version: "3.9"
 services:
   db:
     image: mysql:8.0
-    container_name: yoga_db
+    container_name: ${PROJECT_SLUG}_db
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: yoga_app
-      MYSQL_USER: yoga
-      MYSQL_PASSWORD: yoga
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS}
+      MYSQL_ROOT_HOST: '%'
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASS}
     ports:
-      - "3306:3306"
+      - "${DB_HOST_PORT}:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-proot"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${DB_ROOT_PASS}"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -68,13 +93,13 @@ services:
     build:
       context: ..
       dockerfile: docker/api.Dockerfile
-    container_name: yoga_api
+    container_name: ${PROJECT_SLUG}_api
     depends_on:
       db:
         condition: service_healthy
     environment:
       NODE_ENV: development
-      DATABASE_URL: mysql://yoga:yoga@db:3306/yoga_app
+      DATABASE_URL: mysql://${DB_USER}:${DB_PASS}@db:3306/${DB_NAME}
       PORT: 3000
     ports:
       - "3000:3000"
@@ -86,7 +111,7 @@ services:
     build:
       context: ..
       dockerfile: docker/web.Dockerfile
-    container_name: yoga_web
+    container_name: ${PROJECT_SLUG}_web
     environment:
       NODE_ENV: development
       VITE_API_BASE: http://localhost:3000/api/v1
@@ -99,7 +124,7 @@ services:
     build:
       context: ..
       dockerfile: docker/admin.Dockerfile
-    container_name: yoga_admin
+    container_name: ${PROJECT_SLUG}_admin
     environment:
       NODE_ENV: development
       VITE_API_BASE: http://localhost:3000/api/v1
@@ -110,7 +135,7 @@ services:
 
   proxy:
     image: nginx:alpine
-    container_name: yoga_proxy
+    container_name: ${PROJECT_SLUG}_proxy
     depends_on:
       - web
       - admin
@@ -187,9 +212,9 @@ http {
 }
 NGINX
 
-cat > "${env_example}" <<'ENV'
+cat > "${env_example}" <<ENV
 # Copy to .env.local and edit as needed
-DATABASE_URL=mysql://yoga:yoga@127.0.0.1:3306/yoga_app
+DATABASE_URL=mysql://${DB_USER}:${DB_PASS}@127.0.0.1:${DB_HOST_PORT}/${DB_NAME}
 RECAPTCHA_SITE_KEY=
 RECAPTCHA_SECRET=
 SMTP_HOST=

@@ -3,7 +3,7 @@ version: "3.9"
 services:
   db:
     image: mysql:8.0
-    container_name: yoga_db
+    container_name: {{PROJECT_SLUG}}_db
     mem_limit: 1536m
     mem_reservation: 1g
     environment:
@@ -26,7 +26,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.api
-    container_name: yoga_api
+    container_name: {{PROJECT_SLUG}}_api
     mem_limit: 1024m
     mem_reservation: 512m
     depends_on:
@@ -47,7 +47,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.web
-    container_name: yoga_web
+    container_name: {{PROJECT_SLUG}}_web
     mem_limit: 768m
     mem_reservation: 384m
     environment:
@@ -64,7 +64,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.admin
-    container_name: yoga_admin
+    container_name: {{PROJECT_SLUG}}_admin
     mem_limit: 768m
     mem_reservation: 384m
     environment:
@@ -79,7 +79,7 @@ services:
 
   proxy:
     image: nginx:alpine
-    container_name: yoga_proxy
+    container_name: {{PROJECT_SLUG}}_proxy
     mem_limit: 256m
     mem_reservation: 128m
     depends_on:

@@ -10,13 +10,32 @@ COMPOSE_FILE="${ROOT_DIR}/docker/docker-compose.yml"
 log(){ printf "[db-provision] %s\n" "$*"; }
 die(){ printf "[db-provision][ERROR] %s\n" "$*" >&2; exit 1; }
 
-dc() { docker compose -f "${COMPOSE_FILE}" "$@"; }
+slugify() {
+  local s="${1:-}"
+  s="${s,,}"
+  s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+  s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+  printf '%s\n' "${s:-gptcreator}"
+}
+
+PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_SLUG}"
+
+if [[ -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
 
 DB_HOST="${DB_HOST:-127.0.0.1}"
 DB_PORT="${DB_PORT:-3306}"
-DB_NAME="${DB_NAME:-yoga_app}"
-DB_USER="${DB_USER:-yoga}"
-DB_PASS="${DB_PASS:-yoga}"
+DB_NAME="${DB_NAME:-${GC_DB_NAME:-${PROJECT_SLUG}_app}}"
+DB_USER="${DB_USER:-${GC_DB_USER:-${PROJECT_SLUG}_user}}"
+DB_PASS="${DB_PASS:-${GC_DB_PASSWORD:-${PROJECT_SLUG}_pass}}"
+DB_ROOT_PASS="${DB_ROOT_PASSWORD:-${GC_DB_ROOT_PASSWORD:-root}}"
+
+dc() { COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "${COMPOSE_FILE}" "$@"; }
 
 usage() {
   cat <<'USAGE'

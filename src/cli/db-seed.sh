@@ -8,6 +8,17 @@ ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 if [[ -f "$ROOT_DIR/src/gpt-creator.sh" ]]; then source "$ROOT_DIR/src/gpt-creator.sh"; fi
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then source "$ROOT_DIR/src/constants.sh"; fi
 
+slugify() {
+  local s="${1:-}"
+  s="${s,,}"
+  s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+  s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+  printf '%s\n' "${s:-gptcreator}"
+}
+
+PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_SLUG}"
+
 # Fallback helpers if not sourced
 type log >/dev/null 2>&1 || log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
 type warn >/dev/null 2>&1 || warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
@@ -44,7 +55,7 @@ if [[ -z "${COMPOSE_FILE}" ]]; then
   fi
 fi
 
-CID="$(docker compose -f "$COMPOSE_FILE" ps -q "$SERVICE" || true)"
+CID="$(COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps -q "$SERVICE" || true)"
 [[ -n "$CID" ]] || die "Service '$SERVICE' not found or not running. Start with: gpt-creator run compose-up"
 
 heading "Seeding database in service '$SERVICE'"

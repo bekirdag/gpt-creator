@@ -1,6 +1,6 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project scan normalize plan generate db run verify create-tasks work-on-tasks iterate help version
+set -l subcmds create-project scan normalize plan generate db run refresh-stack verify create-tasks work-on-tasks iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
@@ -22,6 +22,14 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from db" -l project -r
 # run
 complete -c gpt-creator -n "__fish_seen_subcommand_from run" -a "up down logs open" -d "Run action"
 complete -c gpt-creator -n "__fish_seen_subcommand_from run" -l project -r
+
+# refresh-stack
+complete -c gpt-creator -n "__fish_seen_subcommand_from refresh-stack" -l project -r -d "Project root"
+complete -c gpt-creator -n "__fish_seen_subcommand_from refresh-stack" -l compose -r -d "docker-compose file"
+complete -c gpt-creator -n "__fish_seen_subcommand_from refresh-stack" -l sql -r -d "SQL dump"
+complete -c gpt-creator -n "__fish_seen_subcommand_from refresh-stack" -l seed -r -d "Seed SQL file"
+complete -c gpt-creator -n "__fish_seen_subcommand_from refresh-stack" -l no-import -d "Skip schema import"
+complete -c gpt-creator -n "__fish_seen_subcommand_from refresh-stack" -l no-seed -d "Skip seeding"
 
 # verify
 complete -c gpt-creator -n "__fish_seen_subcommand_from verify" -a "acceptance nfr all" -d "Verify kind"

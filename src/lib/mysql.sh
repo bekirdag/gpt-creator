@@ -5,41 +5,71 @@ if [[ -n "${GC_LIB_MYSQL_SH:-}" ]]; then return 0; fi
 GC_LIB_MYSQL_SH=1
 
 # Start MySQL in a container (docker-compose) from default location
+mysql::_slugify() {
+  local s="${1:-}"
+  s="${s,,}"
+  s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+  s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+  printf '%s\n' "${s:-gptcreator}"
+}
+
+mysql::_project_slug() {
+  local slug="${GC_DOCKER_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-}}"
+  if [[ -z "$slug" ]]; then
+    local root="${GC_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+    slug="$(mysql::_slugify "$(basename "$root")")"
+  fi
+  printf '%s\n' "$slug"
+}
+
+mysql::_container() {
+  printf '%s_db\n' "$(mysql::_project_slug)"
+}
+
 mysql_start() {
-  # Pulls MySQL image if not available, then starts container
-  if ! docker ps -q --filter "name=yoga_db" | grep -q .; then
-    docker-compose up -d db
+  local container="$(mysql::_container)"
+  if ! docker ps -q --filter "name=${container}" | grep -q .; then
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+      COMPOSE_PROJECT_NAME="$(mysql::_project_slug)" docker compose up -d db
+    else
+      docker-compose -p "$(mysql::_project_slug)" up -d db
+    fi
     echo "MySQL container started."
   else
     echo "MySQL container already running."
   fi
 }
 
-# Stop MySQL container
 mysql_stop() {
-  docker-compose stop db
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    COMPOSE_PROJECT_NAME="$(mysql::_project_slug)" docker compose stop db
+  else
+    docker-compose -p "$(mysql::_project_slug)" stop db
+  fi
   echo "MySQL container stopped."
 }
 
-# Import SQL dump to MySQL container
 mysql_import() {
   local sql_file="$1"
   if [[ -z "$sql_file" || ! -f "$sql_file" ]]; then
     echo "Error: SQL file required."
     return 1
   fi
-  docker exec -i yoga_db mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" yoga_db < "$sql_file"
+  local container="$(mysql::_container)"
+  local database="${MYSQL_DATABASE:-${DB_NAME:-app}}"
+  docker exec -i "$container" mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" "$database" < "$sql_file"
   echo "SQL dump imported."
 }
 
-# Run MySQL client within the container
 mysql_client() {
-  docker exec -it yoga_db mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" yoga_db
+  local container="$(mysql::_container)"
+  local database="${MYSQL_DATABASE:-${DB_NAME:-app}}"
+  docker exec -it "$container" mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" "$database"
 }
 
-# Check MySQL health
 mysql_health_check() {
-  if docker exec yoga_db mysqladmin ping -h "127.0.0.1" --silent; then
+  local container="$(mysql::_container)"
+  if docker exec "$container" mysqladmin ping -h "127.0.0.1" --silent; then
     echo "MySQL is healthy."
   else
     echo "MySQL is not responding!"

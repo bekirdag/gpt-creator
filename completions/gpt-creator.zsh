@@ -13,6 +13,7 @@ _gpt_creator() {
     'run:Run via docker compose'
     'refresh-stack:Tear down, rebuild, and seed the Docker stack'
     'verify:Acceptance/NFR checks'
+    'create-jira-tasks:Generate jira epics/stories/tasks from documentation'
     'create-tasks:Convert Jira tasks into a SQLite backlog'
     'work-on-tasks:Execute tasks from the SQLite backlog with Codex'
     'task-convert:[deprecated] Alias for create-tasks'
@@ -46,6 +47,13 @@ _gpt_creator() {
       ;;
     verify)
       _values 'verify-kind' acceptance nfr all
+      ;;
+    create-jira-tasks)
+      _arguments \
+        '--model=[Codex model name]' \
+        '--force[Rebuild tasks.db from scratch]' \
+        '--skip-refine[Skip the enrichment pass]' \
+        '--dry-run[Prepare prompts without calling Codex]'
       ;;
     create-tasks|task-convert)
       _arguments \

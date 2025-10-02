@@ -33,6 +33,9 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 .B gpt-creator verify
 [\-\-root DIR]
 .br
+.B gpt-creator create-jira-tasks
+[\-\-project DIR] [\-\-model NAME] [\-\-force] [\-\-skip-refine] [\-\-dry-run]
+.br
 .B gpt-creator create-tasks
 [\-\-project DIR] [\-\-jira FILE] [\-\-force]
 .br
@@ -85,6 +88,9 @@ Docker Compose wrappers: \fBup\fR, \fBdown\fR, \fBlogs\fR, \fBopen\fR.
 .TP
 .B verify
 Acceptance & NFR checks: routes render, filters work, Lighthouse, AA basics.
+.TP
+.B create-jira-tasks
+Mine the staged documentation (PDR, SDS, OpenAPI, SQL dumps, UI samples) to generate Jira epics, user stories, and enriched implementation tasks automatically. Results are written directly to \fI.gpt-creator/staging/plan/tasks/tasks.db\fR. Supports \fB--model\fR to pick a Codex model, \fB--force\fR to rebuild from scratch, \fB--skip-refine\fR to skip the enrichment pass, and \fB--dry-run\fR to stage prompts without calling Codex.
 .TP
 .B create-tasks
 Convert Jira markdown into a project-scoped SQLite backlog at \fI.gpt-creator/staging/plan/tasks/tasks.db\fR, persisting epics, stories, and task metadata (including prior progress) for resumable automation.

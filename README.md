@@ -14,7 +14,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Planning outputs**: Produces route/entity summaries and task hints under `.gpt-creator/staging/plan/` as scaffolding for further design work.
 - **Template-driven generation**: Renders baseline NestJS, Vue 3, Prisma, and Docker scaffolds into `/apps/**` and `/docker`, ready for manual extension or Codex-driven augmentation.
 - **Verification toolkit**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks that you can run on demand.
-- **Iteration helpers**: `create-tasks` converts Jira markdown into a SQLite backlog (preserving task metadata + status), and `work-on-tasks` executes/resumes tasks directly from that database. The legacy `iterate` command is deprecated.
+- **Iteration helpers**: `create-jira-tasks` now mines the project documentation to synthesize epics, user stories, and detailed tasks directly into SQLite; `create-tasks` converts existing Jira markdown; `work-on-tasks` executes/resumes tasks from the backlog. The legacy `iterate` command is deprecated.
 
 ---
 
@@ -78,12 +78,19 @@ Keep the repo on your `PATH`, or invoke `./bin/gpt-creator` directly.
    - `.gpt-creator/staging/plan/` for route/entity summaries and tasks
 4. **Work Jira backlog** (optional):
    ```bash
+   # Mine the documentation and auto-create epics, stories, and tasks
+   gpt-creator create-jira-tasks --project /path/to/project
+
+   # Or import an existing Jira markdown export
    gpt-creator create-tasks --project /path/to/project --jira docs/jira.md
+
+   # Execute and resume tasks directly from SQLite
    gpt-creator work-on-tasks --project /path/to/project
    ```
-  - `create-tasks` snapshots the Jira markdown into `.gpt-creator/staging/plan/tasks/tasks.db` (SQLite backlog with epics/stories/tasks).
+  - `create-jira-tasks` crawls the staged docs (PDR, SDS, OpenAPI, SQL, UI samples) to synthesize epics → user stories → enriched tasks and persists them in `.gpt-creator/staging/plan/tasks/tasks.db`.
+  - `create-tasks` snapshots the Jira markdown into the same database if you already maintain backlog files.
   - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically.
-   - The legacy `iterate` command is deprecated.
+  - The legacy `iterate` command is deprecated.
 
 ---
 

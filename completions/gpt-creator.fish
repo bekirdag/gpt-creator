@@ -1,6 +1,6 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project scan normalize plan generate db run refresh-stack verify create-tasks work-on-tasks iterate help version
+set -l subcmds create-project scan normalize plan generate db run refresh-stack verify create-jira-tasks create-tasks work-on-tasks iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
@@ -38,6 +38,12 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from verify" -l project -r
 # create-tasks
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l jira -r -d "Jira tasks file"
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l force -d "Rebuild tasks database (ignore saved progress)"
+
+# create-jira-tasks
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-jira-tasks" -l model -r -d "Codex model"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-jira-tasks" -l force -d "Rebuild tasks.db"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-jira-tasks" -l skip-refine -d "Skip enrichment pass"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-jira-tasks" -l dry-run -d "Do not call Codex"
 
 # task-convert (deprecated alias)
 complete -c gpt-creator -n "__fish_seen_subcommand_from task-convert" -l jira -r -d "Jira tasks file"

@@ -4846,6 +4846,7 @@ main() {
     run)            cmd_run "$@" ;;
     refresh-stack)  cmd_refresh_stack "$@" ;;
     verify)         cmd_verify "$@" ;;
+    create-jira-tasks) "$CLI_ROOT/src/cli/create-jira-tasks.sh" "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;
     work-on-tasks)  cmd_work_on_tasks "$@" ;;

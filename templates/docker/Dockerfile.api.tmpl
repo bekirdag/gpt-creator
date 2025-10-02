@@ -14,6 +14,9 @@ ENV PNPM_HOME=/usr/local/share/pnpm \
 RUN npm install -g node-gyp
 ENV PATH="$PNPM_HOME:$PATH"
 
+COPY docker/pnpm-entry.sh /usr/local/bin/pnpm-entry.sh
+RUN chmod +x /usr/local/bin/pnpm-entry.sh
+
 WORKDIR /workspace/apps/api
 
 # prepare workspace

@@ -23,7 +23,7 @@ mysql::_project_slug() {
 }
 
 mysql::_container() {
-  printf '%s_db\n' "$(mysql::_project_slug)"
+  printf '%s-db\n' "$(mysql::_project_slug)"
 }
 
 mysql_start() {

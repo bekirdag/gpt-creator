@@ -58,13 +58,22 @@ gc_cli_log "Starting DB service ..."
 dc up -d db
 
 gc_cli_log "Waiting for MySQL to become healthy ..."
-for i in $(seq 1 60); do
+HEALTH_TIMEOUT="${GC_DOCKER_HEALTH_TIMEOUT:-10}"
+HEALTH_INTERVAL="${GC_DOCKER_HEALTH_INTERVAL:-1}"
+[[ "$HEALTH_TIMEOUT" -le 0 ]] && HEALTH_TIMEOUT=1
+[[ "$HEALTH_INTERVAL" -le 0 ]] && HEALTH_INTERVAL=1
+waited=0
+while (( waited < HEALTH_TIMEOUT )); do
   if dc exec -T db sh -lc 'mysqladmin ping -h 127.0.0.1 -p"$MYSQL_ROOT_PASSWORD" --silent' >/dev/null 2>&1; then
     gc_cli_log "MySQL is healthy"
     break
   fi
-  sleep 2
+  sleep "$HEALTH_INTERVAL"
+  (( waited += HEALTH_INTERVAL )) || true
 done
+if (( waited >= HEALTH_TIMEOUT )); then
+  gc_cli_warn "MySQL readiness timeout after ${HEALTH_TIMEOUT}s (continuing)…"
+fi
 
 if [[ -n "${SQL_IMPORT}" ]]; then
   [[ -f "${SQL_IMPORT}" ]] || gc_cli_die "Not found: ${SQL_IMPORT}"

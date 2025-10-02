@@ -6,32 +6,34 @@ http {
     server_name _;
 
     location / {
-      proxy_pass http://web:5173/;
+      proxy_pass http://web:5173;
       proxy_http_version 1.1;
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
-      proxy_set_header Host $http_host;
+      proxy_set_header Host $host;
       proxy_read_timeout 600s;
       proxy_connect_timeout 60s;
+      proxy_redirect off;
       proxy_intercept_errors on;
       error_page 404 = @web_fallback;
     }
 
     location /admin/ {
-      proxy_pass http://admin:5173/;
+      proxy_pass http://admin:5173;
       proxy_http_version 1.1;
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
-      proxy_set_header Host $http_host;
+      proxy_set_header Host $host;
       proxy_read_timeout 600s;
       proxy_connect_timeout 60s;
+      proxy_redirect off;
       proxy_intercept_errors on;
       error_page 404 = @admin_fallback;
     }
 
     location /api/ {
       proxy_pass http://api:3000/api/;
-      proxy_set_header Host $http_host;
+      proxy_set_header Host $host;
     }
 
     location @web_fallback {
@@ -40,7 +42,8 @@ http {
       proxy_http_version 1.1;
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
-      proxy_set_header Host $http_host;
+      proxy_set_header Host $host;
+      proxy_redirect off;
     }
 
     location @admin_fallback {
@@ -50,6 +53,7 @@ http {
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
       proxy_set_header Host $host;
+      proxy_redirect off;
     }
   }
 }

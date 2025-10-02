@@ -1,9 +1,8 @@
 # docker-compose.yml template for gpt-creator stack (API, web, admin, db, proxy)
-version: "3.9"
 services:
   db:
     image: mysql:8.0
-    container_name: {{PROJECT_SLUG}}_db
+    container_name: {{PROJECT_SLUG}}-db
     mem_limit: 1536m
     mem_reservation: 1g
     environment:
@@ -28,7 +27,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.api
-    container_name: {{PROJECT_SLUG}}_api
+    container_name: {{PROJECT_SLUG}}-api
     mem_limit: 1024m
     mem_reservation: 512m
     depends_on:
@@ -38,8 +37,10 @@ services:
       NODE_ENV: development
       DATABASE_URL: mysql://{{DB_USER}}:{{DB_PASSWORD}}@db:3306/{{DB_NAME}}
       PORT: 3000
+      GC_SERVICE: api
+    entrypoint:
+      - /usr/local/bin/pnpm-entry.sh
     command:
-      - /workspace/docker/pnpm-entry.sh
       - cd /workspace/apps/api && pnpm run start:dev
     ports:
       - "3000:3000"
@@ -51,14 +52,16 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.web
-    container_name: {{PROJECT_SLUG}}_web
+    container_name: {{PROJECT_SLUG}}-web
     mem_limit: 768m
     mem_reservation: 384m
     environment:
       NODE_ENV: development
       VITE_API_BASE: ${VITE_API_BASE:-http://localhost:3000/api/v1}
+      GC_SERVICE: web
+    entrypoint:
+      - /usr/local/bin/pnpm-entry.sh
     command:
-      - /workspace/docker/pnpm-entry.sh
       - cd /workspace/apps/web && pnpm run dev -- --host 0.0.0.0
     ports:
       - "5173:5173"
@@ -70,14 +73,16 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.admin
-    container_name: {{PROJECT_SLUG}}_admin
+    container_name: {{PROJECT_SLUG}}-admin
     mem_limit: 768m
     mem_reservation: 384m
     environment:
       NODE_ENV: development
       VITE_API_BASE: ${VITE_API_BASE:-http://localhost:3000/api/v1}
+      GC_SERVICE: admin
+    entrypoint:
+      - /usr/local/bin/pnpm-entry.sh
     command:
-      - /workspace/docker/pnpm-entry.sh
       - cd /workspace/apps/admin && pnpm run dev -- --host 0.0.0.0
     ports:
       - "5174:5173"
@@ -87,7 +92,7 @@ services:
 
   proxy:
     image: nginx:alpine
-    container_name: {{PROJECT_SLUG}}_proxy
+    container_name: {{PROJECT_SLUG}}-proxy
     mem_limit: 256m
     mem_reservation: 128m
     depends_on:

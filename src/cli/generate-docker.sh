@@ -68,11 +68,10 @@ nginx_conf="${OUT_PATH}/nginx.conf"
 env_example="${ROOT_DIR}/.env.example"
 
 cat > "${compose}" <<YML
-version: "3.9"
 services:
   db:
     image: mysql:8.0
-    container_name: ${PROJECT_SLUG}_db
+    container_name: ${PROJECT_SLUG}-db
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS}
       MYSQL_ROOT_HOST: '%'
@@ -93,7 +92,7 @@ services:
     build:
       context: ..
       dockerfile: docker/api.Dockerfile
-    container_name: ${PROJECT_SLUG}_api
+    container_name: ${PROJECT_SLUG}-api
     depends_on:
       db:
         condition: service_healthy
@@ -101,6 +100,7 @@ services:
       NODE_ENV: development
       DATABASE_URL: mysql://${DB_USER}:${DB_PASS}@db:3306/${DB_NAME}
       PORT: 3000
+      GC_SERVICE: api
     command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/api && pnpm run start:dev"
     ports:
       - "3000:3000"
@@ -111,10 +111,11 @@ services:
     build:
       context: ..
       dockerfile: docker/web.Dockerfile
-    container_name: ${PROJECT_SLUG}_web
+    container_name: ${PROJECT_SLUG}-web
     environment:
       NODE_ENV: development
       VITE_API_BASE: http://localhost:3000/api/v1
+      GC_SERVICE: web
     command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/web && pnpm run dev -- --host 0.0.0.0"
     ports:
       - "5173:5173"
@@ -125,10 +126,11 @@ services:
     build:
       context: ..
       dockerfile: docker/admin.Dockerfile
-    container_name: ${PROJECT_SLUG}_admin
+    container_name: ${PROJECT_SLUG}-admin
     environment:
       NODE_ENV: development
       VITE_API_BASE: http://localhost:3000/api/v1
+      GC_SERVICE: admin
     command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/admin && pnpm run dev -- --host 0.0.0.0"
     ports:
       - "5174:5173"
@@ -137,7 +139,7 @@ services:
 
   proxy:
     image: nginx:alpine
-    container_name: ${PROJECT_SLUG}_proxy
+    container_name: ${PROJECT_SLUG}-proxy
     depends_on:
       - web
       - admin
@@ -191,14 +193,16 @@ http {
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
       proxy_set_header Host $host;
+      proxy_redirect off;
     }
 
     location /admin/ {
-      proxy_pass http://admin:5173/;
+      proxy_pass http://admin:5173;
       proxy_http_version 1.1;
       proxy_set_header Upgrade $http_upgrade;
       proxy_set_header Connection "upgrade";
       proxy_set_header Host $host;
+      proxy_redirect off;
     }
 
     location /api/ {

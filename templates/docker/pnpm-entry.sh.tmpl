@@ -1,14 +1,65 @@
 #!/usr/bin/env sh
-set -euo pipefail
+set -eu
+if (set -o pipefail) 2>/dev/null; then
+  set -o pipefail
+fi
 
 PNPM_VERSION="${PNPM_VERSION:-10.17.1}"
 LOCK_FILE="${PNPM_LOCK_FILE:-/var/pnpm-store/.pnpm-install.lock}"
 STORE_DIR="${PNPM_STORE_PATH:-/var/pnpm-store}"
+SERVICE_NAME="${GC_SERVICE:-}"
 STAMP_FILE="/workspace/node_modules/.pnpm-lock.hash"
+LOCK_WAIT_SECS="${PNPM_LOCK_WAIT_SECS:-1}"
+MODULE_WAIT_SECS="${PNPM_MODULE_READY_TIMEOUT:-60}"
+
+mkdir -p "$STORE_DIR" /workspace/node_modules "$(dirname "$LOCK_FILE")"
+chmod 777 "$STORE_DIR" >/dev/null 2>&1 || true
+
+ensure_service_dependencies() {
+  local service="$1"
+  local app_dir=""
+  local bin_name=""
+  case "$service" in
+    web) app_dir="/workspace/apps/web"; bin_name="vite" ;;
+    admin) app_dir="/workspace/apps/admin"; bin_name="vite" ;;
+    api) app_dir="/workspace/apps/api"; bin_name="nest" ;;
+    *) return 0 ;;
+  esac
+  [ -d "$app_dir" ] || return 0
+  if [ -z "$bin_name" ] || [ ! -x "$app_dir/node_modules/.bin/$bin_name" ]; then
+    echo "Ensuring ${service} dependencies via pnpm..." >&2
+    local have_lock=0
+    if command -v flock >/dev/null 2>&1; then
+      exec 8>"$LOCK_FILE"
+      if flock -w "$LOCK_WAIT_SECS" 8 2>/dev/null; then
+        have_lock=1
+      else
+        echo "${service} dependency install in progress elsewhere; waiting for binaries..." >&2
+        if wait_for_service_binary "$app_dir" "$bin_name"; then
+          exec 8>&-
+          return 0
+        fi
+        echo "${service} dependency binaries still missing; waiting for pnpm lock." >&2
+        flock 8
+        have_lock=1
+      fi
+    fi
+    if ! (cd "$app_dir" && PNPM_IGNORE_NODE_VERSION=1 pnpm install --unsafe-perm --prefer-offline --engine-strict=false --no-frozen-lockfile --reporter=append-only); then
+      if [ "$have_lock" = "1" ]; then
+        flock -u 8 || true
+      fi
+      exec 8>&-
+      echo "pnpm install failed for ${service}; check ${app_dir}/pnpm-debug.log" >&2
+      return 1
+    fi
+    if [ "$have_lock" = "1" ]; then
+      flock -u 8 || true
+    fi
+    exec 8>&-
+  fi
+}
 
 export CI="${CI:-1}"
-
-mkdir -p "${STORE_DIR}" /workspace/node_modules "$(dirname "$LOCK_FILE")"
 
 if ! command -v corepack >/dev/null 2>&1; then
   echo "corepack not found" >&2
@@ -21,28 +72,72 @@ hash -r 2>/dev/null || true
 
 pnpm config set store-dir "$STORE_DIR" --global >/dev/null
 
+workspace_has_manifest=0
 need_install=0
 lock_hash=""
-if [ -f /workspace/pnpm-lock.yaml ]; then
-  lock_hash="$(sha256sum /workspace/pnpm-lock.yaml | awk '{print $1}')"
+if [ -f /workspace/pnpm-lock.yaml ] || [ -f /workspace/package.json ] || [ -f /workspace/pnpm-workspace.yaml ]; then
+  workspace_has_manifest=1
 fi
 
-if [ ! -d /workspace/node_modules/.pnpm ]; then
-  need_install=1
-elif [ -n "$lock_hash" ]; then
-  if [ ! -f "$STAMP_FILE" ] || [ "$(cat "$STAMP_FILE" 2>/dev/null)" != "$lock_hash" ]; then
+if [ "$workspace_has_manifest" = "1" ]; then
+  if [ -f /workspace/pnpm-lock.yaml ]; then
+    lock_hash="$(sha256sum /workspace/pnpm-lock.yaml | awk '{print $1}')"
+  fi
+
+  if [ ! -d /workspace/node_modules/.pnpm ]; then
     need_install=1
+  elif [ -n "$lock_hash" ]; then
+    if [ ! -f "$STAMP_FILE" ] || [ "$(cat "$STAMP_FILE" 2>/dev/null)" != "$lock_hash" ]; then
+      need_install=1
+    fi
   fi
 fi
+
+wait_for_modules_ready() {
+  local attempts=0
+  local max_wait="$MODULE_WAIT_SECS"
+  while [ "$attempts" -lt "$max_wait" ]; do
+    if [ -d /workspace/node_modules/.pnpm ]; then
+      return 0
+    fi
+    sleep 1
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
+
+wait_for_service_binary() {
+  local app_dir="$1"
+  local bin_name="$2"
+  local attempts=0
+  while [ "$attempts" -lt "$MODULE_WAIT_SECS" ]; do
+    if [ -z "$bin_name" ] || [ -x "$app_dir/node_modules/.bin/$bin_name" ]; then
+      return 0
+    fi
+    sleep 1
+    attempts=$((attempts + 1))
+  done
+  return 1
+}
 
 acquired=0
-if command -v flock >/dev/null 2>&1; then
-  exec 9>"$LOCK_FILE"
-  if ! flock -n 9 2>/dev/null; then
-    echo "Waiting for pnpm install lock..." >&2
-    flock 9
+if [ "$workspace_has_manifest" = "1" ] && [ "$need_install" = "1" ]; then
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK_FILE"
+    if flock -w "$LOCK_WAIT_SECS" 9 2>/dev/null; then
+      acquired=1
+    else
+      if wait_for_modules_ready; then
+        need_install=0
+        acquired=0
+        exec 9>&-
+      else
+        echo "Waiting for pnpm lock to become available..." >&2
+        flock 9
+        acquired=1
+      fi
+    fi
   fi
-  acquired=1
 fi
 
 cleanup() {
@@ -55,10 +150,10 @@ trap cleanup EXIT INT TERM
 if [ "$need_install" = "1" ]; then
   cd /workspace
   echo "Installing npm dependencies via pnpm..." >&2
-  if ! pnpm install --frozen-lockfile --unsafe-perm --prefer-offline --yes --reporter=append-only; then
+  if ! PNPM_IGNORE_NODE_VERSION=1 pnpm install --frozen-lockfile --unsafe-perm --prefer-offline --engine-strict=false --reporter=append-only; then
     echo "pnpm install failed — attempting lockfile upgrade" >&2
-    pnpm install --force --lockfile-only --yes --reporter=append-only
-    pnpm install --unsafe-perm --prefer-offline --force --yes --reporter=append-only
+    PNPM_IGNORE_NODE_VERSION=1 pnpm install --force --lockfile-only --engine-strict=false --reporter=append-only
+    PNPM_IGNORE_NODE_VERSION=1 pnpm install --unsafe-perm --prefer-offline --force --engine-strict=false --reporter=append-only
   fi
   if [ -f /workspace/pnpm-lock.yaml ]; then
     lock_hash="$(sha256sum /workspace/pnpm-lock.yaml | awk '{print $1}')"
@@ -66,14 +161,19 @@ if [ "$need_install" = "1" ]; then
   else
     rm -f "$STAMP_FILE"
   fi
+elif [ "$workspace_has_manifest" = "1" ]; then
+  wait_for_modules_ready || true
 fi
 
-if [ -d /workspace/apps/api ]; then
-  echo "Ensuring Prisma client is generated (api)..." >&2
-  pnpm --dir /workspace/apps/api prisma generate || true
+ensure_service_dependencies "$SERVICE_NAME"
 
+if [ "$SERVICE_NAME" = "api" ] && [ -d /workspace/apps/api ]; then
+  echo "Ensuring Prisma client is generated (api)..." >&2
+  if ! (cd /workspace/apps/api && PNPM_IGNORE_NODE_VERSION=1 pnpm exec prisma generate); then
+    (cd /workspace/apps/api && PNPM_IGNORE_NODE_VERSION=1 pnpm dlx prisma generate) || true
+  fi
   echo "Rebuilding argon2 native bindings (api)..." >&2
-  pnpm --dir /workspace/apps/api rebuild argon2 || true
+  (cd /workspace/apps/api && PNPM_IGNORE_NODE_VERSION=1 pnpm exec npm rebuild argon2 --build-from-source) || true
 fi
 
 cleanup

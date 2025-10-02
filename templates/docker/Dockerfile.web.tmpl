@@ -10,6 +10,9 @@ ENV PNPM_HOME=/usr/local/share/pnpm \
     COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 ENV PATH="$PNPM_HOME:$PATH"
 
+COPY docker/pnpm-entry.sh /usr/local/bin/pnpm-entry.sh
+RUN chmod +x /usr/local/bin/pnpm-entry.sh
+
 WORKDIR /workspace/apps/web
 
 # prepare workspace

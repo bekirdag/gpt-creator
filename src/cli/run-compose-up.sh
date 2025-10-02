@@ -59,13 +59,21 @@ COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" up -d --b
 DB_ID="$(COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps -q db || true)"
 if [[ -n "$DB_ID" ]]; then
   gc_cli_log "Waiting for MySQL to be ready…"
-  for i in {1..60}; do
+  HEALTH_TIMEOUT="${GC_DOCKER_HEALTH_TIMEOUT:-10}"
+  HEALTH_INTERVAL="${GC_DOCKER_HEALTH_INTERVAL:-1}"
+  [[ "$HEALTH_TIMEOUT" -le 0 ]] && HEALTH_TIMEOUT=1
+  [[ "$HEALTH_INTERVAL" -le 0 ]] && HEALTH_INTERVAL=1
+  waited=0
+  while (( waited < HEALTH_TIMEOUT )); do
     if docker exec -i "$DB_ID" sh -lc 'mysqladmin ping -h 127.0.0.1 --silent' >/dev/null 2>&1; then
       gc_cli_log "MySQL is ready."; break
     fi
-    sleep 1
-    [[ $i -eq 60 ]] && gc_cli_warn "MySQL readiness timeout (continuing)…"
+    sleep "$HEALTH_INTERVAL"
+    (( waited += HEALTH_INTERVAL )) || true
   done
+  if (( waited >= HEALTH_TIMEOUT )); then
+    gc_cli_warn "MySQL readiness timeout after ${HEALTH_TIMEOUT}s (continuing)…"
+  fi
 fi
 
 # Show status

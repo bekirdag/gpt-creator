@@ -14,6 +14,10 @@ fi
 : "${DOCKER_CLIENT_TIMEOUT:=$COMPOSE_HTTP_TIMEOUT}"
 export COMPOSE_HTTP_TIMEOUT DOCKER_CLIENT_TIMEOUT
 
+: "${GC_DOCKER_HEALTH_TIMEOUT:=10}"
+: "${GC_DOCKER_HEALTH_INTERVAL:=1}"
+: "${GC_PNPM_VERSION:=10.17.1}"
+
 resolve_cli_root() {
   local source="${BASH_SOURCE[0]}"
   while [[ -L "$source" ]]; do
@@ -983,17 +987,30 @@ docker_compose() {
     local base="$(basename "${PROJECT_ROOT:-$PWD}")"
     project_name="$(slugify_name "$base")"
   fi
-  local -a compose_opts=()
+  local compose_verbose_flag=""
   if [[ -n "${GC_DOCKER_VERBOSE:-}" ]]; then
-    compose_opts+=(--verbose)
+    compose_verbose_flag="--verbose"
   fi
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    COMPOSE_PROJECT_NAME="$project_name" docker compose "${compose_opts[@]}" "$@"
+    if [[ -n "$compose_verbose_flag" ]]; then
+      COMPOSE_PROJECT_NAME="$project_name" docker compose "$compose_verbose_flag" "$@"
+    else
+      COMPOSE_PROJECT_NAME="$project_name" docker compose "$@"
+    fi
   elif command -v docker-compose >/dev/null 2>&1; then
-    docker-compose -p "$project_name" "${compose_opts[@]}" "$@"
+    if [[ -n "$compose_verbose_flag" ]]; then
+      docker-compose -p "$project_name" "$compose_verbose_flag" "$@"
+    else
+      docker-compose -p "$project_name" "$@"
+    fi
   else
     die "docker compose is not available. Install Docker Desktop or docker-compose."
   fi
+}
+
+gc_container_name() {
+  local service="$1"
+  printf '%s-%s\n' "${GC_DOCKER_PROJECT_NAME}" "$service"
 }
 
 container_exists() {
@@ -1013,7 +1030,7 @@ gc_start_created_containers() {
   local service container state started any_started=0
 
   for service in "${services[@]}"; do
-    container="${GC_DOCKER_PROJECT_NAME}_${service}"
+    container="$(gc_container_name "$service")"
     if ! container_exists "$container"; then
       continue
     fi
@@ -1032,11 +1049,13 @@ gc_start_created_containers() {
 
   if (( any_started == 1 )); then
     local wait_seconds=0
-    local timeout=120
+    local timeout="${GC_DOCKER_HEALTH_TIMEOUT:-10}"
+    local poll_interval="${GC_DOCKER_HEALTH_INTERVAL:-1}"
+    (( poll_interval <= 0 )) && poll_interval=1
     while (( wait_seconds < timeout )); do
       local all_ready=1
       for service in "${services[@]}"; do
-        container="${GC_DOCKER_PROJECT_NAME}_${service}"
+        container="$(gc_container_name "$service")"
         if ! container_exists "$container"; then
           continue
         fi
@@ -1055,8 +1074,8 @@ gc_start_created_containers() {
       if (( all_ready == 1 )); then
         break
       fi
-      sleep 2
-      (( wait_seconds += 2 )) || true
+      sleep "$poll_interval"
+      (( wait_seconds += poll_interval )) || true
     done
   fi
 }
@@ -1086,7 +1105,12 @@ find_free_port() {
 
 wait_for_endpoint() {
   local url="$1" label="$2"
-  local attempts="${3:-30}" delay="${4:-2}"
+  local max_time="${3:-${GC_DOCKER_HEALTH_TIMEOUT:-10}}"
+  local delay="${4:-${GC_DOCKER_HEALTH_INTERVAL:-1}}"
+  (( delay <= 0 )) && delay=1
+  (( max_time <= 0 )) && max_time=1
+  local attempts=$(( (max_time + delay - 1) / delay ))
+  (( attempts < 1 )) && attempts=1
   local i=1
   while (( i <= attempts )); do
     if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
@@ -1096,8 +1120,100 @@ wait_for_endpoint() {
     sleep "$delay"
     ((i++)) || true
   done
-  warn "${label} not ready after $((attempts * delay))s → ${url}"
+  warn "${label} not ready after ${max_time}s → ${url}"
   return 1
+}
+
+gc_sha256_file() {
+  local path="$1"
+  [[ -f "$path" ]] || return 1
+  python3 - <<'PY' "$path"
+import hashlib, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+data = path.read_bytes()
+print(hashlib.sha256(data).hexdigest())
+PY
+}
+
+gc_host_prepare_pnpm() {
+  if command -v pnpm >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v corepack >/dev/null 2>&1; then
+    corepack enable pnpm >/dev/null 2>&1 || true
+    local version="${GC_PNPM_VERSION:-10.17.1}"
+    corepack prepare "pnpm@${version}" --activate >/dev/null 2>&1 || \
+      corepack use "pnpm@${version}" >/dev/null 2>&1 || true
+  fi
+  command -v pnpm >/dev/null 2>&1
+}
+
+gc_refresh_stack_prepare_node_modules() {
+  [[ "${GC_SKIP_HOST_PNPM_INSTALL:-0}" == "1" ]] && return 0
+  local root="${PROJECT_ROOT:-$PWD}"
+  local lock_file="${root}/pnpm-lock.yaml"
+  local has_manifest=0
+  if [[ -f "${root}/pnpm-workspace.yaml" || -f "${root}/package.json" ]]; then
+    has_manifest=1
+  fi
+  (( has_manifest )) || return 0
+
+  local modules_dir="${root}/node_modules/.pnpm"
+  local stamp_file="${root}/node_modules/.pnpm-lock.hash"
+  local need_install=0
+  local lock_hash=""
+
+  if [[ -f "$lock_file" ]]; then
+    lock_hash="$(gc_sha256_file "$lock_file" 2>/dev/null || true)"
+  fi
+
+  if [[ ! -d "$modules_dir" ]]; then
+    need_install=1
+  else
+    if [[ -z "$lock_hash" ]]; then
+      need_install=1
+    else
+      local stamp_hash=""
+      [[ -f "$stamp_file" ]] && stamp_hash="$(cat "$stamp_file" 2>/dev/null || true)"
+      if [[ "$lock_hash" != "$stamp_hash" ]]; then
+        need_install=1
+      fi
+    fi
+  fi
+
+  if (( need_install )); then
+    if [[ ! -f "$lock_file" ]]; then
+      info "pnpm lockfile missing; generating via install"
+    fi
+    info "Installing workspace dependencies via pnpm (host)"
+    if ! gc_host_prepare_pnpm; then
+      warn "pnpm is not available on the host; skipping host install (containers may retry)."
+      return 0
+    fi
+    local install_rc=0
+    if (cd "$root" && PNPM_IGNORE_NODE_VERSION=1 pnpm install --frozen-lockfile --unsafe-perm --prefer-offline --engine-strict=false --reporter=append-only); then
+      install_rc=0
+    else
+      warn "pnpm install --frozen-lockfile failed; retrying without frozen lockfile"
+      if (cd "$root" && PNPM_IGNORE_NODE_VERSION=1 pnpm install --unsafe-perm --prefer-offline --engine-strict=false --no-frozen-lockfile --reporter=append-only); then
+        install_rc=0
+      else
+        install_rc=1
+      fi
+    fi
+    if (( install_rc == 0 )); then
+      lock_hash="$(gc_sha256_file "$lock_file" 2>/dev/null || true)"
+      if [[ -n "$lock_hash" ]]; then
+        mkdir -p "${root}/node_modules"
+        printf '%s' "$lock_hash" > "$stamp_file"
+      else
+        rm -f "$stamp_file"
+      fi
+      ok "Host dependencies installed"
+    else
+      warn "Host pnpm install failed; containers will attempt dependency installation."
+    fi
+  fi
 }
 
 render_template_file() {
@@ -1735,8 +1851,9 @@ PY
 
 gc_refresh_stack_wait_for_containers() {
   local compose_file="${1:?compose file required}"
-  local timeout="${2:-120}"
-  local interval="${3:-5}"
+  local timeout="${2:-${GC_DOCKER_HEALTH_TIMEOUT:-10}}"
+  local interval="${3:-${GC_DOCKER_HEALTH_INTERVAL:-1}}"
+  (( interval <= 0 )) && interval=1
   local elapsed=0
   local output rc
 
@@ -2392,19 +2509,22 @@ cmd_run() {
   case "$action" in
     up)
       [[ -f "$compose_file" ]] || die "Compose file not found at ${compose_file}; generate docker assets first."
+      gc_refresh_stack_prepare_node_modules
       docker_compose -f "$compose_file" up -d
       ok "Stack is starting (check docker compose ps)"
       local api_base="${GC_API_BASE_URL:-http://localhost:3000/api/v1}"
       local web_url="${GC_WEB_URL:-http://localhost:8080/}"
       local admin_url="${GC_ADMIN_URL:-http://localhost:8080/admin/}"
-      wait_for_endpoint "${api_base%/}/health" "API /health" 40 3 || true
+      local health_timeout="${GC_DOCKER_HEALTH_TIMEOUT:-10}"
+      local health_interval="${GC_DOCKER_HEALTH_INTERVAL:-1}"
+      wait_for_endpoint "${api_base%/}/health" "API /health" "$health_timeout" "$health_interval" || true
       local web_ping="${web_url%/}/__vite_ping"
-      if ! wait_for_endpoint "$web_ping" "Web (vite ping)" 40 3; then
-        wait_for_endpoint "${web_url%/}/" "Web" 20 3 || true
+      if ! wait_for_endpoint "$web_ping" "Web (vite ping)" "$health_timeout" "$health_interval"; then
+        wait_for_endpoint "${web_url%/}/" "Web" "$health_timeout" "$health_interval" || true
       fi
       local admin_ping="${admin_url%/}/__vite_ping"
-      if ! wait_for_endpoint "$admin_ping" "Admin (vite ping)" 40 3; then
-        wait_for_endpoint "${admin_url%/}/" "Admin" 20 3 || true
+      if ! wait_for_endpoint "$admin_ping" "Admin (vite ping)" "$health_timeout" "$health_interval"; then
+        wait_for_endpoint "${admin_url%/}/" "Admin" "$health_timeout" "$health_interval" || true
       fi
       ;;
     down)
@@ -2430,6 +2550,7 @@ cmd_run() {
 cmd_refresh_stack() {
   local root="" compose_override="" sql_override="" seed_override=""
   local skip_import=0 skip_seed=0
+  local only_services="" skip_services=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project) root="$(abs_path "$2")"; shift 2;;
@@ -2438,6 +2559,8 @@ cmd_refresh_stack() {
       --seed) seed_override="$(abs_path "$2")"; shift 2;;
       --no-import) skip_import=1; shift;;
       --no-seed) skip_seed=1; shift;;
+      --only-services) only_services="${2:-}"; shift 2;;
+      --skip-services) skip_services="${2:-}"; shift 2;;
       -h|--help)
         cat <<'EOHELP'
 Usage: gpt-creator refresh-stack [options]
@@ -2449,6 +2572,8 @@ Options:
   --compose FILE   Override docker-compose file
   --sql FILE       Explicit SQL dump to import (auto-discovered if omitted)
   --seed FILE      Seed SQL file to apply after import
+  --only-services LIST  Comma/space separated subset of services to start (e.g. "web,api")
+  --skip-services LIST  Comma/space separated services to skip when starting (e.g. "db,admin")
   --no-import      Skip schema import step
   --no-seed        Skip seeding step
   -h, --help       Show this help
@@ -2523,6 +2648,11 @@ EOHELP
 
   local slug="$GC_DOCKER_PROJECT_NAME"
   local -a stale_containers=(
+    "${slug}-db"
+    "${slug}-api"
+    "${slug}-web"
+    "${slug}-admin"
+    "${slug}-proxy"
     "${slug}_db"
     "${slug}_api"
     "${slug}_web"
@@ -2551,30 +2681,96 @@ EOHELP
     info "No SQL assets discovered automatically."
   fi
 
-  info "Building and starting containers"
-  GC_DOCKER_VERBOSE="${GC_DOCKER_VERBOSE:-1}"
-  docker_compose -f "$compose_file" up -d --build
-
-  gc_start_created_containers "$compose_file" db api web admin proxy
-
-  local db_container
-  db_container="$(docker_compose -f "$compose_file" ps -q db || true)"
-  if [[ -n "$db_container" ]]; then
-    info "Waiting for MySQL to be ready…"
-    local waited=0
-    while (( waited < 60 )); do
-      if docker exec -i "$db_container" sh -lc 'mysqladmin ping -h 127.0.0.1 --silent' >/dev/null 2>&1; then
-        info "MySQL is ready."
-        break
-      fi
-      sleep 1
-      ((waited++)) || true
+  local -a all_services=(db api web admin proxy)
+  local -a services_to_start=()
+  if [[ -n "$only_services" ]]; then
+    local normalized_only="${only_services//,/ }"
+    read -r -a services_to_start <<< "$normalized_only"
+  else
+    services_to_start=("${all_services[@]}")
+  fi
+  if [[ -n "$skip_services" ]]; then
+    local -a skip_list=()
+    local normalized_skip="${skip_services//,/ }"
+    read -r -a skip_list <<< "$normalized_skip"
+    if (( ${#skip_list[@]} > 0 )); then
+      local -a filtered=()
+      local svc skip_flag skip_item
+      for svc in "${services_to_start[@]}"; do
+        skip_flag=0
+        for skip_item in "${skip_list[@]}"; do
+          [[ -z "$skip_item" ]] && continue
+          if [[ "$svc" == "$skip_item" ]]; then
+            skip_flag=1
+            break
+          fi
+        done
+        if (( skip_flag == 0 )); then
+          filtered+=("$svc")
+        fi
+      done
+      services_to_start=("${filtered[@]}")
+    fi
+  fi
+  if (( ${#services_to_start[@]} > 0 )); then
+    # Deduplicate and drop empties
+    local -a deduped=()
+    local svc seen_services=""
+    for svc in "${services_to_start[@]}"; do
+      [[ -z "$svc" ]] && continue
+      case " $seen_services " in
+        *" $svc "*) continue ;;
+      esac
+      deduped+=("$svc")
+      seen_services+=" $svc"
     done
-    if (( waited >= 60 )); then
-      warn "MySQL readiness timeout (continuing)."
+    services_to_start=("${deduped[@]}")
+  fi
+
+  if (( ${#services_to_start[@]} == 0 )); then
+    warn "No services selected to start; skipping docker compose up."
+  else
+    info "Building and starting containers (${services_to_start[*]})"
+    GC_DOCKER_VERBOSE="${GC_DOCKER_VERBOSE:-1}"
+    gc_refresh_stack_prepare_node_modules
+    docker_compose -f "$compose_file" up -d --build "${services_to_start[@]}"
+    gc_start_created_containers "$compose_file" "${services_to_start[@]}"
+  fi
+
+  local db_requested=0
+  local svc
+  for svc in "${services_to_start[@]}"; do
+    if [[ "$svc" == "db" ]]; then
+      db_requested=1
+      break
+    fi
+  done
+
+  local db_container=""
+  if (( db_requested )); then
+    db_container="$(docker_compose -f "$compose_file" ps -q db || true)"
+    if [[ -n "$db_container" ]]; then
+      info "Waiting for MySQL to be ready…"
+      local waited=0
+      local mysql_timeout="${GC_DOCKER_HEALTH_TIMEOUT:-10}"
+      local sleep_interval="${GC_DOCKER_HEALTH_INTERVAL:-1}"
+      (( sleep_interval <= 0 )) && sleep_interval=1
+      while (( waited < mysql_timeout )); do
+        if docker exec -i "$db_container" sh -lc 'mysqladmin ping -h 127.0.0.1 --silent' >/dev/null 2>&1; then
+          info "MySQL is ready."
+          break
+        fi
+        sleep "$sleep_interval"
+        ((waited += sleep_interval)) || true
+      done
+      if (( waited >= mysql_timeout )); then
+        warn "MySQL readiness timeout after ${mysql_timeout}s (continuing)."
+      fi
+    else
+      warn "Database container did not start; SQL import will be skipped."
     fi
   else
-    warn "Database container did not start; SQL import will be skipped."
+    info "Database service excluded from start; skipping readiness wait."
   fi
 
   docker_compose -f "$compose_file" ps
@@ -2703,7 +2899,7 @@ PY
 
   info "Verifying Docker service health"
   local stack_health_rc=0
-  if gc_refresh_stack_wait_for_containers "$compose_file" 120 5; then
+  if gc_refresh_stack_wait_for_containers "$compose_file" "${GC_DOCKER_HEALTH_TIMEOUT:-10}" "${GC_DOCKER_HEALTH_INTERVAL:-1}"; then
     ok "Docker services healthy"
   else
     stack_health_rc=1

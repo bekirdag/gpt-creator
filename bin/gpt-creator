@@ -56,9 +56,18 @@ path = pathlib.Path(sys.argv[1])
 key = sys.argv[2]
 value = sys.argv[3]
 if path.exists():
-    lines = path.read_text().splitlines()
+    raw_lines = path.read_text().splitlines()
 else:
-    lines = []
+    raw_lines = []
+lines = []
+for line in raw_lines:
+    stripped = line.strip()
+    if not stripped:
+        lines.append('')
+        continue
+    if stripped.startswith('#') or '=' in line:
+        lines.append(line)
+# Non key/value lines are dropped
 for idx, line in enumerate(lines):
     if line.startswith(f"{key}="):
         lines[idx] = f"{key}={value}"
@@ -69,9 +78,78 @@ path.write_text('\n'.join(lines) + '\n')
 PY
 }
 
+gc_env_sync_ports() {
+  GC_PORT_RESERVATIONS=""
+  GC_DB_HOST_PORT="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-${DB_PORT:-3306}}}"
+  DB_NAME="${DB_NAME:-$GC_DB_NAME}"
+  DB_USER="${DB_USER:-$GC_DB_USER}"
+  DB_PASSWORD="${DB_PASSWORD:-$GC_DB_PASSWORD}"
+  DB_ROOT_PASSWORD="${DB_ROOT_PASSWORD:-$GC_DB_ROOT_PASSWORD}"
+  DB_HOST_PORT="${DB_HOST_PORT:-$GC_DB_HOST_PORT}"
+  GC_API_HOST_PORT="${GC_API_HOST_PORT:-${API_HOST_PORT:-3000}}"
+  GC_WEB_HOST_PORT="${GC_WEB_HOST_PORT:-${WEB_HOST_PORT:-5173}}"
+  GC_ADMIN_HOST_PORT="${GC_ADMIN_HOST_PORT:-${ADMIN_HOST_PORT:-5174}}"
+  GC_PROXY_HOST_PORT="${GC_PROXY_HOST_PORT:-${PROXY_HOST_PORT:-8080}}"
+  API_HOST_PORT="${API_HOST_PORT:-$GC_API_HOST_PORT}"
+  WEB_HOST_PORT="${WEB_HOST_PORT:-$GC_WEB_HOST_PORT}"
+  ADMIN_HOST_PORT="${ADMIN_HOST_PORT:-$GC_ADMIN_HOST_PORT}"
+  PROXY_HOST_PORT="${PROXY_HOST_PORT:-$GC_PROXY_HOST_PORT}"
+  local api_base_default="http://localhost:${GC_API_HOST_PORT}/api/v1"
+  GC_API_BASE_URL="${GC_API_BASE_URL:-$api_base_default}"
+  VITE_API_BASE="${VITE_API_BASE:-$GC_API_BASE_URL}"
+  GC_API_HEALTH_URL="${GC_API_HEALTH_URL:-http://localhost:${GC_API_HOST_PORT}/health}"
+  local proxy_origin="http://localhost:${GC_PROXY_HOST_PORT}"
+  GC_WEB_URL="${GC_WEB_URL:-${proxy_origin}/}"
+  GC_ADMIN_URL="${GC_ADMIN_URL:-${proxy_origin}/admin/}"
+  gc_reserve_port db "$GC_DB_HOST_PORT"
+  gc_reserve_port api "$GC_API_HOST_PORT"
+  gc_reserve_port web "$GC_WEB_HOST_PORT"
+  gc_reserve_port admin "$GC_ADMIN_HOST_PORT"
+  gc_reserve_port proxy "$GC_PROXY_HOST_PORT"
+}
+
+gc_sanitize_env_file() {
+  local env_file="$1"
+  python3 - <<'PY' "$env_file"
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(0)
+pattern = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+ansi_re = re.compile(r"\x1b\[[0-9;]*m")
+whitespace_re = re.compile(r"\s")
+lines = path.read_text().splitlines()
+cleaned = []
+for line in lines:
+    stripped = line.strip()
+    if not stripped:
+        continue
+    if stripped.startswith('#'):
+        cleaned.append(line)
+        continue
+    match = pattern.match(line)
+    if not match:
+        # drop invalid line
+        continue
+    key, value = match.groups()
+    value = ansi_re.sub('', value).strip()
+    if '➜' in value or 'remapping' in value or value.startswith('Port '):
+        continue
+    if key.endswith('_HOST_PORT') or key in {'DB_HOST_PORT', 'DB_PORT', 'MYSQL_HOST_PORT'}:
+        if not value.isdigit():
+            continue
+    if whitespace_re.search(value) and not (value.startswith('"') and value.endswith('"')) and not (value.startswith("'") and value.endswith("'")):
+        # unquoted whitespace breaks sourcing; drop
+        continue
+    cleaned.append(f"{key}={value}")
+path.write_text('\n'.join(cleaned) + ('\n' if cleaned else ''))
+PY
+}
+
 gc_load_env() {
   local env_file="$(gc_env_file)"
   if [[ -f "$env_file" ]]; then
+    gc_sanitize_env_file "$env_file"
     set -a
     # shellcheck disable=SC1090
     source "$env_file"
@@ -81,12 +159,7 @@ gc_load_env() {
   GC_DB_USER="${GC_DB_USER:-${DB_USER:-app}}"
   GC_DB_PASSWORD="${GC_DB_PASSWORD:-${DB_PASSWORD:-app_pass}}"
   GC_DB_ROOT_PASSWORD="${GC_DB_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-root}}"
-  GC_DB_HOST_PORT="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-${DB_PORT:-3306}}}"
-  DB_NAME="${DB_NAME:-$GC_DB_NAME}"
-  DB_USER="${DB_USER:-$GC_DB_USER}"
-  DB_PASSWORD="${DB_PASSWORD:-$GC_DB_PASSWORD}"
-  DB_ROOT_PASSWORD="${DB_ROOT_PASSWORD:-$GC_DB_ROOT_PASSWORD}"
-  DB_HOST_PORT="${DB_HOST_PORT:-$GC_DB_HOST_PORT}"
+  gc_env_sync_ports
 }
 
 gc_create_env_if_missing() {
@@ -114,6 +187,10 @@ DB_ROOT_PASSWORD=${db_root_password}
 DB_HOST=127.0.0.1
 DB_PORT=3306
 DB_HOST_PORT=3306
+API_HOST_PORT=3000
+WEB_HOST_PORT=5173
+ADMIN_HOST_PORT=5174
+PROXY_HOST_PORT=8080
 DATABASE_URL=mysql://${db_user}:${db_password}@127.0.0.1:3306/${db_name}
 VITE_API_BASE=http://localhost:3000/api/v1
 EOF
@@ -162,6 +239,74 @@ slugify_name() {
   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
   printf '%s\n' "${s:-gptcreator}"
+}
+
+GC_PORT_RESERVATIONS=""
+
+gc_port_for_service() {
+  local service="$1"
+  local entry
+  for entry in $GC_PORT_RESERVATIONS; do
+    local svc="${entry%%:*}"
+    if [[ "$svc" == "$service" ]]; then
+      printf '%s\n' "${entry#*:}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+gc_unreserve_port() {
+  local service="$1"
+  [[ -n "$service" ]] || return 0
+  local entry new_list=""
+  for entry in $GC_PORT_RESERVATIONS; do
+    local svc="${entry%%:*}"
+    if [[ "$svc" == "$service" ]]; then
+      continue
+    fi
+    if [[ -z "$new_list" ]]; then
+      new_list="$entry"
+    else
+      new_list+=" $entry"
+    fi
+  done
+  GC_PORT_RESERVATIONS="$new_list"
+}
+
+gc_reserve_port() {
+  local service="$1" port="$2"
+  [[ -n "$service" && -n "$port" ]] || return 0
+  gc_unreserve_port "$service"
+  if [[ -z "${GC_PORT_RESERVATIONS:-}" ]]; then
+    GC_PORT_RESERVATIONS="${service}:${port}"
+  else
+    GC_PORT_RESERVATIONS+=" ${service}:${port}"
+  fi
+}
+
+gc_port_is_reserved() {
+  local port="$1"
+  local entry
+  for entry in $GC_PORT_RESERVATIONS; do
+    if [[ "${entry#*:}" == "$port" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+gc_port_reserved_by_other() {
+  local port="$1" service="$2"
+  local entry
+  for entry in $GC_PORT_RESERVATIONS; do
+    local svc="${entry%%:*}"
+    local val="${entry#*:}"
+    if [[ "$val" == "$port" && "$svc" != "$service" ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 # Context directories inside project
@@ -1008,6 +1153,22 @@ docker_compose() {
   fi
 }
 
+gc_compose_port() {
+  local compose_file="$1" service="$2" container_port="${3:-}"
+  [[ -f "$compose_file" ]] || return 1
+  local output=""
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    output="$(COMPOSE_PROJECT_NAME="$GC_DOCKER_PROJECT_NAME" docker compose -f "$compose_file" port "$service" "$container_port" 2>/dev/null | head -n1)"
+  fi
+  if [[ -z "$output" ]] && command -v docker-compose >/dev/null 2>&1; then
+    output="$(docker-compose -p "$GC_DOCKER_PROJECT_NAME" -f "$compose_file" port "$service" "$container_port" 2>/dev/null | head -n1)"
+  fi
+  [[ -n "$output" ]] || return 1
+  output="${output##*:}"
+  [[ "$output" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$output"
+}
+
 gc_container_name() {
   local service="$1"
   printf '%s-%s\n' "${GC_DOCKER_PROJECT_NAME}" "$service"
@@ -1094,13 +1255,62 @@ find_free_port() {
   local start="${1:-3306}"
   local port="$start"; local limit=$((start+100))
   while (( port <= limit )); do
-    if ! port_in_use "$port"; then
+    if ! port_in_use "$port" && ! gc_port_is_reserved "$port"; then
       echo "$port"
       return 0
     fi
     ((port++)) || true
   done
   echo "$start"  # fallback
+}
+
+gc_pick_port() {
+  local label="$1"
+  local default="$2"
+  shift 2
+  local service_key="$(slugify_name "$label")"
+  [[ -n "$service_key" ]] || service_key="$label"
+  local existing_port=""
+  existing_port="$(gc_port_for_service "$service_key" 2>/dev/null || true)"
+  gc_unreserve_port "$service_key"
+  local port=""
+  local env_name value
+  for env_name in "$@"; do
+    value="${!env_name:-}"
+    if [[ -n "$value" ]] && [[ "$value" =~ ^[0-9]+$ ]]; then
+      port="$value"
+      break
+    fi
+  done
+  [[ -n "$port" ]] || port="$default"
+  if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+    port="$default"
+  fi
+  local original="$port"
+  local attempts=0
+  local limit=200
+  while (( attempts < limit )); do
+    if (( port < 1 || port > 65535 )); then
+      port="$default"
+    fi
+    if ! port_in_use "$port" && ! gc_port_reserved_by_other "$port" "$service_key"; then
+      break
+    fi
+    ((port++))
+    ((attempts++))
+  done
+  while gc_port_reserved_by_other "$port" "$service_key"; do
+    ((port++))
+  done
+  if (( attempts >= limit )); then
+    warn "Unable to find free port for ${label}; using ${port}" >&2
+  elif [[ -n "$original" && "$port" != "$original" ]]; then
+    info "Port ${original} in use; remapping ${label} to ${port}" >&2
+  elif [[ -z "$existing_port" && "$port" != "$default" ]]; then
+    info "Port ${default} in use; remapping ${label} to ${port}" >&2
+  fi
+  gc_reserve_port "$service_key" "$port"
+  echo "$port"
 }
 
 wait_for_endpoint() {
@@ -1191,11 +1401,11 @@ gc_refresh_stack_prepare_node_modules() {
       return 0
     fi
     local install_rc=0
-    if (cd "$root" && PNPM_IGNORE_NODE_VERSION=1 pnpm install --frozen-lockfile --unsafe-perm --prefer-offline --engine-strict=false --reporter=append-only); then
+    if (cd "$root" && CI=1 PNPM_IGNORE_NODE_VERSION=1 pnpm install --frozen-lockfile --unsafe-perm --prefer-offline --engine-strict=false --reporter=append-only); then
       install_rc=0
     else
       warn "pnpm install --frozen-lockfile failed; retrying without frozen lockfile"
-      if (cd "$root" && PNPM_IGNORE_NODE_VERSION=1 pnpm install --unsafe-perm --prefer-offline --engine-strict=false --no-frozen-lockfile --reporter=append-only); then
+      if (cd "$root" && CI=1 PNPM_IGNORE_NODE_VERSION=1 pnpm install --unsafe-perm --prefer-offline --engine-strict=false --no-frozen-lockfile --reporter=append-only); then
         install_rc=0
       else
         install_rc=1
@@ -1224,12 +1434,20 @@ render_template_file() {
   local db_host_port="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-3306}}"
   local db_root_pass="${GC_DB_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-root}}"
   local project_slug="${GC_DOCKER_PROJECT_NAME:-${PROJECT_SLUG:-$(slugify_name "$(basename "${PROJECT_ROOT:-$PWD}")")}}"
-  python3 - <<'PY' "$src" "$dest" "$db_name" "$db_user" "$db_pass" "$db_host_port" "$db_root_pass" "$project_slug"
+  local api_host_port="${GC_API_HOST_PORT:-${API_HOST_PORT:-3000}}"
+  local web_host_port="${GC_WEB_HOST_PORT:-${WEB_HOST_PORT:-5173}}"
+  local admin_host_port="${GC_ADMIN_HOST_PORT:-${ADMIN_HOST_PORT:-5174}}"
+  local proxy_host_port="${GC_PROXY_HOST_PORT:-${PROXY_HOST_PORT:-8080}}"
+  python3 - <<'PY' "$src" "$dest" "$db_name" "$db_user" "$db_pass" "$db_host_port" "$db_root_pass" "$project_slug" "$api_host_port" "$web_host_port" "$admin_host_port" "$proxy_host_port"
 import pathlib, sys
 args = sys.argv[1:]
 src, dest, db_name, db_user, db_pass, db_host_port = args[:6]
 db_root_pass = args[6] if len(args) > 6 else ''
 project_slug = args[7] if len(args) > 7 else 'gptcreator'
+api_host_port = args[8] if len(args) > 8 else '3000'
+web_host_port = args[9] if len(args) > 9 else '5173'
+admin_host_port = args[10] if len(args) > 10 else '5174'
+proxy_host_port = args[11] if len(args) > 11 else '8080'
 text = pathlib.Path(src).read_text()
 text = text.replace('{{DB_NAME}}', db_name)
 text = text.replace('{{DB_USER}}', db_user)
@@ -1237,6 +1455,10 @@ text = text.replace('{{DB_PASSWORD}}', db_pass)
 text = text.replace('{{DB_HOST_PORT}}', db_host_port)
 text = text.replace('{{DB_ROOT_PASSWORD}}', db_root_pass)
 text = text.replace('{{PROJECT_SLUG}}', project_slug)
+text = text.replace('{{API_HOST_PORT}}', api_host_port)
+text = text.replace('{{WEB_HOST_PORT}}', web_host_port)
+text = text.replace('{{ADMIN_HOST_PORT}}', admin_host_port)
+text = text.replace('{{PROXY_HOST_PORT}}', proxy_host_port)
 pathlib.Path(dest).write_text(text)
 PY
 }
@@ -2389,6 +2611,7 @@ cmd_generate() {
       local out="$PROJECT_ROOT/docker"
       mkdir -p "$out"
       local preferred="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-${MYSQL_HOST_PORT:-3306}}}"
+      gc_unreserve_port db
       if port_in_use "$preferred"; then
         local next; next="$(find_free_port "$preferred")"
         if [[ "$next" != "$preferred" ]]; then
@@ -2399,11 +2622,44 @@ cmd_generate() {
       GC_DB_HOST_PORT="$preferred"
       DB_HOST_PORT="$GC_DB_HOST_PORT"
       MYSQL_HOST_PORT="$GC_DB_HOST_PORT"
+      gc_reserve_port db "$GC_DB_HOST_PORT"
       gc_set_env_var DB_HOST_PORT "$GC_DB_HOST_PORT"
       gc_set_env_var MYSQL_HOST_PORT "$GC_DB_HOST_PORT"
       gc_set_env_var GC_DB_HOST_PORT "$GC_DB_HOST_PORT"
+      local api_host_port="$(gc_pick_port "API" 3000 GC_API_HOST_PORT API_HOST_PORT)"
+      GC_API_HOST_PORT="$api_host_port"
+      API_HOST_PORT="$GC_API_HOST_PORT"
+      gc_set_env_var API_HOST_PORT "$API_HOST_PORT"
+      gc_set_env_var GC_API_HOST_PORT "$GC_API_HOST_PORT"
+      gc_reserve_port api "$GC_API_HOST_PORT"
+      local web_host_port="$(gc_pick_port "Web" 5173 GC_WEB_HOST_PORT WEB_HOST_PORT)"
+      GC_WEB_HOST_PORT="$web_host_port"
+      WEB_HOST_PORT="$GC_WEB_HOST_PORT"
+      gc_set_env_var WEB_HOST_PORT "$WEB_HOST_PORT"
+      gc_set_env_var GC_WEB_HOST_PORT "$GC_WEB_HOST_PORT"
+      gc_reserve_port web "$GC_WEB_HOST_PORT"
+      local admin_host_port="$(gc_pick_port "Admin" 5174 GC_ADMIN_HOST_PORT ADMIN_HOST_PORT)"
+      GC_ADMIN_HOST_PORT="$admin_host_port"
+      ADMIN_HOST_PORT="$GC_ADMIN_HOST_PORT"
+      gc_set_env_var ADMIN_HOST_PORT "$ADMIN_HOST_PORT"
+      gc_set_env_var GC_ADMIN_HOST_PORT "$GC_ADMIN_HOST_PORT"
+      gc_reserve_port admin "$GC_ADMIN_HOST_PORT"
+      local proxy_host_port="$(gc_pick_port "Proxy" 8080 GC_PROXY_HOST_PORT PROXY_HOST_PORT)"
+      GC_PROXY_HOST_PORT="$proxy_host_port"
+      PROXY_HOST_PORT="$GC_PROXY_HOST_PORT"
+      gc_set_env_var PROXY_HOST_PORT "$PROXY_HOST_PORT"
+      gc_set_env_var GC_PROXY_HOST_PORT "$GC_PROXY_HOST_PORT"
+      gc_reserve_port proxy "$GC_PROXY_HOST_PORT"
       local local_url="mysql://${GC_DB_USER}:${GC_DB_PASSWORD}@127.0.0.1:${GC_DB_HOST_PORT}/${GC_DB_NAME}"
       gc_set_env_var DATABASE_URL "$local_url"
+      local api_base_url="http://localhost:${GC_API_HOST_PORT}/api/v1"
+      gc_set_env_var GC_API_BASE_URL "$api_base_url"
+      gc_set_env_var VITE_API_BASE "$api_base_url"
+      local api_health_url="http://localhost:${GC_API_HOST_PORT}/health"
+      gc_set_env_var GC_API_HEALTH_URL "$api_health_url"
+      local proxy_base="http://localhost:${GC_PROXY_HOST_PORT}"
+      gc_set_env_var GC_WEB_URL "${proxy_base}/"
+      gc_set_env_var GC_ADMIN_URL "${proxy_base}/admin/"
       gc_load_env
       copy_template_tree "$templates/docker" "$out"
       if [[ -f "$out/pnpm-entry.sh" ]]; then
@@ -2937,23 +3193,62 @@ cmd_verify() {
   local api_health="${GC_API_HEALTH_URL:-}"
   local web_url="${GC_WEB_URL:-http://localhost:8080/}"
   local admin_url="${GC_ADMIN_URL:-http://localhost:8080/admin/}"
+  local api_base_override=0 api_health_override=0 web_url_override=0 admin_url_override=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project) root="$(abs_path "$2")"; shift 2;;
-      --api-url) api_base="$2"; shift 2;;
-      --api-health) api_health="$2"; shift 2;;
-      --web-url) web_url="$2"; shift 2;;
-      --admin-url) admin_url="$2"; shift 2;;
+      --api-url) api_base="$2"; api_base_override=1; shift 2;;
+      --api-health) api_health="$2"; api_health_override=1; shift 2;;
+      --web-url) web_url="$2"; web_url_override=1; shift 2;;
+      --admin-url) admin_url="$2"; admin_url_override=1; shift 2;;
       *) break;;
     esac
   done
   ensure_ctx "$root"
 
-  if [[ -z "$api_health" ]]; then
-    local trimmed_base="${api_base%/}"
-    api_health="${trimmed_base}/health"
+  local compose_file="${PROJECT_ROOT}/docker/docker-compose.yml"
+  local ports_updated=0
+  if [[ -f "$compose_file" ]]; then
+    local detected
+    if detected="$(gc_compose_port "$compose_file" api 3000)"; then
+      if [[ -n "$detected" && "$detected" != "$GC_API_HOST_PORT" ]]; then
+        GC_API_HOST_PORT="$detected"; API_HOST_PORT="$detected"; ports_updated=1
+      fi
+    fi
+    if detected="$(gc_compose_port "$compose_file" web 5173)"; then
+      if [[ -n "$detected" && "$detected" != "$GC_WEB_HOST_PORT" ]]; then
+        GC_WEB_HOST_PORT="$detected"; WEB_HOST_PORT="$detected"; ports_updated=1
+      fi
+    fi
+    if detected="$(gc_compose_port "$compose_file" admin 5173)"; then
+      if [[ -n "$detected" && "$detected" != "$GC_ADMIN_HOST_PORT" ]]; then
+        GC_ADMIN_HOST_PORT="$detected"; ADMIN_HOST_PORT="$detected"; ports_updated=1
+      fi
+    fi
+    if detected="$(gc_compose_port "$compose_file" proxy 80)"; then
+      if [[ -n "$detected" && "$detected" != "$GC_PROXY_HOST_PORT" ]]; then
+        GC_PROXY_HOST_PORT="$detected"; PROXY_HOST_PORT="$detected"; ports_updated=1
+      fi
+    fi
   fi
+  (( ports_updated )) && gc_env_sync_ports
+
+  if (( api_base_override == 0 )); then
+    api_base="${GC_API_BASE_URL:-$api_base}"
+  fi
+  if (( web_url_override == 0 )); then
+    web_url="${GC_WEB_URL:-$web_url}"
+  fi
+  if (( admin_url_override == 0 )); then
+    admin_url="${GC_ADMIN_URL:-$admin_url}"
+  fi
+  if (( api_health_override == 0 )); then
+    api_health="${GC_API_HEALTH_URL:-$api_health}"
+  fi
+
+  local trimmed_base="${api_base%/}"
+  api_health="${api_health:-${trimmed_base}/health}"
 
   local verify_root="$CLI_ROOT/verify"
   [[ -d "$verify_root" ]] || die "verify scripts directory missing at ${verify_root}"
@@ -2967,7 +3262,7 @@ cmd_verify() {
   esac
 
   local pass=0 fail=0 skip=0
-  local compose_file="${PROJECT_ROOT}/docker/docker-compose.yml"
+  compose_file="${PROJECT_ROOT}/docker/docker-compose.yml"
   run_check() {
     local label="$1"; shift
     if "$@"; then
@@ -3217,7 +3512,7 @@ ensure_node_dependencies() {
   info "Ensuring Node.js dependencies via ${installer_desc}"
   local install_status=1
   if [[ ${installer_cmd[0]} == pnpm ]]; then
-    if (cd "$root_dir" && PNPM_IGNORE_NODE_VERSION=1 "${installer_cmd[@]}" >"$log_file" 2>&1); then
+    if (cd "$root_dir" && CI=1 PNPM_IGNORE_NODE_VERSION=1 "${installer_cmd[@]}" >"$log_file" 2>&1); then
       install_status=0
     fi
   else

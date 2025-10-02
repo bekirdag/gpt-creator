@@ -14,6 +14,30 @@ slugify() {
   printf '%s\n' "${s:-gptcreator}"
 }
 
+log(){ printf "[generate-docker] %s\n" "$*"; }
+die(){ printf "[generate-docker][ERROR] %s\n" "$*" >&2; exit 1; }
+
+RESERVED_PORTS=""
+
+port_reserved() {
+  local port="$1"
+  case " ${RESERVED_PORTS:-} " in
+    *" ${port} "*) return 0 ;;
+  esac
+  return 1
+}
+
+reserve_port() {
+  local port="$1"
+  [[ -n "$port" ]] || return 0
+  port_reserved "$port" && return 0
+  if [[ -z "${RESERVED_PORTS:-}" ]]; then
+    RESERVED_PORTS="$port"
+  else
+    RESERVED_PORTS+=" $port"
+  fi
+}
+
 PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
 export PROJECT_SLUG
 
@@ -29,14 +53,79 @@ DB_USER="${DB_USER:-${GC_DB_USER:-${PROJECT_SLUG}_user}}"
 DB_PASS="${DB_PASSWORD:-${GC_DB_PASSWORD:-${PROJECT_SLUG}_pass}}"
 DB_ROOT_PASS="${DB_ROOT_PASSWORD:-root}"
 DB_HOST_PORT="${DB_HOST_PORT:-3306}"
+API_HOST_PORT="${API_HOST_PORT:-${GC_API_HOST_PORT:-3000}}"
+WEB_HOST_PORT="${WEB_HOST_PORT:-${GC_WEB_HOST_PORT:-5173}}"
+ADMIN_HOST_PORT="${ADMIN_HOST_PORT:-${GC_ADMIN_HOST_PORT:-5174}}"
+PROXY_HOST_PORT="${PROXY_HOST_PORT:-${GC_PROXY_HOST_PORT:-8080}}"
+
+port_in_use() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -an 2>/dev/null | grep -E "\\.${port} .*LISTEN" >/dev/null && return 0
+  fi
+  return 1
+}
+
+find_free_port() {
+  local start="$1"
+  local port="$start"; local limit=$((start+100))
+  while (( port <= limit )); do
+    if ! port_in_use "$port" && ! port_reserved "$port"; then
+      printf '%s\n' "$port"
+      return 0
+    fi
+    ((port++)) || true
+  done
+  printf '%s\n' "$start"
+}
+
+ensure_port() {
+  local label="$1" current="$2" default="${3:-$2}"
+  local port="$current"
+  [[ -n "$port" && "$port" =~ ^[0-9]+$ ]] || port="$default"
+  if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+    port="$default"
+  fi
+  local attempts=0
+  local limit=200
+  while (( attempts < limit )); do
+    if (( port < 1 || port > 65535 )); then
+      port="$default"
+    fi
+    local conflict=0
+    if port_in_use "$port"; then
+      conflict=1
+    elif port_reserved "$port" && [[ "$port" != "$current" ]]; then
+      conflict=1
+    fi
+    if (( conflict == 0 )); then
+      break
+    fi
+    ((port++))
+    ((attempts++))
+  done
+  if (( attempts >= limit )); then
+    log "Unable to find free port for ${label}; using ${port}" >&2
+  elif [[ -n "$current" && "$port" != "$current" ]]; then
+    log "Port ${current} in use; remapping ${label} to ${port}" >&2
+  fi
+  reserve_port "$port"
+  printf '%s\n' "$port"
+}
+
+DB_HOST_PORT="$(ensure_port "MySQL" "$DB_HOST_PORT" 3306)"
+API_HOST_PORT="$(ensure_port "API" "$API_HOST_PORT" 3000)"
+WEB_HOST_PORT="$(ensure_port "Web" "$WEB_HOST_PORT" 5173)"
+ADMIN_HOST_PORT="$(ensure_port "Admin" "$ADMIN_HOST_PORT" 5174)"
+PROXY_HOST_PORT="$(ensure_port "Proxy" "$PROXY_HOST_PORT" 8080)"
+
+API_BASE_URL="http://localhost:${API_HOST_PORT}/api/v1"
 
 if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
   source "${ROOT_DIR}/src/constants.sh"
-else
-  CLI_NAME="gpt-creator"
-  log(){ printf "[generate-docker] %s\n" "$*"; }
-  die(){ printf "[generate-docker][ERROR] %s\n" "$*" >&2; exit 1; }
 fi
 
 usage() {
@@ -101,9 +190,9 @@ services:
       DATABASE_URL: mysql://${DB_USER}:${DB_PASS}@db:3306/${DB_NAME}
       PORT: 3000
       GC_SERVICE: api
-    command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/api && pnpm run start:dev"
+    command: sh -c "corepack enable pnpm && cd /workspace && CI=1 pnpm install --frozen-lockfile=false && cd apps/api && pnpm run start:dev"
     ports:
-      - "3000:3000"
+      - "${API_HOST_PORT}:3000"
     volumes:
       - ..:/workspace
 
@@ -114,11 +203,11 @@ services:
     container_name: ${PROJECT_SLUG}-web
     environment:
       NODE_ENV: development
-      VITE_API_BASE: http://localhost:3000/api/v1
+      VITE_API_BASE: ${API_BASE_URL}
       GC_SERVICE: web
-    command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/web && pnpm run dev -- --host 0.0.0.0"
+    command: sh -c "corepack enable pnpm && cd /workspace && CI=1 pnpm install --frozen-lockfile=false && cd apps/web && pnpm run dev -- --host 0.0.0.0"
     ports:
-      - "5173:5173"
+      - "${WEB_HOST_PORT}:5173"
     volumes:
       - ..:/workspace
 
@@ -129,11 +218,11 @@ services:
     container_name: ${PROJECT_SLUG}-admin
     environment:
       NODE_ENV: development
-      VITE_API_BASE: http://localhost:3000/api/v1
+      VITE_API_BASE: ${API_BASE_URL}
       GC_SERVICE: admin
-    command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/admin && pnpm run dev -- --host 0.0.0.0"
+    command: sh -c "corepack enable pnpm && cd /workspace && CI=1 pnpm install --frozen-lockfile=false && cd apps/admin && pnpm run dev -- --host 0.0.0.0"
     ports:
-      - "5174:5173"
+      - "${ADMIN_HOST_PORT}:5173"
     volumes:
       - ..:/workspace
 
@@ -145,7 +234,7 @@ services:
       - admin
       - api
     ports:
-      - "8080:80"
+      - "${PROXY_HOST_PORT}:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
 
@@ -216,6 +305,12 @@ NGINX
 cat > "${env_example}" <<ENV
 # Copy to .env.local and edit as needed
 DATABASE_URL=mysql://${DB_USER}:${DB_PASS}@127.0.0.1:${DB_HOST_PORT}/${DB_NAME}
+DB_HOST_PORT=${DB_HOST_PORT}
+API_HOST_PORT=${API_HOST_PORT}
+WEB_HOST_PORT=${WEB_HOST_PORT}
+ADMIN_HOST_PORT=${ADMIN_HOST_PORT}
+PROXY_HOST_PORT=${PROXY_HOST_PORT}
+VITE_API_BASE=${API_BASE_URL}
 RECAPTCHA_SITE_KEY=
 RECAPTCHA_SECRET=
 SMTP_HOST=

@@ -5,6 +5,15 @@
 
 set -Eeuo pipefail
 
+# Ensure docker compose commands have adequate timeouts unless caller overrides
+if [[ -n "${GC_DOCKER_COMPOSE_TIMEOUT:-}" ]]; then
+  COMPOSE_HTTP_TIMEOUT="$GC_DOCKER_COMPOSE_TIMEOUT"
+  DOCKER_CLIENT_TIMEOUT="$GC_DOCKER_COMPOSE_TIMEOUT"
+fi
+: "${COMPOSE_HTTP_TIMEOUT:=600}"
+: "${DOCKER_CLIENT_TIMEOUT:=$COMPOSE_HTTP_TIMEOUT}"
+export COMPOSE_HTTP_TIMEOUT DOCKER_CLIENT_TIMEOUT
+
 resolve_cli_root() {
   local source="${BASH_SOURCE[0]}"
   while [[ -L "$source" ]]; do
@@ -145,7 +154,7 @@ to_lower() {
 
 slugify_name() {
   local s="${1:-}"
-  s="${s,,}"
+  s="$(to_lower "$s")"
   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
   printf '%s\n' "${s:-gptcreator}"
@@ -974,12 +983,81 @@ docker_compose() {
     local base="$(basename "${PROJECT_ROOT:-$PWD}")"
     project_name="$(slugify_name "$base")"
   fi
+  local -a compose_opts=()
+  if [[ -n "${GC_DOCKER_VERBOSE:-}" ]]; then
+    compose_opts+=(--verbose)
+  fi
   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-    COMPOSE_PROJECT_NAME="$project_name" docker compose "$@"
+    COMPOSE_PROJECT_NAME="$project_name" docker compose "${compose_opts[@]}" "$@"
   elif command -v docker-compose >/dev/null 2>&1; then
-    docker-compose -p "$project_name" "$@"
+    docker-compose -p "$project_name" "${compose_opts[@]}" "$@"
   else
     die "docker compose is not available. Install Docker Desktop or docker-compose."
+  fi
+}
+
+container_exists() {
+  local name="$1"
+  docker ps -a --format '{{.Names}}' | grep -Fxq "$name"
+}
+
+container_state() {
+  local name="$1"
+  docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo "absent"
+}
+
+gc_start_created_containers() {
+  local compose_file="$1"
+  shift || true
+  local -a services=("$@")
+  local service container state started any_started=0
+
+  for service in "${services[@]}"; do
+    container="${GC_DOCKER_PROJECT_NAME}_${service}"
+    if ! container_exists "$container"; then
+      continue
+    fi
+    state="$(container_state "$container")"
+    if [[ "$state" == "created" ]]; then
+      info "Container ${container} stuck in 'created'; attempting manual start"
+      if docker start "$container" >/dev/null 2>&1; then
+        started=1
+        any_started=1
+      else
+        warn "Failed to start ${container}; attempting compose start fallback"
+        docker_compose -f "$compose_file" start "$service" >/dev/null 2>&1 || true
+      fi
+    fi
+  done
+
+  if (( any_started == 1 )); then
+    local wait_seconds=0
+    local timeout=120
+    while (( wait_seconds < timeout )); do
+      local all_ready=1
+      for service in "${services[@]}"; do
+        container="${GC_DOCKER_PROJECT_NAME}_${service}"
+        if ! container_exists "$container"; then
+          continue
+        fi
+        state="$(container_state "$container")"
+        case "$state" in
+          running|healthy) continue ;;
+          exited|dead)
+            warn "Container ${container} exited unexpectedly (state=${state}). Check logs."
+            all_ready=0
+            ;;
+          *)
+            all_ready=0
+            ;;
+        esac
+      done
+      if (( all_ready == 1 )); then
+        break
+      fi
+      sleep 2
+      (( wait_seconds += 2 )) || true
+    done
   fi
 }
 
@@ -1042,7 +1120,7 @@ text = text.replace('{{DB_USER}}', db_user)
 text = text.replace('{{DB_PASSWORD}}', db_pass)
 text = text.replace('{{DB_HOST_PORT}}', db_host_port)
 text = text.replace('{{DB_ROOT_PASSWORD}}', db_root_pass)
- text = text.replace('{{PROJECT_SLUG}}', project_slug)
+text = text.replace('{{PROJECT_SLUG}}', project_slug)
 pathlib.Path(dest).write_text(text)
 PY
 }
@@ -1382,6 +1460,325 @@ PY
   fi
 
   return 1
+}
+
+gc_refresh_stack_collect_sql() {
+  local root="$1"
+  python3 - <<'PY' "$root"
+import os
+import re
+import shlex
+import sys
+from pathlib import Path
+
+root = os.path.abspath(sys.argv[1])
+
+candidate_dirs = []
+seen_dirs = set()
+for rel in [
+    os.path.join('.gpt-creator', 'staging', 'sql'),
+    os.path.join('.gpt-creator', 'staging'),
+    os.path.join('staging', 'sql'),
+    os.path.join('staging'),
+    os.path.join('db'),
+    os.path.join('database'),
+    os.path.join('sql'),
+    os.path.join('data', 'sql'),
+    os.path.join('data'),
+    '.',
+]:
+    path = os.path.abspath(os.path.join(root, rel))
+    if os.path.isdir(path) and path not in seen_dirs:
+        candidate_dirs.append(path)
+        seen_dirs.add(path)
+
+ignore_dirs = {
+    '.git', '.hg', '.svn', '.tox', '.pytest_cache', '.idea', '.vscode',
+    '__pycache__', 'node_modules', 'vendor', 'dist', 'build', 'tmp', 'temp'
+}
+
+entries = []
+seen_files = set()
+
+for base in candidate_dirs:
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
+        for fname in filenames:
+            if not fname.lower().endswith('.sql'):
+                continue
+            full = os.path.abspath(os.path.join(dirpath, fname))
+            if full in seen_files:
+                continue
+            seen_files.add(full)
+            rel_path = os.path.relpath(full, root)
+            base_name = os.path.basename(full)
+            rel_norm = rel_path.replace('\\', '/')
+            if rel_norm.startswith('.gpt-creator/staging/') and (base_name.startswith('import-') or base_name.startswith('seed-')):
+                continue
+            lower = fname.lower()
+            dir_lower = dirpath.lower()
+            label = 'schema'
+            if 'init' in lower or 'init' in dir_lower:
+                label = 'init'
+            elif any(token in lower or token in dir_lower for token in ('seed', 'fixture', 'sample', 'data-seed', 'seed-data')):
+                label = 'seed'
+            elif any(token in lower for token in ('dump', 'schema', 'structure', 'backup', 'snapshot')):
+                label = 'schema'
+            try:
+                mtime = os.path.getmtime(full)
+            except OSError:
+                mtime = 0
+            entries.append((label, mtime, full))
+
+order_map = {'init': 0, 'schema': 1, 'seed': 2}
+entries.sort(key=lambda item: (order_map.get(item[0], 3), item[1], item[2]))
+
+init_list = [path for label, _, path in entries if label == 'init']
+schema_list = [path for label, _, path in entries if label == 'schema']
+seed_list = [path for label, _, path in entries if label == 'seed']
+all_list = [path for _, _, path in entries]
+
+db_create_re = re.compile(r"CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?P<name>`[^`]+`|\"[^\"]+\"|'[^']+'|[A-Za-z0-9_]+)", re.IGNORECASE)
+use_re = re.compile(r"\bUSE\s+(?P<name>`[^`]+`|\"[^\"]+\"|'[^']+'|[A-Za-z0-9_]+)", re.IGNORECASE)
+create_user_re = re.compile(r"CREATE\s+USER\s+(?:IF\s+NOT\s+EXISTS\s+)?'(?P<user>[^']+)'(?:\s*@\s*'(?P<host>[^']*)')?\s+IDENTIFIED(?:\s+WITH\s+[A-Za-z0-9_]+)?\s+BY\s+'(?P<pw>[^']+)'", re.IGNORECASE)
+alter_user_re = re.compile(r"ALTER\s+USER\s+'(?P<user>[^']+)'(?:\s*@\s*'(?P<host>[^']*)')?\s+IDENTIFIED(?:\s+WITH\s+[A-Za-z0-9_]+)?\s+BY\s+'(?P<pw>[^']+)'", re.IGNORECASE)
+grant_re = re.compile(r"GRANT\s+.+?\s+ON\s+(?P<db>`[^`]+`|\"[^\"]+\"|'[^']+'|[A-Za-z0-9_]+(?:\\.[^\s;]+)?)\s+TO\s+'(?P<user>[^']+)'", re.IGNORECASE)
+
+def normalise_identifier(token: str) -> str:
+    token = token.strip().rstrip(';').strip()
+    if token.endswith('.*'):
+        token = token[:-2]
+    if '.' in token:
+        token = token.split('.', 1)[0]
+    if token and token[0] in "`\"'" and token[-1] == token[0]:
+        token = token[1:-1]
+    return token.strip()
+
+db_name = ''
+app_user = ''
+app_password = ''
+user_host = ''
+
+for label, _, path in entries:
+    if db_name and app_user and app_password:
+        break
+    try:
+        text = Path(path).read_text(encoding='utf-8', errors='ignore')
+    except Exception:
+        continue
+    if not db_name:
+        match = db_create_re.search(text)
+        if match:
+            db_name = normalise_identifier(match.group('name'))
+    if not db_name:
+        match = use_re.search(text)
+        if match:
+            db_name = normalise_identifier(match.group('name'))
+    if not app_user or not app_password:
+        match = create_user_re.search(text) or alter_user_re.search(text)
+        if match:
+            app_user = match.group('user')
+            app_password = match.group('pw')
+            host = match.group('host') if match.group('host') is not None else ''
+            user_host = host or '%'
+    if app_user and not db_name:
+        for m in grant_re.finditer(text):
+            if m.group('user') == app_user:
+                candidate = normalise_identifier(m.group('db'))
+                if candidate and candidate != '*':
+                    db_name = candidate
+                    break
+
+def emit_array(name, values):
+    if values:
+        joined = ' '.join(shlex.quote(v) for v in values)
+        print(f"{name}=({joined})")
+    else:
+        print(f"{name}=()")
+
+def emit_value(name, value):
+    quoted = shlex.quote(value) if value else "''"
+    print(f"{name}={quoted}")
+
+emit_array('refresh_sql_init_files', init_list)
+emit_array('refresh_sql_schema_files', schema_list)
+emit_array('refresh_sql_seed_files', seed_list)
+emit_array('refresh_sql_all_files', all_list)
+emit_value('refresh_sql_default_db_name', db_name)
+emit_value('refresh_sql_default_db_user', app_user)
+emit_value('refresh_sql_default_db_password', app_password)
+emit_value('refresh_sql_default_user_host', user_host or '%')
+PY
+}
+
+gc_refresh_stack_exec_mysql() {
+  local container_id="$1" sql_file="$2" user="$3" password="$4" database="$5"
+  local port="${6:-3306}"
+
+  [[ -n "$container_id" ]] || return 1
+  [[ -f "$sql_file" ]] || return 1
+  local -a cmd=(docker exec -i "$container_id" mysql --protocol=TCP -h 127.0.0.1 -P "$port" "-u${user}")
+  if [[ -n "$password" ]]; then
+    cmd+=("-p${password}")
+  fi
+  if [[ -n "$database" ]]; then
+    cmd+=("$database")
+  fi
+  if ! "${cmd[@]}" <"$sql_file"; then
+    return 1
+  fi
+  return 0
+}
+
+gc_refresh_stack_exec_inline_sql() {
+  local container_id="$1" user="$2" password="$3" database="$4"
+  local port="${5:-3306}"
+  local sql_content
+  sql_content="$(cat)"
+  local -a cmd=(docker exec -i "$container_id" mysql --protocol=TCP -h 127.0.0.1 -P "$port" "-u${user}")
+  if [[ -n "$password" ]]; then
+    cmd+=("-p${password}")
+  fi
+  if [[ -n "$database" ]]; then
+    cmd+=("$database")
+  fi
+  if ! printf "%s" "$sql_content" | "${cmd[@]}"; then
+    return 1
+  fi
+  return 0
+}
+
+gc_refresh_stack_inspect_containers() {
+  local compose_file="${1:?compose file required}"
+  local -a container_ids=()
+  mapfile -t container_ids < <(docker_compose -f "$compose_file" ps --all -q 2>/dev/null | awk 'NF')
+  if (( ${#container_ids[@]} == 0 )); then
+    mapfile -t container_ids < <(docker_compose -f "$compose_file" ps -q 2>/dev/null | awk 'NF')
+  fi
+  if (( ${#container_ids[@]} == 0 )); then
+    printf '%s\n' "No containers found for project ${GC_DOCKER_PROJECT_NAME}."
+    return 1
+  fi
+
+  local inspect_json=""
+  if ! inspect_json="$(docker inspect "${container_ids[@]}" 2>/dev/null)"; then
+    printf '%s\n' "Failed to inspect Docker containers for project ${GC_DOCKER_PROJECT_NAME}."
+    return 1
+  fi
+
+  python3 - <<'PY' <<<"${inspect_json}"
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception as exc:
+    print(f"Unable to parse docker inspect output: {exc}")
+    sys.exit(1)
+
+if not isinstance(data, list):
+    data = [data]
+
+if not data:
+    print("No container state data returned by docker inspect.")
+    sys.exit(1)
+
+pending = []
+failures = []
+healthy = []
+
+for entry in data:
+    name = (entry.get("Name") or "").lstrip("/")
+    labels = entry.get("Config", {}).get("Labels", {}) or {}
+    service = labels.get("com.docker.compose.service") or name
+    state = entry.get("State") or {}
+    status = (state.get("Status") or "").lower()
+    health = (state.get("Health", {}).get("Status") or "").lower()
+    exit_code = state.get("ExitCode")
+
+    detail = f"{service}: status={status or 'unknown'}"
+    if health:
+        detail += f", health={health}"
+    if exit_code not in (None, 0):
+        detail += f", exit_code={exit_code}"
+
+    if status == "running":
+        if health in ("", "healthy"):
+            healthy.append(detail)
+        elif health == "starting":
+            pending.append(detail)
+        else:
+            failures.append(detail)
+    elif status in ("created", "starting"):
+        pending.append(detail)
+    else:
+        failures.append(detail)
+
+if failures:
+    print("Container failures detected:")
+    for line in failures:
+        print(f"  - {line}")
+    sys.exit(1)
+
+if pending:
+    print("Containers still starting:")
+    for line in pending:
+        print(f"  - {line}")
+    sys.exit(2)
+
+print("All containers running and healthy:")
+for line in healthy:
+    print(f"  - {line}")
+sys.exit(0)
+PY
+}
+
+gc_refresh_stack_wait_for_containers() {
+  local compose_file="${1:?compose file required}"
+  local timeout="${2:-120}"
+  local interval="${3:-5}"
+  local elapsed=0
+  local output rc
+
+  while (( elapsed <= timeout )); do
+    output="$(gc_refresh_stack_inspect_containers "$compose_file")"
+    rc=$?
+    if (( rc == 0 )); then
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        info "$line"
+      done <<<"$output"
+      return 0
+    elif (( rc == 2 )); then
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        info "$line"
+      done <<<"$output"
+      sleep "$interval"
+      (( elapsed += interval ))
+      continue
+    else
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        warn "$line"
+      done <<<"$output"
+      return 1
+    fi
+  done
+
+  warn "Timed out after ${timeout}s waiting for containers to report healthy state."
+  output="$(gc_refresh_stack_inspect_containers "$compose_file")"
+  rc=$?
+  local log_fn=warn
+  if (( rc == 0 )); then
+    log_fn=info
+  fi
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    "$log_fn" "$line"
+  done <<<"$output"
+  (( rc == 0 )) || return 1
+  return 0
 }
 
 # ---------- Scan helpers ----------
@@ -1892,6 +2289,9 @@ cmd_generate() {
       gc_set_env_var DATABASE_URL "$local_url"
       gc_load_env
       copy_template_tree "$templates/docker" "$out"
+      if [[ -f "$out/pnpm-entry.sh" ]]; then
+        chmod +x "$out/pnpm-entry.sh" || true
+      fi
       ok "Docker assets scaffolded → ${out}"
       ;;
     all)
@@ -2061,14 +2461,58 @@ EOHELP
 
   ensure_ctx "$root"
 
+  local -a refresh_sql_init_files=() refresh_sql_schema_files=() refresh_sql_seed_files=() refresh_sql_all_files=()
+  local refresh_sql_default_db_name="" refresh_sql_default_db_user="" refresh_sql_default_db_password="" refresh_sql_default_user_host=""
+  eval "$(gc_refresh_stack_collect_sql "$PROJECT_ROOT")"
+
+  if [[ -n "$sql_override" ]]; then
+    refresh_sql_schema_files=("$sql_override")
+  fi
+  if [[ -n "$seed_override" ]]; then
+    refresh_sql_seed_files=("$seed_override")
+  fi
+
+  local env_updated=0
+  if [[ -n "$refresh_sql_default_db_name" && "$refresh_sql_default_db_name" != "$GC_DB_NAME" ]]; then
+    gc_set_env_var DB_NAME "$refresh_sql_default_db_name"
+    gc_set_env_var GC_DB_NAME "$refresh_sql_default_db_name"
+    env_updated=1
+  fi
+  if [[ -n "$refresh_sql_default_db_user" && "$refresh_sql_default_db_user" != "$GC_DB_USER" ]]; then
+    gc_set_env_var DB_USER "$refresh_sql_default_db_user"
+    gc_set_env_var GC_DB_USER "$refresh_sql_default_db_user"
+    env_updated=1
+  fi
+  if [[ -n "$refresh_sql_default_db_password" && "$refresh_sql_default_db_password" != "$GC_DB_PASSWORD" ]]; then
+    gc_set_env_var DB_PASSWORD "$refresh_sql_default_db_password"
+    gc_set_env_var GC_DB_PASSWORD "$refresh_sql_default_db_password"
+    env_updated=1
+  fi
+  if (( env_updated )); then
+    gc_load_env
+    local host_port="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-3306}}"
+    local database_url="mysql://${GC_DB_USER}:${GC_DB_PASSWORD}@127.0.0.1:${host_port}/${GC_DB_NAME}"
+    gc_set_env_var DATABASE_URL "$database_url"
+  fi
+
+  info "Using database '${GC_DB_NAME}' with user '${GC_DB_USER}'"
+
   local compose_file="$compose_override"
-  if [[ -z "$compose_file" ]]; then
+  if [[ -n "$compose_file" ]]; then
+    compose_file="$(abs_path "$compose_file")"
+  else
+    info "Rendering docker assets from templates"
+    if ! cmd_generate docker --project "$PROJECT_ROOT"; then
+      die "Failed to generate docker assets"
+    fi
     if [[ -f "${PROJECT_ROOT}/docker/compose.yaml" ]]; then
       compose_file="${PROJECT_ROOT}/docker/compose.yaml"
+    elif [[ -f "${PROJECT_ROOT}/docker/docker-compose.yml" ]]; then
+      compose_file="${PROJECT_ROOT}/docker/docker-compose.yml"
     elif [[ -f "${PROJECT_ROOT}/docker-compose.yml" ]]; then
       compose_file="${PROJECT_ROOT}/docker-compose.yml"
     else
-      die "Compose file not found. Expected docker/compose.yaml or docker-compose.yml"
+      die "Compose file not found after generation. Expected docker/compose.yaml or docker-compose.yml"
     fi
   fi
 
@@ -2077,65 +2521,208 @@ EOHELP
   info "Stopping existing containers (removing volumes)"
   docker_compose -f "$compose_file" down -v --remove-orphans || true
 
-  info "Building and starting containers"
-  "$CLI_ROOT/src/cli/run-compose-up.sh" --compose "$compose_file"
-
-  local import_rc=0 seed_rc=0
-
-  if (( skip_import == 0 )); then
-    info "Importing database structure"
-    if [[ -n "$sql_override" ]]; then
-      if [[ ! -f "$sql_override" ]]; then
-        warn "Specified SQL dump not found: ${sql_override}"
-        import_rc=1
-      else
-        if ! "$CLI_ROOT/src/cli/db-import.sh" --compose "$compose_file" --file "$sql_override" -y; then
-          warn "Database import failed"
-          import_rc=1
-        fi
-      fi
-    else
-      if ! "$CLI_ROOT/src/cli/db-import.sh" --compose "$compose_file" -y; then
-        warn "Database import failed (auto-discovery)"
-        import_rc=1
-      fi
+  local slug="$GC_DOCKER_PROJECT_NAME"
+  local -a stale_containers=(
+    "${slug}_db"
+    "${slug}_api"
+    "${slug}_web"
+    "${slug}_admin"
+    "${slug}_proxy"
+  )
+  local container
+  for container in "${stale_containers[@]}"; do
+    if docker ps -a --format '{{.Names}}' | grep -Fxq "$container"; then
+      info "Removing leftover container ${container}"
+      docker rm -f "$container" >/dev/null 2>&1 || true
     fi
+  done
+
+  if (( ${#refresh_sql_all_files[@]} > 0 )); then
+    info "Discovered SQL assets:"
+    local listed
+    for listed in "${refresh_sql_all_files[@]}"; do
+      if [[ "$listed" == "$PROJECT_ROOT/"* ]]; then
+        info "  - ${listed#$PROJECT_ROOT/}"
+      else
+        info "  - ${listed}"
+      fi
+    done
   else
-    info "Skipping schema import (--no-import)"
+    info "No SQL assets discovered automatically."
   fi
 
-  if (( skip_seed == 0 )); then
-    info "Applying database seeds"
-    if [[ -n "$seed_override" ]]; then
-      if [[ ! -f "$seed_override" ]]; then
-        warn "Seed file not found: ${seed_override}"
-        seed_rc=1
-      else
-        if ! "$CLI_ROOT/src/cli/db-seed.sh" --compose "$compose_file" --from "$seed_override"; then
-          warn "Database seeding failed"
-          seed_rc=1
-        fi
+  info "Building and starting containers"
+  GC_DOCKER_VERBOSE="${GC_DOCKER_VERBOSE:-1}"
+  docker_compose -f "$compose_file" up -d --build
+
+  gc_start_created_containers "$compose_file" db api web admin proxy
+
+  local db_container
+  db_container="$(docker_compose -f "$compose_file" ps -q db || true)"
+  if [[ -n "$db_container" ]]; then
+    info "Waiting for MySQL to be ready…"
+    local waited=0
+    while (( waited < 60 )); do
+      if docker exec -i "$db_container" sh -lc 'mysqladmin ping -h 127.0.0.1 --silent' >/dev/null 2>&1; then
+        info "MySQL is ready."
+        break
       fi
-    else
-      if ! "$CLI_ROOT/src/cli/db-seed.sh" --compose "$compose_file"; then
-        warn "Database seeding failed"
-        seed_rc=1
-      fi
+      sleep 1
+      ((waited++)) || true
+    done
+    if (( waited >= 60 )); then
+      warn "MySQL readiness timeout (continuing)."
     fi
   else
-    info "Skipping seeding (--no-seed)"
+    warn "Database container did not start; SQL import will be skipped."
+  fi
+
+  docker_compose -f "$compose_file" ps
+
+  local db_port="3306"
+  local root_user="${DB_ROOT_USER:-root}"
+  local root_pass="${DB_ROOT_PASSWORD:-${GC_DB_ROOT_PASSWORD:-}}"
+  local app_user="${DB_USER:-$GC_DB_USER}"
+  local app_pass="${DB_PASSWORD:-$GC_DB_PASSWORD}"
+  local db_name="${DB_NAME:-$GC_DB_NAME}"
+  local app_host="${refresh_sql_default_user_host:-%}"
+
+  local import_rc=0 seed_rc=0
+  local schema_attempted=0 seed_attempted=0
+
+  if [[ -z "$db_container" ]]; then
+    if (( skip_import == 0 )); then
+      import_rc=1
+    fi
+    if (( skip_seed == 0 )); then
+      seed_rc=1
+    fi
+  else
+    if (( skip_import == 0 || skip_seed == 0 )); then
+      local ensure_sql
+      ensure_sql="$(python3 - <<'PY' "$db_name" "$app_user" "$app_pass" "$app_host"
+import sys
+
+db, user, password, host = sys.argv[1:5]
+if not host:
+    host = '%'
+if not db:
+    db = 'app'
+if not user:
+    user = 'app'
+
+def quote_identifier(name: str) -> str:
+    return '`' + name.replace('`', '``') + '`'
+
+def quote_string(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+statements = [
+    f"CREATE DATABASE IF NOT EXISTS {quote_identifier(db)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
+    f"CREATE USER IF NOT EXISTS {quote_string(user)}@{quote_string(host)} IDENTIFIED BY {quote_string(password)};",
+    f"GRANT ALL PRIVILEGES ON {quote_identifier(db)}.* TO {quote_string(user)}@{quote_string(host)};",
+    "FLUSH PRIVILEGES;",
+]
+print("\n".join(statements))
+PY
+)"
+      if ! gc_refresh_stack_exec_inline_sql "$db_container" "$root_user" "$root_pass" "" "$db_port" <<<"$ensure_sql"; then
+        warn "Failed to ensure database or user; continuing with imports."
+      else
+        info "Ensured database ${db_name} and user ${app_user}"
+      fi
+    fi
+
+    if (( skip_import == 0 )) && (( ${#refresh_sql_init_files[@]} + ${#refresh_sql_schema_files[@]} == 0 )); then
+      info "No schema SQL files found; skipping import."
+      skip_import=1
+    fi
+    if (( skip_seed == 0 )) && (( ${#refresh_sql_seed_files[@]} == 0 )); then
+      info "No seed SQL files found; skipping seeding."
+      skip_seed=1
+    fi
+
+    if (( skip_import == 0 )); then
+      local file display
+      for file in "${refresh_sql_init_files[@]}"; do
+        [[ -f "$file" ]] || { warn "Init SQL not found: $file"; import_rc=1; continue; }
+        display="$file"
+        [[ "$display" == "$PROJECT_ROOT/"* ]] && display="${display#$PROJECT_ROOT/}"
+        info "Applying init SQL: ${display}"
+        ((schema_attempted++))
+        if ! gc_refresh_stack_exec_mysql "$db_container" "$file" "$root_user" "$root_pass" "" "$db_port"; then
+          warn "Init SQL failed as ${root_user}; retrying as ${app_user}"
+          if ! gc_refresh_stack_exec_mysql "$db_container" "$file" "$app_user" "$app_pass" "" "$db_port"; then
+            warn "Init SQL failed: ${display}"
+            import_rc=1
+            continue
+          fi
+        fi
+      done
+
+      for file in "${refresh_sql_schema_files[@]}"; do
+        [[ -f "$file" ]] || { warn "Schema SQL not found: $file"; import_rc=1; continue; }
+        display="$file"
+        [[ "$display" == "$PROJECT_ROOT/"* ]] && display="${display#$PROJECT_ROOT/}"
+        info "Importing schema SQL: ${display}"
+        ((schema_attempted++))
+        if ! gc_refresh_stack_exec_mysql "$db_container" "$file" "$root_user" "$root_pass" "$db_name" "$db_port"; then
+          warn "Schema import failed as ${root_user}; retrying as ${app_user}"
+          if ! gc_refresh_stack_exec_mysql "$db_container" "$file" "$app_user" "$app_pass" "$db_name" "$db_port"; then
+            warn "Schema SQL failed: ${display}"
+            import_rc=1
+            continue
+          fi
+        fi
+      done
+    else
+      info "Skipping schema import (--no-import)"
+    fi
+
+    if (( skip_seed == 0 )); then
+      local seed_file seed_display
+      for seed_file in "${refresh_sql_seed_files[@]}"; do
+        [[ -f "$seed_file" ]] || { warn "Seed SQL not found: $seed_file"; seed_rc=1; continue; }
+        seed_display="$seed_file"
+        [[ "$seed_display" == "$PROJECT_ROOT/"* ]] && seed_display="${seed_display#$PROJECT_ROOT/}"
+        info "Applying seed SQL: ${seed_display}"
+        ((seed_attempted++))
+        if ! gc_refresh_stack_exec_mysql "$db_container" "$seed_file" "$root_user" "$root_pass" "$db_name" "$db_port"; then
+          warn "Seed import failed as ${root_user}; retrying as ${app_user}"
+          if ! gc_refresh_stack_exec_mysql "$db_container" "$seed_file" "$app_user" "$app_pass" "$db_name" "$db_port"; then
+            warn "Seed SQL failed: ${seed_display}"
+            seed_rc=1
+            continue
+          fi
+        fi
+      done
+    else
+      info "Skipping seeding (--no-seed)"
+    fi
+  fi
+
+  info "Verifying Docker service health"
+  local stack_health_rc=0
+  if gc_refresh_stack_wait_for_containers "$compose_file" 120 5; then
+    ok "Docker services healthy"
+  else
+    stack_health_rc=1
+    warn "Docker services reported issues; inspect compose logs for details."
   fi
 
   local status=0
   if (( import_rc != 0 )); then
     status=1
-  elif (( skip_import == 0 )); then
+  elif (( skip_import == 0 && schema_attempted > 0 )); then
     ok "Database schema imported"
   fi
   if (( seed_rc != 0 )); then
     status=1
-  elif (( skip_seed == 0 )); then
+  elif (( skip_seed == 0 && seed_attempted > 0 )); then
     ok "Database seeds applied"
+  fi
+  if (( stack_health_rc != 0 )); then
+    status=1
   fi
 
   if (( status == 0 )); then
@@ -2145,6 +2732,7 @@ EOHELP
   fi
   return $status
 }
+
 
 cmd_verify() {
   local kind="${1:-all}"; shift || true

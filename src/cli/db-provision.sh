@@ -7,12 +7,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 COMPOSE_FILE="${ROOT_DIR}/docker/docker-compose.yml"
 
-log(){ printf "[db-provision] %s\n" "$*"; }
-die(){ printf "[db-provision][ERROR] %s\n" "$*" >&2; exit 1; }
+gc_cli_log(){ printf "[db-provision] %s\n" "$*"; }
+gc_cli_die(){ printf "[db-provision][ERROR] %s\n" "$*" >&2; exit 1; }
 
 slugify() {
   local s="${1:-}"
-  s="${s,,}"
+  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
   printf '%s\n' "${s:-gptcreator}"
@@ -54,27 +54,27 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-log "Starting DB service ..."
+gc_cli_log "Starting DB service ..."
 dc up -d db
 
-log "Waiting for MySQL to become healthy ..."
+gc_cli_log "Waiting for MySQL to become healthy ..."
 for i in $(seq 1 60); do
   if dc exec -T db sh -lc 'mysqladmin ping -h 127.0.0.1 -p"$MYSQL_ROOT_PASSWORD" --silent' >/dev/null 2>&1; then
-    log "MySQL is healthy"
+    gc_cli_log "MySQL is healthy"
     break
   fi
   sleep 2
 done
 
 if [[ -n "${SQL_IMPORT}" ]]; then
-  [[ -f "${SQL_IMPORT}" ]] || die "Not found: ${SQL_IMPORT}"
-  log "Importing ${SQL_IMPORT} ..."
+  [[ -f "${SQL_IMPORT}" ]] || gc_cli_die "Not found: ${SQL_IMPORT}"
+  gc_cli_log "Importing ${SQL_IMPORT} ..."
   dc cp "${SQL_IMPORT}" db:/import.sql
   dc exec -T db sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" < /import.sql'
-  log "Import complete."
+  gc_cli_log "Import complete."
 fi
 
 # Write a local .env with DATABASE_URL for convenience
 ENV_PATH="${ROOT_DIR}/.env.local"
 echo "DATABASE_URL=mysql://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${DB_NAME}" > "${ENV_PATH}"
-log "Wrote ${ENV_PATH}"
+gc_cli_log "Wrote ${ENV_PATH}"

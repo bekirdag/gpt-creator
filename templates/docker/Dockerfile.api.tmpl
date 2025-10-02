@@ -1,16 +1,26 @@
 # Dockerfile for API (NestJS) container
-FROM node:20-alpine
+FROM node:20-bullseye
+
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3 util-linux && rm -rf /var/lib/apt/lists/*
+
+ENV PNPM_HOME=/usr/local/share/pnpm \
+    PNPM_VERSION=10.17.1 \
+    PNPM_STORE_PATH=/var/pnpm-store \
+    PNPM_LOCK_FILE=/var/pnpm-store/.pnpm-install.lock \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    npm_config_build_from_source=true \
+    ARGON2_PREBUILT=0
+
+RUN npm install -g node-gyp
+ENV PATH="$PNPM_HOME:$PATH"
 
 WORKDIR /workspace/apps/api
 
-# install dependencies
-COPY apps/api/package*.json ./
-RUN npm install
-
-# copy source
-COPY apps/api ./
-
-RUN npm run build
+# prepare workspace
+RUN corepack enable pnpm >/dev/null 2>&1 || true && \
+    corepack use pnpm@${PNPM_VERSION} >/dev/null 2>&1 || corepack prepare pnpm@${PNPM_VERSION} --activate && \
+    mkdir -p /workspace/apps/api "$PNPM_STORE_PATH" /workspace/docker && \
+    chmod 777 "$PNPM_STORE_PATH"
 
 EXPOSE 3000
-CMD ["npm", "run", "start:prod"]
+CMD ["sh", "-c", "while true; do sleep 3600; done"]

@@ -10,7 +10,7 @@ if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then source "$ROOT_DIR/src/constants.s
 
 slugify() {
   local s="${1:-}"
-  s="${s,,}"
+  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
   printf '%s\n' "${s:-gptcreator}"
@@ -19,11 +19,14 @@ slugify() {
 PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_SLUG}"
 
+PROJECT_ROOT_DIR="${PROJECT_ROOT:-$ROOT_DIR}"
+TMP_DIR="${PROJECT_ROOT_DIR}/.gpt-creator/tmp"
+
 # Fallback helpers if not sourced
-type log >/dev/null 2>&1 || log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
-type warn >/dev/null 2>&1 || warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
-type die >/dev/null 2>&1 || die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
-type heading >/dev/null 2>&1 || heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
+gc_cli_log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
+gc_cli_warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
+gc_cli_die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
+gc_cli_heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [--service db] [--compose <file>] [--from sql_file]
@@ -43,7 +46,7 @@ while [[ $# -gt 0 ]]; do
     --compose) COMPOSE_FILE="${2:-}"; shift 2;;
     --from) FROM_SQL="${2:-}"; shift 2;;
     -h|--help) usage; exit 0;;
-    *) die "Unknown arg: $1 (see --help)";;
+    *) gc_cli_die "Unknown arg: $1 (see --help)";;
   esac
 done
 
@@ -51,24 +54,24 @@ if [[ -z "${COMPOSE_FILE}" ]]; then
   if [[ -f "$ROOT_DIR/docker/compose.yaml" ]]; then COMPOSE_FILE="$ROOT_DIR/docker/compose.yaml";
   elif [[ -f "$ROOT_DIR/docker-compose.yml" ]]; then COMPOSE_FILE="$ROOT_DIR/docker-compose.yml";
   else
-    die "No docker compose file found (expected docker/compose.yaml or docker-compose.yml)"
+    gc_cli_die "No docker compose file found (expected docker/compose.yaml or docker-compose.yml)"
   fi
 fi
 
 CID="$(COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps -q "$SERVICE" || true)"
-[[ -n "$CID" ]] || die "Service '$SERVICE' not found or not running. Start with: gpt-creator run compose-up"
+[[ -n "$CID" ]] || gc_cli_die "Service '$SERVICE' not found or not running. Start with: gpt-creator run compose-up"
 
-heading "Seeding database in service '$SERVICE'"
+gc_cli_heading "Seeding database in service '$SERVICE'"
 
 if [[ -n "${FROM_SQL}" ]]; then
-  [[ -f "$FROM_SQL" ]] || die "--from file not found: $FROM_SQL"
-  "$ROOT_DIR/src/cli/db-import.sh" --service "$SERVICE" --compose "$COMPOSE_FILE" --file "$FROM_SQL" -y
+  [[ -f "$FROM_SQL" ]] || gc_cli_die "--from file not found: $FROM_SQL"
+  PROJECT_ROOT="$PROJECT_ROOT_DIR" "$ROOT_DIR/src/cli/db-import.sh" --service "$SERVICE" --compose "$COMPOSE_FILE" --file "$FROM_SQL" -y
   exit 0
 fi
 
 # Default idempotent seed set (safe to re-run)
-SEED_FILE="$ROOT_DIR/.tmp/seed-default.sql"
-mkdir -p "$ROOT_DIR/.tmp"
+SEED_FILE="$TMP_DIR/seed-default.sql"
+mkdir -p "$TMP_DIR"
 
 cat > "$SEED_FILE" <<'SQL'
 -- Default idempotent seeds (safe to run multiple times)
@@ -123,6 +126,6 @@ INSERT INTO pages (slug, title, body) VALUES
 ON DUPLICATE KEY UPDATE title=VALUES(title);
 SQL
 
-log "Applying default seeds…"
-"$ROOT_DIR/src/cli/db-import.sh" --service "$SERVICE" --compose "$COMPOSE_FILE" --file "$SEED_FILE" -y
-log "Seed complete."
+gc_cli_log "Applying default seeds…"
+PROJECT_ROOT="$PROJECT_ROOT_DIR" "$ROOT_DIR/src/cli/db-import.sh" --service "$SERVICE" --compose "$COMPOSE_FILE" --file "$SEED_FILE" -y
+gc_cli_log "Seed complete."

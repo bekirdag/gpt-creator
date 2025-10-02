@@ -1,0 +1,1634 @@
+diff --git a/bin/gpt-creator b/bin/gpt-creator
+index 72e175e..7a062a2 100755
+--- a/bin/gpt-creator
++++ b/bin/gpt-creator
+@@ -5,6 +5,15 @@
+ 
+ set -Eeuo pipefail
+ 
++# Ensure docker compose commands have adequate timeouts unless caller overrides
++if [[ -n "${GC_DOCKER_COMPOSE_TIMEOUT:-}" ]]; then
++  COMPOSE_HTTP_TIMEOUT="$GC_DOCKER_COMPOSE_TIMEOUT"
++  DOCKER_CLIENT_TIMEOUT="$GC_DOCKER_COMPOSE_TIMEOUT"
++fi
++: "${COMPOSE_HTTP_TIMEOUT:=600}"
++: "${DOCKER_CLIENT_TIMEOUT:=$COMPOSE_HTTP_TIMEOUT}"
++export COMPOSE_HTTP_TIMEOUT DOCKER_CLIENT_TIMEOUT
++
+ resolve_cli_root() {
+   local source="${BASH_SOURCE[0]}"
+   while [[ -L "$source" ]]; do
+@@ -145,7 +154,7 @@ to_lower() {
+ 
+ slugify_name() {
+   local s="${1:-}"
+-  s="${s,,}"
++  s="$(to_lower "$s")"
+   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+   printf '%s\n' "${s:-gptcreator}"
+@@ -974,15 +983,84 @@ docker_compose() {
+     local base="$(basename "${PROJECT_ROOT:-$PWD}")"
+     project_name="$(slugify_name "$base")"
+   fi
++  local -a compose_opts=()
++  if [[ -n "${GC_DOCKER_VERBOSE:-}" ]]; then
++    compose_opts+=(--verbose)
++  fi
+   if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+-    COMPOSE_PROJECT_NAME="$project_name" docker compose "$@"
++    COMPOSE_PROJECT_NAME="$project_name" docker compose "${compose_opts[@]}" "$@"
+   elif command -v docker-compose >/dev/null 2>&1; then
+-    docker-compose -p "$project_name" "$@"
++    docker-compose -p "$project_name" "${compose_opts[@]}" "$@"
+   else
+     die "docker compose is not available. Install Docker Desktop or docker-compose."
+   fi
+ }
+ 
++container_exists() {
++  local name="$1"
++  docker ps -a --format '{{.Names}}' | grep -Fxq "$name"
++}
++
++container_state() {
++  local name="$1"
++  docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo "absent"
++}
++
++gc_start_created_containers() {
++  local compose_file="$1"
++  shift || true
++  local -a services=("$@")
++  local service container state started any_started=0
++
++  for service in "${services[@]}"; do
++    container="${GC_DOCKER_PROJECT_NAME}_${service}"
++    if ! container_exists "$container"; then
++      continue
++    fi
++    state="$(container_state "$container")"
++    if [[ "$state" == "created" ]]; then
++      info "Container ${container} stuck in 'created'; attempting manual start"
++      if docker start "$container" >/dev/null 2>&1; then
++        started=1
++        any_started=1
++      else
++        warn "Failed to start ${container}; attempting compose start fallback"
++        docker_compose -f "$compose_file" start "$service" >/dev/null 2>&1 || true
++      fi
++    fi
++  done
++
++  if (( any_started == 1 )); then
++    local wait_seconds=0
++    local timeout=120
++    while (( wait_seconds < timeout )); do
++      local all_ready=1
++      for service in "${services[@]}"; do
++        container="${GC_DOCKER_PROJECT_NAME}_${service}"
++        if ! container_exists "$container"; then
++          continue
++        fi
++        state="$(container_state "$container")"
++        case "$state" in
++          running|healthy) continue ;;
++          exited|dead)
++            warn "Container ${container} exited unexpectedly (state=${state}). Check logs."
++            all_ready=0
++            ;;
++          *)
++            all_ready=0
++            ;;
++        esac
++      done
++      if (( all_ready == 1 )); then
++        break
++      fi
++      sleep 2
++      (( wait_seconds += 2 )) || true
++    done
++  fi
++}
++
+ port_in_use() {
+   local port="$1"
+   if command -v lsof >/dev/null 2>&1; then
+@@ -1042,7 +1120,7 @@ text = text.replace('{{DB_USER}}', db_user)
+ text = text.replace('{{DB_PASSWORD}}', db_pass)
+ text = text.replace('{{DB_HOST_PORT}}', db_host_port)
+ text = text.replace('{{DB_ROOT_PASSWORD}}', db_root_pass)
+- text = text.replace('{{PROJECT_SLUG}}', project_slug)
++text = text.replace('{{PROJECT_SLUG}}', project_slug)
+ pathlib.Path(dest).write_text(text)
+ PY
+ }
+@@ -1384,6 +1462,325 @@ PY
+   return 1
+ }
+ 
++gc_refresh_stack_collect_sql() {
++  local root="$1"
++  python3 - <<'PY' "$root"
++import os
++import re
++import shlex
++import sys
++from pathlib import Path
++
++root = os.path.abspath(sys.argv[1])
++
++candidate_dirs = []
++seen_dirs = set()
++for rel in [
++    os.path.join('.gpt-creator', 'staging', 'sql'),
++    os.path.join('.gpt-creator', 'staging'),
++    os.path.join('staging', 'sql'),
++    os.path.join('staging'),
++    os.path.join('db'),
++    os.path.join('database'),
++    os.path.join('sql'),
++    os.path.join('data', 'sql'),
++    os.path.join('data'),
++    '.',
++]:
++    path = os.path.abspath(os.path.join(root, rel))
++    if os.path.isdir(path) and path not in seen_dirs:
++        candidate_dirs.append(path)
++        seen_dirs.add(path)
++
++ignore_dirs = {
++    '.git', '.hg', '.svn', '.tox', '.pytest_cache', '.idea', '.vscode',
++    '__pycache__', 'node_modules', 'vendor', 'dist', 'build', 'tmp', 'temp'
++}
++
++entries = []
++seen_files = set()
++
++for base in candidate_dirs:
++    for dirpath, dirnames, filenames in os.walk(base):
++        dirnames[:] = [d for d in dirnames if d not in ignore_dirs]
++        for fname in filenames:
++            if not fname.lower().endswith('.sql'):
++                continue
++            full = os.path.abspath(os.path.join(dirpath, fname))
++            if full in seen_files:
++                continue
++            seen_files.add(full)
++            rel_path = os.path.relpath(full, root)
++            base_name = os.path.basename(full)
++            rel_norm = rel_path.replace('\\', '/')
++            if rel_norm.startswith('.gpt-creator/staging/') and (base_name.startswith('import-') or base_name.startswith('seed-')):
++                continue
++            lower = fname.lower()
++            dir_lower = dirpath.lower()
++            label = 'schema'
++            if 'init' in lower or 'init' in dir_lower:
++                label = 'init'
++            elif any(token in lower or token in dir_lower for token in ('seed', 'fixture', 'sample', 'data-seed', 'seed-data')):
++                label = 'seed'
++            elif any(token in lower for token in ('dump', 'schema', 'structure', 'backup', 'snapshot')):
++                label = 'schema'
++            try:
++                mtime = os.path.getmtime(full)
++            except OSError:
++                mtime = 0
++            entries.append((label, mtime, full))
++
++order_map = {'init': 0, 'schema': 1, 'seed': 2}
++entries.sort(key=lambda item: (order_map.get(item[0], 3), item[1], item[2]))
++
++init_list = [path for label, _, path in entries if label == 'init']
++schema_list = [path for label, _, path in entries if label == 'schema']
++seed_list = [path for label, _, path in entries if label == 'seed']
++all_list = [path for _, _, path in entries]
++
++db_create_re = re.compile(r"CREATE\s+DATABASE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?P<name>`[^`]+`|\"[^\"]+\"|'[^']+'|[A-Za-z0-9_]+)", re.IGNORECASE)
++use_re = re.compile(r"\bUSE\s+(?P<name>`[^`]+`|\"[^\"]+\"|'[^']+'|[A-Za-z0-9_]+)", re.IGNORECASE)
++create_user_re = re.compile(r"CREATE\s+USER\s+(?:IF\s+NOT\s+EXISTS\s+)?'(?P<user>[^']+)'(?:\s*@\s*'(?P<host>[^']*)')?\s+IDENTIFIED(?:\s+WITH\s+[A-Za-z0-9_]+)?\s+BY\s+'(?P<pw>[^']+)'", re.IGNORECASE)
++alter_user_re = re.compile(r"ALTER\s+USER\s+'(?P<user>[^']+)'(?:\s*@\s*'(?P<host>[^']*)')?\s+IDENTIFIED(?:\s+WITH\s+[A-Za-z0-9_]+)?\s+BY\s+'(?P<pw>[^']+)'", re.IGNORECASE)
++grant_re = re.compile(r"GRANT\s+.+?\s+ON\s+(?P<db>`[^`]+`|\"[^\"]+\"|'[^']+'|[A-Za-z0-9_]+(?:\\.[^\s;]+)?)\s+TO\s+'(?P<user>[^']+)'", re.IGNORECASE)
++
++def normalise_identifier(token: str) -> str:
++    token = token.strip().rstrip(';').strip()
++    if token.endswith('.*'):
++        token = token[:-2]
++    if '.' in token:
++        token = token.split('.', 1)[0]
++    if token and token[0] in "`\"'" and token[-1] == token[0]:
++        token = token[1:-1]
++    return token.strip()
++
++db_name = ''
++app_user = ''
++app_password = ''
++user_host = ''
++
++for label, _, path in entries:
++    if db_name and app_user and app_password:
++        break
++    try:
++        text = Path(path).read_text(encoding='utf-8', errors='ignore')
++    except Exception:
++        continue
++    if not db_name:
++        match = db_create_re.search(text)
++        if match:
++            db_name = normalise_identifier(match.group('name'))
++    if not db_name:
++        match = use_re.search(text)
++        if match:
++            db_name = normalise_identifier(match.group('name'))
++    if not app_user or not app_password:
++        match = create_user_re.search(text) or alter_user_re.search(text)
++        if match:
++            app_user = match.group('user')
++            app_password = match.group('pw')
++            host = match.group('host') if match.group('host') is not None else ''
++            user_host = host or '%'
++    if app_user and not db_name:
++        for m in grant_re.finditer(text):
++            if m.group('user') == app_user:
++                candidate = normalise_identifier(m.group('db'))
++                if candidate and candidate != '*':
++                    db_name = candidate
++                    break
++
++def emit_array(name, values):
++    if values:
++        joined = ' '.join(shlex.quote(v) for v in values)
++        print(f"{name}=({joined})")
++    else:
++        print(f"{name}=()")
++
++def emit_value(name, value):
++    quoted = shlex.quote(value) if value else "''"
++    print(f"{name}={quoted}")
++
++emit_array('refresh_sql_init_files', init_list)
++emit_array('refresh_sql_schema_files', schema_list)
++emit_array('refresh_sql_seed_files', seed_list)
++emit_array('refresh_sql_all_files', all_list)
++emit_value('refresh_sql_default_db_name', db_name)
++emit_value('refresh_sql_default_db_user', app_user)
++emit_value('refresh_sql_default_db_password', app_password)
++emit_value('refresh_sql_default_user_host', user_host or '%')
++PY
++}
++
++gc_refresh_stack_exec_mysql() {
++  local container_id="$1" sql_file="$2" user="$3" password="$4" database="$5"
++  local port="${6:-3306}"
++
++  [[ -n "$container_id" ]] || return 1
++  [[ -f "$sql_file" ]] || return 1
++  local -a cmd=(docker exec -i "$container_id" mysql --protocol=TCP -h 127.0.0.1 -P "$port" "-u${user}")
++  if [[ -n "$password" ]]; then
++    cmd+=("-p${password}")
++  fi
++  if [[ -n "$database" ]]; then
++    cmd+=("$database")
++  fi
++  if ! "${cmd[@]}" <"$sql_file"; then
++    return 1
++  fi
++  return 0
++}
++
++gc_refresh_stack_exec_inline_sql() {
++  local container_id="$1" user="$2" password="$3" database="$4"
++  local port="${5:-3306}"
++  local sql_content
++  sql_content="$(cat)"
++  local -a cmd=(docker exec -i "$container_id" mysql --protocol=TCP -h 127.0.0.1 -P "$port" "-u${user}")
++  if [[ -n "$password" ]]; then
++    cmd+=("-p${password}")
++  fi
++  if [[ -n "$database" ]]; then
++    cmd+=("$database")
++  fi
++  if ! printf "%s" "$sql_content" | "${cmd[@]}"; then
++    return 1
++  fi
++  return 0
++}
++
++gc_refresh_stack_inspect_containers() {
++  local compose_file="${1:?compose file required}"
++  local -a container_ids=()
++  mapfile -t container_ids < <(docker_compose -f "$compose_file" ps --all -q 2>/dev/null | awk 'NF')
++  if (( ${#container_ids[@]} == 0 )); then
++    mapfile -t container_ids < <(docker_compose -f "$compose_file" ps -q 2>/dev/null | awk 'NF')
++  fi
++  if (( ${#container_ids[@]} == 0 )); then
++    printf '%s\n' "No containers found for project ${GC_DOCKER_PROJECT_NAME}."
++    return 1
++  fi
++
++  local inspect_json=""
++  if ! inspect_json="$(docker inspect "${container_ids[@]}" 2>/dev/null)"; then
++    printf '%s\n' "Failed to inspect Docker containers for project ${GC_DOCKER_PROJECT_NAME}."
++    return 1
++  fi
++
++  python3 - <<'PY' <<<"${inspect_json}"
++import json
++import sys
++
++try:
++    data = json.load(sys.stdin)
++except Exception as exc:
++    print(f"Unable to parse docker inspect output: {exc}")
++    sys.exit(1)
++
++if not isinstance(data, list):
++    data = [data]
++
++if not data:
++    print("No container state data returned by docker inspect.")
++    sys.exit(1)
++
++pending = []
++failures = []
++healthy = []
++
++for entry in data:
++    name = (entry.get("Name") or "").lstrip("/")
++    labels = entry.get("Config", {}).get("Labels", {}) or {}
++    service = labels.get("com.docker.compose.service") or name
++    state = entry.get("State") or {}
++    status = (state.get("Status") or "").lower()
++    health = (state.get("Health", {}).get("Status") or "").lower()
++    exit_code = state.get("ExitCode")
++
++    detail = f"{service}: status={status or 'unknown'}"
++    if health:
++        detail += f", health={health}"
++    if exit_code not in (None, 0):
++        detail += f", exit_code={exit_code}"
++
++    if status == "running":
++        if health in ("", "healthy"):
++            healthy.append(detail)
++        elif health == "starting":
++            pending.append(detail)
++        else:
++            failures.append(detail)
++    elif status in ("created", "starting"):
++        pending.append(detail)
++    else:
++        failures.append(detail)
++
++if failures:
++    print("Container failures detected:")
++    for line in failures:
++        print(f"  - {line}")
++    sys.exit(1)
++
++if pending:
++    print("Containers still starting:")
++    for line in pending:
++        print(f"  - {line}")
++    sys.exit(2)
++
++print("All containers running and healthy:")
++for line in healthy:
++    print(f"  - {line}")
++sys.exit(0)
++PY
++}
++
++gc_refresh_stack_wait_for_containers() {
++  local compose_file="${1:?compose file required}"
++  local timeout="${2:-120}"
++  local interval="${3:-5}"
++  local elapsed=0
++  local output rc
++
++  while (( elapsed <= timeout )); do
++    output="$(gc_refresh_stack_inspect_containers "$compose_file")"
++    rc=$?
++    if (( rc == 0 )); then
++      while IFS= read -r line; do
++        [[ -z "$line" ]] && continue
++        info "$line"
++      done <<<"$output"
++      return 0
++    elif (( rc == 2 )); then
++      while IFS= read -r line; do
++        [[ -z "$line" ]] && continue
++        info "$line"
++      done <<<"$output"
++      sleep "$interval"
++      (( elapsed += interval ))
++      continue
++    else
++      while IFS= read -r line; do
++        [[ -z "$line" ]] && continue
++        warn "$line"
++      done <<<"$output"
++      return 1
++    fi
++  done
++
++  warn "Timed out after ${timeout}s waiting for containers to report healthy state."
++  output="$(gc_refresh_stack_inspect_containers "$compose_file")"
++  rc=$?
++  local log_fn=warn
++  if (( rc == 0 )); then
++    log_fn=info
++  fi
++  while IFS= read -r line; do
++    [[ -z "$line" ]] && continue
++    "$log_fn" "$line"
++  done <<<"$output"
++  (( rc == 0 )) || return 1
++  return 0
++}
++
+ # ---------- Scan helpers ----------
+ has_pattern() { LC_ALL=C grep -E -i -m 1 -q -- "$1" "$2" 2>/dev/null; }
+ classify_file() {
+@@ -1892,6 +2289,9 @@ cmd_generate() {
+       gc_set_env_var DATABASE_URL "$local_url"
+       gc_load_env
+       copy_template_tree "$templates/docker" "$out"
++      if [[ -f "$out/pnpm-entry.sh" ]]; then
++        chmod +x "$out/pnpm-entry.sh" || true
++      fi
+       ok "Docker assets scaffolded → ${out}"
+       ;;
+     all)
+@@ -2061,14 +2461,58 @@ EOHELP
+ 
+   ensure_ctx "$root"
+ 
++  local -a refresh_sql_init_files=() refresh_sql_schema_files=() refresh_sql_seed_files=() refresh_sql_all_files=()
++  local refresh_sql_default_db_name="" refresh_sql_default_db_user="" refresh_sql_default_db_password="" refresh_sql_default_user_host=""
++  eval "$(gc_refresh_stack_collect_sql "$PROJECT_ROOT")"
++
++  if [[ -n "$sql_override" ]]; then
++    refresh_sql_schema_files=("$sql_override")
++  fi
++  if [[ -n "$seed_override" ]]; then
++    refresh_sql_seed_files=("$seed_override")
++  fi
++
++  local env_updated=0
++  if [[ -n "$refresh_sql_default_db_name" && "$refresh_sql_default_db_name" != "$GC_DB_NAME" ]]; then
++    gc_set_env_var DB_NAME "$refresh_sql_default_db_name"
++    gc_set_env_var GC_DB_NAME "$refresh_sql_default_db_name"
++    env_updated=1
++  fi
++  if [[ -n "$refresh_sql_default_db_user" && "$refresh_sql_default_db_user" != "$GC_DB_USER" ]]; then
++    gc_set_env_var DB_USER "$refresh_sql_default_db_user"
++    gc_set_env_var GC_DB_USER "$refresh_sql_default_db_user"
++    env_updated=1
++  fi
++  if [[ -n "$refresh_sql_default_db_password" && "$refresh_sql_default_db_password" != "$GC_DB_PASSWORD" ]]; then
++    gc_set_env_var DB_PASSWORD "$refresh_sql_default_db_password"
++    gc_set_env_var GC_DB_PASSWORD "$refresh_sql_default_db_password"
++    env_updated=1
++  fi
++  if (( env_updated )); then
++    gc_load_env
++    local host_port="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-3306}}"
++    local database_url="mysql://${GC_DB_USER}:${GC_DB_PASSWORD}@127.0.0.1:${host_port}/${GC_DB_NAME}"
++    gc_set_env_var DATABASE_URL "$database_url"
++  fi
++
++  info "Using database '${GC_DB_NAME}' with user '${GC_DB_USER}'"
++
+   local compose_file="$compose_override"
+-  if [[ -z "$compose_file" ]]; then
++  if [[ -n "$compose_file" ]]; then
++    compose_file="$(abs_path "$compose_file")"
++  else
++    info "Rendering docker assets from templates"
++    if ! cmd_generate docker --project "$PROJECT_ROOT"; then
++      die "Failed to generate docker assets"
++    fi
+     if [[ -f "${PROJECT_ROOT}/docker/compose.yaml" ]]; then
+       compose_file="${PROJECT_ROOT}/docker/compose.yaml"
++    elif [[ -f "${PROJECT_ROOT}/docker/docker-compose.yml" ]]; then
++      compose_file="${PROJECT_ROOT}/docker/docker-compose.yml"
+     elif [[ -f "${PROJECT_ROOT}/docker-compose.yml" ]]; then
+       compose_file="${PROJECT_ROOT}/docker-compose.yml"
+     else
+-      die "Compose file not found. Expected docker/compose.yaml or docker-compose.yml"
++      die "Compose file not found after generation. Expected docker/compose.yaml or docker-compose.yml"
+     fi
+   fi
+ 
+@@ -2077,66 +2521,209 @@ EOHELP
+   info "Stopping existing containers (removing volumes)"
+   docker_compose -f "$compose_file" down -v --remove-orphans || true
+ 
+-  info "Building and starting containers"
+-  "$CLI_ROOT/src/cli/run-compose-up.sh" --compose "$compose_file"
+-
+-  local import_rc=0 seed_rc=0
++  local slug="$GC_DOCKER_PROJECT_NAME"
++  local -a stale_containers=(
++    "${slug}_db"
++    "${slug}_api"
++    "${slug}_web"
++    "${slug}_admin"
++    "${slug}_proxy"
++  )
++  local container
++  for container in "${stale_containers[@]}"; do
++    if docker ps -a --format '{{.Names}}' | grep -Fxq "$container"; then
++      info "Removing leftover container ${container}"
++      docker rm -f "$container" >/dev/null 2>&1 || true
++    fi
++  done
+ 
+-  if (( skip_import == 0 )); then
+-    info "Importing database structure"
+-    if [[ -n "$sql_override" ]]; then
+-      if [[ ! -f "$sql_override" ]]; then
+-        warn "Specified SQL dump not found: ${sql_override}"
+-        import_rc=1
++  if (( ${#refresh_sql_all_files[@]} > 0 )); then
++    info "Discovered SQL assets:"
++    local listed
++    for listed in "${refresh_sql_all_files[@]}"; do
++      if [[ "$listed" == "$PROJECT_ROOT/"* ]]; then
++        info "  - ${listed#$PROJECT_ROOT/}"
+       else
+-        if ! "$CLI_ROOT/src/cli/db-import.sh" --compose "$compose_file" --file "$sql_override" -y; then
+-          warn "Database import failed"
+-          import_rc=1
+-        fi
++        info "  - ${listed}"
+       fi
+-    else
+-      if ! "$CLI_ROOT/src/cli/db-import.sh" --compose "$compose_file" -y; then
+-        warn "Database import failed (auto-discovery)"
+-        import_rc=1
++    done
++  else
++    info "No SQL assets discovered automatically."
++  fi
++
++  info "Building and starting containers"
++  GC_DOCKER_VERBOSE="${GC_DOCKER_VERBOSE:-1}"
++  docker_compose -f "$compose_file" up -d --build
++
++  gc_start_created_containers "$compose_file" db api web admin proxy
++
++  local db_container
++  db_container="$(docker_compose -f "$compose_file" ps -q db || true)"
++  if [[ -n "$db_container" ]]; then
++    info "Waiting for MySQL to be ready…"
++    local waited=0
++    while (( waited < 60 )); do
++      if docker exec -i "$db_container" sh -lc 'mysqladmin ping -h 127.0.0.1 --silent' >/dev/null 2>&1; then
++        info "MySQL is ready."
++        break
+       fi
++      sleep 1
++      ((waited++)) || true
++    done
++    if (( waited >= 60 )); then
++      warn "MySQL readiness timeout (continuing)."
+     fi
+   else
+-    info "Skipping schema import (--no-import)"
++    warn "Database container did not start; SQL import will be skipped."
+   fi
+ 
+-  if (( skip_seed == 0 )); then
+-    info "Applying database seeds"
+-    if [[ -n "$seed_override" ]]; then
+-      if [[ ! -f "$seed_override" ]]; then
+-        warn "Seed file not found: ${seed_override}"
+-        seed_rc=1
++  docker_compose -f "$compose_file" ps
++
++  local db_port="3306"
++  local root_user="${DB_ROOT_USER:-root}"
++  local root_pass="${DB_ROOT_PASSWORD:-${GC_DB_ROOT_PASSWORD:-}}"
++  local app_user="${DB_USER:-$GC_DB_USER}"
++  local app_pass="${DB_PASSWORD:-$GC_DB_PASSWORD}"
++  local db_name="${DB_NAME:-$GC_DB_NAME}"
++  local app_host="${refresh_sql_default_user_host:-%}"
++
++  local import_rc=0 seed_rc=0
++  local schema_attempted=0 seed_attempted=0
++
++  if [[ -z "$db_container" ]]; then
++    if (( skip_import == 0 )); then
++      import_rc=1
++    fi
++    if (( skip_seed == 0 )); then
++      seed_rc=1
++    fi
++  else
++    if (( skip_import == 0 || skip_seed == 0 )); then
++      local ensure_sql
++      ensure_sql="$(python3 - <<'PY' "$db_name" "$app_user" "$app_pass" "$app_host"
++import sys
++
++db, user, password, host = sys.argv[1:5]
++if not host:
++    host = '%'
++if not db:
++    db = 'app'
++if not user:
++    user = 'app'
++
++def quote_identifier(name: str) -> str:
++    return '`' + name.replace('`', '``') + '`'
++
++def quote_string(value: str) -> str:
++    return "'" + value.replace("'", "''") + "'"
++
++statements = [
++    f"CREATE DATABASE IF NOT EXISTS {quote_identifier(db)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
++    f"CREATE USER IF NOT EXISTS {quote_string(user)}@{quote_string(host)} IDENTIFIED BY {quote_string(password)};",
++    f"GRANT ALL PRIVILEGES ON {quote_identifier(db)}.* TO {quote_string(user)}@{quote_string(host)};",
++    "FLUSH PRIVILEGES;",
++]
++print("\n".join(statements))
++PY
++)"
++      if ! gc_refresh_stack_exec_inline_sql "$db_container" "$root_user" "$root_pass" "" "$db_port" <<<"$ensure_sql"; then
++        warn "Failed to ensure database or user; continuing with imports."
+       else
+-        if ! "$CLI_ROOT/src/cli/db-seed.sh" --compose "$compose_file" --from "$seed_override"; then
+-          warn "Database seeding failed"
+-          seed_rc=1
+-        fi
++        info "Ensured database ${db_name} and user ${app_user}"
+       fi
++    fi
++
++    if (( skip_import == 0 )) && (( ${#refresh_sql_init_files[@]} + ${#refresh_sql_schema_files[@]} == 0 )); then
++      info "No schema SQL files found; skipping import."
++      skip_import=1
++    fi
++    if (( skip_seed == 0 )) && (( ${#refresh_sql_seed_files[@]} == 0 )); then
++      info "No seed SQL files found; skipping seeding."
++      skip_seed=1
++    fi
++
++    if (( skip_import == 0 )); then
++      local file display
++      for file in "${refresh_sql_init_files[@]}"; do
++        [[ -f "$file" ]] || { warn "Init SQL not found: $file"; import_rc=1; continue; }
++        display="$file"
++        [[ "$display" == "$PROJECT_ROOT/"* ]] && display="${display#$PROJECT_ROOT/}"
++        info "Applying init SQL: ${display}"
++        ((schema_attempted++))
++        if ! gc_refresh_stack_exec_mysql "$db_container" "$file" "$root_user" "$root_pass" "" "$db_port"; then
++          warn "Init SQL failed as ${root_user}; retrying as ${app_user}"
++          if ! gc_refresh_stack_exec_mysql "$db_container" "$file" "$app_user" "$app_pass" "" "$db_port"; then
++            warn "Init SQL failed: ${display}"
++            import_rc=1
++            continue
++          fi
++        fi
++      done
++
++      for file in "${refresh_sql_schema_files[@]}"; do
++        [[ -f "$file" ]] || { warn "Schema SQL not found: $file"; import_rc=1; continue; }
++        display="$file"
++        [[ "$display" == "$PROJECT_ROOT/"* ]] && display="${display#$PROJECT_ROOT/}"
++        info "Importing schema SQL: ${display}"
++        ((schema_attempted++))
++        if ! gc_refresh_stack_exec_mysql "$db_container" "$file" "$root_user" "$root_pass" "$db_name" "$db_port"; then
++          warn "Schema import failed as ${root_user}; retrying as ${app_user}"
++          if ! gc_refresh_stack_exec_mysql "$db_container" "$file" "$app_user" "$app_pass" "$db_name" "$db_port"; then
++            warn "Schema SQL failed: ${display}"
++            import_rc=1
++            continue
++          fi
++        fi
++      done
+     else
+-      if ! "$CLI_ROOT/src/cli/db-seed.sh" --compose "$compose_file"; then
+-        warn "Database seeding failed"
+-        seed_rc=1
+-      fi
++      info "Skipping schema import (--no-import)"
++    fi
++
++    if (( skip_seed == 0 )); then
++      local seed_file seed_display
++      for seed_file in "${refresh_sql_seed_files[@]}"; do
++        [[ -f "$seed_file" ]] || { warn "Seed SQL not found: $seed_file"; seed_rc=1; continue; }
++        seed_display="$seed_file"
++        [[ "$seed_display" == "$PROJECT_ROOT/"* ]] && seed_display="${seed_display#$PROJECT_ROOT/}"
++        info "Applying seed SQL: ${seed_display}"
++        ((seed_attempted++))
++        if ! gc_refresh_stack_exec_mysql "$db_container" "$seed_file" "$root_user" "$root_pass" "$db_name" "$db_port"; then
++          warn "Seed import failed as ${root_user}; retrying as ${app_user}"
++          if ! gc_refresh_stack_exec_mysql "$db_container" "$seed_file" "$app_user" "$app_pass" "$db_name" "$db_port"; then
++            warn "Seed SQL failed: ${seed_display}"
++            seed_rc=1
++            continue
++          fi
++        fi
++      done
++    else
++      info "Skipping seeding (--no-seed)"
+     fi
++  fi
++
++  info "Verifying Docker service health"
++  local stack_health_rc=0
++  if gc_refresh_stack_wait_for_containers "$compose_file" 120 5; then
++    ok "Docker services healthy"
+   else
+-    info "Skipping seeding (--no-seed)"
++    stack_health_rc=1
++    warn "Docker services reported issues; inspect compose logs for details."
+   fi
+ 
+   local status=0
+   if (( import_rc != 0 )); then
+     status=1
+-  elif (( skip_import == 0 )); then
++  elif (( skip_import == 0 && schema_attempted > 0 )); then
+     ok "Database schema imported"
+   fi
+   if (( seed_rc != 0 )); then
+     status=1
+-  elif (( skip_seed == 0 )); then
++  elif (( skip_seed == 0 && seed_attempted > 0 )); then
+     ok "Database seeds applied"
+   fi
++  if (( stack_health_rc != 0 )); then
++    status=1
++  fi
+ 
+   if (( status == 0 )); then
+     ok "Stack refreshed successfully"
+@@ -2146,6 +2733,7 @@ EOHELP
+   return $status
+ }
+ 
++
+ cmd_verify() {
+   local kind="${1:-all}"; shift || true
+   local root=""
+diff --git a/scripts/install.sh b/scripts/install.sh
+index b731aa6..1bfc2c3 100755
+--- a/scripts/install.sh
++++ b/scripts/install.sh
+@@ -94,6 +94,7 @@ install_files() {
+     --no-group
+     --include '/bin/' --include '/bin/*'
+     --include '/templates/***'
++    --include '/src/***'
+     --include '/scripts/***'
+     --include '/docs/***'
+     --include '/README*'
+diff --git a/src/cli/db-import.sh b/src/cli/db-import.sh
+index 687ea92..f257e06 100644
+--- a/src/cli/db-import.sh
++++ b/src/cli/db-import.sh
+@@ -10,7 +10,7 @@ if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then source "$ROOT_DIR/src/constants.s
+ 
+ slugify() {
+   local s="${1:-}"
+-  s="${s,,}"
++  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+   printf '%s\n' "${s:-gptcreator}"
+@@ -20,10 +20,10 @@ PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
+ export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_SLUG}"
+ 
+ # Fallback helpers if not sourced
+-type log >/dev/null 2>&1 || log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
+-type warn >/dev/null 2>&1 || warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
+-type die >/dev/null 2>&1 || die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
+-type heading >/dev/null 2>&1 || heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
++gc_cli_log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
++gc_cli_warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
++gc_cli_die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
++gc_cli_heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
+ usage() {
+   cat <<EOF
+ Usage: $(basename "$0") [-f|--file sql_file] [--service db] [--compose <file>] [-y]
+@@ -46,7 +46,7 @@ while [[ $# -gt 0 ]]; do
+     --compose) COMPOSE_FILE="${2:-}"; shift 2;;
+     -y) AUTO_YES="true"; shift;;
+     -h|--help) usage; exit 0;;
+-    *) die "Unknown arg: $1 (see --help)";;
++    *) gc_cli_die "Unknown arg: $1 (see --help)";;
+   esac
+ done
+ 
+@@ -55,7 +55,7 @@ if [[ -z "${COMPOSE_FILE}" ]]; then
+   if [[ -f "$ROOT_DIR/docker/compose.yaml" ]]; then COMPOSE_FILE="$ROOT_DIR/docker/compose.yaml";
+   elif [[ -f "$ROOT_DIR/docker-compose.yml" ]]; then COMPOSE_FILE="$ROOT_DIR/docker-compose.yml";
+   else
+-    die "No docker compose file found (expected docker/compose.yaml or docker-compose.yml)"
++    gc_cli_die "No docker compose file found (expected docker/compose.yaml or docker-compose.yml)"
+   fi
+ fi
+ 
+@@ -64,33 +64,33 @@ if [[ -z "${SQL_FILE}" ]]; then
+   candidates=()
+   while IFS= read -r -d '' f; do candidates+=("$f"); done < <(find "$ROOT_DIR" -type f \( -name "*.sql" -o -name "sql_dump*.sql" \) \( -path "*/staging/sql/*" -o -path "*/input/*" -o -path "$ROOT_DIR" \) -print0 || true)
+   if [[ ${#candidates[@]} -eq 0 ]]; then
+-    die "No SQL file found. Provide with --file or place under ./staging/sql or ./input"
++    gc_cli_die "No SQL file found. Provide with --file or place under ./staging/sql or ./input"
+   fi
+   # Pick the most recent
+   IFS=$'\n' sorted=($(printf "%s\n" "${candidates[@]}" | xargs -I{} bash -lc 'printf "%s\t%s\n" "$(stat -f %m "{}" 2>/dev/null || stat -c %Y "{}")" "{}"' | sort -nr | cut -f2-))
+   SQL_FILE="${sorted[0]}"
+-  log "Auto-discovered SQL file: $SQL_FILE"
++  gc_cli_log "Auto-discovered SQL file: $SQL_FILE"
+ fi
+ 
+-[[ -f "$SQL_FILE" ]] || die "SQL file not found: $SQL_FILE"
++[[ -f "$SQL_FILE" ]] || gc_cli_die "SQL file not found: $SQL_FILE"
+ 
+-heading "Importing SQL → MySQL in service '$SERVICE'"
++gc_cli_heading "Importing SQL → MySQL in service '$SERVICE'"
+ # Ensure service is up
+ CID="$(COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps -q "$SERVICE" || true)"
+-[[ -n "$CID" ]] || die "Service '$SERVICE' not found or not running. Start with: gpt-creator run compose-up"
++[[ -n "$CID" ]] || gc_cli_die "Service '$SERVICE' not found or not running. Start with: gpt-creator run compose-up"
+ 
+ if [[ "$AUTO_YES" != "true" ]]; then
+   read -r -p "This will import '$SQL_FILE' into the DB inside '$SERVICE'. Continue? [y/N] " ans
+-  [[ "${ans:-}" =~ ^[Yy]$ ]] || { warn "Aborted."; exit 1; }
++  [[ "${ans:-}" =~ ^[Yy]$ ]] || { gc_cli_warn "Aborted."; exit 1; }
+ fi
+ 
+ # Copy SQL to container
+ TMP_IN="/tmp/import-$(date +%s).sql"
+-log "Copying SQL into container $CID:$TMP_IN"
++gc_cli_log "Copying SQL into container $CID:$TMP_IN"
+ docker cp "$SQL_FILE" "$CID:$TMP_IN"
+ 
+ # Build import command in-container (handle empty password gracefully)
+-log "Running mysql client in container…"
++gc_cli_log "Running mysql client in container…"
+ docker exec -i "$CID" sh -lc '
+   set -e
+   PASS="${MYSQL_PASSWORD:-${MYSQL_ROOT_PASSWORD:-}}"
+@@ -104,4 +104,4 @@ docker exec -i "$CID" sh -lc '
+   rm -f "$TMP_IN" || true
+ ' TMP_IN="$TMP_IN"
+ 
+-log "Import complete."
++gc_cli_log "Import complete."
+diff --git a/src/cli/db-provision.sh b/src/cli/db-provision.sh
+index ea4390f..57986c4 100644
+--- a/src/cli/db-provision.sh
++++ b/src/cli/db-provision.sh
+@@ -7,12 +7,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ COMPOSE_FILE="${ROOT_DIR}/docker/docker-compose.yml"
+ 
+-log(){ printf "[db-provision] %s\n" "$*"; }
+-die(){ printf "[db-provision][ERROR] %s\n" "$*" >&2; exit 1; }
++gc_cli_log(){ printf "[db-provision] %s\n" "$*"; }
++gc_cli_die(){ printf "[db-provision][ERROR] %s\n" "$*" >&2; exit 1; }
+ 
+ slugify() {
+   local s="${1:-}"
+-  s="${s,,}"
++  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+   printf '%s\n' "${s:-gptcreator}"
+@@ -54,27 +54,27 @@ while [[ $# -gt 0 ]]; do
+   esac
+ done
+ 
+-log "Starting DB service ..."
++gc_cli_log "Starting DB service ..."
+ dc up -d db
+ 
+-log "Waiting for MySQL to become healthy ..."
++gc_cli_log "Waiting for MySQL to become healthy ..."
+ for i in $(seq 1 60); do
+   if dc exec -T db sh -lc 'mysqladmin ping -h 127.0.0.1 -p"$MYSQL_ROOT_PASSWORD" --silent' >/dev/null 2>&1; then
+-    log "MySQL is healthy"
++    gc_cli_log "MySQL is healthy"
+     break
+   fi
+   sleep 2
+ done
+ 
+ if [[ -n "${SQL_IMPORT}" ]]; then
+-  [[ -f "${SQL_IMPORT}" ]] || die "Not found: ${SQL_IMPORT}"
+-  log "Importing ${SQL_IMPORT} ..."
++  [[ -f "${SQL_IMPORT}" ]] || gc_cli_die "Not found: ${SQL_IMPORT}"
++  gc_cli_log "Importing ${SQL_IMPORT} ..."
+   dc cp "${SQL_IMPORT}" db:/import.sql
+   dc exec -T db sh -lc 'mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" < /import.sql'
+-  log "Import complete."
++  gc_cli_log "Import complete."
+ fi
+ 
+ # Write a local .env with DATABASE_URL for convenience
+ ENV_PATH="${ROOT_DIR}/.env.local"
+ echo "DATABASE_URL=mysql://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${DB_NAME}" > "${ENV_PATH}"
+-log "Wrote ${ENV_PATH}"
++gc_cli_log "Wrote ${ENV_PATH}"
+diff --git a/src/cli/db-seed.sh b/src/cli/db-seed.sh
+index 696eb33..084c027 100644
+--- a/src/cli/db-seed.sh
++++ b/src/cli/db-seed.sh
+@@ -10,7 +10,7 @@ if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then source "$ROOT_DIR/src/constants.s
+ 
+ slugify() {
+   local s="${1:-}"
+-  s="${s,,}"
++  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+   printf '%s\n' "${s:-gptcreator}"
+@@ -19,11 +19,14 @@ slugify() {
+ PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
+ export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_SLUG}"
+ 
++PROJECT_ROOT_DIR="${PROJECT_ROOT:-$ROOT_DIR}"
++TMP_DIR="${PROJECT_ROOT_DIR}/.gpt-creator/tmp"
++
+ # Fallback helpers if not sourced
+-type log >/dev/null 2>&1 || log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
+-type warn >/dev/null 2>&1 || warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
+-type die >/dev/null 2>&1 || die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
+-type heading >/dev/null 2>&1 || heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
++gc_cli_log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
++gc_cli_warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
++gc_cli_die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
++gc_cli_heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
+ usage() {
+   cat <<EOF
+ Usage: $(basename "$0") [--service db] [--compose <file>] [--from sql_file]
+@@ -43,7 +46,7 @@ while [[ $# -gt 0 ]]; do
+     --compose) COMPOSE_FILE="${2:-}"; shift 2;;
+     --from) FROM_SQL="${2:-}"; shift 2;;
+     -h|--help) usage; exit 0;;
+-    *) die "Unknown arg: $1 (see --help)";;
++    *) gc_cli_die "Unknown arg: $1 (see --help)";;
+   esac
+ done
+ 
+@@ -51,24 +54,24 @@ if [[ -z "${COMPOSE_FILE}" ]]; then
+   if [[ -f "$ROOT_DIR/docker/compose.yaml" ]]; then COMPOSE_FILE="$ROOT_DIR/docker/compose.yaml";
+   elif [[ -f "$ROOT_DIR/docker-compose.yml" ]]; then COMPOSE_FILE="$ROOT_DIR/docker-compose.yml";
+   else
+-    die "No docker compose file found (expected docker/compose.yaml or docker-compose.yml)"
++    gc_cli_die "No docker compose file found (expected docker/compose.yaml or docker-compose.yml)"
+   fi
+ fi
+ 
+ CID="$(COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps -q "$SERVICE" || true)"
+-[[ -n "$CID" ]] || die "Service '$SERVICE' not found or not running. Start with: gpt-creator run compose-up"
++[[ -n "$CID" ]] || gc_cli_die "Service '$SERVICE' not found or not running. Start with: gpt-creator run compose-up"
+ 
+-heading "Seeding database in service '$SERVICE'"
++gc_cli_heading "Seeding database in service '$SERVICE'"
+ 
+ if [[ -n "${FROM_SQL}" ]]; then
+-  [[ -f "$FROM_SQL" ]] || die "--from file not found: $FROM_SQL"
+-  "$ROOT_DIR/src/cli/db-import.sh" --service "$SERVICE" --compose "$COMPOSE_FILE" --file "$FROM_SQL" -y
++  [[ -f "$FROM_SQL" ]] || gc_cli_die "--from file not found: $FROM_SQL"
++  PROJECT_ROOT="$PROJECT_ROOT_DIR" "$ROOT_DIR/src/cli/db-import.sh" --service "$SERVICE" --compose "$COMPOSE_FILE" --file "$FROM_SQL" -y
+   exit 0
+ fi
+ 
+ # Default idempotent seed set (safe to re-run)
+-SEED_FILE="$ROOT_DIR/.tmp/seed-default.sql"
+-mkdir -p "$ROOT_DIR/.tmp"
++SEED_FILE="$TMP_DIR/seed-default.sql"
++mkdir -p "$TMP_DIR"
+ 
+ cat > "$SEED_FILE" <<'SQL'
+ -- Default idempotent seeds (safe to run multiple times)
+@@ -123,6 +126,6 @@ INSERT INTO pages (slug, title, body) VALUES
+ ON DUPLICATE KEY UPDATE title=VALUES(title);
+ SQL
+ 
+-log "Applying default seeds…"
+-"$ROOT_DIR/src/cli/db-import.sh" --service "$SERVICE" --compose "$COMPOSE_FILE" --file "$SEED_FILE" -y
+-log "Seed complete."
++gc_cli_log "Applying default seeds…"
++PROJECT_ROOT="$PROJECT_ROOT_DIR" "$ROOT_DIR/src/cli/db-import.sh" --service "$SERVICE" --compose "$COMPOSE_FILE" --file "$SEED_FILE" -y
++gc_cli_log "Seed complete."
+diff --git a/src/cli/db.sh b/src/cli/db.sh
+index 5a78eca..102f2a1 100644
+--- a/src/cli/db.sh
++++ b/src/cli/db.sh
+@@ -12,7 +12,7 @@ die(){ printf "[db][ERROR] %s\n" "$*" >&2; exit 1; }
+ 
+ slugify() {
+   local s="${1:-}"
+-  s="${s,,}"
++  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+   printf '%s\n' "${s:-gptcreator}"
+diff --git a/src/cli/generate-docker.sh b/src/cli/generate-docker.sh
+index 57d1a07..c7449b3 100644
+--- a/src/cli/generate-docker.sh
++++ b/src/cli/generate-docker.sh
+@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ 
+ slugify() {
+   local s="${1:-}"
+-  s="${s,,}"
++  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+   printf '%s\n' "${s:-gptcreator}"
+@@ -101,11 +101,11 @@ services:
+       NODE_ENV: development
+       DATABASE_URL: mysql://${DB_USER}:${DB_PASS}@db:3306/${DB_NAME}
+       PORT: 3000
++    command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/api && pnpm run start:dev"
+     ports:
+       - "3000:3000"
+     volumes:
+-      - ../apps/api:/workspace/apps/api
+-      - ../package.json:/workspace/package.json
++      - ..:/workspace
+ 
+   web:
+     build:
+@@ -115,10 +115,11 @@ services:
+     environment:
+       NODE_ENV: development
+       VITE_API_BASE: http://localhost:3000/api/v1
++    command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/web && pnpm run dev -- --host 0.0.0.0"
+     ports:
+       - "5173:5173"
+     volumes:
+-      - ../apps/web:/workspace/apps/web
++      - ..:/workspace
+ 
+   admin:
+     build:
+@@ -128,10 +129,11 @@ services:
+     environment:
+       NODE_ENV: development
+       VITE_API_BASE: http://localhost:3000/api/v1
++    command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/admin && pnpm run dev -- --host 0.0.0.0"
+     ports:
+       - "5174:5173"
+     volumes:
+-      - ../apps/admin:/workspace/apps/admin
++      - ..:/workspace
+ 
+   proxy:
+     image: nginx:alpine
+@@ -151,34 +153,29 @@ YML
+ 
+ cat > "${api_df}" <<'DOCKER'
+ # API (NestJS) development Dockerfile
+-FROM node:20-bullseye
+-WORKDIR /workspace
+-COPY package*.json ./
+-RUN npm ci || npm install
+-# Expect local volume mounts for source; install dev tools
+-RUN npm i -g @nestjs/cli prisma
++FROM node:20-alpine
++RUN corepack enable pnpm && mkdir -p /workspace/apps/api
++WORKDIR /workspace/apps/api
+ EXPOSE 3000
+-CMD ["bash", "-lc", "cd apps/api && npm run start:dev"]
++CMD ["sh", "-c", "while true; do sleep 3600; done"]
+ DOCKER
+ 
+ cat > "${web_df}" <<'DOCKER'
+ # Website (Vue 3) development Dockerfile
+-FROM node:20-bullseye
+-WORKDIR /workspace
+-COPY package*.json ./
+-RUN npm ci || npm install
++FROM node:20-alpine
++RUN corepack enable pnpm && mkdir -p /workspace/apps/web
++WORKDIR /workspace/apps/web
+ EXPOSE 5173
+-CMD ["bash", "-lc", "cd apps/web && npm run dev -- --host 0.0.0.0"]
++CMD ["sh", "-c", "while true; do sleep 3600; done"]
+ DOCKER
+ 
+ cat > "${admin_df}" <<'DOCKER'
+ # Admin (Vue 3) development Dockerfile
+-FROM node:20-bullseye
+-WORKDIR /workspace
+-COPY package*.json ./
+-RUN npm ci || npm install
++FROM node:20-alpine
++RUN corepack enable pnpm && mkdir -p /workspace/apps/admin
++WORKDIR /workspace/apps/admin
+ EXPOSE 5173
+-CMD ["bash", "-lc", "cd apps/admin && npm run dev -- --host 0.0.0.0"]
++CMD ["sh", "-c", "while true; do sleep 3600; done"]
+ DOCKER
+ 
+ cat > "${nginx_conf}" <<'NGINX'
+diff --git a/src/cli/run-compose-up.sh b/src/cli/run-compose-up.sh
+index 441fefa..5c02301 100644
+--- a/src/cli/run-compose-up.sh
++++ b/src/cli/run-compose-up.sh
+@@ -9,14 +9,14 @@ if [[ -f "$ROOT_DIR/src/gpt-creator.sh" ]]; then source "$ROOT_DIR/src/gpt-creat
+ if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then source "$ROOT_DIR/src/constants.sh"; fi
+ 
+ # Fallback helpers if not sourced
+-type log >/dev/null 2>&1 || log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
+-type warn >/dev/null 2>&1 || warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
+-type die >/dev/null 2>&1 || die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
+-type heading >/dev/null 2>&1 || heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
++gc_cli_log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
++gc_cli_warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
++gc_cli_die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
++gc_cli_heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
+ 
+ slugify() {
+   local s="${1:-}"
+-  s="${s,,}"
++  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+   printf '%s\n' "${s:-gptcreator}"
+@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
+     --compose) COMPOSE_FILE="${2:-}"; shift 2;;
+     --open) OPEN_AFTER="true"; shift;;
+     -h|--help) usage; exit 0;;
+-    *) die "Unknown arg: $1 (see --help)";;
++        *) gc_cli_die "Unknown arg: $1 (see --help)";;
+   esac
+ done
+ 
+@@ -48,23 +48,23 @@ if [[ -z "${COMPOSE_FILE}" ]]; then
+   if [[ -f "$ROOT_DIR/docker/compose.yaml" ]]; then COMPOSE_FILE="$ROOT_DIR/docker/compose.yaml";
+   elif [[ -f "$ROOT_DIR/docker-compose.yml" ]]; then COMPOSE_FILE="$ROOT_DIR/docker-compose.yml";
+   else
+-    die "No docker compose file found (expected docker/compose.yaml or docker-compose.yml)"
++    gc_cli_die "No docker compose file found (expected docker/compose.yaml or docker-compose.yml)"
+   fi
+ fi
+ 
+-heading "Starting Docker stack"
++gc_cli_heading "Starting Docker stack"
+ COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" up -d --build
+ 
+ # Wait for DB readiness (best-effort)
+ DB_ID="$(COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps -q db || true)"
+ if [[ -n "$DB_ID" ]]; then
+-  log "Waiting for MySQL to be ready…"
++  gc_cli_log "Waiting for MySQL to be ready…"
+   for i in {1..60}; do
+     if docker exec -i "$DB_ID" sh -lc 'mysqladmin ping -h 127.0.0.1 --silent' >/dev/null 2>&1; then
+-      log "MySQL is ready."; break
++      gc_cli_log "MySQL is ready."; break
+     fi
+     sleep 1
+-    [[ $i -eq 60 ]] && warn "MySQL readiness timeout (continuing)…"
++    [[ $i -eq 60 ]] && gc_cli_warn "MySQL readiness timeout (continuing)…"
+   done
+ fi
+ 
+@@ -73,8 +73,8 @@ COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps
+ 
+ if [[ "$OPEN_AFTER" == "true" ]]; then
+   URL="${APP_WEB_URL:-http://localhost:5173}"
+-  log "Opening $URL"
++  gc_cli_log "Opening $URL"
+   open "$URL" >/dev/null 2>&1 || xdg-open "$URL" || echo "$URL"
+ fi
+ 
+-log "Stack is up."
++gc_cli_log "Stack is up."
+diff --git a/src/cli/run.sh b/src/cli/run.sh
+index 9ebb6d0..507e888 100644
+--- a/src/cli/run.sh
++++ b/src/cli/run.sh
+@@ -9,14 +9,14 @@ if [[ -f "$ROOT_DIR/src/gpt-creator.sh" ]]; then source "$ROOT_DIR/src/gpt-creat
+ if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then source "$ROOT_DIR/src/constants.sh"; fi
+ 
+ # Fallback helpers if not sourced
+-type log >/dev/null 2>&1 || log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
+-type warn >/dev/null 2>&1 || warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
+-type die >/dev/null 2>&1 || die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
+-type heading >/dev/null 2>&1 || heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
++gc_cli_log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
++gc_cli_warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
++gc_cli_die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
++gc_cli_heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
+ 
+ slugify() {
+   local s="${1:-}"
+-  s="${s,,}"
++  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+   printf '%s\n' "${s:-gptcreator}"
+@@ -57,11 +57,11 @@ case "$CMD" in
+     ;;
+   logs)
+     SVC="${1:-api}"; shift || true
+-    [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
++    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
+     exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" logs -f --tail=200 "$SVC"
+     ;;
+   ps)
+-    [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
++    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
+     exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps
+     ;;
+   open)
+@@ -73,20 +73,20 @@ case "$CMD" in
+       web) open "$URL_WEB" >/dev/null 2>&1 || xdg-open "$URL_WEB" || echo "$URL_WEB";;
+       admin) open "$URL_ADMIN" >/dev/null 2>&1 || xdg-open "$URL_ADMIN" || echo "$URL_ADMIN";;
+       api) open "$URL_API" >/dev/null 2>&1 || xdg-open "$URL_API" || echo "$URL_API";;
+-      *) die "Unknown target: $TARGET (web|admin|api)";;
++      *) gc_cli_die "Unknown target: $TARGET (web|admin|api)";;
+     esac
+     ;;
+   stop)
+-    [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
++    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
+     exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" stop
+     ;;
+   down)
+-    [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
++    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
+     exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" down
+     ;;
+   -h|--help)
+     usage;;
+   *)
+-    die "Unknown run command: $CMD"
++    gc_cli_die "Unknown run command: $CMD"
+     ;;
+ esac
+diff --git a/src/cli/scan.sh b/src/cli/scan.sh
+index f328240..8e2c07d 100644
+--- a/src/cli/scan.sh
++++ b/src/cli/scan.sh
+@@ -81,7 +81,7 @@ mapfile -t FILES < <(find "${FIND_ARGS[@]}")
+ 
+ for f in "${FILES[@]}"; do
+   name="$(basename "$f")"
+-  lower="${name,,}"
++  lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
+   case "${lower}" in
+     *pdr*|*product*design*requirements*)
+       add "pdr" "${f}"; continue;;
+diff --git a/src/lib/docker.sh b/src/lib/docker.sh
+index 9de5718..172da1b 100644
+--- a/src/lib/docker.sh
++++ b/src/lib/docker.sh
+@@ -13,7 +13,7 @@ docker_compose() {
+   if [[ -z "$slug" ]]; then
+     local root="${GC_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+     slug="${root##*/}"
+-    slug="${slug,,}"
++    slug="$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')"
+     slug="$(printf '%s' "$slug" | tr -cs 'a-z0-9' '-')"
+     slug="$(printf '%s' "$slug" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+     [[ -n "$slug" ]] || slug="gptcreator"
+diff --git a/src/lib/mysql.sh b/src/lib/mysql.sh
+index d29160f..845ebb6 100644
+--- a/src/lib/mysql.sh
++++ b/src/lib/mysql.sh
+@@ -7,7 +7,7 @@ GC_LIB_MYSQL_SH=1
+ # Start MySQL in a container (docker-compose) from default location
+ mysql::_slugify() {
+   local s="${1:-}"
+-  s="${s,,}"
++  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+   printf '%s\n' "${s:-gptcreator}"
+diff --git a/src/lib/path.sh b/src/lib/path.sh
+index 16db784..541fa03 100644
+--- a/src/lib/path.sh
++++ b/src/lib/path.sh
+@@ -93,7 +93,7 @@ path_slugify() {
+   # Usage: path_slugify "Some Name — 1.2"
+   local s="$*"
+   # To lowercase
+-  s="${s,,}"
++  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+   # Replace Turkish chars and accents (basic map)
+   s="${s//ç/c}"; s="${s//ğ/g}"; s="${s//ı/i}"; s="${s//ö/o}"; s="${s//ş/s}"; s="${s//ü/u}"
+   # Replace non-alnum with dashes
+diff --git a/templates/admin/vue3/src/components/AdminNav.vue.tmpl b/templates/admin/vue3/src/components/AdminNav.vue.tmpl
+index c6e4156..d15cd2b 100644
+--- a/templates/admin/vue3/src/components/AdminNav.vue.tmpl
++++ b/templates/admin/vue3/src/components/AdminNav.vue.tmpl
+@@ -1,12 +1,12 @@
+ <template>
+   <header class="navbar">
+     <nav class="inner">
+-      <router-link class="brand" to="/dashboard">Admin</router-link>
++      <router-link class="brand" :to="{ name: 'dashboard' }">Admin</router-link>
+       <ul class="links">
+-        <li><router-link to="/dashboard">Dashboard</router-link></li>
+-        <li><router-link to="/users">Users</router-link></li>
+-        <li><router-link to="/content">Content</router-link></li>
+-        <li><router-link to="/settings">Settings</router-link></li>
++        <li><router-link :to="{ name: 'dashboard' }">Dashboard</router-link></li>
++        <li><router-link :to="{ name: 'users' }">Users</router-link></li>
++        <li><router-link :to="{ name: 'content' }">Content</router-link></li>
++        <li><router-link :to="{ name: 'settings' }">Settings</router-link></li>
+       </ul>
+     </nav>
+   </header>
+diff --git a/templates/admin/vue3/src/pages/NotFound.vue.tmpl b/templates/admin/vue3/src/pages/NotFound.vue.tmpl
+index d7343a7..8271da1 100644
+--- a/templates/admin/vue3/src/pages/NotFound.vue.tmpl
++++ b/templates/admin/vue3/src/pages/NotFound.vue.tmpl
+@@ -1,7 +1,7 @@
+ <template>
+   <section>
+     <h1>404 — Not Found</h1>
+-    <router-link to="/dashboard">Back to dashboard</router-link>
++    <router-link :to="{ name: 'dashboard' }">Back to dashboard</router-link>
+   </section>
+ </template>
+ <script setup lang="ts"></script>
+diff --git a/templates/admin/vue3/src/router.ts.tmpl b/templates/admin/vue3/src/router.ts.tmpl
+index 72201e2..0789481 100644
+--- a/templates/admin/vue3/src/router.ts.tmpl
++++ b/templates/admin/vue3/src/router.ts.tmpl
+@@ -6,10 +6,12 @@ const Content = () => import('./pages/Content.vue')
+ const Settings = () => import('./pages/Settings.vue')
+ const NotFound = () => import('./pages/NotFound.vue')
+ 
++const base = import.meta.env.BASE_URL || '/admin/'
++
+ const router = createRouter({
+-  history: createWebHistory(import.meta.env.BASE_URL),
++  history: createWebHistory(base),
+   routes: [
+-    { path: '/', redirect: '/dashboard' },
++    { path: '/', redirect: { name: 'dashboard' } },
+     { path: '/dashboard', name: 'dashboard', component: Dashboard },
+     { path: '/users', name: 'users', component: Users },
+     { path: '/content', name: 'content', component: Content },
+diff --git a/templates/admin/vue3/vite.config.ts.tmpl b/templates/admin/vue3/vite.config.ts.tmpl
+index 1140fa0..d3b111b 100644
+--- a/templates/admin/vue3/vite.config.ts.tmpl
++++ b/templates/admin/vue3/vite.config.ts.tmpl
+@@ -4,7 +4,11 @@ import vue from '@vitejs/plugin-vue'
+ export default defineConfig({
+   base: '/admin/',
+   plugins: [vue()],
+-  server: { host: true, port: 5173 },
++  server: {
++    host: true,
++    port: 5173,
++    origin: 'http://localhost:8080'
++  },
+   define: {
+     __API_BASE__: JSON.stringify(process.env.VITE_API_BASE || 'http://localhost:3000/api/v1')
+   }
+diff --git a/templates/api/nestjs/package.json.tmpl b/templates/api/nestjs/package.json.tmpl
+index a53040a..1e31189 100644
+--- a/templates/api/nestjs/package.json.tmpl
++++ b/templates/api/nestjs/package.json.tmpl
+@@ -3,12 +3,14 @@
+   "version": "1.0.0",
+   "private": true,
+   "scripts": {
+-    "start": "nest start",
+-    "start:dev": "nest start --watch",
+-    "start:prod": "node dist/main",
++    "start": "pnpm prisma generate && nest start",
++    "start:dev": "pnpm prisma generate && nest start --watch",
++    "start:prod": "pnpm prisma generate && node dist/main",
+     "build": "nest build",
+     "lint": "eslint '{src,apps,test}/**/*.ts' --fix",
+-    "test": "jest"
++    "test": "jest",
++    "prisma:generate": "prisma generate",
++    "postinstall": "pnpm prisma generate"
+   },
+   "dependencies": {
+     "@nestjs/common": "^10.0.0",
+diff --git a/templates/docker/Dockerfile.admin.tmpl b/templates/docker/Dockerfile.admin.tmpl
+index cf0e594..9e90839 100644
+--- a/templates/docker/Dockerfile.admin.tmpl
++++ b/templates/docker/Dockerfile.admin.tmpl
+@@ -1,12 +1,22 @@
+ # Dockerfile for Admin (Vue 3 + Vite) container
+ FROM node:20-alpine
+ 
+-WORKDIR /workspace/apps/admin
++RUN apk add --no-cache util-linux
++
++ENV PNPM_HOME=/usr/local/share/pnpm \
++    PNPM_VERSION=10.17.1 \
++    PNPM_STORE_PATH=/workspace/.pnpm-store \
++    PNPM_LOCK_FILE=/workspace/docker/.pnpm-install.lock \
++    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
++ENV PATH="$PNPM_HOME:$PATH"
+ 
+-COPY apps/admin/package*.json ./
+-RUN npm install
++WORKDIR /workspace/apps/admin
+ 
+-COPY apps/admin ./
++# prepare workspace
++RUN corepack enable pnpm >/dev/null 2>&1 || true && \
++    corepack use pnpm@${PNPM_VERSION} >/dev/null 2>&1 || corepack prepare pnpm@${PNPM_VERSION} --activate && \
++    mkdir -p /workspace/apps/admin "$PNPM_STORE_PATH" /workspace/docker && \
++    chmod 777 "$PNPM_STORE_PATH"
+ 
+ EXPOSE 5173
+-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
++CMD ["sh", "-c", "while true; do sleep 3600; done"]
+diff --git a/templates/docker/Dockerfile.api.tmpl b/templates/docker/Dockerfile.api.tmpl
+index e546363..62b4a8b 100644
+--- a/templates/docker/Dockerfile.api.tmpl
++++ b/templates/docker/Dockerfile.api.tmpl
+@@ -1,16 +1,26 @@
+ # Dockerfile for API (NestJS) container
+-FROM node:20-alpine
++FROM node:20-bullseye
+ 
+-WORKDIR /workspace/apps/api
++RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3 && rm -rf /var/lib/apt/lists/*
++
++ENV PNPM_HOME=/usr/local/share/pnpm \
++    PNPM_VERSION=10.17.1 \
++    PNPM_STORE_PATH=/workspace/.pnpm-store \
++    PNPM_LOCK_FILE=/workspace/docker/.pnpm-install.lock \
++    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
++    npm_config_build_from_source=true \
++    ARGON2_PREBUILT=0
+ 
+-# install dependencies
+-COPY apps/api/package*.json ./
+-RUN npm install
++RUN npm install -g node-gyp
++ENV PATH="$PNPM_HOME:$PATH"
+ 
+-# copy source
+-COPY apps/api ./
++WORKDIR /workspace/apps/api
+ 
+-RUN npm run build
++# prepare workspace
++RUN corepack enable pnpm >/dev/null 2>&1 || true && \
++    corepack use pnpm@${PNPM_VERSION} >/dev/null 2>&1 || corepack prepare pnpm@${PNPM_VERSION} --activate && \
++    mkdir -p /workspace/apps/api "$PNPM_STORE_PATH" /workspace/docker && \
++    chmod 777 "$PNPM_STORE_PATH"
+ 
+ EXPOSE 3000
+-CMD ["npm", "run", "start:prod"]
++CMD ["sh", "-c", "while true; do sleep 3600; done"]
+diff --git a/templates/docker/Dockerfile.web.tmpl b/templates/docker/Dockerfile.web.tmpl
+index 923fdba..82ceb1e 100644
+--- a/templates/docker/Dockerfile.web.tmpl
++++ b/templates/docker/Dockerfile.web.tmpl
+@@ -1,12 +1,22 @@
+ # Dockerfile for Web (Vue 3 + Vite) container
+ FROM node:20-alpine
+ 
+-WORKDIR /workspace/apps/web
++RUN apk add --no-cache util-linux
++
++ENV PNPM_HOME=/usr/local/share/pnpm \
++    PNPM_VERSION=10.17.1 \
++    PNPM_STORE_PATH=/workspace/.pnpm-store \
++    PNPM_LOCK_FILE=/workspace/docker/.pnpm-install.lock \
++    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
++ENV PATH="$PNPM_HOME:$PATH"
+ 
+-COPY apps/web/package*.json ./
+-RUN npm install
++WORKDIR /workspace/apps/web
+ 
+-COPY apps/web ./
++# prepare workspace
++RUN corepack enable pnpm >/dev/null 2>&1 || true && \
++    corepack use pnpm@${PNPM_VERSION} >/dev/null 2>&1 || corepack prepare pnpm@${PNPM_VERSION} --activate && \
++    mkdir -p /workspace/apps/web "$PNPM_STORE_PATH" /workspace/docker && \
++    chmod 777 "$PNPM_STORE_PATH"
+ 
+ EXPOSE 5173
+-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
++CMD ["sh", "-c", "while true; do sleep 3600; done"]
+diff --git a/templates/docker/docker-compose.yml.tmpl b/templates/docker/docker-compose.yml.tmpl
+index 189320a..8294ef9 100644
+--- a/templates/docker/docker-compose.yml.tmpl
++++ b/templates/docker/docker-compose.yml.tmpl
+@@ -36,12 +36,13 @@ services:
+       NODE_ENV: development
+       DATABASE_URL: mysql://{{DB_USER}}:{{DB_PASSWORD}}@db:3306/{{DB_NAME}}
+       PORT: 3000
+-    command: sh -c "npm install && npm run start:dev"
++    command:
++      - /workspace/docker/pnpm-entry.sh
++      - cd /workspace/apps/api && pnpm run start:dev
+     ports:
+       - "3000:3000"
+     volumes:
+-      - ../apps/api:/workspace/apps/api
+-      - api_node_modules:/workspace/apps/api/node_modules
++      - ..:/workspace
+ 
+   web:
+     build:
+@@ -53,12 +54,13 @@ services:
+     environment:
+       NODE_ENV: development
+       VITE_API_BASE: ${VITE_API_BASE:-http://localhost:3000/api/v1}
+-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
++    command:
++      - /workspace/docker/pnpm-entry.sh
++      - cd /workspace/apps/web && pnpm run dev -- --host 0.0.0.0
+     ports:
+       - "5173:5173"
+     volumes:
+-      - ../apps/web:/workspace/apps/web
+-      - web_node_modules:/workspace/apps/web/node_modules
++      - ..:/workspace
+ 
+   admin:
+     build:
+@@ -70,12 +72,13 @@ services:
+     environment:
+       NODE_ENV: development
+       VITE_API_BASE: ${VITE_API_BASE:-http://localhost:3000/api/v1}
+-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
++    command:
++      - /workspace/docker/pnpm-entry.sh
++      - cd /workspace/apps/admin && pnpm run dev -- --host 0.0.0.0
+     ports:
+       - "5174:5173"
+     volumes:
+-      - ../apps/admin:/workspace/apps/admin
+-      - admin_node_modules:/workspace/apps/admin/node_modules
++      - ..:/workspace
+ 
+   proxy:
+     image: nginx:alpine
+@@ -93,6 +96,3 @@ services:
+ 
+ volumes:
+   db_data: {}
+-  api_node_modules: {}
+-  web_node_modules: {}
+-  admin_node_modules: {}
+diff --git a/templates/docker/nginx.conf.tmpl b/templates/docker/nginx.conf.tmpl
+index 428bcac..964ce5b 100644
+--- a/templates/docker/nginx.conf.tmpl
++++ b/templates/docker/nginx.conf.tmpl
+@@ -10,7 +10,7 @@ http {
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+-      proxy_set_header Host $host;
++      proxy_set_header Host $http_host;
+       proxy_read_timeout 600s;
+       proxy_connect_timeout 60s;
+       proxy_intercept_errors on;
+@@ -22,7 +22,7 @@ http {
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+-      proxy_set_header Host $host;
++      proxy_set_header Host $http_host;
+       proxy_read_timeout 600s;
+       proxy_connect_timeout 60s;
+       proxy_intercept_errors on;
+@@ -31,7 +31,7 @@ http {
+ 
+     location /api/ {
+       proxy_pass http://api:3000/api/;
+-      proxy_set_header Host $host;
++      proxy_set_header Host $http_host;
+     }
+ 
+     location @web_fallback {
+@@ -40,7 +40,7 @@ http {
+       proxy_http_version 1.1;
+       proxy_set_header Upgrade $http_upgrade;
+       proxy_set_header Connection "upgrade";
+-      proxy_set_header Host $host;
++      proxy_set_header Host $http_host;
+     }
+ 
+     location @admin_fallback {
+diff --git a/verify/acceptance.sh b/verify/acceptance.sh
+index 614bb20..06e6c4e 100644
+--- a/verify/acceptance.sh
++++ b/verify/acceptance.sh
+@@ -26,7 +26,7 @@ COMPOSE_FILE_HINT="${GC_COMPOSE_FILE:-}"
+ 
+ slugify() {
+   local s="${1:-}"
+-  s="${s,,}"
++  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+   printf '%s\n' "${s:-gptcreator}"

@@ -13,7 +13,7 @@ docker_compose() {
   if [[ -z "$slug" ]]; then
     local root="${GC_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
     slug="${root##*/}"
-    slug="${slug,,}"
+    slug="$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')"
     slug="$(printf '%s' "$slug" | tr -cs 'a-z0-9' '-')"
     slug="$(printf '%s' "$slug" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
     [[ -n "$slug" ]] || slug="gptcreator"

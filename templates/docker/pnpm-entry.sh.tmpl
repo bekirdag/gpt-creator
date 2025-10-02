@@ -1,0 +1,86 @@
+#!/usr/bin/env sh
+set -euo pipefail
+
+PNPM_VERSION="${PNPM_VERSION:-10.17.1}"
+LOCK_FILE="${PNPM_LOCK_FILE:-/var/pnpm-store/.pnpm-install.lock}"
+STORE_DIR="${PNPM_STORE_PATH:-/var/pnpm-store}"
+STAMP_FILE="/workspace/node_modules/.pnpm-lock.hash"
+
+export CI="${CI:-1}"
+
+mkdir -p "${STORE_DIR}" /workspace/node_modules "$(dirname "$LOCK_FILE")"
+
+if ! command -v corepack >/dev/null 2>&1; then
+  echo "corepack not found" >&2
+  exit 1
+fi
+
+corepack enable pnpm >/dev/null 2>&1 || true
+corepack use "pnpm@${PNPM_VERSION}" >/dev/null 2>&1 || corepack prepare "pnpm@${PNPM_VERSION}" --activate >/dev/null 2>&1 || true
+hash -r 2>/dev/null || true
+
+pnpm config set store-dir "$STORE_DIR" --global >/dev/null
+
+need_install=0
+lock_hash=""
+if [ -f /workspace/pnpm-lock.yaml ]; then
+  lock_hash="$(sha256sum /workspace/pnpm-lock.yaml | awk '{print $1}')"
+fi
+
+if [ ! -d /workspace/node_modules/.pnpm ]; then
+  need_install=1
+elif [ -n "$lock_hash" ]; then
+  if [ ! -f "$STAMP_FILE" ] || [ "$(cat "$STAMP_FILE" 2>/dev/null)" != "$lock_hash" ]; then
+    need_install=1
+  fi
+fi
+
+acquired=0
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9 2>/dev/null; then
+    echo "Waiting for pnpm install lock..." >&2
+    flock 9
+  fi
+  acquired=1
+fi
+
+cleanup() {
+  if [ "$acquired" = "1" ]; then
+    flock -u 9 || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+if [ "$need_install" = "1" ]; then
+  cd /workspace
+  echo "Installing npm dependencies via pnpm..." >&2
+  if ! pnpm install --frozen-lockfile --unsafe-perm --prefer-offline --yes --reporter=append-only; then
+    echo "pnpm install failed — attempting lockfile upgrade" >&2
+    pnpm install --force --lockfile-only --yes --reporter=append-only
+    pnpm install --unsafe-perm --prefer-offline --force --yes --reporter=append-only
+  fi
+  if [ -f /workspace/pnpm-lock.yaml ]; then
+    lock_hash="$(sha256sum /workspace/pnpm-lock.yaml | awk '{print $1}')"
+    printf '%s' "$lock_hash" > "$STAMP_FILE"
+  else
+    rm -f "$STAMP_FILE"
+  fi
+fi
+
+if [ -d /workspace/apps/api ]; then
+  echo "Ensuring Prisma client is generated (api)..." >&2
+  pnpm --dir /workspace/apps/api prisma generate || true
+
+  echo "Rebuilding argon2 native bindings (api)..." >&2
+  pnpm --dir /workspace/apps/api rebuild argon2 || true
+fi
+
+cleanup
+trap - EXIT INT TERM
+
+if [ $# -eq 0 ]; then
+  exit 0
+fi
+
+exec sh -c "$*"

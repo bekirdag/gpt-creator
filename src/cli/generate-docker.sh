@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 slugify() {
   local s="${1:-}"
-  s="${s,,}"
+  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
   printf '%s\n' "${s:-gptcreator}"
@@ -101,11 +101,11 @@ services:
       NODE_ENV: development
       DATABASE_URL: mysql://${DB_USER}:${DB_PASS}@db:3306/${DB_NAME}
       PORT: 3000
+    command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/api && pnpm run start:dev"
     ports:
       - "3000:3000"
     volumes:
-      - ../apps/api:/workspace/apps/api
-      - ../package.json:/workspace/package.json
+      - ..:/workspace
 
   web:
     build:
@@ -115,10 +115,11 @@ services:
     environment:
       NODE_ENV: development
       VITE_API_BASE: http://localhost:3000/api/v1
+    command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/web && pnpm run dev -- --host 0.0.0.0"
     ports:
       - "5173:5173"
     volumes:
-      - ../apps/web:/workspace/apps/web
+      - ..:/workspace
 
   admin:
     build:
@@ -128,10 +129,11 @@ services:
     environment:
       NODE_ENV: development
       VITE_API_BASE: http://localhost:3000/api/v1
+    command: sh -c "corepack enable pnpm && cd /workspace && pnpm install --frozen-lockfile=false && cd apps/admin && pnpm run dev -- --host 0.0.0.0"
     ports:
       - "5174:5173"
     volumes:
-      - ../apps/admin:/workspace/apps/admin
+      - ..:/workspace
 
   proxy:
     image: nginx:alpine
@@ -151,34 +153,29 @@ YML
 
 cat > "${api_df}" <<'DOCKER'
 # API (NestJS) development Dockerfile
-FROM node:20-bullseye
-WORKDIR /workspace
-COPY package*.json ./
-RUN npm ci || npm install
-# Expect local volume mounts for source; install dev tools
-RUN npm i -g @nestjs/cli prisma
+FROM node:20-alpine
+RUN corepack enable pnpm && mkdir -p /workspace/apps/api
+WORKDIR /workspace/apps/api
 EXPOSE 3000
-CMD ["bash", "-lc", "cd apps/api && npm run start:dev"]
+CMD ["sh", "-c", "while true; do sleep 3600; done"]
 DOCKER
 
 cat > "${web_df}" <<'DOCKER'
 # Website (Vue 3) development Dockerfile
-FROM node:20-bullseye
-WORKDIR /workspace
-COPY package*.json ./
-RUN npm ci || npm install
+FROM node:20-alpine
+RUN corepack enable pnpm && mkdir -p /workspace/apps/web
+WORKDIR /workspace/apps/web
 EXPOSE 5173
-CMD ["bash", "-lc", "cd apps/web && npm run dev -- --host 0.0.0.0"]
+CMD ["sh", "-c", "while true; do sleep 3600; done"]
 DOCKER
 
 cat > "${admin_df}" <<'DOCKER'
 # Admin (Vue 3) development Dockerfile
-FROM node:20-bullseye
-WORKDIR /workspace
-COPY package*.json ./
-RUN npm ci || npm install
+FROM node:20-alpine
+RUN corepack enable pnpm && mkdir -p /workspace/apps/admin
+WORKDIR /workspace/apps/admin
 EXPOSE 5173
-CMD ["bash", "-lc", "cd apps/admin && npm run dev -- --host 0.0.0.0"]
+CMD ["sh", "-c", "while true; do sleep 3600; done"]
 DOCKER
 
 cat > "${nginx_conf}" <<'NGINX'

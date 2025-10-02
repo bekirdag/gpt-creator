@@ -93,7 +93,7 @@ path_slugify() {
   # Usage: path_slugify "Some Name — 1.2"
   local s="$*"
   # To lowercase
-  s="${s,,}"
+  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
   # Replace Turkish chars and accents (basic map)
   s="${s//ç/c}"; s="${s//ğ/g}"; s="${s//ı/i}"; s="${s//ö/o}"; s="${s//ş/s}"; s="${s//ü/u}"
   # Replace non-alnum with dashes

@@ -81,7 +81,7 @@ mapfile -t FILES < <(find "${FIND_ARGS[@]}")
 
 for f in "${FILES[@]}"; do
   name="$(basename "$f")"
-  lower="${name,,}"
+  lower="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
   case "${lower}" in
     *pdr*|*product*design*requirements*)
       add "pdr" "${f}"; continue;;

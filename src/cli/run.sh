@@ -9,14 +9,14 @@ if [[ -f "$ROOT_DIR/src/gpt-creator.sh" ]]; then source "$ROOT_DIR/src/gpt-creat
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then source "$ROOT_DIR/src/constants.sh"; fi
 
 # Fallback helpers if not sourced
-type log >/dev/null 2>&1 || log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
-type warn >/dev/null 2>&1 || warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
-type die >/dev/null 2>&1 || die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
-type heading >/dev/null 2>&1 || heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
+gc_cli_log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
+gc_cli_warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
+gc_cli_die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
+gc_cli_heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
 
 slugify() {
   local s="${1:-}"
-  s="${s,,}"
+  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
   printf '%s\n' "${s:-gptcreator}"
@@ -57,11 +57,11 @@ case "$CMD" in
     ;;
   logs)
     SVC="${1:-api}"; shift || true
-    [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
+    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
     exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" logs -f --tail=200 "$SVC"
     ;;
   ps)
-    [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
+    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
     exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps
     ;;
   open)
@@ -73,20 +73,20 @@ case "$CMD" in
       web) open "$URL_WEB" >/dev/null 2>&1 || xdg-open "$URL_WEB" || echo "$URL_WEB";;
       admin) open "$URL_ADMIN" >/dev/null 2>&1 || xdg-open "$URL_ADMIN" || echo "$URL_ADMIN";;
       api) open "$URL_API" >/dev/null 2>&1 || xdg-open "$URL_API" || echo "$URL_API";;
-      *) die "Unknown target: $TARGET (web|admin|api)";;
+      *) gc_cli_die "Unknown target: $TARGET (web|admin|api)";;
     esac
     ;;
   stop)
-    [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
+    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
     exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" stop
     ;;
   down)
-    [[ -n "$COMPOSE_FILE" ]] || die "Compose file not found"
+    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
     exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" down
     ;;
   -h|--help)
     usage;;
   *)
-    die "Unknown run command: $CMD"
+    gc_cli_die "Unknown run command: $CMD"
     ;;
 esac

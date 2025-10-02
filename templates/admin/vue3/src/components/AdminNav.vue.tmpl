@@ -1,12 +1,12 @@
 <template>
   <header class="navbar">
     <nav class="inner">
-      <router-link class="brand" to="/dashboard">Admin</router-link>
+      <router-link class="brand" :to="{ name: 'dashboard' }">Admin</router-link>
       <ul class="links">
-        <li><router-link to="/dashboard">Dashboard</router-link></li>
-        <li><router-link to="/users">Users</router-link></li>
-        <li><router-link to="/content">Content</router-link></li>
-        <li><router-link to="/settings">Settings</router-link></li>
+        <li><router-link :to="{ name: 'dashboard' }">Dashboard</router-link></li>
+        <li><router-link :to="{ name: 'users' }">Users</router-link></li>
+        <li><router-link :to="{ name: 'content' }">Content</router-link></li>
+        <li><router-link :to="{ name: 'settings' }">Settings</router-link></li>
       </ul>
     </nav>
   </header>

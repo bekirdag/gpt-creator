@@ -7,7 +7,7 @@ GC_LIB_MYSQL_SH=1
 # Start MySQL in a container (docker-compose) from default location
 mysql::_slugify() {
   local s="${1:-}"
-  s="${s,,}"
+  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
   printf '%s\n' "${s:-gptcreator}"

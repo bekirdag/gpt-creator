@@ -1,12 +1,22 @@
 # Dockerfile for Admin (Vue 3 + Vite) container
 FROM node:20-alpine
 
+RUN apk add --no-cache util-linux
+
+ENV PNPM_HOME=/usr/local/share/pnpm \
+    PNPM_VERSION=10.17.1 \
+    PNPM_STORE_PATH=/var/pnpm-store \
+    PNPM_LOCK_FILE=/var/pnpm-store/.pnpm-install.lock \
+    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+ENV PATH="$PNPM_HOME:$PATH"
+
 WORKDIR /workspace/apps/admin
 
-COPY apps/admin/package*.json ./
-RUN npm install
-
-COPY apps/admin ./
+# prepare workspace
+RUN corepack enable pnpm >/dev/null 2>&1 || true && \
+    corepack use pnpm@${PNPM_VERSION} >/dev/null 2>&1 || corepack prepare pnpm@${PNPM_VERSION} --activate && \
+    mkdir -p /workspace/apps/admin "$PNPM_STORE_PATH" /workspace/docker && \
+    chmod 777 "$PNPM_STORE_PATH"
 
 EXPOSE 5173
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+CMD ["sh", "-c", "while true; do sleep 3600; done"]

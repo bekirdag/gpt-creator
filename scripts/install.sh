@@ -94,6 +94,7 @@ install_files() {
     --no-group
     --include '/bin/' --include '/bin/*'
     --include '/templates/***'
+    --include '/src/***'
     --include '/scripts/***'
     --include '/docs/***'
     --include '/README*'

@@ -3,12 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "start": "nest start",
-    "start:dev": "nest start --watch",
-    "start:prod": "node dist/main",
+    "start": "pnpm prisma generate && nest start",
+    "start:dev": "pnpm prisma generate && nest start --watch",
+    "start:prod": "pnpm prisma generate && node dist/main",
     "build": "nest build",
     "lint": "eslint '{src,apps,test}/**/*.ts' --fix",
-    "test": "jest"
+    "test": "jest",
+    "prisma:generate": "prisma generate",
+    "postinstall": "pnpm prisma generate"
   },
   "dependencies": {
     "@nestjs/common": "^10.0.0",

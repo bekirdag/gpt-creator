@@ -87,7 +87,7 @@ Keep the repo on your `PATH`, or invoke `./bin/gpt-creator` directly.
    # Execute and resume tasks directly from SQLite
    gpt-creator work-on-tasks --project /path/to/project
    ```
-  - `create-jira-tasks` crawls the staged docs (PDR, SDS, OpenAPI, SQL, UI samples) to synthesize epics → user stories → enriched tasks and persists them in `.gpt-creator/staging/plan/tasks/tasks.db`.
+  - `create-jira-tasks` crawls the staged docs (PDR, SDS, OpenAPI, SQL, UI samples) to synthesize epics → user stories → enriched tasks and persists them in `.gpt-creator/staging/plan/tasks/tasks.db`. The command is resumable — it records progress under `.gpt-creator/staging/plan/create-jira-tasks/state.json` and continues where it left off on the next run (use `--force` to restart from scratch).
   - `create-tasks` snapshots the Jira markdown into the same database if you already maintain backlog files.
   - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically.
   - The legacy `iterate` command is deprecated.

@@ -154,12 +154,14 @@ gc::normalize_to_staging() {
 
   # diagrams
   for f in "${GC_FOUND_MMD[@]:-}"; do
+    [[ -f "$f" ]] || continue
     base="$(basename "$f")"
     install -m 0644 "$f" "$stage/diagrams/$base"
   done
 
   # samples (preserve relative subdirs if under known sample dirs)
   for f in "${GC_FOUND_SAMPLES[@]:-}"; do
+    [[ -f "$f" ]] || continue
     base="$(basename "$f")"
     case "$base" in
       *backoffice*|*admin*) destdir="$stage/samples/backoffice_pages" ;;

@@ -90,7 +90,7 @@ Docker Compose wrappers: \fBup\fR, \fBdown\fR, \fBlogs\fR, \fBopen\fR.
 Acceptance & NFR checks: routes render, filters work, Lighthouse, AA basics.
 .TP
 .B create-jira-tasks
-Mine the staged documentation (PDR, SDS, OpenAPI, SQL dumps, UI samples) to generate Jira epics, user stories, and enriched implementation tasks automatically. Results are written directly to \fI.gpt-creator/staging/plan/tasks/tasks.db\fR. Supports \fB--model\fR to pick a Codex model, \fB--force\fR to rebuild from scratch, \fB--skip-refine\fR to skip the enrichment pass, and \fB--dry-run\fR to stage prompts without calling Codex.
+Mine the staged documentation (PDR, SDS, OpenAPI, SQL dumps, UI samples) to generate Jira epics, user stories, and enriched implementation tasks automatically. Results are written directly to \fI.gpt-creator/staging/plan/tasks/tasks.db\fR. The command is resumable: checkpoint data is stored under \fI.gpt-creator/staging/plan/create-jira-tasks/state.json\fR and reruns continue from the last successful step. Supports \fB--model\fR to pick a Codex model, \fB--force\fR to rebuild from scratch (clears checkpoints), \fB--skip-refine\fR to skip the enrichment pass, and \fB--dry-run\fR to stage prompts without calling Codex.
 .TP
 .B create-tasks
 Convert Jira markdown into a project-scoped SQLite backlog at \fI.gpt-creator/staging/plan/tasks/tasks.db\fR, persisting epics, stories, and task metadata (including prior progress) for resumable automation.

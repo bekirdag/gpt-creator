@@ -13,6 +13,168 @@ cjt::log()   { printf '\033[36m[create-jira-tasks]\033[0m %s\n' "$*"; }
 cjt::warn()  { printf '\033[33m[create-jira-tasks][WARN]\033[0m %s\n' "$*"; }
 cjt::err()   { printf '\033[31m[create-jira-tasks][ERROR]\033[0m %s\n' "$*" >&2; }
 cjt::die()   { cjt::err "$*"; exit 1; }
+cjt::state_init() {
+  CJT_STATE_FILE="$CJT_PIPELINE_DIR/state.json"
+  if (( CJT_FORCE )); then
+    rm -f "$CJT_STATE_FILE"
+  fi
+  if [[ ! -f "$CJT_STATE_FILE" ]]; then
+    cat >"$CJT_STATE_FILE" <<'JSON'
+{
+  "version": 1,
+  "epics": {"status": "pending"},
+  "stories": {"status": "pending", "completed": []},
+  "tasks": {"status": "pending", "completed": []},
+  "refine": {"status": "pending", "stories": {}}
+}
+JSON
+  fi
+}
+
+cjt::state_stage_is_completed() {
+  local stage="$1"
+  python3 - "$CJT_STATE_FILE" "$stage" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+stage = sys.argv[2]
+data = json.loads(path.read_text(encoding='utf-8'))
+status = (data.get(stage) or {}).get('status')
+sys.exit(0 if status == 'completed' else 1)
+PY
+}
+
+cjt::state_mark_stage_completed() {
+  local stage="$1"
+  python3 - "$CJT_STATE_FILE" "$stage" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+stage = sys.argv[2]
+data = json.loads(path.read_text(encoding='utf-8'))
+section = data.setdefault(stage, {})
+section['status'] = 'completed'
+path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+cjt::state_mark_stage_pending() {
+  local stage="$1"
+  python3 - "$CJT_STATE_FILE" "$stage" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+stage = sys.argv[2]
+data = json.loads(path.read_text(encoding='utf-8'))
+section = data.setdefault(stage, {})
+if section.get('status') != 'pending':
+    section['status'] = 'pending'
+    path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+cjt::state_story_is_completed() {
+  local section="$1" slug="$2" file_path="$3"
+  python3 - "$CJT_STATE_FILE" "$section" "$slug" "$file_path" <<'PY'
+import json, sys
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+section = sys.argv[2]
+slug = sys.argv[3]
+target = Path(sys.argv[4])
+data = json.loads(state_path.read_text(encoding='utf-8'))
+completed = set(data.get(section, {}).get('completed', []))
+if slug in completed and not target.exists():
+    completed.discard(slug)
+    sect = data.setdefault(section, {})
+    sect['completed'] = sorted(completed)
+    sect['status'] = 'pending'
+    state_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+    sys.exit(1)
+if slug in completed:
+    sys.exit(0)
+sect = data.setdefault(section, {})
+if sect.get('status') == 'completed':
+    sect['status'] = 'pending'
+    state_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+sys.exit(1)
+PY
+}
+
+cjt::state_mark_story_completed() {
+  local section="$1" slug="$2"
+  python3 - "$CJT_STATE_FILE" "$section" "$slug" <<'PY'
+import json, sys
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+section = sys.argv[2]
+slug = sys.argv[3]
+data = json.loads(state_path.read_text(encoding='utf-8'))
+completed = set(data.setdefault(section, {}).setdefault('completed', []))
+completed.add(slug)
+data[section]['completed'] = sorted(completed)
+state_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+cjt::state_get_refine_progress() {
+  local slug="$1" total="$2"
+  python3 - "$CJT_STATE_FILE" "$slug" "$total" <<'PY'
+import json, sys
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+slug = sys.argv[2]
+total = int(sys.argv[3])
+data = json.loads(state_path.read_text(encoding='utf-8'))
+stories = data.setdefault('refine', {}).setdefault('stories', {})
+record = stories.get(slug)
+if not record:
+    print(0)
+    sys.exit(0)
+if record.get('status') == 'done':
+    print('done')
+    sys.exit(0)
+next_task = int(record.get('next_task', 0))
+if next_task >= total:
+    record['status'] = 'done'
+    record.pop('next_task', None)
+    stories[slug] = record
+    state_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+    print('done')
+else:
+    print(next_task)
+PY
+}
+
+cjt::state_update_refine_progress() {
+  local slug="$1" next_task="$2" total="$3"
+  python3 - "$CJT_STATE_FILE" "$slug" "$next_task" "$total" <<'PY'
+import json, sys
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+slug = sys.argv[2]
+next_task = int(sys.argv[3])
+total = int(sys.argv[4])
+data = json.loads(state_path.read_text(encoding='utf-8'))
+stories = data.setdefault('refine', {}).setdefault('stories', {})
+record = stories.setdefault(slug, {})
+if next_task >= total:
+    record['status'] = 'done'
+    record.pop('next_task', None)
+else:
+    record['status'] = 'in-progress'
+    record['next_task'] = next_task
+stories[slug] = record
+state_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+PY
+}
 
 cjt::abs_path() {
   local path="${1:-}"
@@ -37,7 +199,7 @@ cjt::slugify() {
 
 cjt::init() {
   CJT_PROJECT_ROOT="${1:?project root required}"
-  CJT_MODEL="${2:-${CODEX_MODEL:-gpt-5-high}}"
+  CJT_MODEL="${2:-${CODEX_MODEL:-gpt-5-codex}}"
   CJT_FORCE="${3:-0}"
   CJT_SKIP_REFINE="${4:-0}"
   CJT_DRY_RUN="${5:-0}"
@@ -45,7 +207,7 @@ cjt::init() {
   CJT_PROJECT_ROOT="$(cjt::abs_path "$CJT_PROJECT_ROOT")"
   [[ -d "$CJT_PROJECT_ROOT" ]] || cjt::die "Project root not found: $CJT_PROJECT_ROOT"
 
-  CJT_ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  CJT_ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
   source "$CJT_ROOT_DIR/src/constants.sh"
   source "$CJT_ROOT_DIR/src/gpt-creator.sh"
@@ -75,6 +237,7 @@ cjt::init() {
   fi
 
   CJT_CODEX_CMD="$codex_bin"
+  cjt::state_init
 }
 
 cjt::prepare_inputs() {
@@ -84,7 +247,15 @@ cjt::prepare_inputs() {
   printf '%s\n' "$manifest" > "$CJT_PIPELINE_DIR/discovery.yaml"
 
   cjt::log "Normalizing source documents into staging workspace"
+  local _had_nounset=0
+  if [[ $- == *u* ]]; then
+    _had_nounset=1
+    set +u
+  fi
   gc::normalize_to_staging "$CJT_PROJECT_ROOT" >/dev/null
+  if (( _had_nounset )); then
+    set -u
+  fi
 
   cjt::log "Compiling context excerpts"
   cjt::build_context_files
@@ -142,7 +313,7 @@ cjt::build_context_files() {
 
 cjt::codex_has_subcommand() {
   local subcmd="$1"
-  "$CJT_CODEX_CMD" --help 2>/dev/null | grep -qi "${subcmd}"
+  "$CJT_CODEX_CMD" --help 2>/dev/null | grep -Eqi "(^|[[:space:]/-])${subcmd}([[:space:]/-]|$)"
 }
 
 cjt::run_codex() {
@@ -158,16 +329,49 @@ cjt::run_codex() {
 
   mkdir -p "$(dirname "$output_file")"
   local model="$CJT_MODEL"
-  local cmd=("$CJT_CODEX_CMD" chat --model "$model" --prompt-file "$prompt_file" --output "$output_file")
-  if ! cjt::codex_has_subcommand chat; then
-    cjt::die "Codex CLI '${CJT_CODEX_CMD}' does not expose a 'chat' subcommand; required for create-jira-tasks."
+
+  if cjt::codex_has_subcommand chat; then
+    local cmd=("$CJT_CODEX_CMD" chat --model "$model" --prompt-file "$prompt_file" --output "$output_file")
+    cjt::log "Running Codex (${label}) with model $CJT_MODEL"
+    if ! "${cmd[@]}"; then
+      cjt::warn "Codex invocation failed for ${label}."
+      return 1
+    fi
+    return 0
   fi
 
-  cjt::log "Running Codex (${label}) with model $CJT_MODEL"
-  if ! "${cmd[@]}"; then
-    cjt::warn "Codex invocation failed for ${label}."
-    return 1
+  if cjt::codex_has_subcommand exec; then
+    local args=("$CJT_CODEX_CMD" exec --model "$model" --full-auto --sandbox workspace-write --skip-git-repo-check)
+    if [[ -n "${CODEX_PROFILE:-}" ]]; then
+      args+=(--profile "$CODEX_PROFILE")
+    fi
+    if [[ -n "$CJT_PROJECT_ROOT" ]]; then
+      args+=(--cd "$CJT_PROJECT_ROOT")
+    fi
+    if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
+      args+=(-c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"")
+    fi
+    args+=(--output-last-message "$output_file")
+    cjt::log "Running Codex (${label}) with model $CJT_MODEL via exec"
+    if ! "${args[@]}" < "$prompt_file"; then
+      cjt::warn "Codex invocation failed for ${label}."
+      return 1
+    fi
+    return 0
   fi
+
+  if cjt::codex_has_subcommand generate; then
+    local cmd=("$CJT_CODEX_CMD" generate --model "$model" --prompt-file "$prompt_file" --output "$output_file")
+    cjt::log "Running Codex (${label}) with model $CJT_MODEL via generate"
+    if ! "${cmd[@]}"; then
+      cjt::warn "Codex invocation failed for ${label}."
+      return 1
+    fi
+    return 0
+  fi
+
+  cjt::warn "Codex CLI '${CJT_CODEX_CMD}' does not expose supported subcommands (chat/exec/generate); switching to dry-run for ${label}."
+  printf '{"status": "codex-missing", "label": "%s"}\n' "$label" >"$output_file"
   return 0
 }
 
@@ -214,6 +418,13 @@ cjt::generate_epics() {
   local raw_output="$CJT_OUTPUT_DIR/epics.raw.txt"
   local json_output="$CJT_JSON_DIR/epics.json"
 
+  if cjt::state_stage_is_completed "epics" && [[ -f "$json_output" ]]; then
+    cjt::log "Epics already generated; skipping"
+    return
+  fi
+
+  cjt::state_mark_stage_pending "epics"
+
   cjt::log "Creating Jira epics prompt"
   cjt::write_epics_prompt "$prompt_file"
 
@@ -223,6 +434,8 @@ cjt::generate_epics() {
   else
     cjt::die "Codex failed while generating epics"
   fi
+
+  cjt::state_mark_stage_completed "epics"
 }
 
 cjt::write_epics_prompt() {
@@ -275,6 +488,13 @@ cjt::generate_stories() {
   local epics_json="$CJT_JSON_DIR/epics.json"
   [[ -f "$epics_json" ]] || cjt::die "Epics JSON not found: ${epics_json}"
 
+  if cjt::state_stage_is_completed "stories"; then
+    cjt::log "User stories already generated; skipping"
+    return
+  fi
+
+  cjt::state_mark_stage_pending "stories"
+
   local epic_ids
   mapfile -t epic_ids < <(python3 - "$epics_json" <<'PY'
 import json
@@ -296,15 +516,22 @@ PY
     local prompt_file="$CJT_PROMPTS_DIR/story_${slug}.prompt.md"
     local raw_file="$CJT_OUTPUT_DIR/story_${slug}.raw.txt"
     local json_file="$CJT_JSON_DIR/story_${slug}.json"
+    if cjt::state_story_is_completed "stories" "$slug" "$json_file"; then
+      cjt::log "Story generation already completed for ${epic_id} (${slug}); skipping"
+      continue
+    fi
     cjt::write_story_prompt "$epic_id" "$prompt_file"
     cjt::log "Generating user stories for ${epic_id}"
     if cjt::run_codex "$prompt_file" "$raw_file" "stories-${epic_id}"; then
       cjt::wrap_json_extractor "$raw_file" "$json_file"
       cjt::split_story_json "$json_file"
+      cjt::state_mark_story_completed "stories" "$slug"
     else
       cjt::die "Codex failed while generating stories for ${epic_id}"
     fi
   done
+
+  cjt::state_mark_stage_completed "stories"
 }
 
 cjt::split_story_json() {
@@ -386,6 +613,12 @@ PY
 cjt::generate_tasks() {
   local stories
   mapfile -t stories < <(find "$CJT_JSON_STORIES_DIR" -maxdepth 1 -type f -name '*.json' | sort)
+  if cjt::state_stage_is_completed "tasks"; then
+    cjt::log "Tasks already generated; skipping"
+    return
+  fi
+
+  cjt::state_mark_stage_pending "tasks"
   local story_file
   for story_file in "${stories[@]}"; do
     local slug
@@ -393,14 +626,21 @@ cjt::generate_tasks() {
     local prompt_file="$CJT_PROMPTS_DIR/tasks_${slug}.prompt.md"
     local raw_file="$CJT_OUTPUT_DIR/tasks_${slug}.raw.txt"
     local json_file="$CJT_JSON_TASKS_DIR/${slug}.json"
+    if cjt::state_story_is_completed "tasks" "$slug" "$json_file"; then
+      cjt::log "Tasks already generated for story ${slug}; skipping"
+      continue
+    fi
     cjt::write_task_prompt "$story_file" "$prompt_file"
     cjt::log "Generating tasks for story ${slug}"
     if cjt::run_codex "$prompt_file" "$raw_file" "tasks-${slug}"; then
       cjt::wrap_json_extractor "$raw_file" "$json_file"
+      cjt::state_mark_story_completed "tasks" "$slug"
     else
       cjt::die "Codex failed while generating tasks for story ${slug}"
     fi
   done
+
+  cjt::state_mark_stage_completed "tasks"
 }
 
 cjt::write_task_prompt() {
@@ -457,6 +697,12 @@ cjt::refine_tasks() {
   fi
   local task_files
   mapfile -t task_files < <(find "$CJT_JSON_TASKS_DIR" -maxdepth 1 -type f -name '*.json' | sort)
+  if cjt::state_stage_is_completed "refine"; then
+    cjt::log "Task refinement already completed; skipping"
+    return
+  fi
+
+  cjt::state_mark_stage_pending "refine"
   local file
   for file in "${task_files[@]}"; do
     local slug="${file##*/}"; slug="${slug%.json}"
@@ -484,12 +730,24 @@ PY
     if (( task_total == 0 )); then
       cjt::warn "No tasks found for story ${slug}; skipping refinement"
       rm -f "$CJT_JSON_REFINED_DIR/${slug}.json" 2>/dev/null || true
+      cjt::state_update_refine_progress "$slug" 0 0
       continue
     fi
 
-    cjt::log "Refining tasks for story ${slug} (${task_total} tasks)"
+    local progress
+    progress="$(cjt::state_get_refine_progress "$slug" "$task_total")"
+    if [[ "$progress" == "done" && -f "$CJT_JSON_REFINED_DIR/${slug}.json" ]]; then
+      cjt::log "Refinement already completed for story ${slug}; skipping"
+      continue
+    fi
+    local start_index=0
+    if [[ "$progress" != "done" ]]; then
+      start_index=${progress:-0}
+    fi
+    cjt::log "Refining tasks for story ${slug} (${task_total} tasks, starting at index ${start_index})"
     local idx
-    for (( idx=0; idx<task_total; idx++ )); do
+    local story_success=1
+    for (( idx=start_index; idx<task_total; idx++ )); do
       local task_num
       printf -v task_num "%03d" $((idx + 1))
       local prompt_file="$CJT_PROMPTS_DIR/refine_${slug}_task_${task_num}.prompt.md"
@@ -497,21 +755,77 @@ PY
       local json_file="$CJT_TMP_DIR/refine_${slug}_task_${task_num}.json"
 
       cjt::write_refine_task_prompt "$working_copy" "$idx" "$prompt_file"
-      if cjt::run_codex "$prompt_file" "$raw_file" "refine-${slug}-task-${task_num}"; then
+      local attempt=0
+      local max_attempts=2
+      local prompt_augmented=0
+      local success=0
+      while (( attempt < max_attempts )); do
+        (( attempt++ ))
+        rm -f "$raw_file" "$json_file" 2>/dev/null || true
+        if ! cjt::run_codex "$prompt_file" "$raw_file" "refine-${slug}-task-${task_num}"; then
+          cjt::warn "Codex invocation failed for ${slug} task ${task_num} (attempt ${attempt}/${max_attempts})"
+          continue
+        fi
         if cjt::wrap_json_extractor "$raw_file" "$json_file"; then
           cjt::apply_refined_task "$working_copy" "$json_file" "$idx"
-        else
-          cjt::warn "Failed to parse Codex output for ${slug} task ${task_num}; keeping prior content"
+          cjt::state_update_refine_progress "$slug" $((idx + 1)) "$task_total"
+          success=1
+          break
         fi
-      else
-        cjt::warn "Codex invocation failed for ${slug} task ${task_num}; keeping prior content"
+        if (( prompt_augmented == 0 )); then
+          cat >>"$prompt_file" <<'REM'
+
+## Reminder
+- Output a single JSON object conforming to the schema above.
+- Do not include explanations, markdown code fences, or commentary outside the JSON.
+- If a field is not applicable use an empty array or omit it; do not return prose.
+REM
+          prompt_augmented=1
+        fi
+        cjt::warn "Codex produced non-JSON output for ${slug} task ${task_num}; retrying (${attempt}/${max_attempts})."
+      done
+      if (( success == 0 )); then
+        cjt::warn "Unable to obtain JSON output for ${slug} task ${task_num}; keeping prior content"
+        story_success=0
+        break
       fi
     done
 
     local final_story="$CJT_JSON_REFINED_DIR/${slug}.json"
     mkdir -p "$(dirname "$final_story")"
     cp "$working_copy" "$final_story"
+    if (( story_success == 1 )); then
+      cjt::state_update_refine_progress "$slug" "$task_total" "$task_total"
+    fi
   done
+
+  local remaining=0
+  for file in "${task_files[@]}"; do
+    local slug="${file##*/}"; slug="${slug%.json}"
+    local total
+    total=$(python3 - <<'PY' "$file"
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    print(0)
+else:
+    print(len(payload.get('tasks') or []))
+PY
+)
+    total=${total//$'\n'/}
+    total=${total:-0}
+    if [[ "$(cjt::state_get_refine_progress "$slug" "$total")" != "done" ]]; then
+      remaining=1
+      break
+    fi
+  done
+  if (( remaining == 0 )); then
+    cjt::state_mark_stage_completed "refine"
+  fi
 }
 
 cjt::write_refine_task_prompt() {

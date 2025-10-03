@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macOS installer for gpt-creator
+# Unix installer for gpt-creator (macOS / Linux)
 set -Eeuo pipefail
 
 PREFIX="/usr/local"
@@ -8,7 +8,7 @@ FORCE=0
 
 usage() {
   cat <<EOF
-gpt-creator installer (macOS)
+gpt-creator installer (macOS / Linux)
 
 Usage:
   ./install.sh [--prefix /usr/local] [--skip-preflight] [--force]
@@ -32,9 +32,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "This installer targets macOS (Darwin)." >&2; exit 1
-fi
+OS_NAME="$(uname -s)"
+case "$OS_NAME" in
+  Darwin)
+    INSTALL_MODE="macos"
+    ;;
+  Linux)
+    INSTALL_MODE="linux"
+    ;;
+  *)
+    echo "Unsupported OS: $OS_NAME" >&2
+    exit 1
+    ;;
+esac
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd "$SCRIPTS_DIR/.." && pwd -P)"
@@ -58,18 +68,18 @@ ver_major() { echo "${1#v}" | awk -F. '{print $1}'; }
 
 preflight() {
   echo "› Preflight…"
-  need_cmd docker || { echo "✖ docker not found. Install Docker Desktop." >&2; exit 1; }
+  need_cmd docker || { echo "✖ docker not found. Install Docker Engine/Desktop." >&2; exit 1; }
   if ! docker info >/dev/null 2>&1; then
-    echo "✖ Docker is installed but not running. Start Docker Desktop." >&2; exit 1;
+    echo "✖ Docker is installed but not running. Start the Docker daemon." >&2; exit 1;
   fi
 
-  need_cmd node || { echo "✖ node not found. Install Node 20+ (brew install node@20)." >&2; exit 1; }
+  need_cmd node || { echo "✖ node not found. Install Node 20+ (e.g. via brew install node@20 or your distro packages)." >&2; exit 1; }
   local nv; nv="$(node -v)"; local major; major="$(ver_major "$nv")"
   if (( major < 20 )); then echo "✖ Node $nv found; require ≥ v20." >&2; exit 1; fi
 
   need_cmd pnpm || { echo "✖ pnpm not found. Install via corepack: 'corepack enable && corepack prepare pnpm@latest --activate'." >&2; exit 1; }
 
-  need_cmd mysql || { echo "✖ mysql client not found. Install: 'brew install mysql-client' and ensure it’s on PATH." >&2; exit 1; }
+  need_cmd mysql || { echo "✖ mysql client not found. Install the MySQL client tools (e.g. brew install mysql-client) and ensure they’re on PATH." >&2; exit 1; }
 
   if ! need_cmd codex && ! need_cmd codex-client; then
     echo "✖ Codex client not found (expected 'codex' or 'codex-client' on PATH)." >&2; exit 1;
@@ -133,7 +143,7 @@ install_completions() {
   echo "› Installing shell completions…"
   # zsh
   local zcomp
-  if need_cmd brew; then
+  if [[ "$INSTALL_MODE" == "macos" ]] && need_cmd brew; then
     zcomp="$(brew --prefix)/share/zsh/site-functions"
   else
     zcomp="$PREFIX/share/zsh/site-functions"
@@ -147,7 +157,15 @@ _arguments -s \
 ZSHC
 
   # bash
-  local bdir="$PREFIX/etc/bash_completion.d"
+  local bdir
+  case "$INSTALL_MODE" in
+    macos)
+      bdir="$PREFIX/etc/bash_completion.d"
+      ;;
+    linux)
+      bdir="$PREFIX/share/bash-completion/completions"
+      ;;
+  esac
   as_root "$PREFIX" mkdir -p "$bdir"
   as_root "$PREFIX" tee "$bdir/gpt-creator" >/dev/null <<'BASHC'
 _gpt_creator_complete() {
@@ -165,7 +183,7 @@ complete -F _gpt_creator_complete gpt-creator
 BASHC
 
   # fish
-  local fdir="${HOME}/.config/fish/completions"
+  local fdir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
   mkdir -p "$fdir"
   tee "$fdir/gpt-creator.fish" >/dev/null <<'FISHC'
 complete -c gpt-creator -n "not __fish_seen_subcommand_from create-project help" -a "create-project help"

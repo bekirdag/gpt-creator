@@ -197,6 +197,35 @@ cjt::slugify() {
   printf '%s\n' "${value:-item}"
 }
 
+cjt::derive_project_title() {
+  local input="${1:-}"
+  python3 - <<'PY' "$input"
+import pathlib
+import re
+import sys
+
+raw = sys.argv[1] if len(sys.argv) > 1 else ''
+if raw:
+    path = pathlib.Path(raw)
+    if path.exists():
+        raw = path.name
+raw = re.sub(r'[_\-]+', ' ', raw)
+raw = re.sub(r'\s+', ' ', raw).strip()
+if not raw:
+    print("Project")
+else:
+    words = []
+    for token in raw.split():
+        if len(token) <= 3:
+            words.append(token.upper())
+        elif token.isupper():
+            words.append(token)
+        else:
+            words.append(token.capitalize())
+    print(' '.join(words))
+PY
+}
+
 cjt::init() {
   CJT_PROJECT_ROOT="${1:?project root required}"
   CJT_MODEL="${2:-${CODEX_MODEL:-gpt-5-codex}}"
@@ -229,6 +258,14 @@ cjt::init() {
 
   mkdir -p "$CJT_PROMPTS_DIR" "$CJT_OUTPUT_DIR" "$CJT_JSON_DIR" \
     "$CJT_JSON_STORIES_DIR" "$CJT_JSON_TASKS_DIR" "$CJT_JSON_REFINED_DIR" "$CJT_TMP_DIR"
+
+  if [[ -n "${CJT_PROJECT_TITLE:-}" ]]; then
+    :
+  elif [[ -n "${GC_PROJECT_TITLE:-}" ]]; then
+    CJT_PROJECT_TITLE="$GC_PROJECT_TITLE"
+  else
+    CJT_PROJECT_TITLE="$(cjt::derive_project_title "$CJT_PROJECT_ROOT")"
+  fi
 
   local codex_bin="${CODEX_BIN:-${CODEX_CMD:-codex}}"
   if ! command -v "$codex_bin" >/dev/null 2>&1; then
@@ -380,6 +417,7 @@ cjt::wrap_json_extractor() {
   local outfile="${2:?output file required}"
   python3 - "$infile" "$outfile" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -440,10 +478,11 @@ cjt::generate_epics() {
 
 cjt::write_epics_prompt() {
   local prompt_file="${1:?prompt file required}"
+  local project_label="${CJT_PROJECT_TITLE:-this project}"
   {
-    echo "You are a senior delivery lead creating Jira epics for the Bhavani Yoga product."
-    echo
-    echo "Project scope: only Website (customer-facing) and Admin/Backoffice experiences. Ignore DevOps, infrastructure, and tooling work."
+    printf "You are a senior delivery lead creating Jira epics for the %s initiative.\n\n" "$project_label"
+    echo "Project scope: prioritize the customer-facing and admin/backoffice experiences described in the documentation."
+    echo "Ignore DevOps, infrastructure, and tooling work unless explicitly documented."
     echo "Investigate the provided documentation thoroughly before proposing epics. Cover end-to-end functionality, including sunny-day flows and edge cases."
     echo
     echo "## Documentation Index"
@@ -566,8 +605,10 @@ cjt::write_story_prompt() {
   local epic_id="${1:?epic id required}"
   local prompt_file="${2:?prompt file required}"
   local epics_json="$CJT_JSON_DIR/epics.json"
-  python3 - "$epics_json" "$epic_id" "$prompt_file" "$CJT_CONTEXT_SNIPPET_FILE" <<'PY'
+  local project_label="${CJT_PROJECT_TITLE:-the product}"
+  CJT_PROMPT_TITLE="$project_label" python3 - "$epics_json" "$epic_id" "$prompt_file" "$CJT_CONTEXT_SNIPPET_FILE" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -575,6 +616,7 @@ epics_path = Path(sys.argv[1])
 epic_id = sys.argv[2]
 prompt_path = Path(sys.argv[3])
 context_snippet = Path(sys.argv[4]).read_text(encoding='utf-8')
+project_label = os.environ.get('CJT_PROMPT_TITLE', 'the product').strip() or 'the product'
 
 data = json.loads(epics_path.read_text(encoding='utf-8'))
 match = None
@@ -587,7 +629,7 @@ if not match:
     raise SystemExit(f"Epic {epic_id} not found in epics.json")
 
 with prompt_path.open('w', encoding='utf-8') as fh:
-    fh.write("You are a lead product analyst expanding Jira epics into granular user stories for the Bhavani Yoga build.\n\n")
+    fh.write(f"You are a lead product analyst expanding Jira epics into granular user stories for the {project_label} initiative.\n\n")
     fh.write("Only focus on the website and admin/backoffice surfaces. Ignore DevOps/infra.\n\n")
     fh.write("## Target epic\n")
     json.dump(match, fh, indent=2)
@@ -832,8 +874,10 @@ cjt::write_refine_task_prompt() {
   local tasks_file="${1:?tasks json required}"
   local task_index="${2:?task index required}"
   local prompt_file="${3:?prompt file required}"
-  python3 - "$tasks_file" "$task_index" "$CJT_CONTEXT_FILE" "$prompt_file" <<'PY'
+  local project_name_label="${CJT_PROJECT_TITLE:-the project}"
+  CJT_PROMPT_TITLE="$project_name_label" python3 - "$tasks_file" "$task_index" "$CJT_CONTEXT_FILE" "$prompt_file" <<'PY'
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -841,6 +885,8 @@ story_path = Path(sys.argv[1])
 task_index = int(sys.argv[2])
 context = Path(sys.argv[3]).read_text(encoding='utf-8')
 prompt_path = Path(sys.argv[4])
+base_label = os.environ.get('CJT_PROMPT_TITLE', 'the project').strip()
+project_label = f"{base_label} delivery team" if base_label else "the delivery team"
 
 story_payload = json.loads(story_path.read_text(encoding='utf-8'))
 tasks = story_payload.get('tasks') or []
@@ -853,7 +899,7 @@ epic_id = story_payload.get('epic_id') or ''
 target_task = tasks[task_index]
 
 with prompt_path.open('w', encoding='utf-8') as fh:
-    fh.write("You are validating and enriching a Jira task for the Bhavani Yoga delivery team.\n")
+    fh.write(f"You are validating and enriching a Jira task for the {project_label}.\n")
     fh.write("Only website and admin/backoffice scopes are in play—ignore DevOps and infra.\n\n")
 
     fh.write("## Project documentation excerpt\n")

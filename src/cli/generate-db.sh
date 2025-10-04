@@ -19,6 +19,31 @@ fi
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"; }
 
+humanize_name() {
+  python3 - <<'PY' "${1:-}"
+import pathlib
+import re
+import sys
+
+raw = sys.argv[1] if len(sys.argv) > 1 else ''
+if raw:
+    raw = pathlib.Path(raw).name
+raw = re.sub(r'[_\-]+', ' ', raw).strip()
+if not raw:
+    print('Project')
+else:
+    words = []
+    for token in raw.split():
+        if len(token) <= 3:
+            words.append(token.upper())
+        elif token.isupper():
+            words.append(token)
+        else:
+            words.append(token.capitalize())
+    print(' '.join(words))
+PY
+}
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -50,6 +75,19 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1"; usage; exit 2;;
   esac
 done
+
+if [[ -n "${GC_PROJECT_TITLE:-}" ]]; then
+  PROJECT_LABEL="$GC_PROJECT_TITLE"
+else
+  PROJECT_LABEL="$(humanize_name "$ROOT_DIR")"
+fi
+[[ -n "$PROJECT_LABEL" ]] || PROJECT_LABEL="Project"
+project_label_lower="$(printf '%s' "$PROJECT_LABEL" | tr '[:upper:]' '[:lower:]')"
+if [[ "$project_label_lower" == "project" ]]; then
+  PROJECT_LABEL_PROMPT="this project"
+else
+  PROJECT_LABEL_PROMPT="the ${PROJECT_LABEL}"
+fi
 
 API_DIR="${ROOT_DIR}/${OUT_DIR}"
 PRISMA_DIR="${API_DIR}/prisma"
@@ -137,8 +175,8 @@ You are an expert backend engineer. Produce a high-quality, production-ready ORM
 - Enforce unique constraints and reasonable lengths. Use snake_case table names.
 SYS
 
-cat > "${PROMPT_DIR}/db.task.md" <<'TASK'
-Goal: Generate a complete ORM schema and initial migration for the Bhavani Yoga Studio MVP.
+cat > "${PROMPT_DIR}/db.task.md" <<TASK
+Goal: Generate a complete ORM schema and initial migration for ${PROJECT_LABEL_PROMPT}.
 Inputs: PDR, SDS, OpenAPI (if present), SQL dump (if present), Mermaid ERD (if present).
 Outputs:
 1) prisma/schema.prisma (or TypeORM entities if requested)
@@ -155,9 +193,29 @@ TASK
 # Collect likely inputs
 ATTACH=()
 add_if() { [[ -f "$1" ]] && ATTACH+=("$1"); }
-for p in   "${ROOT_DIR}/Yoga PDR.md"   "${ROOT_DIR}/Yoga SDS.md"   "${ROOT_DIR}/Yoga JIRA tasks.md"   "${ROOT_DIR}/Yoga website UI pages.md"   "${ROOT_DIR}/Yoga website RFP.md"   "${ROOT_DIR}/openAPI.yaml"   "${ROOT_DIR}/openAPI.yml"   "${ROOT_DIR}/openAPI.json"   "${ROOT_DIR}/openAPI.txt"   "${ROOT_DIR}/DB Schema _ Mermaid Diagram.mmd"   "${ROOT_DIR}/Backoffice pages workflow _ Mermaid Diagram.mmd"   "${ROOT_DIR}/sql_dump.sql"   "${ROOT_DIR}/sql_dump*.sql"; do
-  for f in $p; do add_if "$f"; done
-done
+STAGING_ROOT="${ROOT_DIR}/${GC_WORK_DIR_NAME:-.gpt-creator}/staging"
+if [[ -d "$STAGING_ROOT" ]]; then
+  for candidate in     "$STAGING_ROOT/docs/pdr.md"     "$STAGING_ROOT/docs/sds.md"     "$STAGING_ROOT/docs/rfp.md"     "$STAGING_ROOT/docs/jira.md"     "$STAGING_ROOT/docs/ui-pages.md"; do
+    add_if "$candidate"
+  done
+  for f in "$STAGING_ROOT"/openapi/* "$STAGING_ROOT"/sql/* "$STAGING_ROOT"/diagrams/*; do
+    [[ -f "$f" ]] || continue
+    add_if "$f"
+  done
+fi
+
+if (( ${#ATTACH[@]} == 0 )); then
+  while IFS= read -r -d '' f; do
+    add_if "$f"
+  done < <(find "$ROOT_DIR" -maxdepth 2 -type f \
+    \( -iname '*pdr*.md' -o -iname '*sds*.md' -o -iname '*rfp*.md' -o -iname '*jira*.md' \
+       -o -iname 'openapi.yaml' -o -iname 'openapi.yml' -o -iname 'openapi.json' \
+       -o -iname '*.sql' -o -iname '*.mmd' \) -print0)
+fi
+
+if (( ${#ATTACH[@]} > 0 )); then
+  mapfile -t ATTACH < <(printf '%s\n' "${ATTACH[@]}" | awk '!seen[$0]++')
+fi
 
 log "Attachments discovered: ${#ATTACH[@]} file(s)"
 

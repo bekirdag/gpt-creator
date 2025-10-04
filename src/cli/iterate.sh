@@ -25,6 +25,44 @@ warn(){ printf "\033[33m[%s][WARN]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 err(){  printf "\033[31m[%s][ERROR]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 
+humanize_name() {
+  python3 - <<'PY' "${1:-}"
+import pathlib
+import re
+import sys
+
+raw = sys.argv[1] if len(sys.argv) > 1 else ''
+if raw:
+    raw = pathlib.Path(raw).name
+raw = re.sub(r'[_\-]+', ' ', raw).strip()
+if not raw:
+    print('Project')
+else:
+    words = []
+    for token in raw.split():
+        if len(token) <= 3:
+            words.append(token.upper())
+        elif token.isupper():
+            words.append(token)
+        else:
+            words.append(token.capitalize())
+    print(' '.join(words))
+PY
+}
+
+if [[ -n "${GC_PROJECT_TITLE:-}" ]]; then
+  PROJECT_LABEL="$GC_PROJECT_TITLE"
+else
+  PROJECT_LABEL="$(humanize_name "$PROJECT_DIR")"
+fi
+[[ -n "$PROJECT_LABEL" ]] || PROJECT_LABEL="Project"
+project_label_lower="$(printf '%s' "$PROJECT_LABEL" | tr '[:upper:]' '[:lower:]')"
+if [[ "$project_label_lower" == "project" ]]; then
+  PROJECT_LABEL_PROMPT="this project"
+else
+  PROJECT_LABEL_PROMPT="the ${PROJECT_LABEL}"
+fi
+
 warn "'gpt-creator iterate' is deprecated. Use 'gpt-creator create-tasks' followed by 'gpt-creator work-on-tasks'."
 
 usage() {
@@ -128,7 +166,7 @@ for entry in "${TASKS[@]}"; do
   cat > "$PROMPT" <<EOP
 # You are Codex (model: $CODEX_MODEL)
 
-You are helping build the Bhavani Yoga product from normalized docs. Read **all** context below, then complete the task precisely.
+You are helping build ${PROJECT_LABEL_PROMPT} based on normalized docs. Read **all** context below, then complete the task precisely.
 Focus on: NestJS (API), MySQL 8 (Prisma/TypeORM), Vue 3 (site+admin), Docker. Adhere to PDR/SDS acceptance checks.
 
 ## Task

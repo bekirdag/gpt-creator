@@ -23,6 +23,44 @@ MANIFEST_DIR="${RUNTIME_DIR}/manifests"
 LOG_DIR="${RUNTIME_DIR}/logs"
 STAGING_DIR="${RUNTIME_DIR}/staging"
 
+PROJECT_SCORE_TOKENS=()
+_scan_add_token() {
+  local token="$1"
+  token="$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')"
+  token="$(printf '%s' "$token" | tr -cd 'a-z0-9')"
+  [[ ${#token} -ge 3 ]] || return
+  local existing
+  for existing in "${PROJECT_SCORE_TOKENS[@]}"; do
+    [[ "$existing" == "$token" ]] && return
+  done
+  PROJECT_SCORE_TOKENS+=("$token")
+}
+
+project_base="$(basename "$PROJECT_DIR")"
+project_base_clean="$(printf '%s' "$project_base" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' ' ')"
+for token in $project_base_clean; do
+  _scan_add_token "$token"
+done
+
+if [[ -n "${GC_PROJECT_KEYWORDS:-}" ]]; then
+  keywords_expanded="$(printf '%s' "$GC_PROJECT_KEYWORDS" | tr ',;/' ' ')"
+  for token in $keywords_expanded; do
+    _scan_add_token "$token"
+  done
+fi
+
+keywords_file="${RUNTIME_DIR}/project-keywords.txt"
+if [[ -f "$keywords_file" ]]; then
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    [[ -n "$line" ]] || continue
+    line="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' ' ')"
+    for token in $line; do
+      _scan_add_token "$token"
+    done
+  done < "$keywords_file"
+fi
+
 mkdir -p "${MANIFEST_DIR}" "${LOG_DIR}" "${STAGING_DIR}"
 
 TS="$(date +"%Y%m%d-%H%M%S")"
@@ -43,7 +81,15 @@ score() {
   local base="$1" ext="$2"
   local s=10
   [[ "${ext}" =~ ^(md|yaml|yml|json|sql|mmd|html|css|txt)$ ]] || s=$((s-2))
-  [[ "${base}" =~ (BYS|Bhavani|Yoga|yoga|studio) ]] && s=$((s+6))
+  local lower_base
+  lower_base="$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')"
+  local token
+  for token in "${PROJECT_SCORE_TOKENS[@]}"; do
+    if [[ -n "$token" && "$lower_base" == *"$token"* ]]; then
+      s=$((s+6))
+      break
+    fi
+  done
   [[ "${base}" =~ (final|v1|latest) ]] && s=$((s+4))
   [[ "${base}" =~ (draft|old|backup|copy) ]] && s=$((s-3))
   printf "%d" "${s}"

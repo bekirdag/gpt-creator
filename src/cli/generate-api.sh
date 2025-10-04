@@ -15,6 +15,23 @@ type log_warn >/dev/null 2>&1 || log_warn(){ printf "[%s] \033[33mWARN\033[0m  %
 type log_err  >/dev/null 2>&1 || log_err(){  printf "[%s] \033[31mERROR\033[0m %s\n" "$(date +%H:%M:%S)" "$*" >&2; }
 type die      >/dev/null 2>&1 || die(){ log_err "$*"; exit 1; }
 
+resolve_doc() {
+  local primary="$1"; shift
+  if [[ -f "$primary" ]]; then
+    printf '%s\n' "$primary"
+    return
+  fi
+  local pattern candidate
+  for pattern in "$@"; do
+    candidate="$(find "$PROJECT_ROOT" -maxdepth 2 -type f -iname "$pattern" 2>/dev/null | head -n1)"
+    if [[ -n "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  printf '\n'
+}
+
 : "${PROJECT_ROOT:=${ROOT_DIR}}"
 : "${CODEX_MODEL:=gpt-5-high}"
 : "${CODEX_CMD:=codex}"
@@ -73,11 +90,11 @@ fi
 [[ -f "${OPENAPI_PATH}" ]] || die "OpenAPI not found. Looked for staged openapi.*; set --openapi."
 
 # Collect context document paths (best-effort)
-PDR="${STAGING_DIR}/pdr.md"; [[ -f "$PDR" ]] || PDR="${PROJECT_ROOT}/Yoga PDR.md"
-SDS="${STAGING_DIR}/sds.md"; [[ -f "$SDS" ]] || SDS="${PROJECT_ROOT}/Yoga SDS.md"
-RFP="${STAGING_DIR}/rfp.md"; [[ -f "$RFP" ]] || RFP="${PROJECT_ROOT}/Yoga website RFP.md"
-IA="${STAGING_DIR}/ui-pages.md"; [[ -f "$IA" ]] || IA="${PROJECT_ROOT}/Yoga website UI pages.md"
-SQL="${STAGING_DIR}/schema.sql"; [[ -f "$SQL" ]] || SQL="${PROJECT_ROOT}/sql_dump*.sql"
+PDR="$(resolve_doc "${STAGING_DIR}/pdr.md" '*pdr*.md')"; PDR="${PDR:-<missing>}"
+SDS="$(resolve_doc "${STAGING_DIR}/sds.md" '*sds*.md' '*system*design*spec*.md')"; SDS="${SDS:-<missing>}"
+RFP="$(resolve_doc "${STAGING_DIR}/rfp.md" '*rfp*.md' '*request*for*proposal*.md')"; RFP="${RFP:-<missing>}"
+IA="$(resolve_doc "${STAGING_DIR}/ui-pages.md" '*ui*pages*.md' '*website*ui*pages*.md')"; IA="${IA:-<missing>}"
+SQL="$(resolve_doc "${STAGING_DIR}/schema.sql" '*schema.sql' '*sql_dump*.sql' '*.sql')"; SQL="${SQL:-<missing>}"
 
 PROMPT_FILE="${WORK_DIR}/prompts/generate-api.prompt.md"
 

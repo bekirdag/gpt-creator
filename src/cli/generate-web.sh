@@ -15,6 +15,23 @@ type log_warn >/dev/null 2>&1 || log_warn(){ printf "[%s] \033[33mWARN\033[0m  %
 type log_err  >/dev/null 2>&1 || log_err(){  printf "[%s] \033[31mERROR\033[0m %s\n" "$(date +%H:%M:%S)" "$*" >&2; }
 type die      >/dev/null 2>&1 || die(){ log_err "$*"; exit 1; }
 
+resolve_doc() {
+  local primary="$1"; shift
+  if [[ -f "$primary" ]]; then
+    printf '%s\n' "$primary"
+    return
+  fi
+  local pattern candidate
+  for pattern in "$@"; do
+    candidate="$(find "$PROJECT_ROOT" -maxdepth 2 -type f -iname "$pattern" 2>/dev/null | head -n1)"
+    if [[ -n "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+  printf '\n'
+}
+
 : "${PROJECT_ROOT:=${ROOT_DIR}}"
 : "${CODEX_MODEL:=gpt-5-high}"
 : "${CODEX_CMD:=codex}"
@@ -38,9 +55,9 @@ Usage:
   gpt-creator generate web [options]
 
 Options:
-  --style <file>       Path to site CSS (e.g., bhavani.css or style_sheet.md tokens)
+  --style <file>       Path to site CSS (e.g., style.css or style_sheet.md tokens)
   --samples <dir>      Path to page_samples directory (with *.html)
-  --ui-doc <file>      Path to "Yoga website UI pages.md"
+  --ui-doc <file>      Path to UI pages specification markdown
   --out <dir>          Output directory (default: ${WEB_DIR})
   --no-install         Skip pnpm install/build
   -n, --dry-run        Create prompt only; do not call Codex
@@ -63,22 +80,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Discover defaults
-[[ -n "$STYLE_CSS" ]] || for cand in \
-   "${STAGING_DIR}/page_samples/style.css" \
-   "${PROJECT_ROOT}/page_samples/style.css" \
-   "${PROJECT_ROOT}/bhavani.css" \
-   "${PROJECT_ROOT}/style_sheet.md"
-do [[ -f "$cand" ]] && STYLE_CSS="$cand" && break; done
+if [[ -z "$STYLE_CSS" ]]; then
+  STYLE_CSS="$(resolve_doc "${STAGING_DIR}/page_samples/style.css" '*style*.css' '*style*sheet*.md')"
+fi
 
 [[ -n "$SAMPLES_DIR" ]] || for cand in \
    "${STAGING_DIR}/page_samples" \
    "${PROJECT_ROOT}/page_samples"
 do [[ -d "$cand" ]] && SAMPLES_DIR="$cand" && break; done
 
-[[ -n "$UI_DOC" ]] || for cand in \
-   "${STAGING_DIR}/ui-pages.md" \
-   "${PROJECT_ROOT}/Yoga website UI pages.md"
-do [[ -f "$cand" ]] && UI_DOC="$cand" && break; done
+if [[ -z "$UI_DOC" ]]; then
+  UI_DOC="$(resolve_doc "${STAGING_DIR}/ui-pages.md" '*ui*pages*.md' '*website*ui*pages*.md')"
+fi
 
 [[ -f "$UI_DOC" ]] || die "UI pages doc not found. Set --ui-doc."
 [[ -d "$SAMPLES_DIR" ]] || log_warn "Sample HTML directory not found; proceeding without."

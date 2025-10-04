@@ -86,11 +86,11 @@ CREATE TABLE IF NOT EXISTS class_types (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 INSERT INTO class_types (`key`, label_tr, label_en) VALUES
-  ('yoga-1','Yoga 1','Yoga 1'),
-  ('yoga-2','Yoga 2','Yoga 2'),
-  ('her-seviye','Her Seviye','All Levels'),
-  ('fly-yoga','Fly Yoga','Aerial Yoga'),
-  ('hamile','Hamile Yogası','Prenatal')
+  ('seviye-1','Seviye 1','Level 1'),
+  ('seviye-2','Seviye 2','Level 2'),
+  ('her-seviye','Tüm Seviyeler','All Levels'),
+  ('aerial-flow','Hava Akışı','Aerial Flow'),
+  ('hamile-program','Hamile Programı','Prenatal')
 ON DUPLICATE KEY UPDATE label_tr=VALUES(label_tr), label_en=VALUES(label_en);
 
 -- instructors

@@ -3909,6 +3909,7 @@ gc_write_task_prompt() {
   local project_root="${7:-$PROJECT_ROOT}"
   python3 - "$db_path" "$story_slug" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" <<'PY'
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -3956,6 +3957,29 @@ def parse_json_list(value):
 def clean(value: str) -> str:
     return (value or '').strip()
 
+
+def project_display_name(root: str) -> str:
+    if not root:
+        return "Project"
+    try:
+        name = Path(root).name.strip()
+    except Exception:
+        name = ""
+    if not name:
+        return "Project"
+    tokens = [token for token in re.split(r'[^A-Za-z0-9]+', name) if token]
+    if not tokens:
+        return "Project"
+    words = []
+    for token in tokens:
+        if len(token) <= 3:
+            words.append(token.upper())
+        elif token.isupper():
+            words.append(token)
+        else:
+            words.append(token.capitalize())
+    return ' '.join(words) or "Project"
+
 assignees = parse_json_list(task['assignees_json'])
 tags = parse_json_list(task['tags_json'])
 acceptance = parse_json_list(task['acceptance_json'])
@@ -3985,10 +4009,13 @@ sample_create_response = (task['sample_create_response'] or '').strip() if task[
 user_story_ref_id = clean(task['user_story_ref_id'])
 epic_ref_id = clean(task['epic_ref_id'])
 
+project_display = project_display_name(PROJECT_ROOT)
+repo_path = PROJECT_ROOT or '.'
+
 lines = []
 lines.append(f"# You are Codex (model: {MODEL_NAME})")
 lines.append("")
-lines.append("You are assisting the Bhavani Yoga delivery team. Implement the task precisely using the repository at: " + (PROJECT_ROOT or '.'))
+lines.append(f"You are assisting the {project_display} delivery team. Implement the task precisely using the repository at: {repo_path}")
 lines.append("")
 lines.append("## Story")
 

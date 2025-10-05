@@ -13,7 +13,9 @@ _gpt_creator() {
     'run:Run via docker compose'
     'refresh-stack:Tear down, rebuild, and seed the Docker stack'
     'verify:Acceptance/NFR checks'
-    'create-jira-tasks:Generate jira epics/stories/tasks from documentation'
+    'create-jira-tasks:Generate Jira epics/stories/tasks from documentation'
+    'migrate-tasks:Rebuild tasks.db from generated JSON'
+    'refine-tasks:Refine tasks stored in the SQLite backlog'
     'create-tasks:Convert Jira tasks into a SQLite backlog'
     'work-on-tasks:Execute tasks from the SQLite backlog with Codex'
     'task-convert:[deprecated] Alias for create-tasks'
@@ -52,7 +54,16 @@ _gpt_creator() {
       _arguments \
         '--model=[Codex model name]' \
         '--force[Rebuild tasks.db from scratch]' \
-        '--skip-refine[Skip the enrichment pass]' \
+        '--dry-run[Prepare prompts without calling Codex]'
+      ;;
+    migrate-tasks)
+      _arguments \
+        '--force[Rebuild tasks.db from JSON artifacts]'
+      ;;
+    refine-tasks)
+      _arguments \
+        '--story=[Limit refinement to a single story slug]' \
+        '--model=[Codex model name]' \
         '--dry-run[Prepare prompts without calling Codex]'
       ;;
     create-tasks|task-convert)

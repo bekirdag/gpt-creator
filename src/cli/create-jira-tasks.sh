@@ -16,7 +16,6 @@ Options:
   --project PATH     Project root (defaults to current directory)
   --model NAME       Codex model to use (default: gpt-5-high)
   --force            Rebuild tasks.db from scratch (ignore saved progress)
-  --skip-refine      Skip the final per-task enrichment pass
   --dry-run          Prepare prompts but do not call Codex
   -h, --help         Show this help message
 USAGE
@@ -25,7 +24,6 @@ USAGE
 PROJECT_PATH="$PWD"
 MODEL="${CODEX_MODEL:-gpt-5-codex}"
 FORCE=0
-SKIP_REFINE=0
 DRY_RUN=0
 
 while [[ $# -gt 0 ]]; do
@@ -40,10 +38,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --force)
       FORCE=1
-      shift
-      ;;
-    --skip-refine)
-      SKIP_REFINE=1
       shift
       ;;
     --dry-run)
@@ -62,7 +56,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-cjt::init "$PROJECT_PATH" "$MODEL" "$FORCE" "$SKIP_REFINE" "$DRY_RUN"
+cjt::init "$PROJECT_PATH" "$MODEL" "$FORCE" 0 "$DRY_RUN"
 cjt::run_pipeline
 
 cjt::log "create-jira-tasks completed successfully"

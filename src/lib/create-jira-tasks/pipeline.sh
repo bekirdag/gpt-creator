@@ -748,6 +748,18 @@ cjt::refine_tasks() {
   local file
   for file in "${task_files[@]}"; do
     local slug="${file##*/}"; slug="${slug%.json}"
+    if [[ -n "${CJT_ONLY_STORY_SLUG:-}" ]]; then
+      local _match=0
+      IFS=',' read -r -a _filters <<<"${CJT_ONLY_STORY_SLUG}"
+      for _filter in "${_filters[@]}"; do
+        [[ "$slug" == "${_filter}" ]] && { _match=1; break; }
+      done
+      unset _filters
+      if (( _match == 0 )); then
+        continue
+      fi
+    fi
+
     local working_copy="$CJT_TMP_DIR/refine_${slug}.json"
     cp "$file" "$working_copy"
 
@@ -811,6 +823,7 @@ PY
         if cjt::wrap_json_extractor "$raw_file" "$json_file"; then
           cjt::apply_refined_task "$working_copy" "$json_file" "$idx"
           cjt::state_update_refine_progress "$slug" $((idx + 1)) "$task_total"
+          cjt::sync_refined_task_to_db "$working_copy" "$slug" "$idx"
           success=1
           break
         fi
@@ -941,6 +954,27 @@ with prompt_path.open('w', encoding='utf-8') as fh:
 PY
 }
 
+cjt::sync_refined_task_to_db() {
+  local story_json="${1:?refined story json required}"
+  local slug="${2:?story slug required}"
+  local task_index="${3:?task index required}"
+  if [[ "${CJT_SYNC_DB:-0}" != "1" ]]; then
+    return
+  fi
+  if [[ -z "${CJT_TASKS_DB_PATH:-}" ]]; then
+    cjt::warn "CJT_SYNC_DB is enabled but CJT_TASKS_DB_PATH is not set; skipping DB update for ${slug}"
+    return
+  fi
+  if [[ ! -f "${CJT_TASKS_DB_PATH}" ]]; then
+    cjt::warn "Tasks database not found at ${CJT_TASKS_DB_PATH}; skipping DB update for ${slug}"
+    return
+  fi
+  if ! python3 "$CJT_ROOT_DIR/src/lib/create-jira-tasks/update_task_db.py" \
+      "${CJT_TASKS_DB_PATH}" "${story_json}" "${slug}" "${task_index}"; then
+    cjt::warn "Failed to update tasks database for ${slug} (index ${task_index})"
+  fi
+}
+
 cjt::apply_refined_task() {
   local working_json="${1:?working story json required}"
   local refined_json="${2:?refined task json required}"
@@ -1031,7 +1065,6 @@ cjt::run_pipeline() {
   cjt::generate_epics
   cjt::generate_stories
   cjt::generate_tasks
-  cjt::refine_tasks
   cjt::build_payload
   cjt::update_database
 }

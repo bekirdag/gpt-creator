@@ -3899,6 +3899,114 @@ EOUSAGE
   fi
 }
 
+cmd_migrate_tasks_json() {
+  local root="" force=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) root="$(abs_path "$2")"; shift 2;;
+      --force) force=1; shift;;
+      -h|--help)
+        cat <<'EOUSAGE'
+Usage: gpt-creator migrate-tasks [--project PATH] [--force]
+
+Populate the tasks SQLite database from the JSON outputs produced by
+`gpt-creator create-jira-tasks` (under plan/create-jira-tasks/json).
+
+Options:
+  --project PATH  Project root (defaults to current directory)
+  --force         Rebuild the database without restoring prior task status metadata
+EOUSAGE
+        return 0
+        ;;
+      *) break;;
+    esac
+  done
+
+  ensure_ctx "$root"
+
+  local pipeline_dir="${PLAN_DIR}/create-jira-tasks"
+  local json_dir="${pipeline_dir}/json"
+  local epics_json="${json_dir}/epics.json"
+  local stories_dir="${json_dir}/stories"
+  local tasks_dir="${json_dir}/tasks"
+  local refined_dir="${json_dir}/refined"
+
+  [[ -f "$epics_json" ]] || die "Epics JSON not found: ${epics_json}"
+  [[ -d "$stories_dir" ]] || die "Stories JSON directory not found: ${stories_dir}"
+  [[ -d "$tasks_dir" ]] || die "Tasks JSON directory not found: ${tasks_dir}"
+
+  local payload="${json_dir}/tasks_payload.json"
+  info "Building tasks payload from JSON → ${payload}"
+  python3 "${CLI_ROOT}/src/lib/create-jira-tasks/to_payload.py" \
+    "$epics_json" "$stories_dir" "$tasks_dir" "$refined_dir" "$payload"
+
+  local tasks_workspace="${PLAN_DIR}/tasks"
+  mkdir -p "$tasks_workspace"
+  local db_path="${tasks_workspace}/tasks.db"
+  info "Updating tasks database → ${db_path}"
+  python3 "${CLI_ROOT}/src/lib/create-jira-tasks/to_sqlite.py" \
+    "$payload" "$db_path" "$force"
+
+  ok "Tasks database updated → ${db_path}"
+}
+
+cmd_refine_tasks() {
+  local root="" story_filter="" model_override="" dry_run=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project) root="$(abs_path "$2")"; shift 2;;
+      --story) story_filter="$2"; shift 2;;
+      --model) model_override="$2"; shift 2;;
+      --dry-run) dry_run=1; shift;;
+      -h|--help)
+        cat <<'EOUSAGE'
+Usage: gpt-creator refine-tasks [--project PATH] [--story SLUG] [--model NAME] [--dry-run]
+
+Refine tasks stored in the SQLite backlog using Codex, updating each task
+record and the refined JSON artifacts as soon as a task is enriched.
+
+Options:
+  --project PATH  Project root (defaults to current directory)
+  --story SLUG    Limit refinement to a single story slug (optional)
+  --model NAME    Override Codex model (defaults to CODEX_MODEL/GC defaults)
+  --dry-run       Build prompts without invoking Codex
+EOUSAGE
+        return 0
+        ;;
+      *) break;;
+    esac
+  done
+
+  ensure_ctx "$root"
+
+  local tasks_db="${PLAN_DIR}/tasks/tasks.db"
+  [[ -f "$tasks_db" ]] || die "Tasks database not found: ${tasks_db}"
+
+  local pipeline_dir="${PLAN_DIR}/create-jira-tasks"
+  local json_tasks_dir="${pipeline_dir}/json/tasks"
+  [[ -d "$json_tasks_dir" ]] || die "Tasks JSON directory not found: ${json_tasks_dir}"
+
+  local model_name="${model_override:-${CODEX_MODEL:-$GC_DEFAULT_MODEL}}"
+
+  # shellcheck source=src/lib/create-jira-tasks/pipeline.sh
+  source "${CLI_ROOT}/src/lib/create-jira-tasks/pipeline.sh"
+
+  local force_flag=0
+  local skip_refine=0
+  local dry_flag="$dry_run"
+  cjt::init "$PROJECT_ROOT" "$model_name" "$force_flag" "$skip_refine" "$dry_flag"
+  cjt::build_context_files
+
+  CJT_SYNC_DB=1
+  CJT_TASKS_DB_PATH="$tasks_db"
+  if [[ -n "$story_filter" ]]; then
+    CJT_ONLY_STORY_SLUG="$story_filter"
+  fi
+
+  cjt::refine_tasks
+  ok "Task refinement complete"
+}
+
 gc_write_task_prompt() {
   local db_path="${1:?tasks db path required}"
   local story_slug="${2:?story slug required}"
@@ -4848,6 +4956,9 @@ Usage:
   ${APP_NAME} run <up|down|logs|open> [--project <path>]
   ${APP_NAME} refresh-stack [options]
   ${APP_NAME} verify <acceptance|nfr|all> [--project <path>] [--api-url API_BASE] [--api-health URL] [--web-url URL] [--admin-url URL]
+  ${APP_NAME} create-jira-tasks [--project <path>] [--model NAME] [--force] [--dry-run]
+  ${APP_NAME} migrate-tasks [--project <path>] [--force]
+  ${APP_NAME} refine-tasks [--project <path>] [--story SLUG] [--model NAME] [--dry-run]
   ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
   ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]
   ${APP_NAME} iterate [--project <path>] [--jira <file>] [--no-verify] (deprecated)
@@ -4873,6 +4984,8 @@ main() {
     run)            cmd_run "$@" ;;
     refresh-stack)  cmd_refresh_stack "$@" ;;
     verify)         cmd_verify "$@" ;;
+    migrate-tasks)  cmd_migrate_tasks_json "$@" ;;
+    refine-tasks)   cmd_refine_tasks "$@" ;;
     create-jira-tasks) "$CLI_ROOT/src/cli/create-jira-tasks.sh" "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;

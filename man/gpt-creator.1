@@ -34,7 +34,13 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 [\-\-root DIR]
 .br
 .B gpt-creator create-jira-tasks
-[\-\-project DIR] [\-\-model NAME] [\-\-force] [\-\-skip-refine] [\-\-dry-run]
+[\-\-project DIR] [\-\-model NAME] [\-\-force] [\-\-dry-run]
+.br
+.B gpt-creator migrate-tasks
+[\-\-project DIR] [\-\-force]
+.br
+.B gpt-creator refine-tasks
+[\-\-project DIR] [\-\-story SLUG] [\-\-model NAME] [\-\-dry-run]
 .br
 .B gpt-creator create-tasks
 [\-\-project DIR] [\-\-jira FILE] [\-\-force]
@@ -90,7 +96,13 @@ Docker Compose wrappers: \fBup\fR, \fBdown\fR, \fBlogs\fR, \fBopen\fR.
 Acceptance & NFR checks: routes render, filters work, Lighthouse, AA basics.
 .TP
 .B create-jira-tasks
-Mine the staged documentation (PDR, SDS, OpenAPI, SQL dumps, UI samples) to generate Jira epics, user stories, and enriched implementation tasks automatically. Results are written directly to \fI.gpt-creator/staging/plan/tasks/tasks.db\fR. The command is resumable: checkpoint data is stored under \fI.gpt-creator/staging/plan/create-jira-tasks/state.json\fR and reruns continue from the last successful step. Supports \fB--model\fR to pick a Codex model, \fB--force\fR to rebuild from scratch (clears checkpoints), \fB--skip-refine\fR to skip the enrichment pass, and \fB--dry-run\fR to stage prompts without calling Codex.
+Mine the staged documentation (PDR, SDS, OpenAPI, SQL dumps, UI samples) to generate Jira epics, user stories, and implementation tasks automatically. Outputs are written to \fI.gpt-creator/staging/plan/create-jira-tasks/json/\fR and a consolidated payload is stored in \fI.gpt-creator/staging/plan/tasks/tasks.db\fR. The command is resumable: checkpoint data is stored under \fI.gpt-creator/staging/plan/create-jira-tasks/state.json\fR and reruns continue from the last successful step. Supports \fB--model\fR to pick a Codex model, \fB--force\fR to rebuild from scratch (clears checkpoints), and \fB--dry-run\fR to stage prompts without calling Codex. Follow up with \fBmigrate-tasks\fR and \fBrefine-tasks\fR to refresh the SQLite backlog or enrich tasks in place.
+.TP
+.B migrate-tasks
+Rebuild the \fI.gpt-creator/staging/plan/tasks/tasks.db\fR backlog from the JSON artifacts produced by \fBcreate-jira-tasks\fR. Useful when you need to resync the database without re-running the full Codex pipeline. Pass \fB--force\fR to discard preserved task status metadata during the rebuild.
+.TP
+.B refine-tasks
+Read tasks from \fI.gpt-creator/staging/plan/tasks/tasks.db\fR, invoke Codex to enrich each task sequentially, write refined JSON snapshots to \fIjson/refined\fR, and update the corresponding SQLite rows immediately after each successful response. Supports \fB--story\fR to focus on a single story slug, \fB--model\fR to override the Codex model, and \fB--dry-run\fR to generate prompts without calling Codex.
 .TP
 .B create-tasks
 Convert Jira markdown into a project-scoped SQLite backlog at \fI.gpt-creator/staging/plan/tasks/tasks.db\fR, persisting epics, stories, and task metadata (including prior progress) for resumable automation.

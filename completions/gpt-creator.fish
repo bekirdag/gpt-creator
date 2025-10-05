@@ -1,6 +1,6 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project scan normalize plan generate db run refresh-stack verify create-jira-tasks create-tasks work-on-tasks iterate help version
+set -l subcmds create-project scan normalize plan generate db run refresh-stack verify create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
@@ -42,8 +42,15 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l force -
 # create-jira-tasks
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-jira-tasks" -l model -r -d "Codex model"
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-jira-tasks" -l force -d "Rebuild tasks.db"
-complete -c gpt-creator -n "__fish_seen_subcommand_from create-jira-tasks" -l skip-refine -d "Skip enrichment pass"
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-jira-tasks" -l dry-run -d "Do not call Codex"
+
+# migrate-tasks
+complete -c gpt-creator -n "__fish_seen_subcommand_from migrate-tasks" -l force -d "Rebuild tasks.db from JSON"
+
+# refine-tasks
+complete -c gpt-creator -n "__fish_seen_subcommand_from refine-tasks" -l story -r -d "Limit refinement to a story slug"
+complete -c gpt-creator -n "__fish_seen_subcommand_from refine-tasks" -l model -r -d "Codex model"
+complete -c gpt-creator -n "__fish_seen_subcommand_from refine-tasks" -l dry-run -d "Do not call Codex"
 
 # task-convert (deprecated alias)
 complete -c gpt-creator -n "__fish_seen_subcommand_from task-convert" -l jira -r -d "Jira tasks file"

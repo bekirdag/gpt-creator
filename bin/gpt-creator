@@ -1125,6 +1125,74 @@ print(pending)
 PY
 }
 
+gc_tasks_db_has_rows() {
+  local db_path="${1:?tasks database path required}"
+  [[ -f "$db_path" ]] || return 1
+  python3 - <<'PY' "$db_path"
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+try:
+    conn = sqlite3.connect(db_path)
+except sqlite3.DatabaseError:
+    sys.exit(1)
+
+stories = 0
+tasks = 0
+try:
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM stories")
+    row = cur.fetchone()
+    stories = int(row[0]) if row and row[0] is not None else 0
+    cur.execute("SELECT COUNT(*) FROM tasks")
+    row = cur.fetchone()
+    tasks = int(row[0]) if row and row[0] is not None else 0
+except sqlite3.DatabaseError:
+    conn.close()
+    sys.exit(1)
+finally:
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+sys.exit(0 if stories > 0 and tasks > 0 else 1)
+PY
+}
+
+gc_has_legacy_tasks_json() {
+  local json_dir="${PLAN_DIR}/create-jira-tasks/json"
+  [[ -f "${json_dir}/epics.json" ]] || return 1
+  [[ -d "${json_dir}/stories" ]] || return 1
+  [[ -d "${json_dir}/tasks" ]] || return 1
+  return 0
+}
+
+gc_rebuild_tasks_db_from_json() {
+  local force_flag="${1:-0}"
+  local json_dir="${PLAN_DIR}/create-jira-tasks/json"
+  local epics_json="${json_dir}/epics.json"
+  local stories_dir="${json_dir}/stories"
+  local tasks_dir="${json_dir}/tasks"
+  local refined_dir="${json_dir}/refined"
+  [[ -f "$epics_json" ]] || return 1
+  [[ -d "$stories_dir" ]] || return 1
+  [[ -d "$tasks_dir" ]] || return 1
+
+  local payload="${json_dir}/tasks_payload.json"
+  python3 "${CLI_ROOT}/src/lib/create-jira-tasks/to_payload.py" \
+    "$epics_json" "$stories_dir" "$tasks_dir" "$refined_dir" "$payload" || return 1
+
+  local tasks_workspace="${PLAN_DIR}/tasks"
+  mkdir -p "$tasks_workspace"
+  local db_path="${tasks_workspace}/tasks.db"
+  python3 "${CLI_ROOT}/src/lib/create-jira-tasks/to_sqlite.py" \
+    "$payload" "$db_path" "$force_flag" || return 1
+
+  return 0
+}
+
 # docker compose helper (prefers "docker compose" then docker-compose)
 docker_compose() {
   local project_name="${GC_DOCKER_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-}}"
@@ -3929,23 +3997,22 @@ EOUSAGE
   local epics_json="${json_dir}/epics.json"
   local stories_dir="${json_dir}/stories"
   local tasks_dir="${json_dir}/tasks"
-  local refined_dir="${json_dir}/refined"
 
   [[ -f "$epics_json" ]] || die "Epics JSON not found: ${epics_json}"
   [[ -d "$stories_dir" ]] || die "Stories JSON directory not found: ${stories_dir}"
   [[ -d "$tasks_dir" ]] || die "Tasks JSON directory not found: ${tasks_dir}"
 
   local payload="${json_dir}/tasks_payload.json"
-  info "Building tasks payload from JSON → ${payload}"
-  python3 "${CLI_ROOT}/src/lib/create-jira-tasks/to_payload.py" \
-    "$epics_json" "$stories_dir" "$tasks_dir" "$refined_dir" "$payload"
-
   local tasks_workspace="${PLAN_DIR}/tasks"
   mkdir -p "$tasks_workspace"
   local db_path="${tasks_workspace}/tasks.db"
+
+  info "Building tasks payload from JSON → ${payload}"
   info "Updating tasks database → ${db_path}"
-  python3 "${CLI_ROOT}/src/lib/create-jira-tasks/to_sqlite.py" \
-    "$payload" "$db_path" "$force"
+
+  if ! gc_rebuild_tasks_db_from_json "$force"; then
+    die "Failed to rebuild tasks database from JSON payload"
+  fi
 
   ok "Tasks database updated → ${db_path}"
 }
@@ -4442,7 +4509,22 @@ EOHELP
   ensure_ctx "$root"
   local tasks_dir="${PLAN_DIR}/tasks"
   local tasks_db="${tasks_dir}/tasks.db"
-  [[ -f "$tasks_db" ]] || die "Task database not found. Run 'gpt-creator create-tasks' first."
+  mkdir -p "$tasks_dir"
+
+  if ! gc_tasks_db_has_rows "$tasks_db"; then
+    if gc_has_legacy_tasks_json; then
+      info "Tasks database missing or empty; importing legacy JSON backlog into ${tasks_db}."
+      if gc_rebuild_tasks_db_from_json 0; then
+        ok "Legacy backlog migrated to tasks.db"
+      else
+        warn "Failed to migrate legacy JSON backlog into tasks.db"
+      fi
+    fi
+  fi
+
+  if ! gc_tasks_db_has_rows "$tasks_db"; then
+    die "Task database missing or empty. Run 'gpt-creator create-tasks' or 'gpt-creator migrate-tasks' first."
+  fi
 
   ensure_node_dependencies "$PROJECT_ROOT"
 

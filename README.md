@@ -14,6 +14,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Planning outputs**: Produces route/entity summaries and task hints under `.gpt-creator/staging/plan/` as scaffolding for further design work.
 - **Template-driven generation**: Renders baseline NestJS, Vue 3, Prisma, and Docker scaffolds into `/apps/**` and `/docker`, ready for manual extension or Codex-driven augmentation.
 - **Verification toolkit**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks that you can run on demand.
+- **Doc synthesis**: `create-pdr` converts the staged RFP into a multi-level Product Requirements Document (PDR) by iteratively asking Codex to draft the table of contents, sections, and detailed subsections. `create-sds` continues the loop, transforming the staged PDR into a System Design Specification that drills from architecture overview down to low-level operational detail.
 - **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, and `work-on-tasks` executes/resumes backlog items. The legacy `iterate` command is deprecated.
 
 ---
@@ -76,7 +77,18 @@ Keep the repo on your `PATH`, or invoke `./bin/gpt-creator` directly.
 3. **Inspect outputs**:
    - `.gpt-creator/staging/discovery.yaml` for scan results
    - `.gpt-creator/staging/plan/` for route/entity summaries and tasks
-4. **Work Jira backlog** (optional):
+4. **Synthesize docs** (optional):
+   ```bash
+   # Build a Product Requirements Document from the staged RFP
+   gpt-creator create-pdr --project /path/to/project
+
+   # Derive the System Design Specification directly from the staged PDR
+   gpt-creator create-sds --project /path/to/project
+   ```
+   - `create-pdr` iteratively asks Codex to propose the table of contents, then fills each section/subsection with detail sourced from the normalized RFP.
+   - `create-sds` consumes the staged PDR and performs the same iterative flow to produce an architecture-focused SDS (`.gpt-creator/staging/plan/sds/sds.md`).
+
+5. **Work Jira backlog** (optional):
    ```bash
    # Mine the documentation and auto-create epics, stories, and task JSON
    gpt-creator create-jira-tasks --project /path/to/project

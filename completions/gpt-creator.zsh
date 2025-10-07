@@ -13,6 +13,8 @@ _gpt_creator() {
     'run:Run via docker compose'
     'refresh-stack:Tear down, rebuild, and seed the Docker stack'
     'verify:Acceptance/NFR checks'
+    'create-sds:Generate a System Design Specification from the staged PDR'
+    'create-pdr:Generate a Product Requirements Document from the staged RFP'
     'create-jira-tasks:Generate Jira epics/stories/tasks from documentation'
     'migrate-tasks:Rebuild tasks.db from generated JSON'
     'refine-tasks:Refine tasks stored in the SQLite backlog'
@@ -49,6 +51,18 @@ _gpt_creator() {
       ;;
     verify)
       _values 'verify-kind' acceptance nfr all
+      ;;
+    create-pdr)
+      _arguments \
+        '--model=[Codex model name]' \
+        '--dry-run[Prepare prompts without calling Codex]' \
+        '--force[Regenerate all stages]'
+      ;;
+    create-sds)
+      _arguments \
+        '--model=[Codex model name]' \
+        '--dry-run[Prepare prompts without calling Codex]' \
+        '--force[Regenerate all stages]'
       ;;
     create-jira-tasks)
       _arguments \

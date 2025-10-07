@@ -1,6 +1,6 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project scan normalize plan generate db run refresh-stack verify create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version
+set -l subcmds create-project scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
@@ -38,6 +38,16 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from verify" -l project -r
 # create-tasks
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l jira -r -d "Jira tasks file"
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l force -d "Rebuild tasks database (ignore saved progress)"
+
+# create-pdr
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-pdr" -l model -r -d "Codex model"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-pdr" -l dry-run -d "Do not call Codex"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-pdr" -l force -d "Regenerate all stages"
+
+# create-sds
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-sds" -l model -r -d "Codex model"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-sds" -l dry-run -d "Do not call Codex"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-sds" -l force -d "Regenerate all stages"
 
 # create-jira-tasks
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-jira-tasks" -l model -r -d "Codex model"

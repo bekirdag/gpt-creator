@@ -9,7 +9,7 @@ _gpt_creator()
     prev="${COMP_WORDS[COMP_CWORD-1]}"
   }
 
-  local subcmds="create-project scan normalize plan generate db run refresh-stack verify create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version"
+  local subcmds="create-project scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version"
   local global_opts="--project -h --help -v --version"
 
   # find the subcommand (first non-option token)
@@ -29,12 +29,18 @@ _gpt_creator()
       # complete directories
       COMPREPLY=( $(compgen -d -- "$cur") )
       ;;
-    scan|normalize|plan|iterate|verify|run|refresh-stack|db|generate|create-jira-tasks|migrate-tasks|refine-tasks|create-tasks|work-on-tasks|task-convert)
+    scan|normalize|plan|iterate|verify|run|refresh-stack|db|generate|create-pdr|create-sds|create-jira-tasks|migrate-tasks|refine-tasks|create-tasks|work-on-tasks|task-convert)
       case "$prev" in
         --project) COMPREPLY=( $(compgen -d -- "$cur") ); return 0;;
         --jira) COMPREPLY=( $(compgen -f -- "$cur") ); return 0;;
       esac
       case "$cmd" in
+        create-pdr)
+          COMPREPLY=( $(compgen -W "--project --model --dry-run --force ${global_opts}" -- "$cur") )
+          ;;
+        create-sds)
+          COMPREPLY=( $(compgen -W "--project --model --dry-run --force ${global_opts}" -- "$cur") )
+          ;;
         create-jira-tasks)
           COMPREPLY=( $(compgen -W "--project --model --force --dry-run ${global_opts}" -- "$cur") )
           ;;

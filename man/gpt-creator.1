@@ -33,6 +33,12 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 .B gpt-creator verify
 [\-\-root DIR]
 .br
+.B gpt-creator create-sds
+[\-\-project DIR] [\-\-model NAME] [\-\-dry-run] [\-\-force]
+.br
+.B gpt-creator create-pdr
+[\-\-project DIR] [\-\-model NAME] [\-\-dry-run] [\-\-force]
+.br
 .B gpt-creator create-jira-tasks
 [\-\-project DIR] [\-\-model NAME] [\-\-force] [\-\-dry-run]
 .br
@@ -94,6 +100,26 @@ Docker Compose wrappers: \fBup\fR, \fBdown\fR, \fBlogs\fR, \fBopen\fR.
 .TP
 .B verify
 Acceptance & NFR checks: routes render, filters work, Lighthouse, AA basics.
+.TP
+.B create-sds
+Derive a System Design Specification from the staged PDR. The command calls Codex
+iteratively: first to produce a high-level table of contents ordered from
+architecture down to operational detail, then to write each section and
+subsection in sequence. Intermediate prompts/outputs live under
+\fI.gpt-creator/staging/plan/create-sds/\fR and the assembled SDS is written to
+\fI.gpt-creator/staging/plan/sds/sds.md\fR. Supports \fB--model\fR to choose the
+Codex model, \fB--dry-run\fR to generate prompts without calling Codex, and
+\fB--force\fR to regenerate every stage.
+.TP
+.B create-pdr
+Iteratively draft a Product Requirements Document from the staged RFP. The
+command first asks Codex for a table of contents ordered from high-level
+strategy down to detailed delivery work, then generates section and subsection
+content in subsequent passes. Artifacts are written under
+\fI.gpt-creator/staging/plan/create-pdr/\fR with the assembled document at
+\fI.gpt-creator/staging/plan/pdr/pdr.md\fR. Supports \fB--model\fR to pick the
+Codex model, \fB--dry-run\fR to capture prompts without calling Codex, and
+\fB--force\fR to regenerate every stage.
 .TP
 .B create-jira-tasks
 Mine the staged documentation (PDR, SDS, OpenAPI, SQL dumps, UI samples) to generate Jira epics, user stories, and implementation tasks automatically. Outputs are written to \fI.gpt-creator/staging/plan/create-jira-tasks/json/\fR and a consolidated payload is stored in \fI.gpt-creator/staging/plan/tasks/tasks.db\fR. The command is resumable: checkpoint data is stored under \fI.gpt-creator/staging/plan/create-jira-tasks/state.json\fR and reruns continue from the last successful step. Supports \fB--model\fR to pick a Codex model, \fB--force\fR to rebuild from scratch (clears checkpoints), and \fB--dry-run\fR to stage prompts without calling Codex. Follow up with \fBmigrate-tasks\fR and \fBrefine-tasks\fR to refresh the SQLite backlog or enrich tasks in place.

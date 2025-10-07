@@ -331,6 +331,290 @@ ensure_ctx() {
   export GC_DOCKER_PROJECT_NAME COMPOSE_PROJECT_NAME PROJECT_SLUG
 }
 
+gc_project_templates_root() {
+  local root="${CLI_ROOT}/project_templates"
+  mkdir -p "$root"
+  printf '%s\n' "$root"
+}
+
+gc_find_primary_rfp() {
+  local search_root="${1:-.}"
+  find "$search_root" -maxdepth 3 -type f \
+    \( -iname 'rfp.md' -o -iname '*rfp*.md' -o -iname '*request*for*proposal*.md' \) \
+    | sort | head -n 1
+}
+
+gc_bootstrap_state_dir() {
+  printf '%s\n' "${PLAN_DIR}/bootstrap"
+}
+
+gc_bootstrap_state_file() {
+  printf '%s\n' "$(gc_bootstrap_state_dir)/state.json"
+}
+
+gc_bootstrap_reset_state() {
+  local file
+  file="$(gc_bootstrap_state_file)"
+  rm -f "$file"
+}
+
+gc_bootstrap_mark_step() {
+  local step="${1:?step required}"
+  local status="${2:?status required}"
+  local file
+  file="$(gc_bootstrap_state_file)"
+  mkdir -p "$(dirname "$file")"
+  python3 - <<'PY' "$file" "$step" "$status"
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+step = sys.argv[2]
+status = sys.argv[3]
+
+if status == 'reset':
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            data = {}
+        steps = data.get('steps', {})
+        steps.pop(step, None)
+        data['steps'] = steps
+        path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+    sys.exit(0)
+
+try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    data = {}
+
+steps = data.setdefault('steps', {})
+steps[step] = {
+    'status': status,
+    'updated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+}
+if status == 'done':
+    data['last_completed'] = step
+elif status == 'failed':
+    data['failed_step'] = step
+else:
+    data.pop('failed_step', None)
+
+path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+gc_bootstrap_mark_complete() {
+  local file
+  file="$(gc_bootstrap_state_file)"
+  mkdir -p "$(dirname "$file")"
+  python3 - <<'PY' "$file"
+import json
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    data = {}
+
+data['completed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+gc_bootstrap_step_is_done() {
+  local step="${1:?step required}"
+  local file
+  file="$(gc_bootstrap_state_file)"
+  [[ -f "$file" ]] || return 1
+  python3 - "$file" "$step" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+step = sys.argv[2]
+try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    data = {}
+steps = data.get('steps') or {}
+status = steps.get(step, {}).get('status')
+sys.exit(0 if status == 'done' else 1)
+PY
+}
+
+gc_bootstrap_run_step() {
+  local step="${1:?step required}"
+  shift
+  if gc_bootstrap_step_is_done "$step"; then
+    info "Step '${step}' already completed; skipping."
+    return 0
+  fi
+  if "$@"; then
+    gc_bootstrap_mark_step "$step" done
+    return 0
+  else
+    gc_bootstrap_mark_step "$step" failed
+    return 1
+  fi
+}
+
+gc_auto_project_template() {
+  local project_root="${1:?project root required}"
+  local templates_root="${2:?templates root required}"
+  shift 2
+  local -a template_dirs=("$@")
+  local count=${#template_dirs[@]}
+  (( count )) || return 1
+  if (( count == 1 )); then
+    printf '%s\n' "${template_dirs[0]}"
+    return 0
+  fi
+
+  local rfp_path
+  rfp_path="$(gc_find_primary_rfp "$project_root")"
+  [[ -n "$rfp_path" ]] || return 1
+
+  python3 - "$rfp_path" "${template_dirs[@]}" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+rfp_path = Path(sys.argv[1])
+rfp_text = rfp_path.read_text(encoding='utf-8', errors='ignore').lower()
+templates = sys.argv[2:]
+
+stopwords = {"the","and","with","from","base","template","project","app","service","system"}
+
+def template_tokens(path: Path):
+    tokens = set()
+    name = path.name.lower()
+    tokens.update(token for token in re.split(r'[^a-z0-9]+', name) if len(token) >= 3)
+    tags_file = path / 'tags.txt'
+    if tags_file.exists():
+        for line in tags_file.read_text(encoding='utf-8', errors='ignore').splitlines():
+            for token in re.split(r'[^a-z0-9]+', line.lower()):
+                if len(token) >= 3:
+                    tokens.add(token)
+    template_json = path / 'template.json'
+    if template_json.exists():
+        try:
+            data = json.loads(template_json.read_text(encoding='utf-8', errors='ignore'))
+        except Exception:
+            data = {}
+        for field in ("tags", "keywords", "stack"):
+            value = data.get(field)
+            if isinstance(value, str):
+                for token in re.split(r'[^a-z0-9]+', value.lower()):
+                    if len(token) >= 3:
+                        tokens.add(token)
+            elif isinstance(value, list):
+                for entry in value:
+                    text = str(entry).lower()
+                    for token in re.split(r'[^a-z0-9]+', text):
+                        if len(token) >= 3:
+                            tokens.add(token)
+    return {token for token in tokens if token not in stopwords}
+
+scores = []
+for template in templates:
+    path = Path(template)
+    tokens = template_tokens(path)
+    score = 0
+    for token in tokens:
+        if token and token in rfp_text:
+            score += rfp_text.count(token)
+    scores.append((score, template))
+
+scores.sort(reverse=True)
+if scores and scores[0][0] > 0:
+    print(scores[0][1])
+PY
+}
+
+gc_copy_project_template() {
+  local template_dir="${1:?template directory required}"
+  local project_root="${2:?project root required}"
+  python3 - "$template_dir" "$project_root" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+
+for path in src.rglob('*'):
+    if path.name in {'.git', '.DS_Store'}:
+        continue
+    rel = path.relative_to(src)
+    target = dest / rel
+    if path.is_dir():
+        target.mkdir(parents=True, exist_ok=True)
+        continue
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        print(f"SKIP {rel}")
+        continue
+    shutil.copy2(path, target)
+    print(f"COPY {rel}")
+PY
+}
+
+gc_apply_project_template() {
+  local project_root="${1:?project root required}"
+  local template_request="${2:-auto}"
+  local templates_root
+  templates_root="$(gc_project_templates_root)"
+
+  mapfile -t available_templates < <(find "$templates_root" -mindepth 1 -maxdepth 1 -type d | sort)
+  (( ${#available_templates[@]} )) || {
+    info "No project templates available under ${templates_root}; continuing without scaffolding."
+    return 0
+  }
+
+  local chosen=""
+  local request_lower="$(to_lower "$template_request")"
+  if [[ "$request_lower" == "skip" ]]; then
+    info "Skipping project template scaffolding (per flag)."
+    return 0
+  fi
+
+  if [[ "$request_lower" != "auto" ]]; then
+    for tpl in "${available_templates[@]}"; do
+      local tpl_name="$(basename "$tpl")"
+      if [[ "$(to_lower "$tpl_name")" == "$request_lower" ]]; then
+        chosen="$tpl"
+        template_request="$tpl_name"
+        break
+      fi
+    done
+    if [[ -z "$chosen" ]]; then
+      warn "Template '${template_request}' not found under ${templates_root}; available: $(printf '%s ' "${available_templates[@]##*/}")"
+      return 1
+    fi
+  else
+    chosen="$(gc_auto_project_template "$project_root" "$templates_root" "${available_templates[@]}")"
+    if [[ -z "$chosen" ]]; then
+      info "No matching project template determined automatically; continuing without scaffolding."
+      return 0
+    fi
+  fi
+
+  local template_name="$(basename "$chosen")"
+  info "Applying project template → ${template_name}"
+  if ! gc_copy_project_template "$chosen" "$project_root"; then
+    warn "Failed to copy template '${template_name}'"
+    return 1
+  fi
+}
+
 gc_parse_jira_tasks() {
   local jira_file="${1:?jira markdown path required}"
   local out_json="${2:?output json path required}"
@@ -5131,9 +5415,49 @@ PY
 
 
 cmd_create_project() {
-  local path="${1:-}"; [[ -n "$path" ]] || die "create-project requires a path"
-  ensure_ctx "$path"
-  mkdir -p "$PROJECT_ROOT"
+  local template_request="auto"
+  local path=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --template)
+        template_request="${2:?--template requires a value (template name or 'auto')}"
+        shift 2
+        ;;
+      --skip-template)
+        template_request="skip"
+        shift
+        ;;
+      -h|--help)
+        cat <<'USAGE'
+Usage: gpt-creator create-project [--template NAME|auto|skip] [--skip-template] <path>
+
+Create a new project root, optionally scaffold it from a project template, then
+run the full build pipeline (scan → normalize → plan → generate → db → run → verify).
+USAGE
+        return 0
+        ;;
+      *)
+        if [[ -z "$path" ]]; then
+          path="$1"
+        else
+          die "Unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$path" ]] || die "create-project requires a path"
+
+  local project_root
+  project_root="$(abs_path "$path")"
+  mkdir -p "$project_root"
+
+  if ! gc_apply_project_template "$project_root" "$template_request"; then
+    warn "Project template application reported issues; continuing with base scaffolding."
+  fi
+
+  ensure_ctx "$project_root"
   info "Project root: ${PROJECT_ROOT}"
 
   cmd_scan --project "$PROJECT_ROOT"
@@ -5146,12 +5470,187 @@ cmd_create_project() {
   ok "Project bootstrap complete"
 }
 
+cmd_bootstrap() {
+  local template_request="auto"
+  local path=""
+  local fresh=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --template)
+        template_request="${2:?--template requires a value (template name or 'auto')}"
+        shift 2
+        ;;
+      --skip-template)
+        template_request="skip"
+        shift
+        ;;
+      --fresh)
+        fresh=1
+        shift
+        ;;
+      -h|--help)
+        cat <<'USAGE'
+Usage: gpt-creator bootstrap [--template NAME|auto|skip] [--skip-template] [--fresh] <path>
+
+Generate a full project from an RFP in one step by running:
+  • create-pdr → create-sds → create-jira-tasks → scan/normalize/plan/generate/db/run/verify
+Templates from project_templates/ are applied first (auto-selected by default).
+USAGE
+        return 0
+        ;;
+      *)
+        if [[ -z "$path" ]]; then
+          path="$1"
+        else
+          die "Unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$path" ]] || die "bootstrap requires a path"
+
+  local project_root
+  project_root="$(abs_path "$path")"
+  mkdir -p "$project_root"
+
+  ensure_ctx "$project_root"
+  info "Project root: ${PROJECT_ROOT}"
+
+  if (( fresh )); then
+    gc_bootstrap_reset_state
+  fi
+
+  mkdir -p "$(gc_bootstrap_state_dir)"
+
+  if gc_bootstrap_step_is_done template; then
+    info "Step 'template' already completed; skipping."
+  else
+    if gc_apply_project_template "$PROJECT_ROOT" "$template_request"; then
+      gc_bootstrap_mark_step template done
+    else
+      gc_bootstrap_mark_step template failed
+      die "Project template application failed"
+    fi
+  fi
+
+  info "[1/9] Scanning documentation"
+  if ! gc_bootstrap_run_step scan cmd_scan --project "$PROJECT_ROOT"; then
+    die "Bootstrap halted during scan"
+  fi
+
+  info "[2/9] Normalizing documentation"
+  if ! gc_bootstrap_run_step normalize cmd_normalize --project "$PROJECT_ROOT"; then
+    die "Bootstrap halted during normalize"
+  fi
+
+  info "[3/9] Generating Product Requirements Document"
+  if gc_bootstrap_step_is_done create-pdr; then
+    info "Step 'create-pdr' already completed; skipping."
+  else
+    if "$CLI_ROOT/src/cli/create-pdr.sh" --project "$PROJECT_ROOT"; then
+      gc_bootstrap_mark_step create-pdr done
+    else
+      gc_bootstrap_mark_step create-pdr failed
+      die "create-pdr failed"
+    fi
+  fi
+
+  info "[4/9] Generating System Design Specification"
+  if gc_bootstrap_step_is_done create-sds; then
+    info "Step 'create-sds' already completed; skipping."
+  else
+    if "$CLI_ROOT/src/cli/create-sds.sh" --project "$PROJECT_ROOT"; then
+      gc_bootstrap_mark_step create-sds done
+    else
+      gc_bootstrap_mark_step create-sds failed
+      die "create-sds failed"
+    fi
+  fi
+
+  info "[5/9] Mining Jira tasks"
+  if ! gc_bootstrap_step_is_done create-jira-tasks; then
+    if cmd_create_jira_tasks --project "$PROJECT_ROOT"; then
+      gc_bootstrap_mark_step create-jira-tasks done
+    else
+      gc_bootstrap_mark_step create-jira-tasks failed
+      die "create-jira-tasks failed"
+    fi
+  else
+    info "Step 'create-jira-tasks' already completed; skipping."
+  fi
+
+  info "[6/9] Planning build"
+  if ! gc_bootstrap_step_is_done plan; then
+    if cmd_plan --project "$PROJECT_ROOT"; then
+      gc_bootstrap_mark_step plan done
+    else
+      gc_bootstrap_mark_step plan failed
+      die "plan step failed"
+    fi
+  else
+    info "Step 'plan' already completed; skipping."
+  fi
+
+  if ! gc_bootstrap_step_is_done generate; then
+    info "[7/9] Generating stack code"
+    if cmd_generate all --project "$PROJECT_ROOT"; then
+      gc_bootstrap_mark_step generate done
+    else
+      gc_bootstrap_mark_step generate failed
+      die "generate step failed"
+    fi
+  else
+    info "Step 'generate' already completed; skipping."
+  fi
+
+  info "[8/9] Provisioning infrastructure"
+  if ! gc_bootstrap_step_is_done db-provision; then
+    if cmd_db provision --project "$PROJECT_ROOT"; then
+      gc_bootstrap_mark_step db-provision done
+    else
+      gc_bootstrap_mark_step db-provision failed
+      die "Database provision failed"
+    fi
+  else
+    info "Step 'db-provision' already completed; skipping."
+  fi
+
+  info "[9/9] Starting stack & verifying"
+  if ! gc_bootstrap_step_is_done run-up; then
+    if cmd_run up --project "$PROJECT_ROOT"; then
+      gc_bootstrap_mark_step run-up done
+    else
+      gc_bootstrap_mark_step run-up failed
+      die "Stack start failed"
+    fi
+  else
+    info "Step 'run-up' already completed; skipping."
+  fi
+
+  if ! gc_bootstrap_step_is_done verify; then
+    if cmd_verify acceptance --project "$PROJECT_ROOT"; then
+      gc_bootstrap_mark_step verify done
+    else
+      gc_bootstrap_mark_step verify failed
+      die "Acceptance verification failed"
+    fi
+  else
+    info "Step 'verify' already completed; skipping."
+  fi
+
+  gc_bootstrap_mark_complete
+  ok "Bootstrap complete — code, docs, and backlog generated"
+}
+
 usage() {
 cat <<EOF
 ${APP_NAME} v${VERSION}
 
 Usage:
-  ${APP_NAME} create-project <path>
+  ${APP_NAME} create-project [--template NAME|auto|skip] [--skip-template] <path>
+  ${APP_NAME} bootstrap [--template NAME|auto|skip] [--skip-template] <path>
   ${APP_NAME} scan [--project <path>]
   ${APP_NAME} normalize [--project <path>]
   ${APP_NAME} plan [--project <path>]
@@ -5182,6 +5681,7 @@ main() {
     help|-h|--help) usage ;;
     version|-v|--version) echo "${APP_NAME} ${VERSION}" ;;
     create-project) cmd_create_project "$@" ;;
+    bootstrap)      cmd_bootstrap "$@" ;;
     scan)           cmd_scan "$@" ;;
     normalize)      cmd_normalize "$@" ;;
     plan)           cmd_plan "$@" ;;

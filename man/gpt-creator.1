@@ -9,8 +9,12 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 [\-h|\-\-help] [\-\-version]
 .br
 .B gpt-creator create-project
+[\-\-template NAME|auto|skip] [\-\-skip-template]
 .I /path/to/project
-[\-\-non-interactive] [\-\-yes] [\-\-verbose]
+.br
+.B gpt-creator bootstrap
+[\-\-template NAME|auto|skip] [\-\-skip-template] [\-\-fresh]
+.I /path/to/project
 .br
 .B gpt-creator scan
 [\-\-root DIR] [patterns...]
@@ -77,7 +81,21 @@ Verbose output (repeatable).
 .SH SUBCOMMANDS
 .TP
 .B create-project
-Run the full pipeline on a target directory.
+Run the full pipeline on a target directory. When `--template auto` (default),
+the command inspects the staged RFP/PDR and, when possible, clones a matching
+project scaffold from \fIproject_templates/\fR before executing the standard
+scan → normalize → plan → generate → db → run → verify flow. Use
+`--template <name>` to force a specific template or `--skip-template` to start
+from an empty folder.
+.TP
+.B bootstrap
+Automate the entire RFP → code loop. The command optionally applies a project
+template (same semantics as \fBcreate-project\fR), then runs `create-pdr`,
+`create-sds`, `create-jira-tasks`, and the full build pipeline (scan → normalize
+→ plan → generate → db → run → verify) sequentially. The result is a generated
+stack, staged PDR/SDS, and a populated Jira backlog with a single invocation.
+Progress is checkpointed; re-running the command resumes from the last
+successful step unless \fB--fresh\fR is supplied to start over.
 .TP
 .B scan
 Fuzzy discovery of inputs: PDR, SDS, RFP, OpenAPI, SQL dumps, Mermaid (*.mmd),

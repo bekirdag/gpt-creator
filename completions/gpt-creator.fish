@@ -1,6 +1,6 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version
+set -l subcmds create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
@@ -10,6 +10,13 @@ complete -c gpt-creator -l project -r -d "Project root"
 
 # create-project
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-project" -a "(__fish_complete_directories)" -d "Project directory"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-project" -l template -r -d "Project template name or auto"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-project" -l skip-template -d "Skip project template scaffolding"
+
+# bootstrap
+complete -c gpt-creator -n "__fish_seen_subcommand_from bootstrap" -l template -r -d "Project template name or auto"
+complete -c gpt-creator -n "__fish_seen_subcommand_from bootstrap" -l skip-template -d "Skip project template scaffolding"
+complete -c gpt-creator -n "__fish_seen_subcommand_from bootstrap" -l fresh -d "Restart pipeline from scratch"
 
 # generate
 complete -c gpt-creator -n "__fish_seen_subcommand_from generate" -a "api web admin db docker all" -d "Facet"

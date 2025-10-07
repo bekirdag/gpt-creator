@@ -68,12 +68,22 @@ Keep the repo on your `PATH`, or invoke `./bin/gpt-creator` directly.
 1. **Collect artifacts** into a folder (PDR/SDS docs, `openapi.yaml`, SQL dumps, HTML samples, etc.).
 2. **Run the bootstrap command**:
    ```bash
-   gpt-creator create-project /path/to/project
+   gpt-creator create-project --template auto /path/to/project
    ```
    - A `.gpt-creator` workspace is created under the project root.
    - Generated code lands in `/apps/api`, `/apps/web`, `/apps/admin`, `/db`, `/docker`.
    - A `.env` file with random database credentials is created automatically; reuse it for local scripts and CI secrets.
    - The command finishes after acceptance checks (`verify acceptance`); run `verify all` to execute the extended NFR suite.
+   - Templates live under `project_templates/`. Add subdirectories (optionally with `tags.txt` or `template.json`) to seed new projects; `--template auto` attempts to match the staged RFP/PDR, or pass `--template <name>` / `--skip-template` to override.
+
+   To drive the entire flow (PDR → SDS → Jira tasks → stack generation) in one shot:
+
+   ```bash
+   gpt-creator bootstrap --template auto /path/to/project
+   ```
+
+   This runs `create-pdr`, `create-sds`, `create-jira-tasks`, and the full build pipeline sequentially, producing docs, backlog, code, and a running stack with a single command.
+   - If a step fails, re-running `bootstrap` resumes from the last successful step. Use `--fresh` to restart the pipeline from scratch.
 3. **Inspect outputs**:
    - `.gpt-creator/staging/discovery.yaml` for scan results
    - `.gpt-creator/staging/plan/` for route/entity summaries and tasks

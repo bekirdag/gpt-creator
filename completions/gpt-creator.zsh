@@ -15,6 +15,7 @@ _gpt_creator() {
     'verify:Acceptance/NFR checks'
     'create-sds:Generate a System Design Specification from the staged PDR'
     'create-pdr:Generate a Product Requirements Document from the staged RFP'
+    'bootstrap:End-to-end build from RFP to running stack'
     'create-jira-tasks:Generate Jira epics/stories/tasks from documentation'
     'migrate-tasks:Rebuild tasks.db from generated JSON'
     'refine-tasks:Refine tasks stored in the SQLite backlog'
@@ -111,7 +112,16 @@ _gpt_creator() {
       ;;
     create-project)
       _arguments \
-        ':project-dir:_files -/'
+        '--template=[Template name or auto]:template:(auto skip)' \
+        '--skip-template[Skip applying a project template]' \
+        '1:project-dir:_files -/'
+      ;;
+    bootstrap)
+      _arguments \
+        '--template=[Template name or auto]:template:(auto skip)' \
+        '--skip-template[Skip project template scaffolding]' \
+        '--fresh[Restart the bootstrap pipeline from scratch]' \
+        '1:project-dir:_files -/'
       ;;
     *)
       ;;

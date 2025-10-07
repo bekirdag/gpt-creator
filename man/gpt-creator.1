@@ -13,7 +13,7 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 .I /path/to/project
 .br
 .B gpt-creator bootstrap
-[\-\-template NAME|auto|skip] [\-\-skip-template] [\-\-fresh]
+[\-\-template NAME|auto|skip] [\-\-skip-template] [\-\-rfp FILE] [\-\-fresh]
 .I /path/to/project
 .br
 .B gpt-creator scan
@@ -95,7 +95,9 @@ template (same semantics as \fBcreate-project\fR), then runs `create-pdr`,
 → plan → generate → db → run → verify) sequentially. The result is a generated
 stack, staged PDR/SDS, and a populated Jira backlog with a single invocation.
 Progress is checkpointed; re-running the command resumes from the last
-successful step unless \fB--fresh\fR is supplied to start over.
+successful step unless \fB--fresh\fR is supplied to start over. Use
+\fB--rfp FILE\fR to stage the source RFP before bootstrapping when one is
+available.
 .TP
 .B scan
 Fuzzy discovery of inputs: PDR, SDS, RFP, OpenAPI, SQL dumps, Mermaid (*.mmd),

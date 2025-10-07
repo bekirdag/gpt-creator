@@ -79,11 +79,11 @@ Keep the repo on your `PATH`, or invoke `./bin/gpt-creator` directly.
    To drive the entire flow (PDR → SDS → Jira tasks → stack generation) in one shot:
 
    ```bash
-   gpt-creator bootstrap --template auto /path/to/project
+   gpt-creator bootstrap --template auto --rfp docs/rfp.md /path/to/project
    ```
 
    This runs `create-pdr`, `create-sds`, `create-jira-tasks`, and the full build pipeline sequentially, producing docs, backlog, code, and a running stack with a single command.
-   - If a step fails, re-running `bootstrap` resumes from the last successful step. Use `--fresh` to restart the pipeline from scratch.
+   - If a step fails, re-running `bootstrap` resumes from the last successful step. Use `--fresh` to restart the pipeline from scratch. Provide `--rfp` to stage the primary RFP file when launching the flow.
 3. **Inspect outputs**:
    - `.gpt-creator/staging/discovery.yaml` for scan results
    - `.gpt-creator/staging/plan/` for route/entity summaries and tasks

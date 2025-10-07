@@ -5474,6 +5474,7 @@ cmd_bootstrap() {
   local template_request="auto"
   local path=""
   local fresh=0
+  local rfp_path=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --template)
@@ -5484,13 +5485,21 @@ cmd_bootstrap() {
         template_request="skip"
         shift
         ;;
+      --rfp)
+        rfp_path="${2:?--rfp requires a file path}"
+        shift 2
+        ;;
+      --fresh)
+        fresh=1
+        shift
+        ;;
       --fresh)
         fresh=1
         shift
         ;;
       -h|--help)
         cat <<'USAGE'
-Usage: gpt-creator bootstrap [--template NAME|auto|skip] [--skip-template] [--fresh] <path>
+Usage: gpt-creator bootstrap [--template NAME|auto|skip] [--skip-template] [--rfp FILE] [--fresh] <path>
 
 Generate a full project from an RFP in one step by running:
   • create-pdr → create-sds → create-jira-tasks → scan/normalize/plan/generate/db/run/verify
@@ -5510,6 +5519,10 @@ USAGE
   done
 
   [[ -n "$path" ]] || die "bootstrap requires a path"
+
+  if [[ -n "$rfp_path" ]]; then
+    [[ -f "$rfp_path" ]] || die "RFP file not found: ${rfp_path}"
+  fi
 
   local project_root
   project_root="$(abs_path "$path")"
@@ -5535,17 +5548,29 @@ USAGE
     fi
   fi
 
-  info "[1/9] Scanning documentation"
+  if [[ -n "$rfp_path" ]]; then
+    local staged_rfp="${INPUT_DIR}/rfp.md"
+    if ! gc_bootstrap_step_is_done stage-rfp; then
+      mkdir -p "${INPUT_DIR}"
+      cp "$rfp_path" "$staged_rfp"
+      gc_bootstrap_mark_step stage-rfp done
+      info "Staged RFP → ${staged_rfp}"
+    else
+      info "Step 'stage-rfp' already completed; skipping."
+    fi
+  fi
+
+  info "[1/10] Scanning documentation"
   if ! gc_bootstrap_run_step scan cmd_scan --project "$PROJECT_ROOT"; then
     die "Bootstrap halted during scan"
   fi
 
-  info "[2/9] Normalizing documentation"
+  info "[2/10] Normalizing documentation"
   if ! gc_bootstrap_run_step normalize cmd_normalize --project "$PROJECT_ROOT"; then
     die "Bootstrap halted during normalize"
   fi
 
-  info "[3/9] Generating Product Requirements Document"
+  info "[3/10] Generating Product Requirements Document"
   if gc_bootstrap_step_is_done create-pdr; then
     info "Step 'create-pdr' already completed; skipping."
   else
@@ -5557,7 +5582,7 @@ USAGE
     fi
   fi
 
-  info "[4/9] Generating System Design Specification"
+  info "[4/10] Generating System Design Specification"
   if gc_bootstrap_step_is_done create-sds; then
     info "Step 'create-sds' already completed; skipping."
   else
@@ -5569,7 +5594,7 @@ USAGE
     fi
   fi
 
-  info "[5/9] Mining Jira tasks"
+  info "[5/10] Mining Jira tasks"
   if ! gc_bootstrap_step_is_done create-jira-tasks; then
     if cmd_create_jira_tasks --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step create-jira-tasks done
@@ -5581,7 +5606,7 @@ USAGE
     info "Step 'create-jira-tasks' already completed; skipping."
   fi
 
-  info "[6/9] Planning build"
+  info "[6/10] Planning build"
   if ! gc_bootstrap_step_is_done plan; then
     if cmd_plan --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step plan done
@@ -5594,7 +5619,7 @@ USAGE
   fi
 
   if ! gc_bootstrap_step_is_done generate; then
-    info "[7/9] Generating stack code"
+    info "[7/10] Generating stack code"
     if cmd_generate all --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step generate done
     else
@@ -5605,7 +5630,7 @@ USAGE
     info "Step 'generate' already completed; skipping."
   fi
 
-  info "[8/9] Provisioning infrastructure"
+  info "[8/10] Provisioning infrastructure"
   if ! gc_bootstrap_step_is_done db-provision; then
     if cmd_db provision --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step db-provision done
@@ -5617,7 +5642,7 @@ USAGE
     info "Step 'db-provision' already completed; skipping."
   fi
 
-  info "[9/9] Starting stack & verifying"
+  info "[9/10] Starting stack"
   if ! gc_bootstrap_step_is_done run-up; then
     if cmd_run up --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step run-up done
@@ -5640,6 +5665,7 @@ USAGE
     info "Step 'verify' already completed; skipping."
   fi
 
+  info "[10/10] Verifying acceptance"
   gc_bootstrap_mark_complete
   ok "Bootstrap complete — code, docs, and backlog generated"
 }
@@ -5650,7 +5676,7 @@ ${APP_NAME} v${VERSION}
 
 Usage:
   ${APP_NAME} create-project [--template NAME|auto|skip] [--skip-template] <path>
-  ${APP_NAME} bootstrap [--template NAME|auto|skip] [--skip-template] <path>
+  ${APP_NAME} bootstrap [--template NAME|auto|skip] [--skip-template] [--rfp FILE] [--fresh] <path>
   ${APP_NAME} scan [--project <path>]
   ${APP_NAME} normalize [--project <path>]
   ${APP_NAME} plan [--project <path>]

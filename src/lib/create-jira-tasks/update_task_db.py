@@ -113,6 +113,8 @@ def main() -> None:
         "epic_key": epic_key or None,
         "epic_title": _text(task.get("epic_title") or epic_title) or None,
         "updated_at": now,
+        "refined": 1,
+        "refined_at": now,
     }
 
     conn = sqlite3.connect(str(db_path))

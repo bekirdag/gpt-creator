@@ -64,7 +64,8 @@ _gpt_creator() {
       _arguments \
         '--story=[Limit refinement to a single story slug]' \
         '--model=[Codex model name]' \
-        '--dry-run[Prepare prompts without calling Codex]'
+        '--dry-run[Prepare prompts without calling Codex]' \
+        '--force[Reset refinement progress and reprocess all tasks]'
       ;;
     create-tasks|task-convert)
       _arguments \

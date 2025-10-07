@@ -108,6 +108,8 @@ def ensure_table(cur: sqlite3.Cursor) -> None:
           sample_create_response TEXT,
           user_story_ref_id TEXT,
           epic_ref_id TEXT,
+          refined INTEGER DEFAULT 0,
+          refined_at TEXT,
           status TEXT NOT NULL DEFAULT 'pending',
           started_at TEXT,
           completed_at TEXT,
@@ -165,6 +167,8 @@ def sync_optional_columns(cur: sqlite3.Cursor) -> None:
         ("sample_create_response", "TEXT"),
         ("user_story_ref_id", "TEXT"),
         ("epic_ref_id", "TEXT"),
+        ("refined", "INTEGER DEFAULT 0"),
+        ("refined_at", "TEXT"),
     ]
     for column, definition in cols:
         ensure_column(cur, "tasks", column, definition)
@@ -199,14 +203,16 @@ def load_prior_state(cur: sqlite3.Cursor, force: bool) -> Tuple[Dict[str, str], 
 
     try:
         for row in cur.execute(
-            "SELECT story_slug, position, task_id, status, started_at, completed_at, last_run FROM tasks"
+            "SELECT story_slug, position, task_id, status, started_at, completed_at, last_run, refined, refined_at FROM tasks"
         ):
-            story_slug, position, task_id, status, started_at, completed_at, last_run = row
+            story_slug, position, task_id, status, started_at, completed_at, last_run, refined, refined_at = row
             base = {
                 "status": status or "pending",
                 "started_at": started_at,
                 "completed_at": completed_at,
                 "last_run": last_run,
+                "refined": int(refined or 0),
+                "refined_at": refined_at,
             }
             prior_task_state[("pos", story_slug, str(position))] = base
             tid = (task_id or "").strip().lower()
@@ -288,10 +294,7 @@ def build_database(tasks: List[Dict[str, object]], db_path: Path, force: bool, s
         preferred_slug_source = story_id or story_title or epic_id or f"story-{sequence}"
         story_slug = assign_story_slug(prior_story_slugs, used_slugs, preferred_slug_source, story_key)
         restored = story_slug in prior_story_state and not force
-        if restored:
-            restored_state = prior_story_state[story_slug]
-        else:
-            restored_state = {}
+        restored_state = prior_story_state.get(story_slug, {}) if restored else {}
 
         epic_key = (epic_id or epic_title or "").strip() or None
         if epic_key:
@@ -306,6 +309,38 @@ def build_database(tasks: List[Dict[str, object]], db_path: Path, force: bool, s
 
         completed_tasks = 0
         story_total = len(tasks_list)
+
+        initial_status = restored_state.get("status") if restored else "pending"
+        initial_completed = int(restored_state.get("completed_tasks") or 0) if restored else 0
+        initial_total = restored_state.get("total_tasks") or story_total
+        initial_last_run = restored_state.get("last_run") if restored else None
+        story_created_at = restored_state.get("created_at", generated_at) if restored else generated_at
+
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO stories (
+              story_slug, story_key, story_id, story_title,
+              epic_key, epic_title, sequence, status,
+              completed_tasks, total_tasks, last_run,
+              updated_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                story_slug,
+                story_key,
+                story_id or None,
+                story_title or None,
+                epic_key,
+                epic_title or None,
+                sequence,
+                initial_status,
+                initial_completed,
+                initial_total,
+                initial_last_run,
+                generated_at,
+                story_created_at,
+            ),
+        )
 
         for position, task in enumerate(tasks_list):
             task_id = (str(task.get("id") or task.get("task_id")) or "").strip()
@@ -322,6 +357,8 @@ def build_database(tasks: List[Dict[str, object]], db_path: Path, force: bool, s
             started_at = (restore or {}).get("started_at")
             completed_at = (restore or {}).get("completed_at")
             last_run = (restore or {}).get("last_run")
+            refined_flag = int((restore or {}).get("refined") or 0)
+            refined_at = (restore or {}).get("refined_at")
             if status == "complete":
                 completed_tasks += 1
 
@@ -335,10 +372,11 @@ def build_database(tasks: List[Dict[str, object]], db_path: Path, force: bool, s
                   messaging_workflows, performance_targets, observability,
                   acceptance_text, endpoints, sample_create_request,
                   sample_create_response, user_story_ref_id, epic_ref_id,
+                  refined, refined_at,
                   status, started_at, completed_at, last_run,
                   story_id, story_title, epic_key, epic_title,
                   updated_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     story_slug,
@@ -368,6 +406,8 @@ def build_database(tasks: List[Dict[str, object]], db_path: Path, force: bool, s
                     as_text(task.get("sample_create_response")) or None,
                     as_text(task.get("user_story_ref_id")) or None,
                     as_text(task.get("epic_ref_id")) or None,
+                    refined_flag,
+                    refined_at,
                     status,
                     started_at,
                     completed_at,
@@ -396,29 +436,21 @@ def build_database(tasks: List[Dict[str, object]], db_path: Path, force: bool, s
 
         cur.execute(
             """
-            INSERT OR REPLACE INTO stories (
-              story_slug, story_key, story_id, story_title,
-              epic_key, epic_title, sequence, status,
-              completed_tasks, total_tasks, last_run,
-              updated_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            UPDATE stories
+               SET status = ?,
+                   completed_tasks = ?,
+                   total_tasks = ?,
+                   last_run = ?,
+                   updated_at = ?
+             WHERE story_slug = ?
             """,
             (
-                story_slug,
-                story_key,
-                story_id or None,
-                story_title or None,
-                epic_key,
-                epic_title or None,
-                sequence,
                 story_status,
                 completed_tasks,
                 story_total,
                 (prior_story_state.get(story_slug) or {}).get("last_run") if restored and not force else None,
                 generated_at,
-                (prior_story_state.get(story_slug) or {}).get("created_at", generated_at)
-                if restored and not force
-                else generated_at,
+                story_slug,
             ),
         )
 

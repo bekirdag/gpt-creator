@@ -51,6 +51,7 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from migrate-tasks" -l force 
 complete -c gpt-creator -n "__fish_seen_subcommand_from refine-tasks" -l story -r -d "Limit refinement to a story slug"
 complete -c gpt-creator -n "__fish_seen_subcommand_from refine-tasks" -l model -r -d "Codex model"
 complete -c gpt-creator -n "__fish_seen_subcommand_from refine-tasks" -l dry-run -d "Do not call Codex"
+complete -c gpt-creator -n "__fish_seen_subcommand_from refine-tasks" -l force -d "Reset refinement progress"
 
 # task-convert (deprecated alias)
 complete -c gpt-creator -n "__fish_seen_subcommand_from task-convert" -l jira -r -d "Jira tasks file"

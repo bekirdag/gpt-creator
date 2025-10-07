@@ -9,6 +9,8 @@ GC_LIB_CREATE_JIRA_TASKS_PIPELINE_SH=1
 
 set -o errtrace
 
+CJT_DOC_FILES=()
+
 cjt::log()   { printf '\033[36m[create-jira-tasks]\033[0m %s\n' "$*"; }
 cjt::warn()  { printf '\033[33m[create-jira-tasks][WARN]\033[0m %s\n' "$*"; }
 cjt::err()   { printf '\033[31m[create-jira-tasks][ERROR]\033[0m %s\n' "$*" >&2; }
@@ -313,7 +315,15 @@ cjt::collect_source_files() {
 }
 
 cjt::build_context_files() {
+  local _had_nounset=0
+  if [[ $- == *u* ]]; then
+    _had_nounset=1
+    set +u
+  fi
   cjt::collect_source_files
+  if [[ -z ${CJT_DOC_FILES+x} ]]; then
+    CJT_DOC_FILES=()
+  fi
   {
     echo "# Consolidated Project Context"
     echo "(Source: .gpt-creator staging copy)"
@@ -346,11 +356,42 @@ cjt::build_context_files() {
       fi
     done
   } > "$CJT_CONTEXT_SNIPPET_FILE"
+
+  if (( _had_nounset )); then
+    set -u
+  fi
 }
 
 cjt::codex_has_subcommand() {
   local subcmd="$1"
-  "$CJT_CODEX_CMD" --help 2>/dev/null | grep -Eqi "(^|[[:space:]/-])${subcmd}([[:space:]/-]|$)"
+  if ! command -v "$CJT_CODEX_CMD" >/dev/null 2>&1; then
+    return 1
+  fi
+  "$CJT_CODEX_CMD" --help 2>/dev/null | grep -Eqi "(^|[[:space:]/-])${subcmd}([[:space:]/-]|$)" || return 1
+}
+
+cjt::task_title_from_json() {
+  local json_file="${1:?json file required}" index="${2:?index required}"
+  python3 - "$json_file" "$index" <<'PY'
+import json, sys
+from pathlib import Path
+
+json_path = Path(sys.argv[1])
+index = int(sys.argv[2])
+
+try:
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+tasks = payload.get("tasks") or []
+if 0 <= index < len(tasks):
+    title = (tasks[index].get("title") or "").strip()
+    print(title)
+else:
+    print("")
+PY
 }
 
 cjt::run_codex() {
@@ -537,7 +578,9 @@ cjt::generate_stories() {
   local epic_ids
   mapfile -t epic_ids < <(python3 - "$epics_json" <<'PY'
 import json
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 payload = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -725,6 +768,8 @@ with prompt_path.open('w', encoding='utf-8') as fh:
     fh.write("- Reference relevant documentation sections (e.g., 'SDS §10.1.1', 'SQL dump table users').\n")
     fh.write("- Spell out API endpoints, payload structures, data validation, and state transitions.\n")
     fh.write("- Cover testing requirements (unit, integration, E2E).\n")
+    fh.write("- Cross-check each detail against the staged PDR, SDS, OpenAPI, SQL, and sample documents; bring the task into alignment with any mismatches you find.\n")
+    fh.write("- If information is missing from the task, enrich it with specifics derived from the docs (fields, DB tables, endpoints, validations, RBAC, analytics, etc.).\n")
     fh.write("\n")
     fh.write("## Output JSON schema\n")
     fh.write("{\n  \"story_id\": \"...\",\n  \"story_title\": \"...\",\n  \"tasks\": [\n    {\n      \"id\": \"WEB-01-T01\",\n      \"title\": \"...\",\n      \"description\": \"Detailed instructions...\",\n      \"acceptance_criteria\": [\"...\"],\n      \"tags\": [\"Web-FE\"],\n      \"assignees\": [\"FE dev\"],\n      \"estimate\": 5,\n      \"story_points\": 5,\n      \"dependencies\": [\"WEB-01-T00\"],\n      \"document_references\": [\"SDS §10.1.1\"],\n      \"endpoints\": [\"GET /api/v1/...\"],\n      \"data_contracts\": [\"Request payloads, DB tables, indexes, policies, RBAC\"],\n      \"qa_notes\": [\"Unit tests, integration tests\"],\n      \"user_roles\": [\"Visitor\"]\n    }\n  ]\n}\n")
@@ -737,34 +782,74 @@ cjt::refine_tasks() {
     cjt::log "Skipping task refinement (per flag)"
     return
   fi
-  local task_files
-  mapfile -t task_files < <(find "$CJT_JSON_TASKS_DIR" -maxdepth 1 -type f -name '*.json' | sort)
-  if cjt::state_stage_is_completed "refine"; then
-    cjt::log "Task refinement already completed; skipping"
-    return
+  : "${CJT_REFINE_PROCESSED_TASKS:=0}"
+  : "${CJT_REFINE_PROCESSED_STORIES:=0}"
+  : "${CJT_REFINE_SKIPPED_STORIES:=0}"
+  if [[ -n "${CJT_REFINE_TOTAL_TASKS:-}" ]]; then
+    cjt::log "Backlog summary: tasks total=${CJT_REFINE_TOTAL_TASKS}, refined=${CJT_REFINE_REFINED_TASKS:-0}, pending=${CJT_REFINE_PENDING_TASKS:-0}; stories total=${CJT_REFINE_TOTAL_STORIES:-0}, pending=${CJT_REFINE_PENDING_STORIES:-0}."
+  fi
+  if [[ "${CJT_DRY_RUN:-0}" == "1" ]]; then
+    cjt::warn "Running in dry-run mode; no Codex calls will be issued and the database will not be updated."
+  fi
+  local using_db=0
+  local story_entries
+  local story_mode="pending"
+  if [[ "${CJT_REFINE_FORCE:-0}" == "1" || "${CJT_HAVE_REFINED_COLUMN:-0}" == "0" ]]; then
+    story_mode="all"
+  fi
+  if [[ -n "${CJT_TASKS_DB_PATH:-}" ]]; then
+    using_db=1
+    story_entries=()
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      story_entries+=("$line")
+    done < <(python3 "$CJT_ROOT_DIR/src/lib/create-jira-tasks/list_stories_from_db.py" "$CJT_TASKS_DB_PATH" "${CJT_ONLY_STORY_SLUG:-}" "$story_mode")
+    if (( ${#story_entries[@]} == 0 )); then
+      cjt::warn "No stories found in tasks database${CJT_ONLY_STORY_SLUG:+ matching filter '${CJT_ONLY_STORY_SLUG}'}; skipping refinement"
+      return
+    fi
+  else
+    story_entries=()
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      story_entries+=("$line")
+    done < <(find "$CJT_JSON_TASKS_DIR" -maxdepth 1 -type f -name '*.json' | sort)
   fi
 
-  cjt::state_mark_stage_pending "refine"
-  local file
-  for file in "${task_files[@]}"; do
-    local slug="${file##*/}"; slug="${slug%.json}"
-    if [[ -n "${CJT_ONLY_STORY_SLUG:-}" ]]; then
-      local _match=0
-      IFS=',' read -r -a _filters <<<"${CJT_ONLY_STORY_SLUG}"
-      for _filter in "${_filters[@]}"; do
-        [[ "$slug" == "${_filter}" ]] && { _match=1; break; }
-      done
-      unset _filters
-      if (( _match == 0 )); then
+  if [[ "${CJT_IGNORE_REFINE_STATE:-0}" != "1" ]]; then
+    if cjt::state_stage_is_completed "refine"; then
+      cjt::log "Task refinement already completed; skipping"
+      return
+    fi
+    cjt::state_mark_stage_pending "refine"
+  fi
+
+  local entry
+  for entry in "${story_entries[@]}"; do
+    local slug=""
+    local source_file=""
+    local working_copy=""
+    local pending_total
+    local -a refine_order=()
+    if (( using_db )); then
+      slug="${entry}"
+      working_copy="$CJT_TMP_DIR/refine_${slug}.json"
+      if ! pending_total=$(python3 "$CJT_ROOT_DIR/src/lib/create-jira-tasks/export_story_from_db.py" "$CJT_TASKS_DB_PATH" "$slug" "$working_copy" "$story_mode" 2>/dev/null); then
+        cjt::warn "Unable to load story ${slug} from tasks database; skipping"
         continue
       fi
-    fi
-
-    local working_copy="$CJT_TMP_DIR/refine_${slug}.json"
-    cp "$file" "$working_copy"
-
-    local task_total
-    task_total=$(python3 - <<'PY' "$working_copy"
+      if [[ -z "$pending_total" ]]; then
+        cjt::warn "Unable to load story ${slug} from tasks database; skipping"
+        continue
+      fi
+      mkdir -p "$CJT_JSON_TASKS_DIR"
+      cp "$working_copy" "$CJT_JSON_TASKS_DIR/${slug}.json" 2>/dev/null || true
+    else
+      source_file="$entry"
+      slug="${source_file##*/}"; slug="${slug%.json}"
+      working_copy="$CJT_TMP_DIR/refine_${slug}.json"
+      cp "$source_file" "$working_copy"
+      pending_total=$(python3 - <<'PY' "$working_copy"
 import json, sys
 from pathlib import Path
 
@@ -774,56 +859,143 @@ try:
 except Exception:
     print(0)
 else:
-    tasks = payload.get('tasks') or []
-    print(len(tasks))
+    print(len(payload.get('tasks') or []))
 PY
 )
-    if [[ -z "$task_total" ]]; then
-      task_total=0
     fi
-    if (( task_total == 0 )); then
-      cjt::warn "No tasks found for story ${slug}; skipping refinement"
+    if [[ -n "${CJT_ONLY_STORY_SLUG:-}" ]]; then
+      local _match=0
+      IFS=',' read -r -a _filters <<<"${CJT_ONLY_STORY_SLUG}"
+      local slug_lower
+      slug_lower=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')
+      for _filter in "${_filters[@]}"; do
+        local filter_lower
+        filter_lower=$(printf '%s' "$_filter" | tr '[:upper:]' '[:lower:]')
+        if [[ "$slug_lower" == "$filter_lower" ]]; then
+          _match=1
+          break
+        fi
+      done
+      unset _filters
+      if (( _match == 0 )); then
+        rm -f "$working_copy" 2>/dev/null || true
+        continue
+      fi
+    fi
+    pending_total=${pending_total//$'\r'/}
+    pending_total=${pending_total//$'\n'/}
+    if [[ -z "$pending_total" ]]; then
+      pending_total=0
+    fi
+
+    refine_order=()
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      refine_order+=("$line")
+    done < <(python3 - <<'PY' "$working_copy"
+import json, sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+indices = payload.get('pending_indices')
+tasks = payload.get('tasks') or []
+if isinstance(indices, list) and indices:
+    for value in indices:
+        try:
+            print(int(value))
+        except Exception:
+            continue
+else:
+    for idx in range(len(tasks)):
+        print(idx)
+PY
+)
+    pending_total=${#refine_order[@]}
+
+    if (( pending_total == 0 )); then
+      if (( using_db )) && [[ "$story_mode" != "all" ]]; then
+        cjt::log "All tasks already refined for story ${slug}; skipping"
+      else
+        cjt::warn "No tasks found for story ${slug}; skipping refinement"
+      fi
       rm -f "$CJT_JSON_REFINED_DIR/${slug}.json" 2>/dev/null || true
-      cjt::state_update_refine_progress "$slug" 0 0
+      if [[ "${CJT_IGNORE_REFINE_STATE:-0}" != "1" ]]; then
+        cjt::state_update_refine_progress "$slug" 0 0
+      fi
+      rm -f "$working_copy" 2>/dev/null || true
+      CJT_REFINE_SKIPPED_STORIES=$((CJT_REFINE_SKIPPED_STORIES + 1))
       continue
     fi
 
     local progress
-    progress="$(cjt::state_get_refine_progress "$slug" "$task_total")"
-    if [[ "$progress" == "done" && -f "$CJT_JSON_REFINED_DIR/${slug}.json" ]]; then
-      cjt::log "Refinement already completed for story ${slug}; skipping"
-      continue
-    fi
     local start_index=0
-    if [[ "$progress" != "done" ]]; then
-      start_index=${progress:-0}
+    if (( using_db )); then
+      progress=0
+      start_index=0
+    else
+      if [[ "${CJT_IGNORE_REFINE_STATE:-0}" == "1" ]]; then
+        cjt::state_update_refine_progress "$slug" 0 "$pending_total"
+        progress=0
+      else
+        progress="$(cjt::state_get_refine_progress "$slug" "$pending_total")"
+        if [[ "$progress" == "done" && -f "$CJT_JSON_REFINED_DIR/${slug}.json" ]]; then
+          cjt::log "Refinement already completed for story ${slug}; skipping"
+          rm -f "$working_copy" 2>/dev/null || true
+          continue
+        fi
+        if [[ "$progress" != "done" ]]; then
+          start_index=${progress:-0}
+        fi
+      fi
     fi
-    cjt::log "Refining tasks for story ${slug} (${task_total} tasks, starting at index ${start_index})"
+    local total_indices=${#refine_order[@]}
+    local next_target="N/A"
+    if (( total_indices > start_index )); then
+      next_target="${refine_order[start_index]}"
+    fi
+    cjt::log "Refining story ${slug}: pending=${pending_total}${task_total:+ / total=${task_total}} (start index ${start_index}, next task index ${next_target})"
     local idx
+    local processed_count=0
     local story_success=1
-    for (( idx=start_index; idx<task_total; idx++ )); do
+    for (( idx=start_index; idx<total_indices; idx++ )); do
+      local actual_index="${refine_order[idx]}"
       local task_num
-      printf -v task_num "%03d" $((idx + 1))
+      printf -v task_num "%03d" $((actual_index + 1))
       local prompt_file="$CJT_PROMPTS_DIR/refine_${slug}_task_${task_num}.prompt.md"
       local raw_file="$CJT_OUTPUT_DIR/refine_${slug}_task_${task_num}.raw.txt"
       local json_file="$CJT_TMP_DIR/refine_${slug}_task_${task_num}.json"
 
-      cjt::write_refine_task_prompt "$working_copy" "$idx" "$prompt_file"
+      cjt::write_refine_task_prompt "$working_copy" "$actual_index" "$prompt_file"
+      local task_title
+      task_title=$(cjt::task_title_from_json "$working_copy" "$actual_index")
       local attempt=0
       local max_attempts=2
       local prompt_augmented=0
       local success=0
       while (( attempt < max_attempts )); do
         (( attempt++ ))
+        if [[ -n "$task_title" ]]; then
+          cjt::log "  -> Task ${slug}#${task_num} attempt ${attempt}/${max_attempts} — '${task_title//'"'/\"}'"
+        else
+          cjt::log "  -> Task ${slug}#${task_num} attempt ${attempt}/${max_attempts}"
+        fi
         rm -f "$raw_file" "$json_file" 2>/dev/null || true
         if ! cjt::run_codex "$prompt_file" "$raw_file" "refine-${slug}-task-${task_num}"; then
           cjt::warn "Codex invocation failed for ${slug} task ${task_num} (attempt ${attempt}/${max_attempts})"
           continue
         fi
         if cjt::wrap_json_extractor "$raw_file" "$json_file"; then
-          cjt::apply_refined_task "$working_copy" "$json_file" "$idx"
-          cjt::state_update_refine_progress "$slug" $((idx + 1)) "$task_total"
-          cjt::sync_refined_task_to_db "$working_copy" "$slug" "$idx"
+          cjt::apply_refined_task "$working_copy" "$json_file" "$actual_index"
+          if [[ "${CJT_IGNORE_REFINE_STATE:-0}" != "1" ]]; then
+            cjt::state_update_refine_progress "$slug" $((idx + 1)) "$pending_total"
+          fi
+          cjt::sync_refined_task_to_db "$working_copy" "$slug" "$actual_index"
+          if [[ -n "$task_title" ]]; then
+            cjt::log "    -> Codex refinement applied for ${slug}#${task_num} ('${task_title//'"'/\"}')"
+          else
+            cjt::log "    -> Codex refinement applied for ${slug}#${task_num}"
+          fi
+          ((processed_count++))
           success=1
           break
         fi
@@ -840,8 +1012,13 @@ REM
         cjt::warn "Codex produced non-JSON output for ${slug} task ${task_num}; retrying (${attempt}/${max_attempts})."
       done
       if (( success == 0 )); then
-        cjt::warn "Unable to obtain JSON output for ${slug} task ${task_num}; keeping prior content"
+        if [[ -n "$task_title" ]]; then
+          cjt::warn "Unable to obtain JSON output for ${slug} task ${task_num} ('${task_title//'"'/\"}') ; keeping prior content"
+        else
+          cjt::warn "Unable to obtain JSON output for ${slug} task ${task_num}; keeping prior content"
+        fi
         story_success=0
+        cjt::warn "    ✗ Codex did not return usable JSON for ${slug}#${task_num}"
         break
       fi
     done
@@ -849,16 +1026,42 @@ REM
     local final_story="$CJT_JSON_REFINED_DIR/${slug}.json"
     mkdir -p "$(dirname "$final_story")"
     cp "$working_copy" "$final_story"
+    rm -f "$working_copy" 2>/dev/null || true
     if (( story_success == 1 )); then
-      cjt::state_update_refine_progress "$slug" "$task_total" "$task_total"
+      if [[ "${CJT_IGNORE_REFINE_STATE:-0}" != "1" ]]; then
+        cjt::state_update_refine_progress "$slug" "$pending_total" "$pending_total"
+      fi
+      cjt::log "  -> Story ${slug} refined ${processed_count}/${pending_total} tasks"
+    fi
+
+    if (( processed_count > 0 )); then
+      if [[ -n "${CJT_REFINE_PENDING_TASKS:-}" ]]; then
+        local _pending=$((CJT_REFINE_PENDING_TASKS - processed_count))
+        (( _pending < 0 )) && _pending=0
+        CJT_REFINE_PENDING_TASKS=$_pending
+      fi
+      if [[ -n "${CJT_REFINE_REFINED_TASKS:-}" ]]; then
+        CJT_REFINE_REFINED_TASKS=$((CJT_REFINE_REFINED_TASKS + processed_count))
+      fi
+      CJT_REFINE_PROCESSED_TASKS=$((CJT_REFINE_PROCESSED_TASKS + processed_count))
+      CJT_REFINE_PROCESSED_STORIES=$((CJT_REFINE_PROCESSED_STORIES + 1))
+    else
+      CJT_REFINE_SKIPPED_STORIES=$((CJT_REFINE_SKIPPED_STORIES + 1))
+      if (( pending_total > 0 )); then
+        cjt::warn "  -> Story ${slug} left with ${pending_total} pending tasks (Codex failures)."
+      fi
     fi
   done
 
-  local remaining=0
-  for file in "${task_files[@]}"; do
-    local slug="${file##*/}"; slug="${slug%.json}"
-    local total
-    total=$(python3 - <<'PY' "$file"
+  if [[ "${CJT_IGNORE_REFINE_STATE:-0}" != "1" ]]; then
+    if (( using_db )); then
+      cjt::state_mark_stage_completed "refine"
+    else
+      local remaining=0
+      for entry in "${story_entries[@]}"; do
+        local slug_entry="${entry##*/}"; slug_entry="${slug_entry%.json}"
+        local total
+        total=$(python3 - <<'PY' "$entry"
 import json, sys
 from pathlib import Path
 
@@ -871,15 +1074,26 @@ else:
     print(len(payload.get('tasks') or []))
 PY
 )
-    total=${total//$'\n'/}
-    total=${total:-0}
-    if [[ "$(cjt::state_get_refine_progress "$slug" "$total")" != "done" ]]; then
-      remaining=1
-      break
+        total=${total//$'\n'/}
+        total=${total:-0}
+        if [[ "$(cjt::state_get_refine_progress "$slug_entry" "$total")" != "done" ]]; then
+          remaining=1
+          break
+        fi
+      done
+      if (( remaining == 0 )); then
+        cjt::state_mark_stage_completed "refine"
+      fi
     fi
-  done
-  if (( remaining == 0 )); then
-    cjt::state_mark_stage_completed "refine"
+  fi
+
+  if [[ -n "${CJT_REFINE_TOTAL_TASKS:-}" ]]; then
+    local processed_tasks="${CJT_REFINE_PROCESSED_TASKS:-0}"
+    local refined_total="${CJT_REFINE_REFINED_TASKS:-0}"
+    local pending_left="${CJT_REFINE_PENDING_TASKS:-0}"
+    local processed_stories="${CJT_REFINE_PROCESSED_STORIES:-0}"
+    local skipped_stories="${CJT_REFINE_SKIPPED_STORIES:-0}"
+    cjt::log "Refinement summary: tasks processed=${processed_tasks}, total refined=${refined_total}, pending remaining=${pending_left}; stories processed=${processed_stories}, skipped=${skipped_stories}."
   fi
 }
 
@@ -961,6 +1175,9 @@ cjt::sync_refined_task_to_db() {
   if [[ "${CJT_SYNC_DB:-0}" != "1" ]]; then
     return
   fi
+  if [[ "${CJT_DRY_RUN:-0}" == "1" ]]; then
+    return
+  fi
   if [[ -z "${CJT_TASKS_DB_PATH:-}" ]]; then
     cjt::warn "CJT_SYNC_DB is enabled but CJT_TASKS_DB_PATH is not set; skipping DB update for ${slug}"
     return
@@ -1024,6 +1241,11 @@ for key, value in task_data.items():
     if value is None:
        continue
     existing[key] = value
+
+dry_run = os.environ.get('CJT_DRY_RUN', '0') == '1'
+if not dry_run:
+    existing['refined'] = 1
+    existing['refined_at'] = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
 
 story_payload['tasks'][task_index] = existing
 working_path.write_text(json.dumps(story_payload, indent=2) + "\n", encoding='utf-8')

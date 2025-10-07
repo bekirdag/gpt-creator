@@ -42,7 +42,7 @@ _gpt_creator()
           COMPREPLY=( $(compgen -W "--project --force ${global_opts}" -- "$cur") )
           ;;
         refine-tasks)
-          COMPREPLY=( $(compgen -W "--project --story --model --dry-run ${global_opts}" -- "$cur") )
+          COMPREPLY=( $(compgen -W "--project --story --model --dry-run --force ${global_opts}" -- "$cur") )
           ;;
         create-tasks|task-convert)
           COMPREPLY=( $(compgen -W "--project --jira --force ${global_opts}" -- "$cur") )

@@ -40,7 +40,7 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 [\-\-project DIR] [\-\-force]
 .br
 .B gpt-creator refine-tasks
-[\-\-project DIR] [\-\-story SLUG] [\-\-model NAME] [\-\-dry-run]
+[\-\-project DIR] [\-\-story SLUG] [\-\-model NAME] [\-\-dry-run] [\-\-force]
 .br
 .B gpt-creator create-tasks
 [\-\-project DIR] [\-\-jira FILE] [\-\-force]
@@ -102,7 +102,7 @@ Mine the staged documentation (PDR, SDS, OpenAPI, SQL dumps, UI samples) to gene
 Rebuild the \fI.gpt-creator/staging/plan/tasks/tasks.db\fR backlog from the JSON artifacts produced by \fBcreate-jira-tasks\fR. Useful when you need to resync the database without re-running the full Codex pipeline. Pass \fB--force\fR to discard preserved task status metadata during the rebuild.
 .TP
 .B refine-tasks
-Read tasks from \fI.gpt-creator/staging/plan/tasks/tasks.db\fR, invoke Codex to enrich each task sequentially, write refined JSON snapshots to \fIjson/refined\fR, and update the corresponding SQLite rows immediately after each successful response. Supports \fB--story\fR to focus on a single story slug, \fB--model\fR to override the Codex model, and \fB--dry-run\fR to generate prompts without calling Codex.
+Stream tasks from \fI.gpt-creator/staging/plan/tasks/tasks.db\fR, hydrate the story/task JSON, invoke Codex to refine the content against the staged documentation, write refined JSON snapshots to \fIjson/refined\fR, and update the corresponding SQLite rows immediately after each successful response. Supports \fB--story\fR to focus on a single story slug, \fB--model\fR to override the Codex model, \fB--dry-run\fR to generate prompts without calling Codex, and \fB--force\fR to reset stored refinement flags and reprocess every task.
 .TP
 .B create-tasks
 Convert Jira markdown into a project-scoped SQLite backlog at \fI.gpt-creator/staging/plan/tasks/tasks.db\fR, persisting epics, stories, and task metadata (including prior progress) for resumable automation.

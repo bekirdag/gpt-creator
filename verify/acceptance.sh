@@ -9,6 +9,8 @@ CONFIG_DEFAULTS="${ROOT_DIR}/config/defaults.sh"
 API_URL="${1:-${GC_DEFAULT_API_URL:-http://localhost:3000/api/v1}}"
 WEB_URL="${2:-http://localhost:8080/}"
 ADMIN_URL="${3:-http://localhost:8080/admin/}"
+API_HEALTH_URL="${4:-}";
+API_HEALTH_URL="${API_HEALTH_URL:-${API_URL%/}/health}"
 
 ok()   { printf '✅ %s\n' "$*"; }
 bad()  { printf '❌ %s\n' "$*" >&2; }
@@ -64,11 +66,11 @@ else
   fi
 fi
 
-info "API health: ${API_URL%/}/health"
-if curl_ok "${API_URL%/}/health"; then
+info "API health: ${API_HEALTH_URL}"
+if curl_ok "${API_HEALTH_URL}"; then
   ok "API /health reachable."
 else
-  bad "API /health check failed at ${API_URL%/}/health"
+  bad "API /health check failed at ${API_HEALTH_URL}"
   FAIL=1
 fi
 

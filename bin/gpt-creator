@@ -3645,7 +3645,7 @@ cmd_verify() {
       acceptance)
         run_check "acceptance" \
           env PROJECT_ROOT="$PROJECT_ROOT" GC_COMPOSE_FILE="$compose_file" \
-          bash "$verify_root/acceptance.sh" "${api_base}" "${web_url}" "${admin_url}"
+          bash "$verify_root/acceptance.sh" "${api_base}" "${web_url}" "${admin_url}" "${api_health}"
         ;;
       openapi)
         local spec=""

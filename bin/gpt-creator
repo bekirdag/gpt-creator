@@ -97,7 +97,7 @@ gc_env_sync_ports() {
   local api_base_default="http://localhost:${GC_API_HOST_PORT}/api/v1"
   GC_API_BASE_URL="${GC_API_BASE_URL:-$api_base_default}"
   VITE_API_BASE="${VITE_API_BASE:-$GC_API_BASE_URL}"
-  GC_API_HEALTH_URL="${GC_API_HEALTH_URL:-http://localhost:${GC_API_HOST_PORT}/health}"
+  GC_API_HEALTH_URL="${GC_API_HEALTH_URL:-${GC_API_BASE_URL%/}/health}"
   local proxy_origin="http://localhost:${GC_PROXY_HOST_PORT}"
   GC_WEB_URL="${GC_WEB_URL:-${proxy_origin}/}"
   GC_ADMIN_URL="${GC_ADMIN_URL:-${proxy_origin}/admin/}"

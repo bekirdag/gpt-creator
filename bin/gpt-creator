@@ -5769,6 +5769,7 @@ EOF
 
 main() {
   local cmd="${1:-help}"; shift || true
+  local shell_bin="${BASH:-bash}"
   case "$cmd" in
     help|-h|--help) usage ;;
     version|-v|--version) echo "${APP_NAME} ${VERSION}" ;;
@@ -5784,10 +5785,10 @@ main() {
     verify)         cmd_verify "$@" ;;
     migrate-tasks)  cmd_migrate_tasks_json "$@" ;;
     refine-tasks)   cmd_refine_tasks "$@" ;;
-    create-sds)       "$CLI_ROOT/src/cli/create-sds.sh" "$@" ;;
-    create-pdr)       "$CLI_ROOT/src/cli/create-pdr.sh" "$@" ;;
+    create-sds)     "$shell_bin" "$CLI_ROOT/src/cli/create-sds.sh" "$@" ;;
+    create-pdr)     "$shell_bin" "$CLI_ROOT/src/cli/create-pdr.sh" "$@" ;;
     create-jira-tasks) "$CLI_ROOT/src/cli/create-jira-tasks.sh" "$@" ;;
-    create-db-dump) "$CLI_ROOT/src/cli/create-db-dump.sh" "$@" ;;
+    create-db-dump) "$shell_bin" "$CLI_ROOT/src/cli/create-db-dump.sh" "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;
     work-on-tasks)  cmd_work_on_tasks "$@" ;;

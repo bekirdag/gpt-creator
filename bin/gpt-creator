@@ -4044,6 +4044,15 @@ for change in changes:
         content = change.get('content', '')
         dest = ensure_within_root(Path(path))
         dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists() and dest.is_dir():
+            try:
+                rel_path = str(dest.relative_to(project_root))
+            except ValueError:
+                rel_path = str(dest)
+            manual_notes.append(
+                f"Skipped writing {rel_path} because that path already exists as a directory."
+            )
+            continue
         dest.write_text(content, encoding='utf-8')
         written.append(str(dest.relative_to(project_root)))
     elif ctype == 'patch':

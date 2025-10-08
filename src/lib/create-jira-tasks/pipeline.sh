@@ -1578,7 +1578,9 @@ cjt::apply_refined_task() {
   local task_index="${3:?task index required}"
   python3 - "$working_json" "$refined_json" "$task_index" <<'PY'
 import json
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 working_path = Path(sys.argv[1])

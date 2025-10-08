@@ -97,7 +97,14 @@ gc_env_sync_ports() {
   local api_base_default="http://localhost:${GC_API_HOST_PORT}/api/v1"
   GC_API_BASE_URL="${GC_API_BASE_URL:-$api_base_default}"
   VITE_API_BASE="${VITE_API_BASE:-$GC_API_BASE_URL}"
-  GC_API_HEALTH_URL="${GC_API_HEALTH_URL:-${GC_API_BASE_URL%/}/health}"
+  local expected_health="${GC_API_BASE_URL%/}/health"
+  if [[ -z "${GC_API_HEALTH_URL:-}" ]]; then
+    GC_API_HEALTH_URL="$expected_health"
+    gc_set_env_var GC_API_HEALTH_URL "$GC_API_HEALTH_URL"
+  elif [[ "$GC_API_HEALTH_URL" == "http://localhost:${GC_API_HOST_PORT}/health" && "$expected_health" != "$GC_API_HEALTH_URL" ]]; then
+    GC_API_HEALTH_URL="$expected_health"
+    gc_set_env_var GC_API_HEALTH_URL "$GC_API_HEALTH_URL"
+  fi
   local proxy_origin="http://localhost:${GC_PROXY_HOST_PORT}"
   GC_WEB_URL="${GC_WEB_URL:-${proxy_origin}/}"
   GC_ADMIN_URL="${GC_ADMIN_URL:-${proxy_origin}/admin/}"
@@ -3016,7 +3023,7 @@ cmd_generate() {
       local api_base_url="http://localhost:${GC_API_HOST_PORT}/api/v1"
       gc_set_env_var GC_API_BASE_URL "$api_base_url"
       gc_set_env_var VITE_API_BASE "$api_base_url"
-      local api_health_url="http://localhost:${GC_API_HOST_PORT}/health"
+      local api_health_url="${api_base_url%/}/health"
       gc_set_env_var GC_API_HEALTH_URL "$api_health_url"
       local proxy_base="http://localhost:${GC_PROXY_HOST_PORT}"
       gc_set_env_var GC_WEB_URL "${proxy_base}/"

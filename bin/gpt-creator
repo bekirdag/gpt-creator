@@ -413,6 +413,7 @@ gc_bootstrap_mark_complete() {
   mkdir -p "$(dirname "$file")"
   python3 - <<'PY' "$file"
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -5585,6 +5586,8 @@ USAGE
     if ! gc_bootstrap_step_is_done stage-rfp; then
       mkdir -p "${INPUT_DIR}"
       cp "$rfp_path" "$staged_rfp"
+      mkdir -p "${STAGING_DIR}/docs"
+      cp "$rfp_path" "${STAGING_DIR}/docs/rfp.md"
       gc_bootstrap_mark_step stage-rfp done
       info "Staged RFP → ${staged_rfp}"
     else

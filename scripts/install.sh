@@ -107,6 +107,7 @@ install_files() {
     --include '/src/***'
     --include '/scripts/***'
     --include '/docs/***'
+    --include '/verify/***'
     --include '/README*'
     --exclude '*'
   )

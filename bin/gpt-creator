@@ -5583,6 +5583,13 @@ USAGE
 
   if [[ -n "$rfp_path" ]]; then
     local staged_rfp="${INPUT_DIR}/rfp.md"
+    local staged_docs_rfp="${STAGING_DIR}/docs/rfp.md"
+    if gc_bootstrap_step_is_done stage-rfp; then
+      if [[ ! -f "$staged_rfp" || ! -f "$staged_docs_rfp" ]]; then
+        info "Restaging RFP (previous artifacts missing)."
+        gc_bootstrap_mark_step stage-rfp reset
+      fi
+    fi
     if ! gc_bootstrap_step_is_done stage-rfp; then
       mkdir -p "${INPUT_DIR}"
       cp "$rfp_path" "$staged_rfp"

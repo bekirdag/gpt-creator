@@ -197,7 +197,9 @@ cpdr::locate_rfp() {
     CPDR_RFP_PATH="$(find "$CPDR_STAGING_DIR" -maxdepth 3 -type f -iname '*rfp*.md' | head -n1 || true)"
   fi
 
-  [[ -n "${CPDR_RFP_PATH:-}" && -f "$CPDR_RFP_PATH" ]] || cpdr::die "Unable to locate normalized RFP document under ${CPDR_STAGING_DIR}. Run 'gpt-creator normalize' first."
+  if [[ -z "${CPDR_RFP_PATH:-}" || ! -f "$CPDR_RFP_PATH" ]]; then
+    cpdr::die "Unable to locate RFP under ${CPDR_STAGING_DIR}. Provide an RFP via 'gpt-creator bootstrap --rfp <file>' or place one at .gpt-creator/staging/docs/rfp.md before rerunning."
+  fi
 
   cpdr::log "Using RFP source → ${CPDR_RFP_PATH}"
 }

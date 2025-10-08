@@ -466,6 +466,14 @@ gc_bootstrap_run_step() {
   fi
 }
 
+gc_bootstrap_have_rfp() {
+  local stage="${STAGING_DIR:-}" input="${INPUT_DIR:-}"
+  [[ -n "$stage" && -f "$stage/docs/rfp.md" ]] && return 0
+  [[ -n "$stage" && -f "$stage/rfp.md" ]] && return 0
+  [[ -n "$input" && -f "$input/rfp.md" ]] && return 0
+  return 1
+}
+
 gc_auto_project_template() {
   local project_root="${1:?project root required}"
   local templates_root="${2:?templates root required}"
@@ -5616,7 +5624,10 @@ USAGE
   if gc_bootstrap_step_is_done create-pdr; then
     info "Step 'create-pdr' already completed; skipping."
   else
-    if bash "$CLI_ROOT/src/cli/create-pdr.sh" --project "$PROJECT_ROOT"; then
+    if ! gc_bootstrap_have_rfp; then
+      warn "No RFP found in staging; skipping create-pdr. Provide --rfp or add .gpt-creator/staging/docs/rfp.md to enable this step."
+      gc_bootstrap_mark_step create-pdr done
+    elif bash "$CLI_ROOT/src/cli/create-pdr.sh" --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step create-pdr done
     else
       gc_bootstrap_mark_step create-pdr failed

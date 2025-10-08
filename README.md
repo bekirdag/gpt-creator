@@ -15,6 +15,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Template-driven generation**: Renders baseline NestJS, Vue 3, Prisma, and Docker scaffolds into `/apps/**` and `/docker`, ready for manual extension or Codex-driven augmentation.
 - **Verification toolkit**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks that you can run on demand.
 - **Doc synthesis**: `create-pdr` converts the staged RFP into a multi-level Product Requirements Document (PDR) by iteratively asking Codex to draft the table of contents, sections, and detailed subsections. `create-sds` continues the loop, transforming the staged PDR into a System Design Specification that drills from architecture overview down to low-level operational detail.
+- **Database synthesis**: `create-db-dump` reads the SDS (and PDR context) to draft a full MySQL schema plus production-grade seed data, then reviews both dumps for consistency before storing them under `.gpt-creator/staging/plan/create-db-dump/sql/`.
 - **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, and `work-on-tasks` executes/resumes backlog items. The legacy `iterate` command is deprecated.
 
 ---
@@ -82,7 +83,7 @@ Keep the repo on your `PATH`, or invoke `./bin/gpt-creator` directly.
    gpt-creator bootstrap --template auto --rfp docs/rfp.md /path/to/project
    ```
 
-   This runs `create-pdr`, `create-sds`, `create-jira-tasks`, and the full build pipeline sequentially, producing docs, backlog, code, and a running stack with a single command.
+  This runs `create-pdr`, `create-sds`, `create-db-dump`, `create-jira-tasks`, and the full build pipeline sequentially, producing docs, database dumps, backlog, code, and a running stack with a single command.
    - If a step fails, re-running `bootstrap` resumes from the last successful step. Use `--fresh` to restart the pipeline from scratch. Provide `--rfp` to stage the primary RFP file when launching the flow.
 3. **Inspect outputs**:
    - `.gpt-creator/staging/discovery.yaml` for scan results
@@ -97,6 +98,12 @@ Keep the repo on your `PATH`, or invoke `./bin/gpt-creator` directly.
    ```
    - `create-pdr` iteratively asks Codex to propose the table of contents, then fills each section/subsection with detail sourced from the normalized RFP.
    - `create-sds` consumes the staged PDR and performs the same iterative flow to produce an architecture-focused SDS (`.gpt-creator/staging/plan/sds/sds.md`).
+
+   ```bash
+   # Generate schema.sql and seed.sql derived from the SDS
+   gpt-creator create-db-dump --project /path/to/project
+   ```
+   - `create-db-dump` synthesizes a MySQL schema and seed dump, stores them under `.gpt-creator/staging/plan/create-db-dump/sql/`, and finishes with a Codex review to ensure consistency across tables, constraints, and seed data.
 
 5. **Work Jira backlog** (optional):
    ```bash
@@ -197,12 +204,20 @@ Scripts exit with `0` on success, `3` when a dependency is missing, or non-zero 
 ```
 gpt-creator create-tasks --project /path/to/project --jira docs/jira.md
 ```
-- Builds (or refreshes) a project-scoped SQLite database at `.gpt-creator/staging/plan/tasks/tasks.db` with `epics`, `stories`, and `tasks` tables.
-- Preserves story slugs, task ordering, and prior status data unless `--force` is supplied (which regenerates the DB without reusing saved progress).
-- All task attributes (description, assignees, tags, acceptance criteria, dependencies, estimates) are persisted as columns within the `tasks` table for downstream tooling.
-- Captures additional delivery metadata per task (story points, document links, idempotency notes, rate limits, RBAC, messaging/workflows, performance targets, observability, endpoints, sample payloads, and story/epic reference IDs) to support richer automation.
+ - Builds (or refreshes) a project-scoped SQLite database at `.gpt-creator/staging/plan/tasks/tasks.db` with `epics`, `stories`, and `tasks` tables.
+ - Preserves story slugs, task ordering, and prior status data unless `--force` is supplied (which regenerates the DB without reusing saved progress).
+ - All task attributes (description, assignees, tags, acceptance criteria, dependencies, estimates) are persisted as columns within the `tasks` table for downstream tooling.
+ - Captures additional delivery metadata per task (story points, document links, idempotency notes, rate limits, RBAC, messaging/workflows, performance targets, observability, endpoints, sample payloads, and story/epic reference IDs) to support richer automation.
 
-### 9. Work on Tasks (resumable Codex loop)
+### 9. Generate Database Dumps
+```
+gpt-creator create-db-dump --project /path/to/project
+```
+- Produces `schema.sql` and `seed.sql` under `.gpt-creator/staging/plan/create-db-dump/sql/`, derived from the SDS (plus optional PDR context).
+- Concludes with a Codex review that rewrites both files to ensure data types, keys, and seed rows align; the initial drafts are preserved as `schema.initial.sql` / `seed.initial.sql` backups.
+- Use `--dry-run` to preview prompts without calling Codex or `--force` to regenerate dumps after SDS changes.
+
+### 10. Work on Tasks (resumable Codex loop)
 ```
 export PNPM_HOME="$HOME/.local/share/pnpm"  # keep pnpm toolchain outside the workspace
 gpt-creator work-on-tasks --project /path/to/project

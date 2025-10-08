@@ -14,6 +14,7 @@ _gpt_creator() {
     'refresh-stack:Tear down, rebuild, and seed the Docker stack'
     'verify:Acceptance/NFR checks'
     'create-sds:Generate a System Design Specification from the staged PDR'
+    'create-db-dump:Generate MySQL schema and seed dumps from the SDS'
     'create-pdr:Generate a Product Requirements Document from the staged RFP'
     'bootstrap:End-to-end build from RFP to running stack'
     'create-jira-tasks:Generate Jira epics/stories/tasks from documentation'
@@ -64,6 +65,12 @@ _gpt_creator() {
         '--model=[Codex model name]' \
         '--dry-run[Prepare prompts without calling Codex]' \
         '--force[Regenerate all stages]'
+      ;;
+    create-db-dump)
+      _arguments \
+        '--model=[Codex model name]' \
+        '--dry-run[Prepare prompts without calling Codex]' \
+        '--force[Regenerate schema and seed dumps]'
       ;;
     create-jira-tasks)
       _arguments \
@@ -120,6 +127,7 @@ _gpt_creator() {
       _arguments \
         '--template=[Template name or auto]:template:(auto skip)' \
         '--skip-template[Skip project template scaffolding]' \
+        '--rfp=[Path to RFP file]:file:_files' \
         '--fresh[Restart the bootstrap pipeline from scratch]' \
         '1:project-dir:_files -/'
       ;;

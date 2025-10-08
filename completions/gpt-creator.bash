@@ -9,7 +9,7 @@ _gpt_creator()
     prev="${COMP_WORDS[COMP_CWORD-1]}"
   }
 
-  local subcmds="create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version"
+  local subcmds="create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version"
   local global_opts="--project -h --help -v --version"
 
   # find the subcommand (first non-option token)
@@ -35,7 +35,7 @@ _gpt_creator()
       local opts="--template --skip-template"
       COMPREPLY=( $(compgen -W "$opts" -- "$cur") $(compgen -d -- "$cur") )
       ;;
-    scan|normalize|plan|iterate|verify|run|refresh-stack|db|generate|create-pdr|create-sds|create-jira-tasks|migrate-tasks|refine-tasks|create-tasks|work-on-tasks|task-convert|bootstrap)
+    scan|normalize|plan|iterate|verify|run|refresh-stack|db|generate|create-pdr|create-sds|create-db-dump|create-jira-tasks|migrate-tasks|refine-tasks|create-tasks|work-on-tasks|task-convert|bootstrap)
       case "$prev" in
         --project) COMPREPLY=( $(compgen -d -- "$cur") ); return 0;;
         --jira) COMPREPLY=( $(compgen -f -- "$cur") ); return 0;;
@@ -47,11 +47,18 @@ _gpt_creator()
         create-sds)
           COMPREPLY=( $(compgen -W "--project --model --dry-run --force ${global_opts}" -- "$cur") )
           ;;
+        create-db-dump)
+          COMPREPLY=( $(compgen -W "--project --model --dry-run --force ${global_opts}" -- "$cur") )
+          ;;
         bootstrap)
           case "$prev" in
             --template) COMPREPLY=( $(compgen -W "auto skip" -- "$cur") ); return 0;;
           esac
-          local opts="--template --skip-template --fresh"
+          local opts="--template --skip-template --rfp --fresh"
+          if [[ $prev == --rfp ]]; then
+            COMPREPLY=( $(compgen -f -- "$cur") )
+            return 0
+          fi
           COMPREPLY=( $(compgen -W "$opts" -- "$cur") $(compgen -d -- "$cur") )
           ;;
         create-jira-tasks)

@@ -4188,6 +4188,38 @@ for note in summary['notes']:
 PY
 }
 
+cmd_create_jira_tasks() {
+  local args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project)
+        args+=(--project "$(abs_path "$2")")
+        shift 2
+        ;;
+      --model)
+        args+=(--model "$2")
+        shift 2
+        ;;
+      --force|--dry-run)
+        args+=("$1")
+        shift
+        ;;
+      -h|--help)
+        # Let the dedicated CLI script handle help output.
+        args+=("$1")
+        shift
+        ;;
+      *)
+        args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  local shell_bin="${BASH:-bash}"
+  "$shell_bin" "$CLI_ROOT/src/cli/create-jira-tasks.sh" "${args[@]}"
+}
+
 cmd_create_tasks() {
   local root="" jira="" force=0
   while [[ $# -gt 0 ]]; do
@@ -5502,7 +5534,7 @@ cmd_bootstrap() {
 Usage: gpt-creator bootstrap [--template NAME|auto|skip] [--skip-template] [--rfp FILE] [--fresh] <path>
 
 Generate a full project from an RFP in one step by running:
-  • create-pdr → create-sds → create-jira-tasks → scan/normalize/plan/generate/db/run/verify
+  • create-pdr → create-sds → create-db-dump → create-jira-tasks → scan/normalize/plan/generate/db/run/verify
 Templates from project_templates/ are applied first (auto-selected by default).
 USAGE
         return 0
@@ -5574,7 +5606,7 @@ USAGE
   if gc_bootstrap_step_is_done create-pdr; then
     info "Step 'create-pdr' already completed; skipping."
   else
-    if "$CLI_ROOT/src/cli/create-pdr.sh" --project "$PROJECT_ROOT"; then
+    if bash "$CLI_ROOT/src/cli/create-pdr.sh" --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step create-pdr done
     else
       gc_bootstrap_mark_step create-pdr failed
@@ -5586,7 +5618,7 @@ USAGE
   if gc_bootstrap_step_is_done create-sds; then
     info "Step 'create-sds' already completed; skipping."
   else
-    if "$CLI_ROOT/src/cli/create-sds.sh" --project "$PROJECT_ROOT"; then
+    if bash "$CLI_ROOT/src/cli/create-sds.sh" --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step create-sds done
     else
       gc_bootstrap_mark_step create-sds failed
@@ -5594,7 +5626,19 @@ USAGE
     fi
   fi
 
-  info "[5/10] Mining Jira tasks"
+  info "[5/11] Generating database schema & seed dumps"
+  if gc_bootstrap_step_is_done create-db-dump; then
+    info "Step 'create-db-dump' already completed; skipping."
+  else
+    if bash "$CLI_ROOT/src/cli/create-db-dump.sh" --project "$PROJECT_ROOT"; then
+      gc_bootstrap_mark_step create-db-dump done
+    else
+      gc_bootstrap_mark_step create-db-dump failed
+      die "create-db-dump failed"
+    fi
+  fi
+
+  info "[6/11] Mining Jira tasks"
   if ! gc_bootstrap_step_is_done create-jira-tasks; then
     if cmd_create_jira_tasks --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step create-jira-tasks done
@@ -5606,7 +5650,7 @@ USAGE
     info "Step 'create-jira-tasks' already completed; skipping."
   fi
 
-  info "[6/10] Planning build"
+  info "[7/11] Planning build"
   if ! gc_bootstrap_step_is_done plan; then
     if cmd_plan --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step plan done
@@ -5619,7 +5663,7 @@ USAGE
   fi
 
   if ! gc_bootstrap_step_is_done generate; then
-    info "[7/10] Generating stack code"
+    info "[8/11] Generating stack code"
     if cmd_generate all --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step generate done
     else
@@ -5630,7 +5674,7 @@ USAGE
     info "Step 'generate' already completed; skipping."
   fi
 
-  info "[8/10] Provisioning infrastructure"
+  info "[9/11] Provisioning infrastructure"
   if ! gc_bootstrap_step_is_done db-provision; then
     if cmd_db provision --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step db-provision done
@@ -5642,7 +5686,7 @@ USAGE
     info "Step 'db-provision' already completed; skipping."
   fi
 
-  info "[9/10] Starting stack"
+  info "[10/11] Starting stack"
   if ! gc_bootstrap_step_is_done run-up; then
     if cmd_run up --project "$PROJECT_ROOT"; then
       gc_bootstrap_mark_step run-up done
@@ -5665,7 +5709,7 @@ USAGE
     info "Step 'verify' already completed; skipping."
   fi
 
-  info "[10/10] Verifying acceptance"
+  info "[11/11] Verifying acceptance"
   gc_bootstrap_mark_complete
   ok "Bootstrap complete — code, docs, and backlog generated"
 }
@@ -5688,6 +5732,7 @@ Usage:
   ${APP_NAME} create-sds [--project <path>] [--model NAME] [--dry-run] [--force]
   ${APP_NAME} create-pdr [--project <path>] [--model NAME] [--dry-run] [--force]
   ${APP_NAME} create-jira-tasks [--project <path>] [--model NAME] [--force] [--dry-run]
+  ${APP_NAME} create-db-dump [--project <path>] [--model NAME] [--dry-run] [--force]
   ${APP_NAME} migrate-tasks [--project <path>] [--force]
   ${APP_NAME} refine-tasks [--project <path>] [--story SLUG] [--model NAME] [--dry-run]
   ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
@@ -5721,6 +5766,7 @@ main() {
     create-sds)       "$CLI_ROOT/src/cli/create-sds.sh" "$@" ;;
     create-pdr)       "$CLI_ROOT/src/cli/create-pdr.sh" "$@" ;;
     create-jira-tasks) "$CLI_ROOT/src/cli/create-jira-tasks.sh" "$@" ;;
+    create-db-dump) "$CLI_ROOT/src/cli/create-db-dump.sh" "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;
     work-on-tasks)  cmd_work_on_tasks "$@" ;;

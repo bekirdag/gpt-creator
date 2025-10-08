@@ -16,8 +16,7 @@ cmd::create_project() {
 
   gc::hr
   gc::log "Scanning for inputs (docs, OpenAPI, SQL, Mermaid, samples)…"
-  local manifest; manifest="$(gc::discover "$target")"
-  printf "%s\n" "$manifest" | sed 's/^/  /'
+  gc::discover "$target" | sed 's/^/  /'
   gc::ok "Discovery complete"
 
   gc::hr

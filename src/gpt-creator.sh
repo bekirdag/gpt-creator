@@ -63,6 +63,28 @@ gc::ensure_workspace() {
 }
 
 # ------------- Discovery (fuzzy) -------------
+gc::_found_doc_var() {
+  local key="$1"
+  key="${key//-/_}"
+  key="$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')"
+  printf 'GC_FOUND_DOC_%s' "$key"
+}
+
+gc::_set_found_doc() {
+  local key="$1"
+  local value="${2:-}"
+  local var
+  var="$(gc::_found_doc_var "$key")"
+  printf -v "$var" '%s' "$value"
+}
+
+gc::_get_found_doc() {
+  local key="$1"
+  local var
+  var="$(gc::_found_doc_var "$key")"
+  printf '%s' "${!var:-}"
+}
+
 gc::_find_first_by_patterns() {
   local root="$1"; shift
   local -a patterns=("$@")
@@ -86,44 +108,60 @@ gc::_find_all_by_patterns() {
 }
 
 gc::discover() {
-  # Args: project_root ; Outputs variables via declare -gA/-ga + manifest echo
+  # Args: project_root [out_file]
   local project_root="$1"
-  declare -gA GC_FOUND_DOCS=() GC_FOUND_MISC=()
-  declare -ga GC_FOUND_MMD=() GC_FOUND_SAMPLES=()
+  local out_file="${2:-}"
 
-  # Primary documents
-  GC_FOUND_DOCS[pdr]="$({ gc::_find_first_by_patterns "$project_root" "${GC_DOC_PATTERNS[@]}" | grep -Ei "/(pdr|product.*design.*requirement).*" -m1 || true; })"
-  GC_FOUND_DOCS[sds]="$({ gc::_find_first_by_patterns "$project_root" "${GC_DOC_PATTERNS[@]}" | grep -Ei "/(sds|system.*design.*spec).*" -m1 || true; })"
-  GC_FOUND_DOCS[rfp]="$({ gc::_find_first_by_patterns "$project_root" "${GC_DOC_PATTERNS[@]}" | grep -Ei "/(rfp|request.*for.*proposal).*" -m1 || true; })"
-  GC_FOUND_DOCS[jira]="$({ gc::_find_first_by_patterns "$project_root" "${GC_DOC_PATTERNS[@]}" | grep -Ei "/(jira).*" -m1 || true; })"
-  GC_FOUND_DOCS[ui_pages]="$({ gc::_find_first_by_patterns "$project_root" "${GC_DOC_PATTERNS[@]}" | grep -Ei "/(ui.*pages|website.*ui.*pages).*" -m1 || true; })"
+  GC_FOUND_MMD=()
+  GC_FOUND_SAMPLES=()
 
-  # OpenAPI & SQL
-  GC_FOUND_DOCS[openapi]="$({ gc::_find_first_by_patterns "$project_root" "${GC_OPENAPI_PATTERNS[@]}" | head -n1 || true; })"
-  GC_FOUND_DOCS[sql]="$({ gc::_find_first_by_patterns "$project_root" "${GC_SQL_PATTERNS[@]}" | head -n1 || true; })"
+  gc::_set_found_doc pdr "$({ gc::_find_first_by_patterns "$project_root" "${GC_DOC_PATTERNS[@]}" | grep -Ei "/(pdr|product.*design.*requirement).*" -m1 || true; })"
+  gc::_set_found_doc sds "$({ gc::_find_first_by_patterns "$project_root" "${GC_DOC_PATTERNS[@]}" | grep -Ei "/(sds|system.*design.*spec).*" -m1 || true; })"
+  gc::_set_found_doc rfp "$({ gc::_find_first_by_patterns "$project_root" "${GC_DOC_PATTERNS[@]}" | grep -Ei "/(rfp|request.*for.*proposal).*" -m1 || true; })"
+  gc::_set_found_doc jira "$({ gc::_find_first_by_patterns "$project_root" "${GC_DOC_PATTERNS[@]}" | grep -Ei "/(jira).*" -m1 || true; })"
+  gc::_set_found_doc ui_pages "$({ gc::_find_first_by_patterns "$project_root" "${GC_DOC_PATTERNS[@]}" | grep -Ei "/(ui.*pages|website.*ui.*pages).*" -m1 || true; })"
 
-  # Mermaid diagrams
-  mapfile -t GC_FOUND_MMD < <(gc::_find_all_by_patterns "$project_root" "${GC_MERMAID_PATTERNS[@]}")
+  gc::_set_found_doc openapi "$({ gc::_find_first_by_patterns "$project_root" "${GC_OPENAPI_PATTERNS[@]}" | head -n1 || true; })"
+  gc::_set_found_doc sql "$({ gc::_find_first_by_patterns "$project_root" "${GC_SQL_PATTERNS[@]}" | head -n1 || true; })"
 
-  # Page samples: prefer known directories; fall back to loose files
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    GC_FOUND_MMD+=("$f")
+  done < <(gc::_find_all_by_patterns "$project_root" "${GC_MERMAID_PATTERNS[@]}")
+
+  local d
   for d in "${GC_SAMPLE_DIRS[@]}"; do
     if [[ -d "$project_root/$d" ]]; then
-      while IFS= read -r -d '' f; do GC_FOUND_SAMPLES+=("$f"); done < <(find "$project_root/$d" -type f \( -iname "*.html" -o -iname "*.css" \) -print0)
+      while IFS= read -r -d '' f; do
+        GC_FOUND_SAMPLES+=("$f")
+      done < <(find "$project_root/$d" -type f \( -iname "*.html" -o -iname "*.css" \) -print0)
     fi
   done
-  # loose
-  while IFS= read -r -d '' f; do GC_FOUND_SAMPLES+=("$f"); done < <(find "$project_root" -maxdepth 2 -type f \( -iname "*.html" -o -iname "*.css" \) -print0)
+  while IFS= read -r -d '' f; do
+    GC_FOUND_SAMPLES+=("$f")
+  done < <(find "$project_root" -maxdepth 2 -type f \( -iname "*.html" -o -iname "*.css" \) -print0)
 
-  # Manifest (stdout)
-  echo "---"
-  echo "found:"
+  local manifest_buffer="---"$'\n'"found:"$'\n'
+  local k
   for k in pdr sds rfp jira ui_pages openapi sql; do
-    printf "  %s: %s\n" "$k" "${GC_FOUND_DOCS[$k]:-}"
+    manifest_buffer+="  ${k}: $(gc::_get_found_doc "$k")"$'\n'
   done
-  echo "  mermaid_diagrams:"
-  for m in "${GC_FOUND_MMD[@]:-}"; do printf "    - %s\n" "$m"; done
-  echo "  samples:"
-  for s in "${GC_FOUND_SAMPLES[@]:-}"; do printf "    - %s\n" "$s"; done
+  manifest_buffer+="  mermaid_diagrams:"$'\n'
+  local m
+  for m in ${GC_FOUND_MMD[@]+"${GC_FOUND_MMD[@]}"}; do
+    manifest_buffer+="    - ${m}"$'\n'
+  done
+  manifest_buffer+="  samples:"$'\n'
+  local s
+  for s in ${GC_FOUND_SAMPLES[@]+"${GC_FOUND_SAMPLES[@]}"}; do
+    manifest_buffer+="    - ${s}"$'\n'
+  done
+
+  if [[ -n "$out_file" ]]; then
+    printf '%s' "$manifest_buffer" > "$out_file"
+  else
+    printf '%s' "$manifest_buffer"
+  fi
 }
 
 # ------------- Normalization (staging copy with canonical names) -------------
@@ -131,36 +169,49 @@ gc::normalize_to_staging() {
   local project_root="$1"
   local work_dir; work_dir="$(gc::ensure_workspace "$project_root")"
   local stage="$work_dir/staging"
+  gc::discover "$project_root" "$stage/discovery.yaml"
 
   # docs
-  [[ -n "${GC_FOUND_DOCS[pdr]:-}"      ]] && install -m 0644 "${GC_FOUND_DOCS[pdr]}"      "$stage/docs/pdr.md"
-  [[ -n "${GC_FOUND_DOCS[sds]:-}"      ]] && install -m 0644 "${GC_FOUND_DOCS[sds]}"      "$stage/docs/sds.md"
-  [[ -n "${GC_FOUND_DOCS[rfp]:-}"      ]] && install -m 0644 "${GC_FOUND_DOCS[rfp]}"      "$stage/docs/rfp.md"
-  [[ -n "${GC_FOUND_DOCS[jira]:-}"     ]] && install -m 0644 "${GC_FOUND_DOCS[jira]}"     "$stage/docs/jira.md"
-  [[ -n "${GC_FOUND_DOCS[ui_pages]:-}" ]] && install -m 0644 "${GC_FOUND_DOCS[ui_pages]}" "$stage/docs/ui-pages.md"
+  local doc_path
+  doc_path="$(gc::_get_found_doc pdr)"
+  [[ -n "$doc_path" ]] && install -m 0644 "$doc_path" "$stage/docs/pdr.md"
+  doc_path="$(gc::_get_found_doc sds)"
+  [[ -n "$doc_path" ]] && install -m 0644 "$doc_path" "$stage/docs/sds.md"
+  doc_path="$(gc::_get_found_doc rfp)"
+  [[ -n "$doc_path" ]] && install -m 0644 "$doc_path" "$stage/docs/rfp.md"
+  doc_path="$(gc::_get_found_doc jira)"
+  [[ -n "$doc_path" ]] && install -m 0644 "$doc_path" "$stage/docs/jira.md"
+  doc_path="$(gc::_get_found_doc ui_pages)"
+  [[ -n "$doc_path" ]] && install -m 0644 "$doc_path" "$stage/docs/ui-pages.md"
 
   # openapi
-  if [[ -n "${GC_FOUND_DOCS[openapi]:-}" ]]; then
-    ext="${GC_FOUND_DOCS[openapi]##*.}"
+  local openapi_path
+  openapi_path="$(gc::_get_found_doc openapi)"
+  if [[ -n "$openapi_path" ]]; then
+    local ext
+    ext="${openapi_path##*.}"
     case "$ext" in
-      yml|yaml) install -m 0644 "${GC_FOUND_DOCS[openapi]}" "$stage/openapi/openapi.yaml" ;;
-      json)     install -m 0644 "${GC_FOUND_DOCS[openapi]}" "$stage/openapi/openapi.json" ;;
-      *)        install -m 0644 "${GC_FOUND_DOCS[openapi]}" "$stage/openapi/openapi.src"  ;;
+      yml|yaml) install -m 0644 "$openapi_path" "$stage/openapi/openapi.yaml" ;;
+      json)     install -m 0644 "$openapi_path" "$stage/openapi/openapi.json" ;;
+      *)        install -m 0644 "$openapi_path" "$stage/openapi/openapi.src"  ;;
     esac
   fi
 
   # sql
-  [[ -n "${GC_FOUND_DOCS[sql]:-}" ]] && install -m 0644 "${GC_FOUND_DOCS[sql]}" "$stage/sql/dump.sql"
+  local sql_path
+  sql_path="$(gc::_get_found_doc sql)"
+  [[ -n "$sql_path" ]] && install -m 0644 "$sql_path" "$stage/sql/dump.sql"
 
   # diagrams
-  for f in "${GC_FOUND_MMD[@]:-}"; do
+  local f
+  for f in ${GC_FOUND_MMD[@]+"${GC_FOUND_MMD[@]}"}; do
     [[ -f "$f" ]] || continue
     base="$(basename "$f")"
     install -m 0644 "$f" "$stage/diagrams/$base"
   done
 
   # samples (preserve relative subdirs if under known sample dirs)
-  for f in "${GC_FOUND_SAMPLES[@]:-}"; do
+  for f in ${GC_FOUND_SAMPLES[@]+"${GC_FOUND_SAMPLES[@]}"}; do
     [[ -f "$f" ]] || continue
     base="$(basename "$f")"
     case "$base" in
@@ -173,9 +224,6 @@ gc::normalize_to_staging() {
     mkdir -p "$destdir"
     install -m 0644 "$f" "$destdir/$base"
   done
-
-  # write discovery manifest
-  gc::discover "$project_root" > "$stage/discovery.yaml"
 
   echo "$work_dir"
 }

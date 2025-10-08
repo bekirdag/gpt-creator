@@ -1,6 +1,6 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version
+set -l subcmds create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
@@ -17,6 +17,7 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from create-project" -l skip-
 complete -c gpt-creator -n "__fish_seen_subcommand_from bootstrap" -l template -r -d "Project template name or auto"
 complete -c gpt-creator -n "__fish_seen_subcommand_from bootstrap" -l skip-template -d "Skip project template scaffolding"
 complete -c gpt-creator -n "__fish_seen_subcommand_from bootstrap" -l fresh -d "Restart pipeline from scratch"
+complete -c gpt-creator -n "__fish_seen_subcommand_from bootstrap" -l rfp -r -d "Path to RFP file" -a "(__fish_complete_path)"
 
 # generate
 complete -c gpt-creator -n "__fish_seen_subcommand_from generate" -a "api web admin db docker all" -d "Facet"
@@ -55,6 +56,11 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from create-pdr" -l force -d 
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-sds" -l model -r -d "Codex model"
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-sds" -l dry-run -d "Do not call Codex"
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-sds" -l force -d "Regenerate all stages"
+
+# create-db-dump
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-db-dump" -l model -r -d "Codex model"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-db-dump" -l dry-run -d "Do not call Codex"
+complete -c gpt-creator -n "__fish_seen_subcommand_from create-db-dump" -l force -d "Regenerate schema and seed dumps"
 
 # create-jira-tasks
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-jira-tasks" -l model -r -d "Codex model"

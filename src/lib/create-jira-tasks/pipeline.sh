@@ -10,6 +10,11 @@ GC_LIB_CREATE_JIRA_TASKS_PIPELINE_SH=1
 set -o errtrace
 
 CJT_DOC_FILES=()
+CJT_SDS_SOURCE=""
+CJT_SDS_CHUNKS_DIR=""
+CJT_SDS_CHUNKS_LIST=""
+CJT_PDR_PATH=""
+CJT_SQL_PATH=""
 
 cjt::log()   { printf '\033[36m[create-jira-tasks]\033[0m %s\n' "$*"; }
 cjt::warn()  { printf '\033[33m[create-jira-tasks][WARN]\033[0m %s\n' "$*"; }
@@ -257,6 +262,10 @@ cjt::init() {
   CJT_TMP_DIR="$CJT_PIPELINE_DIR/tmp"
   CJT_CONTEXT_FILE="$CJT_PIPELINE_DIR/context-full.md"
   CJT_CONTEXT_SNIPPET_FILE="$CJT_PIPELINE_DIR/context-snippet.md"
+  CJT_TASKS_DIR="$CJT_PLAN_DIR/tasks"
+
+  mkdir -p "$CJT_TASKS_DIR"
+  CJT_TASKS_DB_PATH="${CJT_TASKS_DB_PATH:-$CJT_TASKS_DIR/tasks.db}"
 
   mkdir -p "$CJT_PROMPTS_DIR" "$CJT_OUTPUT_DIR" "$CJT_JSON_DIR" \
     "$CJT_JSON_STORIES_DIR" "$CJT_JSON_TASKS_DIR" "$CJT_JSON_REFINED_DIR" "$CJT_TMP_DIR"
@@ -276,14 +285,40 @@ cjt::init() {
   fi
 
   CJT_CODEX_CMD="$codex_bin"
+
+  if [[ "$CJT_FORCE" == "1" && "${CJT_DRY_RUN:-0}" != "1" ]]; then
+    rm -f "$CJT_TASKS_DB_PATH"
+  fi
+
+  CJT_INCREMENTAL_DB=0
+
+  if [[ -f "$CJT_STAGING_DIR/docs/pdr.md" ]]; then
+    CJT_PDR_PATH="$CJT_STAGING_DIR/docs/pdr.md"
+  elif [[ -f "$CJT_STAGING_DIR/pdr.md" ]]; then
+    CJT_PDR_PATH="$CJT_STAGING_DIR/pdr.md"
+  elif [[ -f "$CJT_PLAN_DIR/pdr/pdr.md" ]]; then
+    CJT_PDR_PATH="$CJT_PLAN_DIR/pdr/pdr.md"
+  else
+    CJT_PDR_PATH=""
+  fi
+
+  if [[ -f "$CJT_STAGING_DIR/sql/dump.sql" ]]; then
+    CJT_SQL_PATH="$CJT_STAGING_DIR/sql/dump.sql"
+  else
+    CJT_SQL_PATH=""
+    if [[ -d "$CJT_STAGING_DIR/sql" ]]; then
+      local first_sql
+      first_sql="$(find "$CJT_STAGING_DIR/sql" -maxdepth 1 -type f -name '*.sql' | head -n1 || true)"
+      CJT_SQL_PATH="$first_sql"
+    fi
+  fi
+
   cjt::state_init
 }
 
 cjt::prepare_inputs() {
   cjt::log "Discovering documentation under $CJT_PROJECT_ROOT"
-  local manifest
-  manifest="$(gc::discover "$CJT_PROJECT_ROOT")"
-  printf '%s\n' "$manifest" > "$CJT_PIPELINE_DIR/discovery.yaml"
+  gc::discover "$CJT_PROJECT_ROOT" "$CJT_PIPELINE_DIR/discovery.yaml"
 
   cjt::log "Normalizing source documents into staging workspace"
   local _had_nounset=0
@@ -314,6 +349,69 @@ cjt::collect_source_files() {
   done
 }
 
+cjt::chunk_doc_by_headings() {
+  local source_file="${1:?source file required}"
+  local chunk_dir="${2:?chunk directory required}"
+  local out_list="${3:?chunk list file required}"
+  python3 - <<'PY' "$source_file" "$chunk_dir" "$out_list"
+import re
+import sys
+from pathlib import Path
+
+
+def main(source_path: Path, chunk_dir: Path, out_list: Path) -> None:
+    text = source_path.read_text(encoding='utf-8', errors='ignore')
+    lines = text.splitlines()
+
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    chunks = []
+
+    heading_re = re.compile(r'^(#+)\s*(.+)$')
+    current = []
+    current_heading = 'Introduction'
+    current_label = ''
+    index = 0
+
+    def flush() -> None:
+        nonlocal index, current
+        nonlocal current_heading, current_label
+        if not current:
+            return
+        index += 1
+        chunk_path = chunk_dir / f"chunk_{index:03d}.md"
+        chunk_path.write_text('\n'.join(current).strip() + '\n', encoding='utf-8')
+        chunks.append((str(chunk_path), current_label, current_heading))
+        current = []
+
+    for line in lines:
+        match = heading_re.match(line)
+        if match:
+            flush()
+            heading_text = match.group(2).strip()
+            label_match = re.match(r'((?:\d+\.)*\d+)', heading_text)
+            current_label = label_match.group(1) if label_match else ''
+            current_heading = heading_text
+            current = [line]
+        else:
+            current.append(line)
+
+    flush()
+
+    if not chunks:
+        chunk_path = chunk_dir / "chunk_001.md"
+        chunk_path.write_text(text, encoding='utf-8')
+        chunks.append((str(chunk_path), '', 'Full Document'))
+
+    out_lines = ["|".join(part.replace('\n', ' ').strip() for part in chunk) for chunk in chunks]
+    out_list.write_text('\n'.join(out_lines) + ('\n' if out_lines else ''), encoding='utf-8')
+
+
+if __name__ == '__main__':
+    main(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
+
+PY
+}
+
 cjt::build_context_files() {
   local _had_nounset=0
   if [[ $- == *u* ]]; then
@@ -324,12 +422,18 @@ cjt::build_context_files() {
   if [[ -z ${CJT_DOC_FILES+x} ]]; then
     CJT_DOC_FILES=()
   fi
+  local sds_candidate=""
   {
     echo "# Consolidated Project Context"
     echo "(Source: .gpt-creator staging copy)"
     echo
     local file
     for file in "${CJT_DOC_FILES[@]}"; do
+      local base_name
+      base_name="$(basename "$file")"
+      if [[ -z "$sds_candidate" && "$base_name" =~ [sS][dD][sS] ]]; then
+        sds_candidate="$file"
+      fi
       echo "----- FILE: $(basename "$file") -----"
       sed -e 's/\t/  /g' "$file"
       echo
@@ -356,6 +460,21 @@ cjt::build_context_files() {
       fi
     done
   } > "$CJT_CONTEXT_SNIPPET_FILE"
+
+  if [[ -z "$sds_candidate" ]] && [[ -f "$CJT_PLAN_DIR/sds/sds.md" ]]; then
+    sds_candidate="$CJT_PLAN_DIR/sds/sds.md"
+  fi
+
+  if [[ -n "$sds_candidate" ]]; then
+    CJT_SDS_SOURCE="$sds_candidate"
+    CJT_SDS_CHUNKS_DIR="$CJT_PIPELINE_DIR/sds-chunks"
+    CJT_SDS_CHUNKS_LIST="$CJT_SDS_CHUNKS_DIR/list.txt"
+    cjt::chunk_doc_by_headings "$CJT_SDS_SOURCE" "$CJT_SDS_CHUNKS_DIR" "$CJT_SDS_CHUNKS_LIST"
+  else
+    CJT_SDS_SOURCE=""
+    CJT_SDS_CHUNKS_DIR=""
+    CJT_SDS_CHUNKS_LIST=""
+  fi
 
   if (( _had_nounset )); then
     set -u
@@ -575,25 +694,9 @@ cjt::generate_stories() {
 
   cjt::state_mark_stage_pending "stories"
 
-  local epic_ids
-  mapfile -t epic_ids < <(python3 - "$epics_json" <<'PY'
-import json
-import os
-import sys
-from datetime import datetime
-from pathlib import Path
-
-payload = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-epics = payload.get('epics') or []
-for epic in epics:
-    eid = (epic.get('epic_id') or '').strip()
-    if eid:
-        print(eid)
-PY
-)
-
   local epic_id
-  for epic_id in "${epic_ids[@]}"; do
+  while IFS= read -r epic_id; do
+    [[ -n "$epic_id" ]] || continue
     local slug="$(cjt::slugify "$epic_id")"
     local prompt_file="$CJT_PROMPTS_DIR/story_${slug}.prompt.md"
     local raw_file="$CJT_OUTPUT_DIR/story_${slug}.raw.txt"
@@ -611,7 +714,21 @@ PY
     else
       cjt::die "Codex failed while generating stories for ${epic_id}"
     fi
-  done
+  done < <(python3 - "$epics_json" <<'PY'
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+epics = payload.get('epics') or []
+for epic in epics:
+    eid = (epic.get('epic_id') or '').strip()
+    if eid:
+        print(eid)
+PY
+  )
 
   cjt::state_mark_stage_completed "stories"
 }
@@ -696,8 +813,6 @@ PY
 }
 
 cjt::generate_tasks() {
-  local stories
-  mapfile -t stories < <(find "$CJT_JSON_STORIES_DIR" -maxdepth 1 -type f -name '*.json' | sort)
   if cjt::state_stage_is_completed "tasks"; then
     cjt::log "Tasks already generated; skipping"
     return
@@ -705,7 +820,8 @@ cjt::generate_tasks() {
 
   cjt::state_mark_stage_pending "tasks"
   local story_file
-  for story_file in "${stories[@]}"; do
+  while IFS= read -r story_file; do
+    [[ -n "$story_file" ]] || continue
     local slug
     slug="${story_file##*/}"; slug="${slug%.json}"
     local prompt_file="$CJT_PROMPTS_DIR/tasks_${slug}.prompt.md"
@@ -720,18 +836,112 @@ cjt::generate_tasks() {
     if cjt::run_codex "$prompt_file" "$raw_file" "tasks-${slug}"; then
       cjt::wrap_json_extractor "$raw_file" "$json_file"
       cjt::state_mark_story_completed "tasks" "$slug"
+      cjt::sync_story_snapshot_to_db "$json_file" "$slug"
+      cjt::inline_refine_story_tasks "$json_file" "$slug"
     else
       cjt::die "Codex failed while generating tasks for story ${slug}"
     fi
-  done
+  done < <(find "$CJT_JSON_STORIES_DIR" -maxdepth 1 -type f -name '*.json' | sort)
 
   cjt::state_mark_stage_completed "tasks"
+}
+
+cjt::sync_story_snapshot_to_db() {
+  local story_json="${1:?story json required}"
+  local slug="${2:?story slug required}"
+  if [[ "${CJT_DRY_RUN:-0}" == "1" ]]; then
+    return
+  fi
+  if [[ -z "${CJT_TASKS_DB_PATH:-}" ]]; then
+    return
+  fi
+  if ! python3 "$CJT_ROOT_DIR/src/lib/create-jira-tasks/upsert_story_into_db.py" \
+      "$CJT_TASKS_DB_PATH" "$story_json" "$slug"; then
+    cjt::warn "Failed to upsert story ${slug} into tasks database"
+  else
+    CJT_INCREMENTAL_DB=1
+  fi
+}
+
+cjt::inline_refine_story_tasks() {
+  local story_json="${1:?story json required}"
+  local slug="${2:?story slug required}"
+  if [[ "${CJT_DRY_RUN:-0}" == "1" ]]; then
+    cjt::log "[dry-run] Skipping inline refinement for ${slug}"
+    return
+  fi
+  if [[ ! -f "$story_json" ]]; then
+    return
+  fi
+
+  local working="$CJT_TMP_DIR/inline_refine_${slug}.json"
+  mkdir -p "$CJT_TMP_DIR"
+  cp "$story_json" "$working" || {
+    cjt::warn "Unable to prepare working copy for ${slug}; skipping inline refinement"
+    return
+  }
+
+  local total
+  total=$(python3 - <<'PY' "$working"
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    print(0)
+else:
+    tasks = payload.get('tasks') or []
+    print(len(tasks))
+PY
+)
+  total=${total//$'\n'/}
+  if [[ -z "$total" ]]; then
+    total=0
+  fi
+  if (( total <= 0 )); then
+    rm -f "$working" 2>/dev/null || true
+    return
+  fi
+
+  cjt::log "Refining tasks inline for story ${slug} (${total} tasks)"
+
+  local idx
+  for (( idx=0; idx<total; idx++ )); do
+    local task_num
+    printf -v task_num "%03d" $((idx + 1))
+    local prompt_file="$CJT_PROMPTS_DIR/inline_refine_${slug}_${task_num}.prompt.md"
+    local raw_file="$CJT_OUTPUT_DIR/inline_refine_${slug}_${task_num}.raw.txt"
+    local refined_json="$CJT_TMP_DIR/inline_refine_${slug}_${task_num}.json"
+
+    cjt::write_refine_task_prompt \
+      "$working" "$idx" "$prompt_file" \
+      "${CJT_SDS_CHUNKS_LIST:-}" "${CJT_PDR_PATH:-}" "${CJT_SQL_PATH:-}" "${CJT_TASKS_DB_PATH:-}"
+
+    if cjt::run_codex "$prompt_file" "$raw_file" "refine-inline-${slug}-task-${task_num}"; then
+      if cjt::wrap_json_extractor "$raw_file" "$refined_json"; then
+        cjt::apply_refined_task "$working" "$refined_json" "$idx"
+        cjt::sync_story_snapshot_to_db "$working" "$slug"
+      else
+        cjt::warn "Inline refinement produced non-JSON output for ${slug} task ${task_num}; keeping prior content"
+      fi
+    else
+      cjt::warn "Codex failed during inline refinement for ${slug} task ${task_num}"
+    fi
+
+    rm -f "$raw_file" "$refined_json" 2>/dev/null || true
+  done
+
+  mv "$working" "$story_json"
+  cjt::sync_story_snapshot_to_db "$story_json" "$slug"
 }
 
 cjt::write_task_prompt() {
   local story_file="${1:?story json required}"
   local prompt_file="${2:?prompt file required}"
-  python3 - "$story_file" "$CJT_CONTEXT_SNIPPET_FILE" "$prompt_file" <<'PY'
+  python3 - "$story_file" "$CJT_CONTEXT_SNIPPET_FILE" "$prompt_file" "${CJT_SDS_CHUNKS_LIST:-}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -739,6 +949,7 @@ from pathlib import Path
 story_path = Path(sys.argv[1])
 context = Path(sys.argv[2]).read_text(encoding='utf-8')
 prompt_path = Path(sys.argv[3])
+sds_chunk_list = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None
 
 story_payload = json.loads(story_path.read_text(encoding='utf-8'))
 
@@ -746,6 +957,26 @@ epic_id = story_payload.get('epic_id')
 story = story_payload.get('story')
 if not story:
     raise SystemExit(f"Story payload missing in {story_path}")
+
+chunk_entries = []
+if sds_chunk_list and sds_chunk_list.exists():
+    for line in sds_chunk_list.read_text(encoding='utf-8').splitlines():
+        if not line.strip():
+            continue
+        parts = line.split('|', 2)
+        chunk_path = Path(parts[0].strip())
+        label = parts[1].strip() if len(parts) > 1 else ''
+        heading = parts[2].strip() if len(parts) > 2 else ''
+        if chunk_path.exists():
+            try:
+                content = chunk_path.read_text(encoding='utf-8').strip()
+            except Exception:
+                content = ''
+            if content:
+                chunk_entries.append((chunk_path.name, label, heading, content))
+
+MAX_OVERVIEW = 20
+MAX_CONTENT = 12
 
 with prompt_path.open('w', encoding='utf-8') as fh:
     fh.write("You are a delivery engineer decomposing a single user story into actionable Jira tasks.\n\n")
@@ -771,6 +1002,22 @@ with prompt_path.open('w', encoding='utf-8') as fh:
     fh.write("- Cross-check each detail against the staged PDR, SDS, OpenAPI, SQL, and sample documents; bring the task into alignment with any mismatches you find.\n")
     fh.write("- If information is missing from the task, enrich it with specifics derived from the docs (fields, DB tables, endpoints, validations, RBAC, analytics, etc.).\n")
     fh.write("\n")
+    if chunk_entries:
+        fh.write("## SDS sections overview\n")
+        for name, label, heading, _ in chunk_entries[:MAX_OVERVIEW]:
+            ref = f"SDS {label}" if label else "SDS section"
+            title = heading or name
+            fh.write(f"- {ref}: {title}\n")
+        if len(chunk_entries) > MAX_OVERVIEW:
+            fh.write(f"- ...(remaining {len(chunk_entries) - MAX_OVERVIEW} sections omitted in overview)\n")
+        fh.write("\n## SDS source chunks\n")
+        for name, label, heading, content in chunk_entries[:MAX_CONTENT]:
+            ref = f"SDS {label}" if label else (heading or name)
+            fh.write(f"### {ref}\n")
+            fh.write(content)
+            fh.write("\n\n")
+        if len(chunk_entries) > MAX_CONTENT:
+            fh.write(f"(Additional {len(chunk_entries) - MAX_CONTENT} SDS chunks not shown; reference the overview and full SDS document for complete context.)\n\n")
     fh.write("## Output JSON schema\n")
     fh.write("{\n  \"story_id\": \"...\",\n  \"story_title\": \"...\",\n  \"tasks\": [\n    {\n      \"id\": \"WEB-01-T01\",\n      \"title\": \"...\",\n      \"description\": \"Detailed instructions...\",\n      \"acceptance_criteria\": [\"...\"],\n      \"tags\": [\"Web-FE\"],\n      \"assignees\": [\"FE dev\"],\n      \"estimate\": 5,\n      \"story_points\": 5,\n      \"dependencies\": [\"WEB-01-T00\"],\n      \"document_references\": [\"SDS §10.1.1\"],\n      \"endpoints\": [\"GET /api/v1/...\"],\n      \"data_contracts\": [\"Request payloads, DB tables, indexes, policies, RBAC\"],\n      \"qa_notes\": [\"Unit tests, integration tests\"],\n      \"user_roles\": [\"Visitor\"]\n    }\n  ]\n}\n")
     fh.write("Return strictly valid JSON with all required fields.\n")
@@ -965,7 +1212,8 @@ PY
       local raw_file="$CJT_OUTPUT_DIR/refine_${slug}_task_${task_num}.raw.txt"
       local json_file="$CJT_TMP_DIR/refine_${slug}_task_${task_num}.json"
 
-      cjt::write_refine_task_prompt "$working_copy" "$actual_index" "$prompt_file"
+      cjt::write_refine_task_prompt "$working_copy" "$actual_index" "$prompt_file" \
+        "${CJT_SDS_CHUNKS_LIST:-}" "${CJT_PDR_PATH:-}" "${CJT_SQL_PATH:-}" "${CJT_TASKS_DB_PATH:-}"
       local task_title
       task_title=$(cjt::task_title_from_json "$working_copy" "$actual_index")
       local attempt=0
@@ -1102,16 +1350,107 @@ cjt::write_refine_task_prompt() {
   local task_index="${2:?task index required}"
   local prompt_file="${3:?prompt file required}"
   local project_name_label="${CJT_PROJECT_TITLE:-the project}"
-  CJT_PROMPT_TITLE="$project_name_label" python3 - "$tasks_file" "$task_index" "$CJT_CONTEXT_FILE" "$prompt_file" <<'PY'
+  CJT_PROMPT_TITLE="$project_name_label" python3 - \
+    "$tasks_file" \
+    "$task_index" \
+    "$CJT_CONTEXT_FILE" \
+    "$prompt_file" \
+    "${CJT_SDS_CHUNKS_LIST:-}" \
+    "${CJT_PDR_PATH:-}" \
+    "${CJT_SQL_PATH:-}" \
+    "${CJT_TASKS_DB_PATH:-}" <<'PY'
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
+
+MAX_SDS_OVERVIEW = 12
+MAX_SDS_CHUNKS = 8
+MAX_PDR_CHARS = 3000
+MAX_SQL_CHARS = 3000
+MAX_OTHER_TASKS = 10
+
+def safe_excerpt(path: Path, limit: int) -> str:
+    if not path or not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding='utf-8', errors='ignore').strip()
+    except Exception:
+        return ""
+    if len(text) > limit:
+        text = text[:limit].rstrip() + '\n... (truncated)'
+    return text
+
+def load_sds_chunks(list_path: Path) -> list[tuple[str, str, str, str]]:
+    if not list_path or not list_path.exists():
+        return []
+    entries: list[tuple[str, str, str, str]] = []
+    for line in list_path.read_text(encoding='utf-8').splitlines():
+        if not line.strip():
+            continue
+        parts = line.split('|', 2)
+        chunk_path = Path(parts[0].strip())
+        label = parts[1].strip() if len(parts) > 1 else ''
+        heading = parts[2].strip() if len(parts) > 2 else ''
+        if not chunk_path.exists():
+            continue
+        try:
+            content = chunk_path.read_text(encoding='utf-8').strip()
+        except Exception:
+            continue
+        if content:
+            entries.append((chunk_path.name, label, heading, content))
+    return entries
+
+def load_other_tasks(db_path: Path, story_slug: str, current_index: int) -> list[str]:
+    if not db_path or not db_path.exists():
+        return []
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+    except Exception:
+        return []
+    lines: list[str] = []
+    try:
+        for row in conn.execute(
+            "SELECT position, task_id, title, status, dependencies_json FROM tasks WHERE story_slug = ? ORDER BY position",
+            (story_slug,),
+        ):
+            pos = int(row['position'] or 0)
+            if pos == current_index:
+                continue
+            identifier = (row['task_id'] or '').strip() or f"Task #{pos + 1:02d}"
+            title = (row['title'] or '').strip() or 'Untitled'
+            status = (row['status'] or 'pending').strip()
+            deps_summary = ''
+            deps_raw = row['dependencies_json'] or ''
+            if deps_raw:
+                try:
+                    parsed = json.loads(deps_raw)
+                    if isinstance(parsed, list) and parsed:
+                        deps_summary = ', '.join(str(item).strip() for item in parsed if str(item).strip())
+                except Exception:
+                    deps_summary = deps_raw
+            line = f"- {identifier}: {title} [status: {status}]"
+            if deps_summary:
+                line += f" (depends on: {deps_summary})"
+            lines.append(line)
+            if len(lines) >= MAX_OTHER_TASKS:
+                lines.append('- ... (additional tasks omitted)')
+                break
+    finally:
+        conn.close()
+    return lines
 
 story_path = Path(sys.argv[1])
 task_index = int(sys.argv[2])
 context = Path(sys.argv[3]).read_text(encoding='utf-8')
 prompt_path = Path(sys.argv[4])
+sds_list = Path(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else None
+pdr_path = Path(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] else None
+sql_path = Path(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else None
+db_path = Path(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] else None
 base_label = os.environ.get('CJT_PROMPT_TITLE', 'the project').strip()
 project_label = f"{base_label} delivery team" if base_label else "the delivery team"
 
@@ -1120,54 +1459,95 @@ tasks = story_payload.get('tasks') or []
 if task_index < 0 or task_index >= len(tasks):
     raise SystemExit(f"Task index {task_index} out of range for {story_path}")
 
+target_task = tasks[task_index]
 story_id = story_payload.get('story_id') or ''
 story_title = story_payload.get('story_title') or ''
 epic_id = story_payload.get('epic_id') or ''
-target_task = tasks[task_index]
+epic_title = story_payload.get('epic_title') or ''
+story_description = story_payload.get('story', {}).get('description') or story_payload.get('description') or ''
+story_roles = story_payload.get('story', {}).get('user_roles') or story_payload.get('user_roles') or []
+story_acceptance = story_payload.get('story', {}).get('acceptance_criteria') or story_payload.get('acceptance_criteria') or []
+
+sds_chunks = load_sds_chunks(sds_list)
+pdr_excerpt = safe_excerpt(pdr_path, MAX_PDR_CHARS)
+sql_excerpt = safe_excerpt(sql_path, MAX_SQL_CHARS)
+story_slug = story_path.stem
+other_tasks = load_other_tasks(db_path, story_slug, task_index)
 
 with prompt_path.open('w', encoding='utf-8') as fh:
     fh.write(f"You are validating and enriching a Jira task for the {project_label}.\n")
-    fh.write("Only website and admin/backoffice scopes are in play—ignore DevOps and infra.\n\n")
+    fh.write("Cross-check the System Design Specification (SDS), Product Requirements Document (PDR), database schema, and existing backlog tasks. Align this task with all authoritative sources.\n")
+    fh.write("Resolve any conflicts you discover by updating the task details.\n\n")
 
     fh.write("## Project documentation excerpt\n")
     fh.write(context)
     fh.write("\n\n")
 
+    fh.write("## PDR excerpt\n")
+    fh.write(pdr_excerpt or "(No PDR excerpt available)\n")
+    fh.write("\n")
+
+    fh.write("## Database schema excerpt\n")
+    fh.write(sql_excerpt or "(No database dump available)\n")
+    fh.write("\n")
+
+    if sds_chunks:
+        fh.write("## SDS sections overview\n")
+        for name, label, heading, _ in sds_chunks[:MAX_SDS_OVERVIEW]:
+            ref = f"SDS {label}" if label else "SDS section"
+            title = heading or name
+            fh.write(f"- {ref}: {title}\n")
+        if len(sds_chunks) > MAX_SDS_OVERVIEW:
+            fh.write(f"- ...(remaining {len(sds_chunks) - MAX_SDS_OVERVIEW} sections omitted)\n")
+        fh.write("\n## SDS source snippets\n")
+        for name, label, heading, content in sds_chunks[:MAX_SDS_CHUNKS]:
+            ref = f"SDS {label}" if label else (heading or name)
+            fh.write(f"### {ref}\n")
+            fh.write(content)
+            fh.write("\n\n")
+        if len(sds_chunks) > MAX_SDS_CHUNKS:
+            fh.write(f"(Additional {len(sds_chunks) - MAX_SDS_CHUNKS} SDS sections not shown; consult the full SDS for details.)\n\n")
+
     fh.write("## User story context\n")
     story_ctx = {
         "epic_id": epic_id,
+        "epic_title": epic_title,
         "story_id": story_id,
         "story_title": story_title,
-        "story_description": story_payload.get('description') or '',
-        "story_acceptance_criteria": story_payload.get('acceptance_criteria') or [],
-        "story_tags": story_payload.get('tags') or [],
-        "story_roles": story_payload.get('user_roles') or []
+        "story_description": story_description,
+        "story_roles": story_roles,
+        "story_acceptance_criteria": story_acceptance,
     }
     json.dump(story_ctx, fh, indent=2)
     fh.write("\n\n")
+
+    if other_tasks:
+        fh.write("## Related tasks (current backlog snapshot)\n")
+        fh.write("These tasks already exist in tasks.db; keep IDs, dependencies, and scope aligned.\n")
+        fh.write("\n".join(other_tasks))
+        fh.write("\n\n")
 
     fh.write("## Current task draft\n")
     json.dump(target_task, fh, indent=2)
     fh.write("\n\n")
 
     fh.write("## Requirements\n")
-    fh.write("- Ensure the task aligns with PDR, SDS, SQL schema, and OpenAPI definitions.\n")
+    fh.write("- Align with PDR, SDS, database schema, OpenAPI definitions, and related backlog tasks.\n")
     fh.write("- Spell out endpoints, payload contracts (values, types, validation), database tables/indexes/keys, caching/idempotency, and policy/RBAC expectations.\n")
-    fh.write("- Cover sunny-day, edge cases, error handling, observability, analytics, and QA (unit/integration/E2E).\n")
-    fh.write("- Populate structured fields: title, description, acceptance_criteria, tags, assignees, story_points, estimate, dependencies, document_references, endpoints, data_contracts, qa_notes, analytics, observability, user_roles, policy.\n")
-    fh.write("- Use the approved assignee list: Architect, Dev/Ops, Project Manager, UI/UX designer, BE dev, FE dev, Test Eng.\n")
-    fh.write("- Tags should follow the format [Web-FE], [Web-BE], [Admin-FE], [Admin-BE], [API], [DB], [Design], [QA], etc.\n")
-    fh.write("- Provide story_points as an integer (1..13) and keep dependencies referencing other task IDs when relevant.\n")
-    fh.write("- Return rich acceptance criteria that are testable and cover negative paths.\n")
-    fh.write("- Do not include markdown fences or commentary outside the JSON response.\n\n")
+    fh.write("- Cover sunny-day, error, and edge-case flows along with observability, analytics, and QA (unit/integration/E2E).\n")
+    fh.write("- Populate title, description, acceptance_criteria, tags, assignees, story_points, estimate, dependencies, document_references, endpoints, data_contracts, qa_notes, analytics, observability, user_roles, policy, idempotency, and rate_limits.\n")
+    fh.write("- Use approved assignee roles (Architect, Dev/Ops, Project Manager, UI/UX designer, BE dev, FE dev, Test Eng).\n")
+    fh.write("- Tags must follow [Web-FE], [Web-BE], [Admin-FE], [Admin-BE], [API], [DB], [Design], [QA], etc.\n")
+    fh.write("- Provide integer story_points (1..13) and realistic hour estimates.\n")
+    fh.write("- Update dependencies when this task blocks or relies on others.\n")
+    fh.write("- Return only JSON (no markdown fences or explanatory prose).\n\n")
 
     task_id = target_task.get('id') or target_task.get('task_id') or 'TASK-ID'
     fh.write("## Output format (JSON only)\n")
-    fh.write("{\n  \"task\": {\n    \"id\": \"%s\",\n    \"title\": \"...\",\n    \"description\": \"...\",\n    \"acceptance_criteria\": [\"...\"],\n    \"tags\": [\"Web-FE\"],\n    \"assignees\": [\"FE dev\"],\n    \"estimate\": 5,\n    \"story_points\": 5,\n    \"dependencies\": [\"%s\"],\n    \"document_references\": [\"SDS §10.1.1\"],\n    \"endpoints\": [\"GET /api/v1/...\"],\n    \"data_contracts\": [\"Request payload...\"],\n    \"qa_notes\": [\"Unit tests\"],\n    \"analytics\": [\"Track ...\"],\n    \"observability\": [\"Metrics ...\"],\n    \"user_roles\": [\"Visitor\"],\n    \"policy\": [\"Role mapping...\"],\n    \"idempotency\": \"Describe behaviour...\",\n    \"rate_limits\": \"Document limits...\"\n  }\n}\n" % (task_id, task_id))
+    fh.write("{\n  \"task\": {\n    \"id\": \"%s\",\n    \"title\": \"...\",\n    \"description\": \"...\",\n    \"acceptance_criteria\": [\"...\"],\n    \"tags\": [\"Web-FE\"],\n    \"assignees\": [\"FE dev\"],\n    \"estimate\": 5,\n    \"story_points\": 5,\n    \"dependencies\": [\"%s\"],\n    \"document_references\": [\"SDS §10.1.1\"],\n    \"endpoints\": [\"GET /api/v1/...\"],\n    \"data_contracts\": [\"Request payload...\"],\n    \"qa_notes\": [\"Tests...\"],\n    \"analytics\": [\"Events...\"],\n    \"observability\": [\"Metrics...\"],\n    \"user_roles\": [\"Visitor\"],\n    \"policy\": [\"RBAC mapping...\"],\n    \"idempotency\": \"Describe behaviour...\",\n    \"rate_limits\": \"Document limits...\"\n  }\n}\n" % (task_id, task_id))
     fh.write("Ensure the JSON uses double quotes and escapes newline characters inside string values.\n")
 PY
 }
-
 cjt::sync_refined_task_to_db() {
   local story_json="${1:?refined story json required}"
   local slug="${2:?story slug required}"
@@ -1264,6 +1644,10 @@ cjt::build_payload() {
 }
 
 cjt::update_database() {
+  if [[ "${CJT_INCREMENTAL_DB:-0}" == "1" ]]; then
+    cjt::log "tasks.db already synchronized incrementally; skipping bulk rebuild"
+    return
+  fi
   local payload="$CJT_JSON_DIR/tasks_payload.json"
   [[ -f "$payload" ]] || cjt::die "Tasks payload missing: ${payload}"
 

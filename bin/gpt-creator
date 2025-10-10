@@ -4902,6 +4902,7 @@ EOHELP
 
     processed_any=1
 
+    : "${total_tasks:=0}"; : "${next_task:=0}"
     local total_tasks_int=0
     [[ -n "$total_tasks" ]] && total_tasks_int=$((total_tasks))
     local next_task_int=0

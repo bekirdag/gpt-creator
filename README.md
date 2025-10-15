@@ -17,6 +17,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Doc synthesis**: `create-pdr` converts the staged RFP into a multi-level Product Requirements Document (PDR) by iteratively asking Codex to draft the table of contents, sections, and detailed subsections. `create-sds` continues the loop, transforming the staged PDR into a System Design Specification that drills from architecture overview down to low-level operational detail.
 - **Database synthesis**: `create-db-dump` reads the SDS (and PDR context) to draft a full MySQL schema plus production-grade seed data, then reviews both dumps for consistency before storing them under `.gpt-creator/staging/plan/create-db-dump/sql/`.
 - **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, and `work-on-tasks` executes/resumes backlog items. The legacy `iterate` command is deprecated.
+- **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
 
 ---
 
@@ -38,6 +39,14 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 ---
 
 ## Installation
+
+### Option 0 — One-liner install (curl)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bekirdag/gpt-creator/main/scripts/install-latest.sh | bash
+```
+
+Add extra flags after `--`, e.g. `... | bash -s -- --prefix /opt --force --skip-preflight`. The script clones the repository into a temporary directory, runs the standard installer (`scripts/install.sh --prefix /usr/local` by default), then removes the temporary files. Requires `git` and `mktemp` on your `PATH`.
 
 ### Option 1 — System-wide install (macOS)
 
@@ -61,6 +70,16 @@ cd gpt-creator
 ```
 
 Keep the repo on your `PATH`, or invoke `./bin/gpt-creator` directly.
+
+### Updating an existing install
+
+Run:
+
+```bash
+gpt-creator update [--force]
+```
+
+The updater clones the latest `gpt-creator` sources into a temporary directory, runs `scripts/install.sh --prefix /usr/local`, and removes the temporary files. Use `--force` when you need to replace an existing `/usr/local/bin/gpt-creator` symlink. Set `GC_UPDATE_REPO_URL` if you maintain an internal fork, and ensure `git` is available on your `PATH`. To install to a different prefix, re-run `scripts/install.sh` manually.
 
 ---
 
@@ -199,6 +218,13 @@ Runs:
 - `verify/check-program-filters.sh`
 
 Scripts exit with `0` on success, `3` when a dependency is missing, or non-zero on failure.
+
+### Codex Token Usage
+```
+gpt-creator tokens --project /path/to/project --details
+```
+- Aggregates Codex token metrics from `.gpt-creator/logs/codex-usage.ndjson`, reporting prompt/completion/total counts and optional per-call breakdowns.
+- Add `--json` for machine-readable output or drop `--details` to print only the summary totals.
 
 ### 8. Create Tasks (Jira snapshot)
 ```

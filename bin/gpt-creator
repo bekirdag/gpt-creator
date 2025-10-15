@@ -5,6 +5,13 @@
 
 set -Eeuo pipefail
 
+# Crash logging globals
+GC_CRASH_LOGGED=0
+GC_LAST_ERROR_CMD=""
+GC_LAST_ERROR_STATUS=0
+GC_FAIL_LOG_DIR=""
+GC_INVOCATION=""
+
 # Ensure docker compose commands have adequate timeouts unless caller overrides
 if [[ -n "${GC_DOCKER_COMPOSE_TIMEOUT:-}" ]]; then
   COMPOSE_HTTP_TIMEOUT="$GC_DOCKER_COMPOSE_TIMEOUT"
@@ -335,6 +342,7 @@ ensure_ctx() {
   PROJECT_SLUG="$(slugify_name "${GC_DOCKER_PROJECT_NAME:-$base_name}")"
   GC_DOCKER_PROJECT_NAME="${GC_DOCKER_PROJECT_NAME:-$PROJECT_SLUG}"
   COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$GC_DOCKER_PROJECT_NAME}"
+  GC_FAIL_LOG_DIR="$LOG_DIR"
   export GC_DOCKER_PROJECT_NAME COMPOSE_PROJECT_NAME PROJECT_SLUG
 }
 
@@ -357,6 +365,156 @@ gc_bootstrap_state_dir() {
 
 gc_bootstrap_state_file() {
   printf '%s\n' "$(gc_bootstrap_state_dir)/state.json"
+}
+
+gc_capture_error_context() {
+  local status="${1:-0}"
+  local command="${2:-}"
+  (( status == 0 )) && return
+  GC_LAST_ERROR_STATUS="$status"
+  GC_LAST_ERROR_CMD="$command"
+}
+
+gc_write_crash_log() {
+  local status="${1:-1}"
+  if (( GC_CRASH_LOGGED )); then
+    return
+  fi
+
+  local log_dir="${GC_FAIL_LOG_DIR:-}"
+  if [[ -z "$log_dir" ]]; then
+    if [[ -n "${PROJECT_ROOT:-}" ]]; then
+      log_dir="${PROJECT_ROOT}/.gpt-creator/logs"
+    else
+      log_dir="${PWD}/.gpt-creator/logs"
+    fi
+  fi
+
+  if ! mkdir -p "$log_dir" 2>/dev/null; then
+    return
+  fi
+
+  local log_file="${log_dir}/crash.log"
+  local timestamp
+  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local invocation="${GC_INVOCATION:-$0}"
+  local last_command="${GC_LAST_ERROR_CMD:-}"
+
+  {
+    printf 'timestamp=%s\n' "$timestamp"
+    printf 'command=%s\n' "$invocation"
+    printf 'exit_code=%s\n' "$status"
+    if [[ -n "$last_command" ]]; then
+      printf 'last_command=%s\n' "$last_command"
+    fi
+    if [[ -n "${PROJECT_ROOT:-}" ]]; then
+      printf 'project_root=%s\n' "$PROJECT_ROOT"
+    fi
+    printf 'working_dir=%s\n' "$PWD"
+    printf -- '---\n'
+  } >>"$log_file" 2>/dev/null || return
+
+  GC_CRASH_LOGGED=1
+}
+
+gc_exit_handler() {
+  local status="${1:-0}"
+  (( status == 0 )) && return
+  if [[ -z "${GC_LAST_ERROR_STATUS:-}" || "${GC_LAST_ERROR_STATUS}" -eq 0 ]]; then
+    GC_LAST_ERROR_STATUS="$status"
+  fi
+  gc_write_crash_log "$status"
+}
+
+gc_record_codex_usage() {
+  local log_file="${1:-}"
+  local task="${2:-}"
+  local model="${3:-}"
+  local prompt_file="${4:-}"
+  local exit_code="${5:-0}"
+
+  [[ -n "$log_file" && -f "$log_file" ]] || return 0
+
+  local usage_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
+  mkdir -p "$usage_dir"
+  local usage_file="${usage_dir}/codex-usage.ndjson"
+  local timestamp
+  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+  if python3 - <<'PY' "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code"; then
+import json
+import pathlib
+import re
+import sys
+
+log_path = pathlib.Path(sys.argv[1])
+usage_path = pathlib.Path(sys.argv[2])
+timestamp = sys.argv[3]
+task = sys.argv[4] or None
+model = sys.argv[5] or None
+prompt_file = sys.argv[6] or None
+exit_code = int(sys.argv[7])
+
+if log_path.exists():
+    raw_text = log_path.read_text(encoding="utf-8", errors="ignore")
+else:
+    raw_text = ""
+
+fields = {}
+patterns = [
+    ("prompt_tokens", r'prompt[_\s-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*(\d+)'),
+    ("completion_tokens", r'completion[_\s-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*(\d+)'),
+    ("total_tokens", r'total[_\s-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*(\d+)'),
+    ("input_tokens", r'input[_\s-]*tokens["\']?\s*[:=]\s*(\d+)'),
+    ("output_tokens", r'output[_\s-]*tokens["\']?\s*[:=]\s*(\d+)'),
+    ("cached_tokens", r'cached[_\s-]*tokens["\']?\s*[:=]\s*(\d+)'),
+    ("billable_units", r'billable[_\s-]*(?:tokens|units)["\']?\s*[:=]\s*(\d+)'),
+    ("request_units", r'request[_\s-]*units["\']?\s*[:=]\s*(\d+)'),
+]
+
+for key, pattern in patterns:
+    matches = re.findall(pattern, raw_text, flags=re.IGNORECASE)
+    if matches:
+        fields[key] = int(matches[-1])
+
+if "prompt_tokens" not in fields and "input_tokens" in fields:
+    fields["prompt_tokens"] = fields["input_tokens"]
+if "completion_tokens" not in fields and "output_tokens" in fields:
+    fields["completion_tokens"] = fields["output_tokens"]
+fields.pop("input_tokens", None)
+fields.pop("output_tokens", None)
+
+if "total_tokens" not in fields:
+    prompt_val = fields.get("prompt_tokens")
+    completion_val = fields.get("completion_tokens")
+    if prompt_val is not None or completion_val is not None:
+        total = (prompt_val or 0) + (completion_val or 0)
+        fields["total_tokens"] = total
+
+record = {
+    "timestamp": timestamp,
+    "task": task,
+    "model": model,
+    "prompt_file": prompt_file,
+    "exit_code": exit_code,
+    "usage_captured": bool(fields),
+}
+
+for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "billable_units", "request_units"):
+    if key in fields:
+        record[key] = fields[key]
+
+usage_path.parent.mkdir(parents=True, exist_ok=True)
+with usage_path.open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
+    fh.write("\n")
+PY
+    rm -f "$log_file" || true
+    return 0
+  else
+    warn "Failed to record Codex usage for task=${task} model=${model}."
+    return 1
+  fi
 }
 
 gc_bootstrap_reset_state() {
@@ -3734,8 +3892,48 @@ PROMPT
         mkdir -p "$(dirname "$output_file")"
         args+=(--output-last-message "$output_file")
       fi
-      "$CODEX_BIN" "${args[@]}" < "$prompt_file"
-      return $?
+      local usage_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
+      mkdir -p "$usage_dir"
+      local task_slug
+      task_slug="$(printf '%s' "$task" | tr '[:upper:]' '[:lower:]')"
+      task_slug="$(printf '%s' "$task_slug" | tr -c 'a-z0-9' '_')"
+      [[ -n "$task_slug" ]] || task_slug="codex"
+      local model_slug
+      model_slug="$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')"
+      model_slug="$(printf '%s' "$model_slug" | tr -c 'a-z0-9' '_')"
+      [[ -n "$model_slug" ]] || model_slug="model"
+      local codex_log=""
+      if ! codex_log="$(mktemp "${usage_dir}/codex-${task_slug}-${model_slug}.XXXXXX.log" 2>/dev/null)"; then
+        codex_log="$(mktemp 2>/dev/null)" || codex_log=""
+      fi
+      if [[ -n "$codex_log" ]]; then
+        local cmd_status=0
+        local -a pipeline_status=()
+        if "$CODEX_BIN" "${args[@]}" < "$prompt_file" 2>&1 | tee "$codex_log"; then
+          cmd_status=0
+        else
+          pipeline_status=("${PIPESTATUS[@]}")
+          cmd_status=0
+          local idx
+          for idx in "${!pipeline_status[@]}"; do
+            local status="${pipeline_status[$idx]}"
+            if (( status != 0 )); then
+              cmd_status="$status"
+            fi
+          done
+          (( cmd_status == 0 )) && cmd_status=1
+        fi
+        gc_record_codex_usage "$codex_log" "$task" "$model" "$prompt_file" "$cmd_status"
+        return "$cmd_status"
+      else
+        local cmd_status=0
+        if "$CODEX_BIN" "${args[@]}" < "$prompt_file"; then
+          cmd_status=0
+        else
+          cmd_status=$?
+        fi
+        return "$cmd_status"
+      fi
     }
     if run_codex_model "$CODEX_MODEL"; then
       :
@@ -5472,6 +5670,232 @@ PY
 
 
 
+cmd_tokens() {
+  local root="" details=0 json_output=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      --details)
+        details=1
+        shift
+        ;;
+      --json)
+        json_output=1
+        shift
+        ;;
+      -h|--help)
+        cat <<'USAGE'
+Usage: gpt-creator tokens [--project PATH] [--details] [--json]
+
+Print aggregated Codex token usage captured under .gpt-creator/logs/codex-usage.ndjson.
+USAGE
+        return 0
+        ;;
+      *)
+        die "Unknown tokens option: $1"
+        ;;
+    esac
+  done
+
+  local project_root=""
+  if [[ -n "$root" ]]; then
+    project_root="$root"
+  elif [[ -n "${PROJECT_ROOT:-}" ]]; then
+    project_root="$PROJECT_ROOT"
+  else
+    project_root="$PWD"
+  fi
+
+  local usage_file="${project_root}/.gpt-creator/logs/codex-usage.ndjson"
+  if [[ ! -f "$usage_file" ]]; then
+    warn "No Codex usage data found at ${usage_file}. Run a codex-enabled command first."
+    return 1
+  fi
+
+  python3 - <<'PY' "$usage_file" "$details" "$json_output"
+import json
+import pathlib
+import sys
+from datetime import datetime
+
+usage_path = pathlib.Path(sys.argv[1])
+details = sys.argv[2] == "1"
+json_mode = sys.argv[3] == "1"
+
+def as_int(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+def parse_timestamp(value):
+    if not isinstance(value, str) or not value:
+        return None
+    cleaned = value
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+
+def isoformat(dt):
+    if dt is None:
+        return ""
+    text = dt.isoformat()
+    if text.endswith("+00:00"):
+        text = text[:-6] + "Z"
+    return text
+
+raw_lines = usage_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+records = []
+captured_count = 0
+for line in raw_lines:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        payload = json.loads(line)
+    except Exception:
+        continue
+    if not isinstance(payload, dict):
+        continue
+    records.append(payload)
+    if payload.get("usage_captured"):
+        captured_count += 1
+
+if not records:
+    print("No usage entries recorded.")
+    sys.exit(0)
+
+fields = ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "billable_units", "request_units")
+totals = {field: 0 for field in fields}
+counts = {field: 0 for field in fields}
+for entry in records:
+    for field in fields:
+        value = as_int(entry.get(field))
+        if value is not None:
+            totals[field] += value
+            counts[field] += 1
+
+timestamps = [ts for ts in (parse_timestamp(rec.get("timestamp")) for rec in records) if ts is not None]
+first_ts = isoformat(min(timestamps)) if timestamps else ""
+last_ts = isoformat(max(timestamps)) if timestamps else ""
+
+summary = {
+    "entries": len(records),
+    "captured_entries": captured_count,
+    "totals": {field: totals[field] for field in fields if counts[field]},
+}
+if first_ts:
+    summary["first_timestamp"] = first_ts
+if last_ts:
+    summary["last_timestamp"] = last_ts
+
+def clamp(text, limit):
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+def fmt_int(value):
+    if value is None:
+        return "-"
+    return f"{value:,}"
+
+def fmt_exit_code(value):
+    parsed = as_int(value)
+    if parsed is None:
+        return "-"
+    return str(parsed)
+
+sorted_records = sorted(records, key=lambda rec: rec.get("timestamp") or "")
+
+if json_mode:
+    if details:
+        rows = []
+        for rec in sorted_records:
+            rows.append({
+                "timestamp": rec.get("timestamp"),
+                "task": rec.get("task"),
+                "model": rec.get("model"),
+                "prompt_tokens": as_int(rec.get("prompt_tokens")),
+                "completion_tokens": as_int(rec.get("completion_tokens")),
+                "total_tokens": as_int(rec.get("total_tokens")),
+                "cached_tokens": as_int(rec.get("cached_tokens")),
+                "billable_units": as_int(rec.get("billable_units")),
+                "request_units": as_int(rec.get("request_units")),
+                "exit_code": as_int(rec.get("exit_code")),
+                "usage_captured": bool(rec.get("usage_captured")),
+            })
+        summary["rows"] = rows
+    print(json.dumps(summary, indent=2))
+    sys.exit(0)
+
+print(f"Codex usage file: {usage_path}")
+print(f"Entries: {summary['entries']} (captured={summary['captured_entries']})")
+if first_ts and last_ts:
+    print(f"Range: {first_ts} → {last_ts}")
+
+label_map = {
+    "prompt_tokens": "Prompt tokens",
+    "completion_tokens": "Completion tokens",
+    "total_tokens": "Total tokens",
+    "cached_tokens": "Cached tokens",
+    "billable_units": "Billable units",
+    "request_units": "Request units",
+}
+
+for field, label in label_map.items():
+    if field in summary["totals"]:
+        print(f"{label}: {summary['totals'][field]:,}")
+
+if not details:
+    sys.exit(0)
+
+headers = ["timestamp", "task", "model", "total", "prompt", "completion", "cached", "billable", "request", "exit", "captured"]
+rows = []
+for rec in sorted_records:
+    rows.append([
+        rec.get("timestamp") or "",
+        clamp(rec.get("task") or "", 32),
+        clamp(rec.get("model") or "", 24),
+        fmt_int(as_int(rec.get("total_tokens"))),
+        fmt_int(as_int(rec.get("prompt_tokens"))),
+        fmt_int(as_int(rec.get("completion_tokens"))),
+        fmt_int(as_int(rec.get("cached_tokens"))),
+        fmt_int(as_int(rec.get("billable_units"))),
+        fmt_int(as_int(rec.get("request_units"))),
+        fmt_exit_code(rec.get("exit_code")),
+        "yes" if rec.get("usage_captured") else "no",
+    ])
+
+widths = []
+for index, header in enumerate(headers):
+    column_values = [len(header)] + [len(row[index]) for row in rows]
+    widths.append(max(column_values))
+
+print()
+header_line = "  ".join(header.ljust(widths[i]) for i, header in enumerate(headers))
+separator = "  ".join("-" * widths[i] for i in range(len(headers)))
+print(header_line)
+print(separator)
+for row in rows:
+    print("  ".join(row[i].ljust(widths[i]) for i in range(len(headers))))
+PY
+}
+
+
 cmd_create_project() {
   local template_request="auto"
   local path=""
@@ -5752,6 +6176,71 @@ USAGE
   ok "Bootstrap complete — code, docs, and backlog generated"
 }
 
+cmd_update() {
+  local force=0
+  local repo_url="${GC_UPDATE_REPO_URL:-https://github.com/bekirdag/gpt-creator.git}"
+  local prefix="/usr/local"
+  local tmpdir=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force)
+        force=1
+        shift
+        ;;
+      -h|--help)
+        cat <<EOF
+Usage: ${APP_NAME} update [--force]
+
+Fetches the latest gpt-creator sources and reinstalls the CLI.
+EOF
+        return 0
+        ;;
+      *)
+        die "Unknown argument for update: $1"
+        ;;
+    esac
+  done
+
+  if ! command -v git >/dev/null 2>&1; then
+    die "'git' is required for ${APP_NAME} update"
+  fi
+
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/gpt-creator-update.XXXXXX")" || die "Unable to create temporary directory"
+
+  info "Cloning repository: $repo_url"
+  if ! git clone "$repo_url" "$tmpdir"; then
+    rm -rf "$tmpdir"
+    die "Failed to clone repository from ${repo_url}"
+  fi
+
+  info "Fetching latest changes"
+  if ! git -C "$tmpdir" pull --ff-only; then
+    rm -rf "$tmpdir"
+    die "Failed to update repository in $tmpdir"
+  fi
+
+  local install_script="$tmpdir/scripts/install.sh"
+  if [[ ! -x "$install_script" ]]; then
+    rm -rf "$tmpdir"
+    die "Installer not found at $install_script"
+  fi
+
+  local -a install_cmd=("$install_script" --prefix "$prefix")
+  if (( force )); then
+    install_cmd+=("--force")
+  fi
+
+  info "Running installer: ${install_cmd[*]}"
+  if ! "${install_cmd[@]}"; then
+    rm -rf "$tmpdir"
+    die "Install script failed"
+  fi
+
+  rm -rf "$tmpdir"
+  ok "gpt-creator updated successfully"
+}
+
 usage() {
 cat <<EOF
 ${APP_NAME} v${VERSION}
@@ -5774,8 +6263,10 @@ Usage:
   ${APP_NAME} migrate-tasks [--project <path>] [--force]
   ${APP_NAME} refine-tasks [--project <path>] [--story SLUG] [--model NAME] [--dry-run]
   ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
+  ${APP_NAME} tokens [--project <path>] [--details] [--json]
   ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]
   ${APP_NAME} iterate [--project <path>] [--jira <file>] [--no-verify] (deprecated)
+  ${APP_NAME} update [--force]
   ${APP_NAME} version
   ${APP_NAME} help
 
@@ -5807,11 +6298,22 @@ main() {
     create-jira-tasks) "$CLI_ROOT/src/cli/create-jira-tasks.sh" "$@" ;;
     create-db-dump) "$shell_bin" "$CLI_ROOT/src/cli/create-db-dump.sh" "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
+    tokens)         cmd_tokens "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;
     work-on-tasks)  cmd_work_on_tasks "$@" ;;
     iterate)        cmd_iterate "$@" ;;
+    update)         cmd_update "$@" ;;
     *) die "Unknown command: ${cmd}. See '${APP_NAME} help'" ;;
   esac
 }
+
+GC_INVOCATION="$0"
+if (($#)); then
+  GC_INVOCATION+=" $(printf '%q ' "$@")"
+  GC_INVOCATION="${GC_INVOCATION% }"
+fi
+
+trap 'gc_capture_error_context $? "$BASH_COMMAND"' ERR
+trap 'gc_exit_handler $?' EXIT
 
 main "$@"

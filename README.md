@@ -145,7 +145,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
   - `migrate-tasks` regenerates `.gpt-creator/staging/plan/tasks/tasks.db` directly from the JSON artifacts — ideal when you want to sync the DB without re-running Codex.
   - `refine-tasks` streams tasks from `tasks.db` one at a time, rehydrates the original story context, runs Codex against the staged docs, writes the refined JSON to `json/refined`, and updates the task row in SQLite immediately after each successful response. Use `--force` to reset refinement flags and reprocess every task.
   - `create-tasks` snapshots a Jira markdown export into the same database if you already maintain backlog files.
-  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically.
+  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, or `--force` to reset all story/task statuses to `pending` before the run.
   - The legacy `iterate` command is deprecated.
 
 ---

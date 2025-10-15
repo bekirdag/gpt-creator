@@ -98,6 +98,7 @@ _gpt_creator() {
       _arguments \
         '--story=[Start from story id or slug]' \
         '--from-story=[Alias for --story]' \
+        '--force[Reset stored progress and restart from the first story]' \
         '--fresh[Ignore saved progress]' \
         '--no-verify[Skip final verify run]' \
         '--keep-artifacts[Retain Codex prompt/output artifacts]' \

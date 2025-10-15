@@ -1864,6 +1864,46 @@ conn.close()
 PY
 }
 
+gc_reset_task_progress() {
+  local db_path="${1:?tasks database path required}"
+  python3 - <<'PY' "$db_path"
+import sqlite3
+import sys
+import time
+
+db_path = sys.argv[1]
+timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+
+cur.execute(
+    """
+    UPDATE stories
+       SET status = 'pending',
+           completed_tasks = 0,
+           last_run = NULL,
+           updated_at = ?
+    """,
+    (timestamp,),
+)
+cur.execute(
+    """
+    UPDATE tasks
+       SET status = 'pending',
+           started_at = NULL,
+           completed_at = NULL,
+           last_run = NULL,
+           updated_at = ?
+    """,
+    (timestamp,),
+)
+
+conn.commit()
+conn.close()
+PY
+}
+
 gc_trim_memory() {
   local phase="${1:-memory-cycle}"
   info "[memory] Reclaiming resources (${phase})"
@@ -5646,7 +5686,7 @@ PY
 }
 
 cmd_work_on_tasks() {
-  local root="" resume=1 story_filter="" no_verify=0 keep_artifacts=0 memory_cycle=0
+  local root="" resume=1 story_filter="" no_verify=0 keep_artifacts=0 memory_cycle=0 force_reset=0
   local batch_size=0 sleep_between=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=0
   local context_mode="digest"
   local -a context_mode_flags=()
@@ -5662,6 +5702,11 @@ cmd_work_on_tasks() {
       --project) root="$(abs_path "$2")"; shift 2;;
       --story|--from-story) story_filter="$2"; shift 2;;
       --fresh) resume=0; shift;;
+      --force)
+        resume=0
+        force_reset=1
+        shift
+        ;;
       --no-verify) no_verify=1; shift;;
       --keep-artifacts) keep_artifacts=1; shift;;
       --memory-cycle) memory_cycle=1; shift;;
@@ -5712,6 +5757,10 @@ cmd_work_on_tasks() {
         sample_lines_flag=(--sample-lines "$sample_lines")
         shift 2
         ;;
+      --)
+        shift
+        break
+        ;;
       -h|--help)
         cat <<'EOHELP'
 Usage: gpt-creator work-on-tasks [options]
@@ -5741,9 +5790,15 @@ Options:
 EOHELP
         return 0
         ;;
-      *) break;;
+      *)
+        die "Unknown work-on-tasks option: ${1}"
+        ;;
     esac
   done
+
+  if [[ $# -gt 0 ]]; then
+    die "Unexpected argument for work-on-tasks: ${1}"
+  fi
 
   [[ "$batch_size" =~ ^[0-9]+$ ]] || die "Invalid --batch-size value: ${batch_size}"
   [[ "$sleep_between" =~ ^[0-9]+$ ]] || die "Invalid --sleep-between value: ${sleep_between}"
@@ -5779,6 +5834,11 @@ EOHELP
   fi
 
   gc_align_task_story_slugs "$tasks_db"
+
+  if (( force_reset )); then
+    info "Resetting backlog progress to pending (--force)."
+    gc_reset_task_progress "$tasks_db"
+  fi
 
   ensure_node_dependencies "$PROJECT_ROOT"
 

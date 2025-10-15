@@ -5813,9 +5813,13 @@ EOHELP
 
     : "${total_tasks:=0}"; : "${next_task:=0}"
     local total_tasks_int=0
-    [[ -n "$total_tasks" ]] && total_tasks_int=$((total_tasks))
+    if [[ "$total_tasks" =~ ^[0-9]+$ ]]; then
+      total_tasks_int=$((total_tasks))
+    fi
     local next_task_int=0
-    [[ -n "$next_task" ]] && next_task_int=$((next_task))
+    if [[ "$next_task" =~ ^[0-9]+$ ]]; then
+      next_task_int=$((next_task))
+    fi
 
     printf -v story_prefix "%03d" "${sequence:-0}"
     [[ -n "$slug" ]] || slug="story-${story_prefix}"

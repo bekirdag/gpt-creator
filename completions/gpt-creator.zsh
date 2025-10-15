@@ -103,7 +103,16 @@ _gpt_creator() {
         '--keep-artifacts[Retain Codex prompt/output artifacts]' \
         '--memory-cycle[Process one task per cycle and restart automatically]' \
         '--batch-size=[Process at most this many tasks in one run]' \
-        '--sleep-between=[Pause seconds between tasks]'
+        '--sleep-between=[Pause seconds between tasks]' \
+        '--context-lines=[Include the last N lines of shared context in each prompt]' \
+        '--context-none[Skip attaching shared context to prompts]' \
+        '--context-mode=[Shared context strategy (digest|raw)]:context-mode:(digest raw)' \
+        '--context-file-lines=[Limit each shared-context file to N lines before truncation]' \
+        '--context-skip=[Glob pattern to exclude from shared context]' \
+        '--prompt-compact[Use a shorter instruction/schema block in prompts]' \
+        '--prompt-expanded[Use the legacy verbose instruction/schema block]' \
+        '--context-doc-snippets[Pull scoped excerpts for referenced docs/endpoints]' \
+        '--sample-lines=[Include at most N lines from sample payloads]'
       ;;
     iterate)
       _arguments \

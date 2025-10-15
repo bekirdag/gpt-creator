@@ -442,6 +442,7 @@ gc_record_codex_usage() {
   timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
   if python3 - <<'PY' "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code"; then
+import hashlib
 import json
 import pathlib
 import re
@@ -1412,6 +1413,12 @@ PY
 gc_build_context_file() {
   local dest_file="${1:?context destination required}"
   local staging_dir="${2:-$GC_STAGING_DIR}"
+  local max_lines="${GC_CONTEXT_FILE_LINES:-200}"
+  local allow_ui_dump="${GC_CONTEXT_INCLUDE_UI:-0}"
+  local -a skip_patterns=()
+  if declare -p GC_CONTEXT_SKIP_PATTERNS >/dev/null 2>&1; then
+    skip_patterns=("${GC_CONTEXT_SKIP_PATTERNS[@]}")
+  fi
   mkdir -p "$(dirname "$dest_file")"
   {
     echo "# Project Context (auto-generated)"
@@ -1419,28 +1426,296 @@ gc_build_context_file() {
     shopt -s nullglob
     shopt -s globstar 2>/dev/null || true
     local f
-    for f in \
-      "$staging_dir"/pdr.* \
-      "$staging_dir"/sds.* \
-      "$staging_dir"/openapi.* \
-      "$staging_dir"/*.sql \
-      "$staging_dir"/*.mmd \
-      "$staging_dir"/*ui*pages*.* \
-      "$staging_dir"/*rfp*.* \
-      "$staging_dir"/*style*.* \
-      "$staging_dir"/*css*; do
+    local -a patterns=(
+      "$staging_dir"/pdr.* 
+      "$staging_dir"/sds.* 
+      "$staging_dir"/openapi.* 
+      "$staging_dir"/*.md 
+      "$staging_dir"/*.mdx 
+      "$staging_dir"/*.adoc 
+      "$staging_dir"/*.mmd 
+      "$staging_dir"/*.sql 
+      "$staging_dir"/*.yml 
+      "$staging_dir"/*.yaml
+    )
+    if [[ "$allow_ui_dump" == "1" ]]; then
+      patterns+=("$staging_dir"/*ui*pages*.* "$staging_dir"/*rfp*.*)
+    fi
+    for f in "${patterns[@]}"; do
       [[ -f "$f" ]] || continue
-      echo ""
-      echo "----- FILE: $(basename "$f") -----"
-      if command -v file >/dev/null 2>&1 && file -b --mime-type "$f" | grep -q 'text'; then
-        sed -e 's/\t/  /g' "$f" | sed -e $'s/\r$//'
-      else
-        echo "(binary or non-text file; path: $f)"
+      local base_name
+      base_name="$(basename "$f")"
+
+      local skip_file=0
+      if ((${#skip_patterns[@]} > 0)); then
+        local pattern
+        for pattern in "${skip_patterns[@]}"; do
+          [[ -n "$pattern" ]] || continue
+          if [[ "$base_name" == $pattern || "$f" == $pattern ]]; then
+            skip_file=1
+            break
+          fi
+          # Treat plain patterns without glob characters as substring matches.
+          if [[ "$pattern" != *'*'* && "$pattern" != *'?'* ]]; then
+            if [[ "$f" == *"$pattern"* ]]; then
+              skip_file=1
+              break
+            fi
+          fi
+        done
       fi
+      (( skip_file )) && continue
+
+      echo ""
+      echo "----- FILE: ${base_name} -----"
+      local mime=""
+      if command -v file >/dev/null 2>&1; then
+        mime="$(file -b --mime-type "$f" 2>/dev/null || true)"
+      fi
+      if [[ -n "$mime" ]]; then
+        case "$mime" in
+          text/*|application/json|application/vnd.openxmlformats-officedocument*|application/xml|application/xhtml+xml)
+            ;;
+          *)
+            echo "(skipped non-text file; path: $f)"
+            continue
+            ;;
+        esac
+      fi
+      python3 - "$f" "$max_lines" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+try:
+    limit = int(sys.argv[2])
+except Exception:
+    limit = 200
+
+try:
+    raw = path.read_text(encoding="utf-8", errors="replace")
+except Exception as exc:
+    print(f"(failed to read text: {exc})")
+    raise SystemExit(0)
+
+ext = path.suffix.lower()
+css_exts = {".css", ".scss", ".sass", ".less", ".pcss", ".styl"}
+markup_exts = {".html", ".htm", ".vue", ".jsx", ".tsx"}
+
+def emit(lines):
+    if limit > 0 and len(lines) > limit:
+        omitted = len(lines) - limit
+        lines = lines[:limit]
+        lines.append(f"... ({omitted} line(s) truncated) ...")
+    print("\n".join(lines))
+    raise SystemExit(0)
+
+if ext in css_exts:
+    tokens = re.findall(r"--([a-z0-9_-]+)", raw, re.I)
+    unique = sorted({token for token in tokens if token})
+    lines = ["CSS variables (first 40):"]
+    for token in unique[:40]:
+        lines.append(f"- --{token}")
+    if len(unique) > 40:
+        lines.append(f"... ({len(unique) - 40} additional variables omitted)")
+    emit(lines)
+
+if ext in markup_exts:
+    clean = re.sub(r"<script[\s\S]*?</script>", "", raw, flags=re.I)
+    clean = re.sub(r"<style[\s\S]*?</style>", "", clean, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", clean)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        emit(["(markup collapsed to empty after stripping tags)"])
+    chunks = [text[i:i + 200] for i in range(0, len(text), 200)]
+    lines = ["Markup summary:"] + chunks[:5]
+    if len(chunks) > 5:
+        lines.append(f"... ({len(chunks) - 5} additional chunks omitted)")
+    emit(lines)
+
+try:
+    parsed = json.loads(raw)
+    preview = json.dumps(parsed, indent=2)[:4000]
+    emit(["JSON summary:", preview])
+except Exception:
+    pass
+
+lines = raw.splitlines()
+result = []
+max_width = 160
+table_run = 0
+table_notice = False
+sql_insert_run = 0
+sql_notice = False
+
+def truncate(line: str) -> str:
+    if len(line) <= max_width:
+        return line
+    return line[:max_width].rstrip() + " …"
+
+for original in lines:
+    line = original.rstrip()
+    stripped = line.lstrip()
+
+    if not stripped:
+        if not result or result[-1] != "":
+            result.append("")
+        continue
+
+    pipe_count = line.count("|")
+    is_table_like = pipe_count >= 6 or (pipe_count >= 3 and "," in line and len(line) > 80)
+    if is_table_like:
+        table_run += 1
+    else:
+        table_run = 0
+        table_notice = False
+    if is_table_like and table_run > 30:
+        if not table_notice:
+            result.append("... (additional table rows truncated) ...")
+            table_notice = True
+        continue
+
+    upper = stripped.upper()
+    if upper.startswith("INSERT INTO") or upper.startswith("UPDATE "):
+        sql_insert_run += 1
+    else:
+        sql_insert_run = 0
+        sql_notice = False
+    if sql_insert_run > 40:
+        if not sql_notice:
+            result.append("... (repetitive SQL statements truncated) ...")
+            sql_notice = True
+        continue
+
+    line = truncate(line.replace("\t", "  "))
+    result.append(line)
+
+emit(result or ["(no textual content captured)"])
+PY
     done
     shopt -u globstar 2>/dev/null || true
     shopt -u nullglob || true
   } >"$dest_file"
+}
+
+gc_build_context_digest() {
+  local context_file="${1:?context file required}"
+  local digest_file="${2:?digest destination required}"
+  local limit_lines="${3:-400}"
+  [[ -f "$context_file" ]] || {
+    printf '%s\n' "(warn) context digest skipped; missing source ${context_file}" >&2
+    return 1
+  }
+  python3 - <<'PY' "$context_file" "$digest_file" "$limit_lines"
+import hashlib
+import math
+import pathlib
+import sys
+
+context_path = pathlib.Path(sys.argv[1])
+dest_path = pathlib.Path(sys.argv[2])
+try:
+    limit = int(sys.argv[3])
+except Exception:
+    limit = 400
+
+if limit <= 0:
+    dest_path.write_text("", encoding="utf-8")
+    raise SystemExit(0)
+
+try:
+    raw = context_path.read_text(encoding="utf-8", errors="replace")
+except Exception as exc:
+    dest_path.write_text(f"(failed to read shared context: {exc})\n", encoding="utf-8")
+    raise SystemExit(0)
+
+lines = raw.splitlines()
+sections = []
+current_name = None
+current_lines: list[str] = []
+
+for line in lines:
+    if line.startswith("----- FILE: ") and line.endswith(" -----"):
+        if current_name is not None:
+            sections.append((current_name, current_lines))
+        current_name = line[len("----- FILE: "):-len(" -----")].strip() or "unnamed"
+        current_lines = []
+        continue
+    if current_name is not None:
+        current_lines.append(line.rstrip())
+
+if current_name is not None:
+    sections.append((current_name, current_lines))
+
+output: list[str] = []
+output.append("Hint: use --context-mode raw to include the literal tail.")
+remaining = max(limit - len(output), 10)
+
+if not sections:
+    output.append("(no staged context files indexed)")
+    dest_path.write_text("\n".join(output) + "\n", encoding="utf-8")
+    raise SystemExit(0)
+
+per_header_cost = 2  # heading + blank separator
+remaining_sections = len(sections)
+
+for index, (name, section_lines) in enumerate(sections, 1):
+    if remaining <= 0:
+        output.append("… (context digest truncated; raise --context-lines or switch to raw)")
+        break
+
+    digest_src = "\n".join(section_lines).encode("utf-8", "replace")
+    digest = hashlib.sha256(digest_src).hexdigest()[:12]
+    heading = f"### {name} (sha256 {digest})"
+    output.append(heading)
+    remaining -= 1
+    if remaining <= 0:
+        output.append("… (context digest truncated; raise --context-lines or switch to raw)")
+        break
+
+    remaining_sections = len(sections) - index
+    # Reserve at least two lines per remaining section for future headings.
+    reserved_for_rest = max(0, remaining_sections * per_header_cost)
+    available_for_this = max(3, min(12, remaining - reserved_for_rest))
+
+    sample_lines = []
+    for raw_line in section_lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("... (additional "):
+            continue
+        if stripped.startswith("----- FILE:"):
+            continue
+        stripped = stripped.replace("\t", "  ")
+        if len(stripped) > 160:
+            stripped = stripped[:160].rstrip() + " …"
+        sample_lines.append(stripped)
+        if len(sample_lines) >= available_for_this:
+            break
+
+    if not sample_lines:
+        sample_lines = ["(no excerpt captured; file may be binary or truncated)"]
+
+    for sample in sample_lines:
+        if remaining <= 0:
+            output.append("… (context digest truncated; raise --context-lines or switch to raw)")
+            break
+        output.append(sample)
+        remaining -= 1
+
+    if remaining <= 0:
+        break
+
+    if index != len(sections):
+        output.append("")
+        remaining -= 1
+
+dest_path.parent.mkdir(parents=True, exist_ok=True)
+dest_path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+PY
 }
 
 gc_update_work_state() {
@@ -4743,14 +5018,16 @@ gc_write_task_prompt() {
   local context_tail="${5:-}"
   local model_name="${6:-$CODEX_MODEL}"
   local project_root="${7:-$PROJECT_ROOT}"
-  python3 - "$db_path" "$story_slug" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" <<'PY'
+  local staging_dir="${8:-$GC_STAGING_DIR}"
+  python3 - "$db_path" "$story_slug" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" "$staging_dir" <<'PY'
 import json
+import os
 import re
 import sqlite3
 import sys
 from pathlib import Path
 
-DB_PATH, STORY_SLUG, TASK_INDEX, PROMPT_PATH, CONTEXT_TAIL_PATH, MODEL_NAME, PROJECT_ROOT = sys.argv[1:8]
+DB_PATH, STORY_SLUG, TASK_INDEX, PROMPT_PATH, CONTEXT_TAIL_PATH, MODEL_NAME, PROJECT_ROOT, STAGING_DIR = sys.argv[1:9]
 TASK_INDEX = int(TASK_INDEX)
 
 conn = sqlite3.connect(DB_PATH)
@@ -4848,6 +5125,16 @@ epic_ref_id = clean(task['epic_ref_id'])
 project_display = project_display_name(PROJECT_ROOT)
 repo_path = PROJECT_ROOT or '.'
 
+sample_limit_env = os.getenv("GC_PROMPT_SAMPLE_LINES", "").strip()
+try:
+    sample_limit = int(sample_limit_env) if sample_limit_env else 80
+except ValueError:
+    sample_limit = 80
+if sample_limit < 0:
+    sample_limit = 0
+
+compact_mode = os.getenv("GC_PROMPT_COMPACT", "").strip().lower() not in {"", "0", "false"}
+
 lines = []
 lines.append(f"# You are Codex (model: {MODEL_NAME})")
 lines.append("")
@@ -4857,60 +5144,109 @@ lines.append("## Story")
 
 epic_id = clean(story_row['epic_key'])
 epic_title = clean(story_row['epic_title'])
-if epic_id or epic_title:
-    parts = [part for part in [epic_id, epic_title] if part]
-    lines.append("- Epic: " + " — ".join(parts))
-
 story_id = clean(story_row['story_id'])
 story_title = clean(story_row['story_title'])
-if story_id or story_title:
-    parts = [part for part in [story_id, story_title] if part]
-    lines.append("- Story: " + " — ".join(parts))
 sequence = story_row['sequence']
-if sequence:
-    lines.append(f"- Story order: {sequence}")
+
+if compact_mode:
+    story_label = story_id or STORY_SLUG
+    if story_label and story_title:
+        summary = f"- {story_label} — {story_title}"
+    elif story_label:
+        summary = f"- {story_label}"
+    elif story_title:
+        summary = f"- {story_title}"
+    else:
+        summary = "- Story details unavailable"
+    extras = []
+    if epic_id or epic_title:
+        epic_bits = [bit for bit in [epic_id, epic_title] if bit]
+        extras.append("epic " + " — ".join(epic_bits))
+    if sequence:
+        extras.append(f"order {sequence}")
+    if extras:
+        summary += f" ({'; '.join(extras)})"
+    lines.append(summary)
+else:
+    if epic_id or epic_title:
+        parts = [part for part in [epic_id, epic_title] if part]
+        lines.append("- Epic: " + " — ".join(parts))
+    if story_id or story_title:
+        parts = [part for part in [story_id, story_title] if part]
+        lines.append("- Story: " + " — ".join(parts))
+    if sequence:
+        lines.append(f"- Story order: {sequence}")
 
 lines.append("")
 lines.append("## Task")
 task_id = clean(task['task_id'])
 task_title = clean(task['title'])
-if task_id:
-    lines.append(f"- Task ID: {task_id}")
-if task_title:
-    lines.append(f"- Title: {task_title}")
 estimate = clean(task['estimate'])
-if estimate:
-    lines.append(f"- Estimate: {estimate}")
-if assignees:
-    lines.append("- Assignees: " + ", ".join(assignees))
-elif assignee_text:
-    lines.append(f"- Assignee: {assignee_text}")
-if tags:
-    lines.append("- Tags: " + ", ".join(tags))
-elif tags_text:
-    lines.append(f"- Tags: {tags_text}")
-if story_points and story_points != estimate:
-    lines.append(f"- Story points: {story_points}")
-elif story_points and not estimate:
-    lines.append(f"- Story points: {story_points}")
-if document_reference:
-    lines.append(f"- Document reference: {document_reference}")
-if idempotency_text:
-    lines.append(f"- Idempotency: {idempotency_text}")
-if rate_limits:
-    lines.append(f"- Rate limits: {rate_limits}")
-if rbac_text:
-    lines.append(f"- RBAC: {rbac_text}")
-if messaging_workflows:
-    lines.append(f"- Messaging & workflows: {messaging_workflows}")
-if performance_targets:
-    lines.append(f"- Performance targets: {performance_targets}")
-if observability_text:
-    lines.append(f"- Observability: {observability_text}")
-if user_story_ref_id and user_story_ref_id.lower() != story_id.lower():
-    lines.append(f"- User story reference ID: {user_story_ref_id}")
-if epic_ref_id and epic_ref_id.lower() != epic_id.lower():
-    lines.append(f"- Epic reference ID: {epic_ref_id}")
+
+if compact_mode:
+    task_label = task_id or f"Task {TASK_INDEX + 1}"
+    summary = f"- {task_label}"
+    if task_title:
+        summary += f" — {task_title}"
+    lines.append(summary)
+    meta_bits = []
+    if estimate:
+        meta_bits.append(f"estimate {estimate}")
+    if story_points and story_points != estimate:
+        meta_bits.append(f"story points {story_points}")
+    if assignees or assignee_text:
+        assigned = ", ".join(assignees) if assignees else assignee_text
+        meta_bits.append(f"assignees {assigned}")
+    if tags:
+        tags_summary = ", ".join(tags[:3])
+        if len(tags) > 3:
+            tags_summary += "…"
+        meta_bits.append(f"tags {tags_summary}")
+    elif tags_text:
+        meta_bits.append(f"tags {tags_text}")
+    if document_reference:
+        meta_bits.append(f"doc {document_reference}")
+    if rate_limits:
+        meta_bits.append(f"rate limits {rate_limits}")
+    if meta_bits:
+        lines.append(f"- Details: {'; '.join(meta_bits)}")
+else:
+    if task_id:
+        lines.append(f"- Task ID: {task_id}")
+    if task_title:
+        lines.append(f"- Title: {task_title}")
+    if estimate:
+        lines.append(f"- Estimate: {estimate}")
+    if assignees:
+        lines.append("- Assignees: " + ", ".join(assignees))
+    elif assignee_text:
+        lines.append(f"- Assignee: {assignee_text}")
+    if tags:
+        lines.append("- Tags: " + ", ".join(tags))
+    elif tags_text:
+        lines.append(f"- Tags: {tags_text}")
+    if story_points and story_points != estimate:
+        lines.append(f"- Story points: {story_points}")
+    elif story_points and not estimate:
+        lines.append(f"- Story points: {story_points}")
+    if document_reference:
+        lines.append(f"- Document reference: {document_reference}")
+    if idempotency_text:
+        lines.append(f"- Idempotency: {idempotency_text}")
+    if rate_limits:
+        lines.append(f"- Rate limits: {rate_limits}")
+    if rbac_text:
+        lines.append(f"- RBAC: {rbac_text}")
+    if messaging_workflows:
+        lines.append(f"- Messaging & workflows: {messaging_workflows}")
+    if performance_targets:
+        lines.append(f"- Performance targets: {performance_targets}")
+    if observability_text:
+        lines.append(f"- Observability: {observability_text}")
+    if user_story_ref_id and user_story_ref_id.lower() != story_id.lower():
+        lines.append(f"- User story reference ID: {user_story_ref_id}")
+    if epic_ref_id and epic_ref_id.lower() != epic_id.lower():
+        lines.append(f"- Epic reference ID: {epic_ref_id}")
 
 lines.append("")
 lines.append("### Description")
@@ -4944,49 +5280,315 @@ if endpoints_text:
     lines.append("### Endpoints")
     lines.extend(endpoints_text.splitlines())
 
-if sample_create_request:
+doc_snippets_enabled = os.getenv("GC_PROMPT_DOC_SNIPPETS", "").strip().lower() not in {"", "0", "false"}
+staging_root = Path(STAGING_DIR).resolve() if STAGING_DIR else None
+project_root_path = Path(PROJECT_ROOT).resolve() if PROJECT_ROOT else None
+
+def _split_items(raw: str):
+    if not raw:
+        return []
+    items = re.split(r'[\n;,]+', raw)
+    return [item.strip() for item in items if item and item.strip()]
+
+def _collect_candidate_files(ref: str):
+    candidates = []
+    if not ref:
+        return candidates
+    ref_stripped = ref.strip()
+    ref_lower = ref_stripped.lower()
+
+    def add_path(candidate: Path):
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if resolved.is_file():
+            if resolved not in candidates:
+                candidates.append(resolved)
+
+    # Direct path attempts relative to project or staging roots
+    for base in filter(None, [project_root_path, staging_root]):
+        candidate = base / ref_stripped
+        if candidate.is_file():
+            add_path(candidate)
+    # If ref looks like filename only, search staging dir for matches
+    if staging_root and ("." in ref_stripped or "/" not in ref_stripped):
+        for match in staging_root.rglob(ref_stripped):
+            add_path(match)
+
+    keyword_map = {
+        "sds": ["sds.*"],
+        "pdr": ["pdr.*"],
+        "openapi": ["openapi.*"],
+        "swagger": ["openapi.*"],
+        "erd": ["*.mmd"],
+        "mermaid": ["*.mmd"],
+        "schema": ["*.sql", "*.yaml", "*.yml"],
+    }
+    if staging_root:
+        for keyword, patterns in keyword_map.items():
+            if keyword in ref_lower:
+                for pattern in patterns:
+                    for match in staging_root.glob(pattern):
+                        add_path(match)
+
+    return candidates
+
+def _extract_snippet(path: Path, term: str, limit: int):
+    if limit <= 0:
+        return ([], False)
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return ([f"(failed to read {path.name}: {exc})"], False)
+    lines_local = text.splitlines()
+    if not lines_local:
+        return ([], False)
+    search_terms: list[str] = []
+    if term:
+        search_terms.append(term.strip())
+        search_terms.extend(
+            [token for token in re.split(r'[^a-z0-9/_\-.]+', term.lower()) if len(token) >= 3]
+        )
+
+    match_index = None
+    for needle in search_terms:
+        if not needle:
+            continue
+        needle_lower = needle.lower()
+        for idx, line in enumerate(lines_local):
+            if needle_lower in line.lower():
+                match_index = idx
+                break
+        if match_index is not None:
+            break
+
+    if match_index is None:
+        start = 0
+    else:
+        start = max(0, match_index - max(5, limit // 2))
+    end = min(len(lines_local), start + limit)
+    snippet = lines_local[start:end]
+    truncated = end < len(lines_local)
+    if match_index is not None and start > 0:
+        snippet.insert(0, "... (preceding lines omitted)")
+    if truncated:
+        snippet.append("... (additional content truncated)")
+    return (snippet, truncated)
+
+def _minify_payload(value: str) -> str:
+    if not value:
+        return ""
+    raw = value.strip()
+    if not raw:
+        return ""
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return raw
+    try:
+        return json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+    except Exception:
+        return raw
+
+def _chunk_text(text: str, width: int = 160) -> list[str]:
+    if not text:
+        return []
+    return [text[i:i + width] for i in range(0, len(text), width)]
+
+def _normalise_space(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+def _condense_snippet(snippet_lines, term, max_chars=420):
+    core = " ".join(line.strip() for line in snippet_lines if line.strip())
+    if not core:
+        return ""
+    core = _normalise_space(core)
+    if term:
+        lowered = core.lower()
+        idx = lowered.find(term.lower())
+        if idx > 0:
+            start = max(0, idx - 180)
+            core = core[start:]
+    sentences = re.split(r'(?<=[.!?])\s+', core)
+    assembled: list[str] = []
+    total = 0
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        assembled.append(sentence)
+        total += len(sentence)
+        if total >= max_chars:
+            break
+    summary = " ".join(assembled) if assembled else core
+    summary = summary.strip()
+    if len(summary) > max_chars:
+        summary = summary[:max_chars].rstrip() + "…"
+    return summary
+
+def append_sample_section(title: str, value: str):
+    if not value:
+        return
     lines.append("")
-    lines.append("### Sample Create Request")
-    lines.extend(sample_create_request.splitlines())
+    heading = f"### {title}"
+    payload = _minify_payload(value)
+    if sample_limit <= 0:
+        digest_src = payload.encode("utf-8", "replace")
+        digest = hashlib.sha256(digest_src).hexdigest()[:12]
+        preview = payload[:120]
+        if payload and len(payload) > 120:
+            preview = preview.rstrip() + "…"
+        lines.append(f"{heading} (digest — pass --sample-lines N to view payload)")
+        if preview:
+            preview_clean = preview.replace("\n", " ").strip()
+            lines.append(f"- preview: `{preview_clean}`")
+        source_lines = len(value.splitlines()) or 1
+        lines.append(f"- original lines: {source_lines}; minified chars: {len(payload)}")
+        lines.append(f"- sha256: {digest}")
+        return
+
+    sample_chunks = _chunk_text(payload)
+    truncated = 0
+    if sample_limit and len(sample_chunks) > sample_limit:
+        truncated = len(sample_chunks) - sample_limit
+        sample_chunks = sample_chunks[:sample_limit]
+        heading = f"{heading} (first {sample_limit} chunk{'s' if sample_limit != 1 else ''} of minified payload)"
+
+    lines.append(heading)
+    if sample_chunks:
+        lines.extend(sample_chunks)
+    else:
+        lines.append("(payload empty after normalisation)")
+    if truncated:
+        lines.append(f"... ({truncated} additional chunk{'s' if truncated != 1 else ''} truncated)")
+        lines.append("... (raise --sample-lines to include more of the payload)")
+
+if sample_create_request:
+    append_sample_section("Sample Create Request", sample_create_request)
 
 if sample_create_response:
+    append_sample_section("Sample Create Response", sample_create_response)
+
+doc_snippet_limit = 24 if sample_limit == 0 else max(12, min(30, sample_limit * 2))
+doc_snippets = []
+if doc_snippets_enabled and (staging_root or project_root_path):
+    def _record_snippet(title: str, snippet_lines: list[str], term_label: str) -> None:
+        if not snippet_lines:
+            return
+        digest = hashlib.sha256("\n".join(snippet_lines).encode("utf-8", "replace")).hexdigest()[:12]
+        if digest in seen_digests:
+            return
+        summary = _condense_snippet(snippet_lines, term_label)
+        if not summary:
+            return
+        seen_digests.add(digest)
+        doc_snippets.append({
+            "title": title,
+            "summary": summary,
+            "hash": digest,
+        })
+
+    seen_pairs = set()
+    seen_digests = set()
+    references = _split_items(document_reference)
+    endpoints_list = _split_items(endpoints_text)
+    max_snippets = 3
+
+    for reference in references:
+        for candidate in _collect_candidate_files(reference):
+            key = (str(candidate), reference.lower())
+            if key in seen_pairs:
+                continue
+            snippet_lines, _ = _extract_snippet(candidate, reference, doc_snippet_limit)
+            _record_snippet(f"{candidate.name} — {reference}", snippet_lines, reference)
+            seen_pairs.add(key)
+            if len(doc_snippets) >= max_snippets:
+                break
+        if len(doc_snippets) >= max_snippets:
+            break
+
+    if staging_root and len(doc_snippets) < max_snippets and endpoints_list:
+        openapi_files = list(staging_root.glob("openapi.*"))
+        for endpoint in endpoints_list:
+            for candidate in openapi_files:
+                key = (str(candidate), f"endpoint:{endpoint.lower()}")
+                if key in seen_pairs:
+                    continue
+                snippet_lines, found = _extract_snippet(candidate, endpoint, doc_snippet_limit)
+                label = f"{candidate.name} — endpoint {endpoint}"
+                if not found:
+                    label += " (approximate match)"
+                _record_snippet(label, snippet_lines, endpoint)
+                seen_pairs.add(key)
+                if len(doc_snippets) >= max_snippets:
+                    break
+            if len(doc_snippets) >= max_snippets:
+                break
+
+if doc_snippets:
     lines.append("")
-    lines.append("### Sample Create Response")
-    lines.extend(sample_create_response.splitlines())
+    lines.append("## Referenced Docs")
+    for snippet in doc_snippets:
+        lines.append(f"### {snippet['title']} (sha256 {snippet['hash']})")
+        lines.append(f"- {snippet['summary']}")
+        lines.append("")
 
 lines.append("")
+
 lines.append("## Instructions")
-lines.append("- Draft a short plan before modifying files.")
-lines.append("- Apply changes directly in the repository; commits are not required.")
-lines.append("- Respond with structured JSON described below — no markdown fencing or prose outside the JSON.")
-lines.append("- Verify acceptance criteria before finishing.")
-lines.append("- If blocked, explain why and suggest next steps inside the JSON response.")
-lines.append("- Prefer pnpm for install/build scripts; avoid npm/yarn unless explicitly required.")
-lines.append("- Assume limited network access; note any commands that cannot run for that reason instead of failing silently.")
+if compact_mode:
+    lines.append('- Respond with JSON only: {"plan":[], "changes":[], "commands":[], "notes":[]}.')
+    lines.append("- Keep plan bullets brief; record blockers or follow-ups in `notes`.")
+    lines.append("- Apply repository changes directly and confirm acceptance criteria (note gaps in `notes`).")
+    lines.append("- Prefer pnpm for scripts; mention commands that cannot run because of network limits.")
 
-lines.append("")
-lines.append("## Output JSON schema")
-lines.append("Return a single JSON object with keys exactly as follows (omit null/empty collections when not needed):")
-lines.append("{")
-lines.append("  \"plan\": [\"short step-by-step plan items...\"],")
-lines.append("  \"changes\": [")
-lines.append("    { \"type\": \"patch\", \"path\": \"relative/file/path\", \"diff\": \"UNIFIED_DIFF\" },")
-lines.append("    { \"type\": \"file\", \"path\": \"relative/file/path\", \"content\": \"entire file content\" }")
-lines.append("  ],")
-lines.append("  \"commands\": [\"optional shell commands to run (e.g., pnpm install)\"],")
-lines.append("  \"notes\": [\"follow-up items or blockers\"]")
-lines.append("}")
-lines.append("- Use UTF-8, escape newlines as \\n inside JSON strings.")
-lines.append("- Diff entries must be valid unified diffs (git apply compatible) against the current workspace.")
-lines.append("- File entries provide the complete desired file content (for new or fully rewritten files).")
-lines.append("- Do not emit markdown fences, commentary, or additional text outside the JSON object.")
+    lines.append("")
+    lines.append("## Change Format")
+    lines.append("- Use unified diffs or full file bodies inside the `changes` array.")
+    lines.append("- Omit keys with no content; no markdown fences or extra prose.")
+else:
+    lines.append("- Draft a short plan before modifying files.")
+    lines.append("- Apply changes directly in the repository; commits are not required.")
+    lines.append("- Respond with structured JSON described below — no markdown fencing or prose outside the JSON.")
+    lines.append("- Verify acceptance criteria before finishing.")
+    lines.append("- If blocked, explain why and suggest next steps inside the JSON response.")
+    lines.append("- Prefer pnpm for install/build scripts; avoid npm/yarn unless explicitly required.")
+    lines.append("- Assume limited network access; note any commands that cannot run for that reason instead of failing silently.")
+
+    lines.append("")
+    lines.append("## Output JSON schema")
+    lines.append("Return a single JSON object with keys exactly as follows (omit null/empty collections when not needed):")
+    lines.append("{")
+    lines.append("  \"plan\": [\"short step-by-step plan items...\"],")
+    lines.append("  \"changes\": [")
+    lines.append("    { \"type\": \"patch\", \"path\": \"relative/file/path\", \"diff\": \"UNIFIED_DIFF\" },")
+    lines.append("    { \"type\": \"file\", \"path\": \"relative/file/path\", \"content\": \"entire file content\" }")
+    lines.append("  ],")
+    lines.append("  \"commands\": [\"optional shell commands to run (e.g., pnpm install)\"],")
+    lines.append("  \"notes\": [\"follow-up items or blockers\"]")
+    lines.append("}")
+    lines.append("- Use UTF-8, escape newlines as \\n inside JSON strings.")
+    lines.append("- Diff entries must be valid unified diffs (git apply compatible) against the current workspace.")
+    lines.append("- File entries provide the complete desired file content (for new or fully rewritten files).")
+    lines.append("- Do not emit markdown fences, commentary, or additional text outside the JSON object.")
 
 if CONTEXT_TAIL_PATH:
     context_path = Path(CONTEXT_TAIL_PATH)
     if context_path.exists():
         tail_text = context_path.read_text(encoding='utf-8').splitlines()
+        tail_mode = os.getenv("GC_CONTEXT_TAIL_MODE", "digest").strip().lower()
+        tail_limit = os.getenv("GC_CONTEXT_TAIL_LIMIT", "").strip()
+        if tail_mode == "digest":
+            heading = "## Shared Context Digest"
+        elif tail_mode == "raw":
+            heading = "## Shared Context Tail"
+            if tail_limit and tail_limit.isdigit():
+                heading += f" (last {int(tail_limit)} line{'s' if int(tail_limit) != 1 else ''})"
+        else:
+            heading = "## Shared Context"
         lines.append("")
-        lines.append("## Shared Context (truncated)")
+        lines.append(heading)
         lines.append("")
         lines.extend(tail_text)
 
@@ -5000,7 +5602,16 @@ PY
 
 cmd_work_on_tasks() {
   local root="" resume=1 story_filter="" no_verify=0 keep_artifacts=0 memory_cycle=0
-  local batch_size=0 sleep_between=0
+  local batch_size=0 sleep_between=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=0
+  local context_mode="digest"
+  local -a context_mode_flags=()
+  local -a context_mode_choice_flag=()
+  local -a context_file_flag=()
+  local -a context_skip_flags=()
+  local -a context_skip_patterns=()
+  local -a prompt_mode_flag=()
+  local -a sample_lines_flag=()
+  local -a doc_snippets_flag=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project) root="$(abs_path "$2")"; shift 2;;
@@ -5011,6 +5622,51 @@ cmd_work_on_tasks() {
       --memory-cycle) memory_cycle=1; shift;;
       --batch-size) batch_size="${2:-0}"; shift 2;;
       --sleep-between) sleep_between="${2:-0}"; shift 2;;
+      --context-lines)
+        context_lines="${2:-}"
+        context_mode_flags=(--context-lines "$context_lines")
+        shift 2
+        ;;
+      --context-none)
+        context_lines=0
+        context_mode_flags=(--context-none)
+        shift
+        ;;
+      --context-mode)
+        context_mode="${2:-}"
+        context_mode_choice_flag=(--context-mode "$context_mode")
+        shift 2
+        ;;
+      --context-file-lines)
+        context_file_lines="${2:-}"
+        context_file_flag=(--context-file-lines "$context_file_lines")
+        shift 2
+        ;;
+      --context-skip)
+        context_skip_patterns+=("$2")
+        context_skip_flags+=(--context-skip "$2")
+        shift
+        ;;
+      --prompt-compact)
+        prompt_compact=1
+        prompt_mode_flag=(--prompt-compact)
+        shift
+        ;;
+      --prompt-expanded)
+        prompt_compact=0
+        prompt_mode_flag=(--prompt-expanded)
+        shift
+        ;;
+      --context-doc-snippets|--doc-snippets)
+        doc_snippets=1
+        doc_snippets_flag=(--context-doc-snippets)
+        shift
+        ;;
+      --sample-lines)
+        sample_lines="${2:-}"
+        sample_lines_flag=(--sample-lines "$sample_lines")
+        shift 2
+        ;;
       -h|--help)
         cat <<'EOHELP'
 Usage: gpt-creator work-on-tasks [options]
@@ -5026,6 +5682,17 @@ Options:
   --memory-cycle       Process one task at a time, prune caches, and auto-resume to limit memory usage
   --batch-size NUM     Process at most NUM tasks this run, then pause (default: unlimited)
   --sleep-between SEC  Sleep SEC seconds between tasks (default: 0)
+  --context-lines NUM  Include the last NUM lines of shared context in each prompt (default: 400)
+  --context-none       Skip attaching shared context to task prompts
+  --context-mode MODE  Choose 'digest' (default) to summarise context or 'raw' for the literal tail
+  --context-file-lines NUM
+                        Limit each shared-context file to NUM lines before summarising (default: 200)
+  --context-skip GLOB  Ignore matching files when building shared context (repeatable)
+  --prompt-compact     Use the compact instruction/schema block (default setting)
+  --prompt-expanded    Restore the legacy verbose instruction/schema block
+  --context-doc-snippets
+                        Pull scoped excerpts for referenced docs/endpoints when available
+  --sample-lines NUM   Include at most NUM chunks of minified sample payloads (default: 0; increase to view raw content)
 EOHELP
         return 0
         ;;
@@ -5035,8 +5702,20 @@ EOHELP
 
   [[ "$batch_size" =~ ^[0-9]+$ ]] || die "Invalid --batch-size value: ${batch_size}"
   [[ "$sleep_between" =~ ^[0-9]+$ ]] || die "Invalid --sleep-between value: ${sleep_between}"
+  [[ "$context_lines" =~ ^[0-9]+$ ]] || die "Invalid --context-lines value: ${context_lines}"
+  [[ "$context_file_lines" =~ ^[0-9]+$ ]] || die "Invalid --context-file-lines value: ${context_file_lines}"
+  [[ "$sample_lines" =~ ^-?[0-9]+$ ]] || die "Invalid --sample-lines value: ${sample_lines}"
   batch_size=$((batch_size))
   sleep_between=$((sleep_between))
+  context_lines=$((context_lines))
+  context_file_lines=$((context_file_lines))
+  sample_lines=$((sample_lines))
+  (( sample_lines >= 0 )) || die "--sample-lines must be zero or positive (got ${sample_lines})"
+  context_mode="${context_mode,,}"
+  case "$context_mode" in
+    digest|raw) ;;
+    *) die "Invalid --context-mode value: ${context_mode}" ;;
+  esac
 
   if (( memory_cycle )); then
     if (( batch_size == 0 || batch_size > 1 )); then
@@ -5051,34 +5730,66 @@ EOHELP
   mkdir -p "$tasks_dir"
 
   if ! gc_tasks_db_has_rows "$tasks_db"; then
-    if gc_has_legacy_tasks_json; then
-      info "Tasks database missing or empty; importing legacy JSON backlog into ${tasks_db}."
-      if gc_rebuild_tasks_db_from_json 0; then
-        ok "Legacy backlog migrated to tasks.db"
-      else
-        warn "Failed to migrate legacy JSON backlog into tasks.db"
-      fi
-    fi
-  fi
-
-  if ! gc_tasks_db_has_rows "$tasks_db"; then
-    die "Task database missing or empty. Run 'gpt-creator create-tasks' or 'gpt-creator migrate-tasks' first."
+    die "Task database missing or empty. Run 'gpt-creator create-tasks' (or create-jira-tasks + migrate-tasks) before work-on-tasks."
   fi
 
   ensure_node_dependencies "$PROJECT_ROOT"
 
+  if (( prompt_compact )); then
+    export GC_PROMPT_COMPACT=1
+  else
+    unset GC_PROMPT_COMPACT
+  fi
+  if (( doc_snippets )); then
+    export GC_PROMPT_DOC_SNIPPETS=1
+  else
+    unset GC_PROMPT_DOC_SNIPPETS
+  fi
+
   local state_dir="${PLAN_DIR}/work"
   local runs_dir="${state_dir}/runs"
   mkdir -p "$runs_dir"
+
+  GC_CONTEXT_FILE_LINES="$context_file_lines"
+  if ((${#context_skip_patterns[@]} > 0)); then
+    GC_CONTEXT_SKIP_PATTERNS=("${context_skip_patterns[@]}")
+  else
+    unset GC_CONTEXT_SKIP_PATTERNS
+  fi
+
+  export GC_PROMPT_SAMPLE_LINES="$sample_lines"
 
   local run_stamp="$(date +%Y%m%d_%H%M%S)"
   local run_dir="${runs_dir}/${run_stamp}"
   mkdir -p "$run_dir"
   local ctx_file="${run_dir}/context.md"
   gc_build_context_file "$ctx_file" "$STAGING_DIR"
-  local context_tail="${run_dir}/context_tail.md"
-  if ! tail -n 400 "$ctx_file" >"$context_tail" 2>/dev/null; then
-    cp "$ctx_file" "$context_tail"
+  local context_tail=""
+  export GC_CONTEXT_TAIL_LIMIT="$context_lines"
+  export GC_CONTEXT_TAIL_MODE="$context_mode"
+  if (( context_lines > 0 )); then
+    case "$context_mode" in
+      digest)
+        context_tail="${run_dir}/context_digest.md"
+        if ! gc_build_context_digest "$ctx_file" "$context_tail" "$context_lines"; then
+          warn "Failed to build context digest; falling back to raw tail."
+          context_mode="raw"
+          export GC_CONTEXT_TAIL_MODE="raw"
+        fi
+        if [[ "$context_mode" == "raw" ]]; then
+          context_tail="${run_dir}/context_tail.md"
+          if ! tail -n "$context_lines" "$ctx_file" >"$context_tail" 2>/dev/null; then
+            cp "$ctx_file" "$context_tail"
+          fi
+        fi
+        ;;
+      raw)
+        context_tail="${run_dir}/context_tail.md"
+        if ! tail -n "$context_lines" "$ctx_file" >"$context_tail" 2>/dev/null; then
+          cp "$ctx_file" "$context_tail"
+        fi
+        ;;
+    esac
   fi
 
   info "Work run directory → ${run_dir}"
@@ -5138,7 +5849,7 @@ EOHELP
       local output_path="${story_run_dir}/out/task_${task_number}.out.md"
 
       local prompt_meta
-      if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$task_index" "$prompt_path" "$context_tail" "$CODEX_MODEL" "$PROJECT_ROOT")"; then
+      if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$task_index" "$prompt_path" "$context_tail" "$CODEX_MODEL" "$PROJECT_ROOT" "$STAGING_DIR")"; then
         warn "  Failed to build prompt for task index ${task_index}"
         work_failed=1
         break
@@ -5397,6 +6108,27 @@ PY
         if (( sleep_between > 0 )); then
           restart_cmd+=(--sleep-between "$sleep_between")
         fi
+        if (( doc_snippets )); then
+          restart_cmd+=("${doc_snippets_flag[@]}")
+        fi
+        if ((${#sample_lines_flag[@]} > 0)); then
+          restart_cmd+=("${sample_lines_flag[@]}")
+        fi
+        if ((${#prompt_mode_flag[@]} > 0)); then
+          restart_cmd+=("${prompt_mode_flag[@]}")
+        fi
+        if ((${#context_mode_flags[@]} > 0)); then
+          restart_cmd+=("${context_mode_flags[@]}")
+        fi
+        if ((${#context_mode_choice_flag[@]} > 0)); then
+          restart_cmd+=("${context_mode_choice_flag[@]}")
+        fi
+        if ((${#context_file_flag[@]} > 0)); then
+          restart_cmd+=("${context_file_flag[@]}")
+        fi
+        if ((${#context_skip_flags[@]} > 0)); then
+          restart_cmd+=("${context_skip_flags[@]}")
+        fi
         restart_cmd+=(--batch-size 1 --memory-cycle)
         info "Restarting work-on-tasks to continue processing."
         exec "${restart_cmd[@]}"
@@ -5434,6 +6166,27 @@ PY
       fi
       if (( sleep_between > 0 )); then
         restart_cmd+=(--sleep-between "$sleep_between")
+      fi
+      if (( doc_snippets )); then
+        restart_cmd+=("${doc_snippets_flag[@]}")
+      fi
+      if ((${#sample_lines_flag[@]} > 0)); then
+        restart_cmd+=("${sample_lines_flag[@]}")
+      fi
+      if ((${#prompt_mode_flag[@]} > 0)); then
+        restart_cmd+=("${prompt_mode_flag[@]}")
+      fi
+      if ((${#context_mode_flags[@]} > 0)); then
+        restart_cmd+=("${context_mode_flags[@]}")
+      fi
+      if ((${#context_mode_choice_flag[@]} > 0)); then
+        restart_cmd+=("${context_mode_choice_flag[@]}")
+      fi
+      if ((${#context_file_flag[@]} > 0)); then
+        restart_cmd+=("${context_file_flag[@]}")
+      fi
+      if ((${#context_skip_flags[@]} > 0)); then
+        restart_cmd+=("${context_skip_flags[@]}")
       fi
       info "Restarting work-on-tasks to process remaining backlog."
       exec "${restart_cmd[@]}"

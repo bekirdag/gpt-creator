@@ -20,3 +20,9 @@ Common flow:
    - The CLI will try to install workspace dependencies automatically (preferring pnpm) before running tasks, reporting any failure to `/tmp/gc_deps_install.log`.
    - `create-tasks` now emits `.gpt-creator/staging/plan/tasks/tasks.db` (SQLite) with epics, stories, and tasks; reruns preserve task status unless `--force` is provided.
    - `work-on-tasks` reads and updates that database so resuming after interruptions requires no extra state files.
+   - Trim shared context with `--context-lines`, `--context-file-lines`, `--context-skip`, or drop it entirely with `--context-none` when Codex prompts get too large.
+  - Prompts are compact by default; use `--prompt-expanded` if you need the legacy verbose instruction/schema block.
+  - Sample payloads default to a compact digest; increase `--sample-lines` when you need the first N minified chunks of the raw request/response.
+  - Pull scoped excerpts for referenced documents/endpoints with `--context-doc-snippets`; excerpts are summarised and hashed to minimise prompt size.
+  - `.gpt-creator/staging/plan/work/context.md` now collapses CSS, SQL dumps, markup, and JSON blobs by default; export `GC_CONTEXT_INCLUDE_UI=1` if you need the legacy raw UI asset sweep.
+  - `work-on-tasks` requires `.gpt-creator/staging/plan/tasks/tasks.db`; JSON fallbacks were removed, so run `create-tasks` (or `create-jira-tasks` + `migrate-tasks`) beforehand.

@@ -89,6 +89,15 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l keep-a
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l memory-cycle -d "Restart after each task and prune caches"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l batch-size -r -d "Process at most this many tasks"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l sleep-between -r -d "Pause seconds between tasks"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l context-lines -r -d "Tail only the last N lines of shared context"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l context-none -d "Skip attaching shared context to prompts"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l context-mode -r -d "Shared context strategy (digest|raw)" -a "digest raw"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l context-file-lines -r -d "Limit each shared-context file to N lines"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l context-skip -r -d "Glob pattern to exclude from shared context"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l prompt-compact -d "Use a compact instruction/schema block in prompts"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l prompt-expanded -d "Use the legacy verbose instruction/schema block"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l context-doc-snippets -d "Pull scoped excerpts for referenced docs/endpoints"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l sample-lines -r -d "Include at most N lines from sample payloads"
 
 # iterate (deprecated)
 complete -c gpt-creator -n "__fish_seen_subcommand_from iterate" -l jira -r -d "Jira tasks file"

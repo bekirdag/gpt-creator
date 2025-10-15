@@ -105,6 +105,12 @@ Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
 - Task rows include enriched columns (tags, story points, dependencies, assignee, document references, idempotency, rate limits, RBAC, messaging/workflows, performance targets, observability, endpoints, sample payloads, story/epic refs) for downstream automation.
 - `work-on-tasks` drives Codex over that backlog, applies returned patches, persists progress directly in the database, and optionally re-verifies.
 - `work-on-tasks` accepts batching/pacing flags (`--batch-size`, `--sleep-between`) to manage long-running Codex sessions.
+- Shared-context size is tunable via `--context-lines`, `--context-file-lines`, `--context-skip`, or `--context-none` to keep Codex prompts concise.
+- Prompts ship with the compact instruction/schema block by default; pass `--prompt-expanded` to restore the legacy verbose guidance when needed.
+- Sample payloads default to a digest; bump `--sample-lines` only when a task needs raw request/response chunks.
+- `--context-doc-snippets` replaces broad document dumps with compact, hashed summaries from referenced specs/endpoints.
+- Context harvesting collapses CSS/SQL/markup noise automatically; export `GC_CONTEXT_INCLUDE_UI=1` if you need raw UI dumps in `context.md`.
+- `.gpt-creator/staging/plan/tasks/tasks.db` must exist before backlog execution; the CLI no longer rebuilds it automatically from legacy JSON, so run `create-tasks` (or `create-jira-tasks` + `migrate-tasks`) first.
 - Dependencies for Node workspaces are installed automatically (preferring pnpm) before processing tasks; failures are surfaced but do not halt execution.
 - Legacy `iterate` remains for backward compatibility, emitting a warning that points users to the new flow.
 

@@ -262,6 +262,8 @@ cjt::init() {
   CJT_TMP_DIR="$CJT_PIPELINE_DIR/tmp"
   CJT_CONTEXT_FILE="$CJT_PIPELINE_DIR/context-full.md"
   CJT_CONTEXT_SNIPPET_FILE="$CJT_PIPELINE_DIR/context-snippet.md"
+  CJT_CONTEXT_EPIC_FILE="$CJT_PIPELINE_DIR/context-epics.md"
+  CJT_CONTEXT_BOILER_CACHE="$CJT_PIPELINE_DIR/context-boilerplate-cache.txt"
   CJT_TASKS_DIR="$CJT_PLAN_DIR/tasks"
 
   mkdir -p "$CJT_TASKS_DIR"
@@ -529,6 +531,97 @@ with dest.open('a', encoding='utf-8') as fh:
 PY
 }
 
+cjt::filter_context_boilerplate() {
+  local source_path="${1:?source path required}"
+  local dest_path="${2:?destination path required}"
+  local cache_path="${3:?cache path required}"
+  python3 - "$source_path" "$dest_path" "$cache_path" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+cache_path = Path(sys.argv[3])
+
+if not source.exists():
+    dest.write_text('', encoding='utf-8')
+    raise SystemExit(0)
+
+try:
+    text = source.read_text(encoding='utf-8', errors='ignore')
+except Exception:
+    dest.write_text('', encoding='utf-8')
+    raise SystemExit(0)
+
+seen = set()
+if cache_path.exists():
+    try:
+        seen = {
+            line.strip()
+            for line in cache_path.read_text(encoding='utf-8', errors='ignore').splitlines()
+            if line.strip()
+        }
+    except Exception:
+        seen = set()
+
+def iter_paragraphs(blob: str):
+    lines = []
+    for raw_line in blob.splitlines():
+        if raw_line.strip():
+            lines.append(raw_line)
+        else:
+            if lines:
+                yield lines
+                lines = []
+    if lines:
+        yield lines
+
+def signature(lines):
+    if not lines:
+        return None
+    first_line = lines[0].lstrip()
+    if first_line.startswith('#'):
+        return None
+    normalized = ' '.join(part.strip().lower() for part in lines if part.strip())
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+    if len(normalized) < 60:
+        return None
+    return normalized[:480]
+
+paragraphs = list(iter_paragraphs(text))
+filtered = []
+added_signatures = set()
+
+for lines in paragraphs:
+    sig = signature(lines)
+    if sig and sig in seen:
+        continue
+    filtered.append('\n'.join(lines).strip())
+    if sig:
+        seen.add(sig)
+        added_signatures.add(sig)
+
+if not filtered and paragraphs:
+    fallback = '\n'.join(paragraphs[0]).strip()
+    if fallback:
+        filtered.append(fallback)
+        sig = signature(paragraphs[0])
+        if sig:
+            seen.add(sig)
+            added_signatures.add(sig)
+
+output = '\n\n'.join(filtered).strip()
+if output:
+    output += '\n'
+dest.write_text(output, encoding='utf-8')
+
+if seen:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text('\n'.join(sorted(seen)) + '\n', encoding='utf-8')
+PY
+}
+
 cjt::chunk_doc_by_headings() {
   local source_file="${1:?source file required}"
   local chunk_dir="${2:?chunk directory required}"
@@ -592,6 +685,126 @@ if __name__ == '__main__':
 PY
 }
 
+cjt::build_epic_context_summary() {
+  local source_path="${1:?source context required}"
+  local dest_path="${2:?destination path required}"
+  python3 - "$source_path" "$dest_path" <<'PY'
+import os
+import re
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+
+def parse_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, default))
+    except Exception:
+        return default
+    return value
+
+section_limit = parse_int("CJT_EPIC_CONTEXT_SECTION_LIMIT", 6)
+snippet_char_limit = parse_int("CJT_EPIC_CONTEXT_SECTION_CHAR_LIMIT", 900)
+total_char_limit = parse_int("CJT_EPIC_CONTEXT_TOTAL_CHAR_LIMIT", 4500)
+
+if not source.exists():
+    dest.write_text("", encoding="utf-8")
+    raise SystemExit(0)
+
+raw = source.read_text(encoding="utf-8", errors="ignore")
+lines = raw.splitlines()
+
+sections = []
+current_title = None
+current_lines = []
+
+for line in lines:
+    if line.startswith("## "):
+        if current_title is not None:
+            body = "\n".join(current_lines).strip()
+            if body:
+                sections.append((current_title, body))
+        current_title = line[3:].strip() or "Section"
+        current_lines = []
+        continue
+    if line.startswith("# "):
+        continue
+    if current_title is None:
+        continue
+    current_lines.append(line)
+
+if current_title is not None:
+    body = "\n".join(current_lines).strip()
+    if body:
+        sections.append((current_title, body))
+
+if not sections:
+    trimmed = raw.strip()
+    if total_char_limit > 0 and len(trimmed) > total_char_limit:
+        trimmed = trimmed[: total_char_limit].rstrip() + "\n... (truncated; consult consolidated context for full details)"
+    dest.write_text(trimmed + ("\n" if trimmed else ""), encoding="utf-8")
+    raise SystemExit(0)
+
+stopwords = {
+    "the", "and", "for", "with", "from", "that", "this", "system", "user", "story",
+    "should", "will", "must", "allow", "support", "able", "data", "api", "admin",
+    "project", "documentation", "context", "section"
+}
+token_re = re.compile(r"[a-z0-9][a-z0-9\-_/]{2,}")
+
+scored = []
+for index, (title, body) in enumerate(sections):
+    tokens = {token.strip("-_/") for token in token_re.findall(body.lower()) if len(token) > 3}
+    keywords = {token for token in tokens if token and token not in stopwords}
+    unique_score = len(keywords)
+    length_score = min(len(body), 2000)
+    scored.append((unique_score, length_score, index, title, body))
+
+scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
+
+selected = []
+total_chars = 0
+remaining_sections = len(scored) if section_limit <= 0 else min(section_limit, len(scored))
+
+for unique_score, length_score, index, title, body in scored:
+    if remaining_sections == 0:
+        break
+    snippet = body
+    if snippet_char_limit > 0 and len(snippet) > snippet_char_limit:
+        snippet = snippet[:snippet_char_limit].rstrip() + "\n... (truncated; consult consolidated context for full details)"
+    snippet_len = len(snippet)
+    if total_char_limit > 0 and total_chars + snippet_len > total_char_limit:
+        allowance = total_char_limit - total_chars
+        if allowance <= 0:
+            break
+        snippet = snippet[:allowance].rstrip()
+        if snippet:
+            snippet += "\n... (truncated; consult consolidated context for full details)"
+            snippet_len = len(snippet)
+        else:
+            break
+    selected.append((title, snippet))
+    total_chars += snippet_len
+    remaining_sections -= 1
+
+if not selected:
+    fallback = scored[0][4]
+    if total_char_limit > 0 and len(fallback) > total_char_limit:
+        fallback = fallback[: total_char_limit].rstrip() + "\n... (truncated; consult consolidated context for full details)"
+    dest.write_text(fallback + ("\n" if fallback else ""), encoding="utf-8")
+    raise SystemExit(0)
+
+lines_out = []
+for title, snippet in selected:
+    lines_out.append(f"### {title}")
+    lines_out.append(snippet)
+    lines_out.append("")
+
+dest.write_text("\n".join(lines_out), encoding="utf-8")
+PY
+}
+
 cjt::build_context_files() {
   local _had_nounset=0
   if [[ $- == *u* ]]; then
@@ -602,15 +815,18 @@ cjt::build_context_files() {
   if [[ -z ${CJT_DOC_FILES+x} ]]; then
     CJT_DOC_FILES=()
   fi
-  : "${CJT_CONTEXT_FULL_CHAR_LIMIT:=15000}"
-  : "${CJT_CONTEXT_SNIPPET_LINES:=80}"
-  : "${CJT_CONTEXT_SNIPPET_CHAR_LIMIT:=6000}"
+  : "${CJT_CONTEXT_FULL_CHAR_LIMIT:=8000}"
+  : "${CJT_CONTEXT_SNIPPET_LINES:=45}"
+  : "${CJT_CONTEXT_SNIPPET_CHAR_LIMIT:=3200}"
 
   local cleaned_dir="$CJT_PIPELINE_DIR/cleaned-docs"
+  local dedupe_cache="${CJT_CONTEXT_BOILER_CACHE:-$CJT_PIPELINE_DIR/context-boilerplate-cache.txt}"
   mkdir -p "$cleaned_dir" "$CJT_TMP_DIR"
 
   : > "$CJT_CONTEXT_FILE"
   : > "$CJT_CONTEXT_SNIPPET_FILE"
+  : > "$CJT_CONTEXT_EPIC_FILE"
+  : > "$dedupe_cache"
 
   {
     echo "# Consolidated Project Context"
@@ -641,16 +857,20 @@ cjt::build_context_files() {
     cleaned_path="$(mktemp "$cleaned_dir/doc_XXXXXX")"
     cjt::sanitize_doc_to "$file" "$cleaned_path"
 
+    local context_filtered
+    context_filtered="$(mktemp "$cleaned_dir/context_XXXXXX")"
+    cjt::filter_context_boilerplate "$cleaned_path" "$context_filtered" "$dedupe_cache"
+
     printf '----- FILE: %s -----\n' "$rel_path" >> "$CJT_CONTEXT_FILE"
-    if [[ -s "$cleaned_path" ]]; then
-      cjt::append_file_with_char_limit "$cleaned_path" "$CJT_CONTEXT_FILE" "$CJT_CONTEXT_FULL_CHAR_LIMIT"
+    if [[ -s "$context_filtered" ]]; then
+      cjt::append_file_with_char_limit "$context_filtered" "$CJT_CONTEXT_FILE" "$CJT_CONTEXT_FULL_CHAR_LIMIT"
     else
       printf '(empty after sanitization)\n\n' >> "$CJT_CONTEXT_FILE"
     fi
 
     printf '## %s\n' "$rel_path" >> "$CJT_CONTEXT_SNIPPET_FILE"
-    if [[ -s "$cleaned_path" ]]; then
-      cjt::append_file_with_line_limit "$cleaned_path" "$CJT_CONTEXT_SNIPPET_FILE" "$CJT_CONTEXT_SNIPPET_LINES" "$CJT_CONTEXT_SNIPPET_CHAR_LIMIT"
+    if [[ -s "$context_filtered" ]]; then
+      cjt::append_file_with_line_limit "$context_filtered" "$CJT_CONTEXT_SNIPPET_FILE" "$CJT_CONTEXT_SNIPPET_LINES" "$CJT_CONTEXT_SNIPPET_CHAR_LIMIT"
     else
       printf '(empty after sanitization)\n\n' >> "$CJT_CONTEXT_SNIPPET_FILE"
     fi
@@ -678,6 +898,8 @@ cjt::build_context_files() {
     CJT_SDS_CHUNKS_DIR=""
     CJT_SDS_CHUNKS_LIST=""
   fi
+
+  cjt::build_epic_context_summary "$CJT_CONTEXT_SNIPPET_FILE" "$CJT_CONTEXT_EPIC_FILE"
 
   if (( _had_nounset )); then
     set -u
@@ -1297,8 +1519,12 @@ cjt::write_epics_prompt() {
       echo "- ${file#$CJT_PROJECT_ROOT/}"
     done
     echo
-    echo "## Context Excerpt"
-    sed 's/\x1b\[[0-9;]*m//g' "$CJT_CONTEXT_SNIPPET_FILE"
+    echo "## Context Excerpt (summary)"
+    if [[ -s "$CJT_CONTEXT_EPIC_FILE" ]]; then
+      sed 's/\x1b\[[0-9;]*m//g' "$CJT_CONTEXT_EPIC_FILE"
+    else
+      sed 's/\x1b\[[0-9;]*m//g' "$CJT_CONTEXT_SNIPPET_FILE"
+    fi
     echo
     cat <<'PROMPT'
 ## Requirements
@@ -1412,16 +1638,21 @@ cjt::write_story_prompt() {
   local prompt_file="${2:?prompt file required}"
   local epics_json="$CJT_JSON_DIR/epics.json"
   local project_label="${CJT_PROJECT_TITLE:-the product}"
-  CJT_PROMPT_TITLE="$project_label" python3 - "$epics_json" "$epic_id" "$prompt_file" "$CJT_CONTEXT_SNIPPET_FILE" <<'PY'
+  CJT_PROMPT_TITLE="$project_label" python3 - \
+    "$epics_json" \
+    "$epic_id" \
+    "$prompt_file" \
+    "$CJT_CONTEXT_SNIPPET_FILE" <<'PY'
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 epics_path = Path(sys.argv[1])
 epic_id = sys.argv[2]
 prompt_path = Path(sys.argv[3])
-context_snippet = Path(sys.argv[4]).read_text(encoding='utf-8')
+context_path = Path(sys.argv[4])
 project_label = os.environ.get('CJT_PROMPT_TITLE', 'the product').strip() or 'the product'
 
 data = json.loads(epics_path.read_text(encoding='utf-8'))
@@ -1434,15 +1665,123 @@ for epic in data.get('epics', []):
 if not match:
     raise SystemExit(f"Epic {epic_id} not found in epics.json")
 
+def parse_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except Exception:
+        return default
+
+SECTION_LIMIT = parse_int("CJT_STORY_CONTEXT_SECTION_LIMIT", 6)
+SNIPPET_CHAR_LIMIT = parse_int("CJT_STORY_CONTEXT_SECTION_CHAR_LIMIT", 1200)
+TOTAL_CHAR_LIMIT = parse_int("CJT_STORY_CONTEXT_TOTAL_CHAR_LIMIT", 5500)
+
+def load_sections(path: Path):
+    if not path.exists():
+        return []
+    raw = path.read_text(encoding='utf-8', errors='ignore')
+    sections = []
+    current_title = None
+    current_lines = []
+    for line in raw.splitlines():
+        if line.startswith("## "):
+            if current_title is not None and current_lines:
+                sections.append((current_title, "\n".join(current_lines).strip()))
+            current_title = line[3:].strip() or "Section"
+            current_lines = []
+            continue
+        if line.startswith("# "):
+            continue
+        if current_title is None:
+            continue
+        current_lines.append(line)
+    if current_title is not None and current_lines:
+        sections.append((current_title, "\n".join(current_lines).strip()))
+    return sections
+
+STOPWORDS = {
+    "the", "and", "for", "with", "from", "that", "this", "system", "user", "story",
+    "should", "will", "must", "allow", "support", "able", "data", "api", "admin",
+    "project", "documentation", "context", "section"
+}
+TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9\\-_/]{2,}")
+
+def extract_keywords(epic_payload: dict):
+    tokens = []
+    for key in ("title", "summary"):
+        value = epic_payload.get(key)
+        if isinstance(value, str):
+            tokens.append(value)
+    for key in ("acceptance_criteria", "primary_roles", "dependencies"):
+        value = epic_payload.get(key)
+        if isinstance(value, list):
+            tokens.extend(str(item) for item in value if item)
+    blob = " ".join(tokens).lower()
+    keywords = {token.strip("-_/") for token in TOKEN_RE.findall(blob) if len(token) > 3}
+    return {kw for kw in keywords if kw and kw not in STOPWORDS}
+
+def score_sections(sections, keywords):
+    scored = []
+    for idx, (title, body) in enumerate(sections):
+        lower = body.lower()
+        score = sum(lower.count(keyword) for keyword in keywords)
+        length_score = min(len(body), 2000)
+        scored.append((score, length_score, idx, title, body))
+    scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    return scored
+
+def select_sections(sections, keywords):
+    scored = score_sections(sections, keywords)
+    if not scored:
+        return []
+    remaining = len(scored) if SECTION_LIMIT <= 0 else min(SECTION_LIMIT, len(scored))
+    total_chars = 0
+    selected = []
+    for score, length_score, idx, title, body in scored:
+        if remaining == 0:
+            break
+        snippet = body
+        if SNIPPET_CHAR_LIMIT > 0 and len(snippet) > SNIPPET_CHAR_LIMIT:
+            snippet = snippet[:SNIPPET_CHAR_LIMIT].rstrip()
+            snippet += "\n... (truncated; see consolidated context for full details)"
+        snippet_len = len(snippet)
+        if TOTAL_CHAR_LIMIT > 0 and total_chars + snippet_len > TOTAL_CHAR_LIMIT:
+            allowance = TOTAL_CHAR_LIMIT - total_chars
+            if allowance <= 0:
+                break
+            snippet = snippet[:allowance].rstrip()
+            if snippet:
+                snippet += "\n... (truncated; see consolidated context for full details)"
+                snippet_len = len(snippet)
+            else:
+                break
+        selected.append((title, snippet))
+        total_chars += snippet_len
+        remaining -= 1
+    if not selected:
+        fallback = scored[0][3], scored[0][4]
+        return [fallback]
+    return selected
+
+sections = load_sections(context_path)
+keywords = extract_keywords(match)
+selected_sections = select_sections(sections, keywords)
+
 with prompt_path.open('w', encoding='utf-8') as fh:
     fh.write(f"You are a lead product analyst expanding Jira epics into granular user stories for the {project_label} initiative.\n\n")
     fh.write("Only focus on the website and admin/backoffice surfaces. Ignore DevOps/infra.\n\n")
     fh.write("## Target epic\n")
     json.dump(match, fh, indent=2)
     fh.write("\n\n")
-    fh.write("## Shared documentation excerpt\n")
-    fh.write(context_snippet)
-    fh.write("\n\n")
+    fh.write("## Focused documentation excerpts\n")
+    if selected_sections:
+        for title, snippet in selected_sections:
+            fh.write(f"### {title}\n")
+            fh.write(snippet)
+            if not snippet.endswith("\n"):
+                fh.write("\n")
+            fh.write("\n")
+    else:
+        fh.write("(No high-confidence documentation sections matched; consult the consolidated context if needed.)\n\n")
     fh.write("## Requirements\n")
     fh.write("- Produce exhaustive user stories that cover sunny-day flows, edge cases, validation errors, state transitions, and accessibility requirements for this epic.\n")
     fh.write("- Use identifiers following the pattern '<epic-id>-US-XX'. Start numbering at 01.\n")
@@ -1465,6 +1804,26 @@ cjt::generate_tasks() {
   fi
 
   cjt::state_mark_stage_pending "tasks"
+  local inline_refine_enabled=0
+  local inline_refine_reason=""
+  if cjt::inline_refine_is_enabled; then
+    inline_refine_enabled=1
+  else
+    inline_refine_reason="${CJT_INLINE_REFINE_REASON:-}"
+    if [[ "${CJT_INLINE_REFINE_NOTICE_EMITTED:-0}" != "1" && -n "$inline_refine_reason" ]]; then
+      case "$inline_refine_reason" in
+        pending-refine-stage)
+          cjt::log "Inline refinement disabled; the refine_tasks stage will handle polishing."
+          ;;
+        disabled-explicit)
+          cjt::log "Inline refinement disabled (CJT_INLINE_REFINE_ENABLED=0)."
+          ;;
+      esac
+      CJT_INLINE_REFINE_NOTICE_EMITTED=1
+    fi
+    unset CJT_INLINE_REFINE_REASON
+  fi
+
   local story_file
   while IFS= read -r story_file; do
     [[ -n "$story_file" ]] || continue
@@ -1483,13 +1842,39 @@ cjt::generate_tasks() {
       cjt::wrap_json_extractor "$raw_file" "$json_file"
       cjt::state_mark_story_completed "tasks" "$slug"
       cjt::sync_story_snapshot_to_db "$json_file" "$slug"
-      cjt::inline_refine_story_tasks "$json_file" "$slug"
+      if (( inline_refine_enabled )); then
+        CJT_INLINE_REFINEMENT_ALLOWED=1
+        cjt::inline_refine_story_tasks "$json_file" "$slug"
+        unset CJT_INLINE_REFINEMENT_ALLOWED
+      fi
     else
       cjt::die "Codex failed while generating tasks for story ${slug}"
     fi
   done < <(find "$CJT_JSON_STORIES_DIR" -maxdepth 1 -type f -name '*.json' | sort)
 
   cjt::state_mark_stage_completed "tasks"
+}
+
+cjt::inline_refine_is_enabled() {
+  CJT_INLINE_REFINE_REASON=""
+  local flag="${CJT_INLINE_REFINE_ENABLED:-}"
+  if [[ -n "$flag" ]]; then
+    flag="${flag,,}"
+    case "$flag" in
+      1|true|yes|on)
+        return 0
+        ;;
+      0|false|no|off|"")
+        CJT_INLINE_REFINE_REASON="disabled-explicit"
+        return 1
+        ;;
+    esac
+  fi
+  if [[ "${CJT_SKIP_REFINE:-0}" == "1" ]]; then
+    return 0
+  fi
+  CJT_INLINE_REFINE_REASON="pending-refine-stage"
+  return 1
 }
 
 cjt::sync_story_snapshot_to_db() {
@@ -1518,6 +1903,11 @@ cjt::inline_refine_story_tasks() {
   fi
   if [[ ! -f "$story_json" ]]; then
     return
+  fi
+  if [[ "${CJT_INLINE_REFINEMENT_ALLOWED:-0}" != "1" ]]; then
+    if ! cjt::inline_refine_is_enabled; then
+      return
+    fi
   fi
 
   local working="$CJT_TMP_DIR/inline_refine_${slug}.json"
@@ -1743,6 +2133,14 @@ def summarize_text(text: str, char_limit: int) -> str:
         return f"{trimmed}\n... (truncated; consult source for full details)"
     return text
 
+def single_line_summary(text: str, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", text.strip())
+    if not text:
+        return ""
+    if max_chars > 0 and len(text) > max_chars:
+        return text[:max_chars].rstrip() + "…"
+    return text
+
 def parse_context_sections(blob: str) -> list[tuple[str, str]]:
     sections: list[tuple[str, str]] = []
     current_title = "Overview"
@@ -1770,21 +2168,25 @@ def parse_context_sections(blob: str) -> list[tuple[str, str]]:
     return deduped
 
 def choose_context_sections(blob: str, keywords: set[str]) -> list[tuple[str, str]]:
-    max_sections = int(os.environ.get("CJT_TASK_CONTEXT_SECTION_LIMIT", "5"))
-    char_limit = int(os.environ.get("CJT_TASK_CONTEXT_SECTION_CHAR_LIMIT", "1200"))
+    max_sections = int(os.environ.get("CJT_TASK_CONTEXT_SECTION_LIMIT", "3"))
+    char_limit = int(os.environ.get("CJT_TASK_CONTEXT_SECTION_CHAR_LIMIT", "450"))
+    summary_limit = int(os.environ.get("CJT_TASK_CONTEXT_SUMMARY_CHAR_LIMIT", "220"))
     sections = parse_context_sections(blob)
     if not sections:
         return []
     scored = []
     for title, text in sections:
         snippet = summarize_text(text, char_limit)
+        if not snippet:
+            continue
+        summary = single_line_summary(snippet, summary_limit)
         score = score_text(text, keywords)
-        scored.append((score, title, snippet))
+        scored.append((score, title, summary))
     scored.sort(key=lambda item: item[0], reverse=True)
     filtered = [entry for entry in scored if entry[0] > 0][:max_sections]
     if not filtered:
         filtered = scored[:max_sections]
-    return [(title, snippet) for _, title, snippet in filtered if snippet]
+    return [(title, summary) for _, title, summary in filtered if summary]
 
 def load_sds_chunks(list_path: Path) -> list[tuple[str, str, str, str]]:
     entries: list[tuple[str, str, str, str]] = []
@@ -1808,9 +2210,10 @@ def load_sds_chunks(list_path: Path) -> list[tuple[str, str, str, str]]:
 def choose_sds_chunks(entries: list[tuple[str, str, str, str]], keywords: set[str]) -> tuple[list[str], list[tuple[str, str]], int]:
     if not entries:
         return [], [], 0
-    overview_limit = int(os.environ.get("CJT_TASK_SDS_OVERVIEW_LIMIT", "6"))
-    chunk_limit = int(os.environ.get("CJT_TASK_SDS_CHUNK_LIMIT", "5"))
-    snippet_char_limit = int(os.environ.get("CJT_TASK_SDS_SNIPPET_CHAR_LIMIT", "600"))
+    overview_limit = int(os.environ.get("CJT_TASK_SDS_OVERVIEW_LIMIT", "4"))
+    chunk_limit = int(os.environ.get("CJT_TASK_SDS_CHUNK_LIMIT", "3"))
+    snippet_char_limit = int(os.environ.get("CJT_TASK_SDS_SNIPPET_CHAR_LIMIT", "400"))
+    summary_limit = int(os.environ.get("CJT_TASK_SDS_SUMMARY_CHAR_LIMIT", "200"))
     scored = []
     for name, label, heading, content in entries:
         meta = " ".join(filter(None, (name, label, heading)))
@@ -1825,7 +2228,9 @@ def choose_sds_chunks(entries: list[tuple[str, str, str, str]], keywords: set[st
     prepared: list[tuple[str, str]] = []
     for _, name, label, heading, content in selected:
         ref = f"SDS {label}" if label else (heading or name)
-        prepared.append((ref, summarize_text(content, snippet_char_limit)))
+        summary_text = summarize_text(content, snippet_char_limit)
+        summary = single_line_summary(summary_text, summary_limit)
+        prepared.append((ref, summary))
     overview_list: list[str] = []
     for _, name, label, heading, _ in overview_entries:
         ref = f"SDS {label}" if label else (heading or name)
@@ -1834,15 +2239,14 @@ def choose_sds_chunks(entries: list[tuple[str, str, str, str]], keywords: set[st
     return overview_list, prepared, omitted_total
 
 story_keywords = extract_keywords(story)
-context_sections = choose_context_sections(context_raw, story_keywords)
+context_refs = choose_context_sections(context_raw, story_keywords)
 
-sds_overview: list[str] = []
-sds_snippets: list[tuple[str, str]] = []
+sds_refs: list[tuple[str, str]] = []
 sds_omitted = 0
 if sds_chunk_list and sds_chunk_list.exists():
     sds_entries = load_sds_chunks(sds_chunk_list)
     if sds_entries:
-        sds_overview, sds_snippets, sds_omitted = choose_sds_chunks(sds_entries, story_keywords)
+        _, sds_refs, sds_omitted = choose_sds_chunks(sds_entries, story_keywords)
 
 with prompt_path.open('w', encoding='utf-8') as fh:
     fh.write("You are a delivery engineer decomposing a single user story into actionable Jira tasks.\n\n")
@@ -1853,43 +2257,29 @@ with prompt_path.open('w', encoding='utf-8') as fh:
     fh.write("## Epic context\n")
     json.dump({"epic_id": epic_id}, fh, indent=2)
     fh.write("\n\n")
-    fh.write("## Focused project documentation excerpts\n")
-    if context_sections:
-        for title, snippet in context_sections:
-            fh.write(f"### {title}\n")
-            fh.write(snippet)
-            if not snippet.endswith("\n"):
-                fh.write("\n")
-            fh.write("\n")
+    fh.write("## Focused documentation references\n")
+    if context_refs:
+        for title, summary in context_refs:
+            fh.write(f"- {title}: {summary}\n")
+        fh.write("\n")
     else:
         fh.write("(No high-confidence documentation sections matched; consult the consolidated context if needed.)\n\n")
     fh.write("## Requirements\n")
-    fh.write("- Create tasks that cover sunny day, error handling, edge cases, observability, analytics, and release readiness.\n")
-    fh.write("- Assign tasks to the appropriate roles: Architect, Dev/Ops, Project Manager, UI/UX designer, BE dev, FE dev, Test Eng.\n")
-    fh.write("- Include dependencies when a task relies on another.\n")
-    fh.write("- Add tags such as [Web-FE], [Web-BE], [Admin-FE], [Admin-BE], [API], [DB], [Design], [QA].\n")
-    fh.write("- Provide Story points (integer) per task; align with the effort described.\n")
-    fh.write("- Reference relevant documentation sections (e.g., 'SDS §10.1.1', 'SQL dump table users').\n")
-    fh.write("- Spell out API endpoints, payload structures, data validation, and state transitions.\n")
-    fh.write("- Cover testing requirements (unit, integration, E2E).\n")
-    fh.write("- Cross-check each detail against the staged PDR, SDS, OpenAPI, SQL, and sample documents; bring the task into alignment with any mismatches you find.\n")
-    fh.write("- If information is missing from the task, enrich it with specifics derived from the docs (fields, DB tables, endpoints, validations, RBAC, analytics, etc.).\n")
-    fh.write("\n")
-    if sds_snippets:
-        fh.write("## SDS sections overview\n")
-        for ref in sds_overview:
-            fh.write(f"- {ref}\n")
+    fh.write("- Cover happy paths, error handling, analytics, and release readiness considerations.\n")
+    fh.write("- Assign owners, note dependencies, and tag each task for the impacted surfaces (Web-FE, API, DB, QA, etc.).\n")
+    fh.write("- Provide numeric story points and hour estimates consistent with the workload.\n")
+    fh.write("- Reference documentation by identifier (e.g., SDS §10.1.1, SQL:users, API:/v1/auth) instead of pasting content.\n")
+    fh.write("- Describe APIs, data contracts, validations, and required testing (unit, integration, E2E).\n\n")
+    if sds_refs:
+        fh.write("## SDS references\n")
+        for ref, summary in sds_refs:
+            if summary:
+                fh.write(f"- {ref}: {summary}\n")
+            else:
+                fh.write(f"- {ref}\n")
         if sds_omitted > 0:
             fh.write(f"- ...(additional {sds_omitted} sections omitted; see full SDS for details)\n")
-        fh.write("\n## SDS source snippets\n")
-        for ref, snippet in sds_snippets:
-            fh.write(f"### {ref}\n")
-            fh.write(snippet)
-            if not snippet.endswith("\n"):
-                fh.write("\n")
-            fh.write("\n")
-        if sds_omitted > 0:
-            fh.write(f"(Additional {sds_omitted} SDS sections not shown; reference the overview and full SDS document for complete context.)\n\n")
+        fh.write("\n")
     fh.write("## Output JSON schema\n")
     fh.write("{\n  \"story_id\": \"...\",\n  \"story_title\": \"...\",\n  \"tasks\": [\n    {\n      \"id\": \"WEB-01-T01\",\n      \"title\": \"...\",\n      \"description\": \"Detailed instructions...\",\n      \"acceptance_criteria\": [\"...\"],\n      \"tags\": [\"Web-FE\"],\n      \"assignees\": [\"FE dev\"],\n      \"estimate\": 5,\n      \"story_points\": 5,\n      \"dependencies\": [\"WEB-01-T00\"],\n      \"document_references\": [\"SDS §10.1.1\"],\n      \"endpoints\": [\"GET /api/v1/...\"],\n      \"data_contracts\": [\"Request payloads, DB tables, indexes, policies, RBAC\"],\n      \"qa_notes\": [\"Unit tests, integration tests\"],\n      \"user_roles\": [\"Visitor\"]\n    }\n  ]\n}\n")
     fh.write("Return strictly valid JSON with all required fields.\n")
@@ -2347,15 +2737,19 @@ db_path = Path(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] else None
 project_base = os.environ.get("CJT_PROMPT_TITLE", "the project").strip() or "the project"
 project_label = f"{project_base} delivery team"
 
-CONTEXT_SECTION_LIMIT = int(os.environ.get("CJT_REFINE_CONTEXT_SECTION_LIMIT", "4"))
-CONTEXT_SECTION_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_CONTEXT_SECTION_CHAR_LIMIT", "900"))
-PDR_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_PDR_CHAR_LIMIT", "1200"))
-SQL_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_SQL_CHAR_LIMIT", "1200"))
-SDS_OVERVIEW_LIMIT = int(os.environ.get("CJT_REFINE_SDS_OVERVIEW_LIMIT", "4"))
-SDS_CHUNK_LIMIT = int(os.environ.get("CJT_REFINE_SDS_CHUNK_LIMIT", "3"))
-SDS_SNIPPET_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_SDS_SNIPPET_CHAR_LIMIT", "450"))
-OTHER_TASKS_LIMIT = int(os.environ.get("CJT_REFINE_OTHER_TASKS_LIMIT", "5"))
-OTHER_TASKS_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_OTHER_TASKS_CHAR_LIMIT", "160"))
+CONTEXT_SECTION_LIMIT = int(os.environ.get("CJT_REFINE_CONTEXT_SECTION_LIMIT", "2"))
+CONTEXT_SECTION_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_CONTEXT_SECTION_CHAR_LIMIT", "320"))
+CONTEXT_SECTION_SUMMARY_LIMIT = int(os.environ.get("CJT_REFINE_CONTEXT_SUMMARY_CHAR_LIMIT", "180"))
+PDR_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_PDR_CHAR_LIMIT", "360"))
+SQL_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_SQL_CHAR_LIMIT", "360"))
+SDS_OVERVIEW_LIMIT = int(os.environ.get("CJT_REFINE_SDS_OVERVIEW_LIMIT", "3"))
+SDS_CHUNK_LIMIT = int(os.environ.get("CJT_REFINE_SDS_CHUNK_LIMIT", "2"))
+SDS_SNIPPET_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_SDS_SNIPPET_CHAR_LIMIT", "220"))
+SDS_SNIPPET_SUMMARY_LIMIT = int(os.environ.get("CJT_REFINE_SDS_SUMMARY_CHAR_LIMIT", "180"))
+OTHER_TASKS_LIMIT = int(os.environ.get("CJT_REFINE_OTHER_TASKS_LIMIT", "3"))
+OTHER_TASKS_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_OTHER_TASKS_CHAR_LIMIT", "110"))
+TASK_FIELD_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_TASK_FIELD_CHAR_LIMIT", "220"))
+TASK_FIELD_LIST_LIMIT = int(os.environ.get("CJT_REFINE_TASK_LIST_LIMIT", "3"))
 
 payload = json.loads(tasks_path.read_text(encoding="utf-8"))
 tasks = payload.get("tasks") or []
@@ -2501,13 +2895,18 @@ def choose_context_sections(blob, keywords):
     scored = []
     for title, text in sections:
         snippet = summarize_text(text, CONTEXT_SECTION_CHAR_LIMIT)
+        if not snippet:
+            continue
+        summary = single_line_summary(snippet, CONTEXT_SECTION_SUMMARY_LIMIT)
+        if not summary:
+            continue
         score = score_text(text, keywords)
-        scored.append((score, title, snippet))
+        scored.append((score, title, summary))
     scored.sort(key=lambda item: item[0], reverse=True)
     filtered = [entry for entry in scored if entry[0] > 0][:CONTEXT_SECTION_LIMIT]
     if not filtered:
         filtered = scored[:CONTEXT_SECTION_LIMIT]
-    return [(title, snippet) for _, title, snippet in filtered if snippet]
+    return [(title, summary) for _, title, summary in filtered if summary]
 
 def load_sds_chunks(list_path):
     if not list_path or not list_path.exists():
@@ -2547,7 +2946,9 @@ def choose_sds_chunks(entries, keywords):
     prepared = []
     for _, name, label, heading, content in selected:
         ref = f"SDS {label}" if label else (heading or name)
-        prepared.append((ref, summarize_text(content, SDS_SNIPPET_CHAR_LIMIT)))
+        summary_text = summarize_text(content, SDS_SNIPPET_CHAR_LIMIT)
+        summary = single_line_summary(summary_text, SDS_SNIPPET_SUMMARY_LIMIT)
+        prepared.append((ref, summary))
     overview_list = []
     for _, name, label, heading, _ in overview_entries:
         ref = f"SDS {label}" if label else (heading or name)
@@ -2562,9 +2963,7 @@ def safe_excerpt(path, char_limit):
         text = path.read_text(encoding="utf-8", errors="ignore").strip()
     except Exception:
         return ""
-    if char_limit > 0 and len(text) > char_limit:
-        text = text[:char_limit].rstrip() + "\n... (truncated; consult source for full details)"
-    return text
+    return single_line_summary(text, char_limit)
 
 def load_other_tasks(db_path, story_slug, current_index):
     if not db_path or not db_path.exists():
@@ -2595,11 +2994,13 @@ def load_other_tasks(db_path, story_slug, current_index):
                         deps_summary = ", ".join(str(item).strip() for item in parsed if str(item).strip())
                 except Exception:
                     deps_summary = deps_raw
-            line = f"- {identifier}: {title} [status: {status}]"
+            title_summary = single_line_summary(title, OTHER_TASKS_CHAR_LIMIT)
+            line = f"- {identifier}: {title_summary} [status: {status}]"
             if deps_summary:
-                line += f" (depends on: {deps_summary})"
-            if len(line) > OTHER_TASKS_CHAR_LIMIT:
-                line = line[:OTHER_TASKS_CHAR_LIMIT].rstrip() + "..."
+                deps_short = single_line_summary(deps_summary, max(30, OTHER_TASKS_CHAR_LIMIT // 2))
+                if deps_short:
+                    line += f" (deps: {deps_short})"
+            line = single_line_summary(line, OTHER_TASKS_CHAR_LIMIT)
             lines.append(line)
             if len(lines) >= OTHER_TASKS_LIMIT:
                 break
@@ -2616,15 +3017,79 @@ def single_line_summary(text: str, max_chars: int) -> str:
         return text[:max_chars].rstrip() + "…"
     return text
 
+def _trim_field_text(value: str) -> str:
+    if not isinstance(value, str):
+        return value
+    value = re.sub(r"\s+", " ", value.strip())
+    if TASK_FIELD_CHAR_LIMIT > 0 and len(value) > TASK_FIELD_CHAR_LIMIT:
+        value = value[:TASK_FIELD_CHAR_LIMIT].rstrip() + "…"
+    return value
+
+def _trim_field_list(items):
+    if not isinstance(items, list):
+        return []
+    result = []
+    for idx, item in enumerate(items):
+        if idx >= TASK_FIELD_LIST_LIMIT:
+            remainder = len(items) - TASK_FIELD_LIST_LIMIT
+            if remainder > 0:
+                result.append(f"... (+{remainder} more)")
+            break
+        if isinstance(item, str):
+            result.append(_trim_field_text(item))
+        else:
+            result.append(item)
+    return [entry for entry in result if entry not in ("", None, [])]
+
+def build_compact_task(task: dict) -> dict:
+    keys = [
+        "id",
+        "task_id",
+        "status",
+        "title",
+        "description",
+        "acceptance_criteria",
+        "tags",
+        "assignees",
+        "dependencies",
+        "document_references",
+        "endpoints",
+        "data_contracts",
+        "qa_notes",
+        "user_roles",
+        "estimate",
+        "story_points",
+        "analytics",
+        "observability",
+        "policy",
+        "idempotency",
+        "rate_limits",
+    ]
+    snapshot = {}
+    for key in keys:
+        if key not in task:
+            continue
+        value = task.get(key)
+        if isinstance(value, str):
+            trimmed = _trim_field_text(value)
+            if trimmed:
+                snapshot[key] = trimmed
+        elif isinstance(value, list):
+            trimmed_list = _trim_field_list(value)
+            if trimmed_list:
+                snapshot[key] = trimmed_list
+        elif value not in (None, ""):
+            snapshot[key] = value
+    return snapshot
+
 keywords = extract_keywords(story, target_task)
 context_sections = choose_context_sections(context_blob, keywords)
 
-sds_overview = []
 sds_snippets = []
 sds_omitted = 0
 entries = load_sds_chunks(sds_list_path)
 if entries:
-    sds_overview, sds_snippets, sds_omitted = choose_sds_chunks(entries, keywords)
+    _, sds_snippets, sds_omitted = choose_sds_chunks(entries, keywords)
 
 pdr_excerpt = safe_excerpt(pdr_path, PDR_CHAR_LIMIT)
 sql_excerpt = safe_excerpt(sql_path, SQL_CHAR_LIMIT)
@@ -2651,8 +3116,7 @@ with prompt_path.open("w", encoding="utf-8") as fh:
 
     fh.write("## Focused documentation references\n")
     if context_sections:
-        for title, snippet in context_sections:
-            summary = single_line_summary(snippet, CONTEXT_SECTION_CHAR_LIMIT)
+        for title, summary in context_sections:
             fh.write(f"- {title}: {summary}\n")
         fh.write("\n")
     else:
@@ -2660,47 +3124,47 @@ with prompt_path.open("w", encoding="utf-8") as fh:
 
     if pdr_excerpt:
         fh.write("## PDR reference\n")
-        fh.write(f"- {single_line_summary(pdr_excerpt, PDR_CHAR_LIMIT)}\n\n")
+        fh.write(f"- {pdr_excerpt}\n\n")
 
     if sql_excerpt:
         fh.write("## Database schema reference\n")
-        fh.write(f"- {single_line_summary(sql_excerpt, SQL_CHAR_LIMIT)}\n\n")
+        fh.write(f"- {sql_excerpt}\n\n")
 
     if sds_snippets:
         fh.write("## SDS references\n")
-        for ref in sds_overview:
-            fh.write(f"- {ref}\n")
+        for ref, summary in sds_snippets:
+            if summary:
+                fh.write(f"- {ref}: {summary}\n")
+            else:
+                fh.write(f"- {ref}\n")
         if sds_omitted > 0:
             fh.write(f"- ...(additional {sds_omitted} sections omitted; consult full SDS)\n")
-        for ref, snippet in sds_snippets:
-            summary = single_line_summary(snippet, SDS_SNIPPET_CHAR_LIMIT)
-            fh.write(f"  - {ref}: {summary}\n")
         fh.write("\n")
 
     if other_tasks:
         fh.write("## Related tasks in backlog\n")
-        fh.write("Align dependencies, naming, and scope with these existing tasks.\n")
         fh.write("\n".join(other_tasks))
         fh.write("\n\n")
 
-    fh.write("## Current task draft\n")
-    json.dump(target_task, fh, indent=2)
+    fh.write("## Current task snapshot (trimmed)\n")
+    json.dump(snapshot, fh, indent=2)
     fh.write("\n\n")
 
     if gaps:
-        fh.write("## Gaps detected\n")
+        fh.write("## Fields to revise\n")
         for gap in gaps:
             fh.write(f"- {gap}\n")
         fh.write("\n")
+    else:
+        fh.write("## Fields to revise\n")
+        fh.write("- No validation gaps detected; tighten clarity and references if helpful.\n\n")
 
     fh.write("## Requirements\n")
-    fh.write("- Preserve the task ID and keep existing accurate details; enrich missing or incorrect fields.\n")
-    fh.write("- Ground updates in the provided documentation, PDR, SDS snippets, schema excerpt, and backlog snapshot.\n")
-    fh.write("- Cover sunny-day, error, and edge-case flows plus observability, analytics, QA, security, and policy impacts.\n")
-    fh.write("- Provide explicit endpoints, payload contracts, database tables/indexes, caching/idempotency, RBAC, analytics, and rate limits when relevant.\n")
-    fh.write("- Use approved assignee roles (Architect, Dev/Ops, Project Manager, UI/UX designer, BE dev, FE dev, Test Eng) and tags ([Web-FE], [Web-BE], [Admin-FE], [Admin-BE], [API], [DB], [Design], [QA], etc.).\n")
-    fh.write("- Supply integer story_points (1..13) and realistic hour estimates; adjust dependencies when needed.\n")
-    fh.write("- Return strictly valid JSON with no markdown fences or commentary outside the JSON object.\n\n")
+    fh.write("- Update only the fields above that need attention; keep correct data unchanged.\n")
+    fh.write("- Cite documentation by identifier (SDS §#, SQL:table, API:/path) rather than pasting prose.\n")
+    fh.write("- Fill in missing technical specifics (APIs, data contracts, QA, analytics, RBAC) using the references.\n")
+    fh.write("- Keep estimates/story_points realistic and adjust tags, assignees, and dependencies when necessary.\n")
+    fh.write("- Return the complete task as valid JSON with no markdown or commentary outside the object.\n\n")
 
     task_id = target_task.get("id") or target_task.get("task_id") or "TASK-ID"
     fh.write("## Output JSON schema\n")
@@ -2720,12 +3184,7 @@ with prompt_path.open("w", encoding="utf-8") as fh:
         "    \"endpoints\": [\"GET /api/v1/...\"],\n"
         "    \"data_contracts\": [\"Request payload...\"],\n"
         "    \"qa_notes\": [\"Tests...\"],\n"
-        "    \"analytics\": [\"Events...\"],\n"
-        "    \"observability\": [\"Metrics...\"],\n"
-        "    \"user_roles\": [\"Visitor\"],\n"
-        "    \"policy\": [\"RBAC mapping...\"],\n"
-        "    \"idempotency\": \"Describe behaviour...\",\n"
-        "    \"rate_limits\": \"Document limits...\"\n"
+        "    \"user_roles\": [\"Visitor\"]\n"
         "  }\n"
         "}\n"
     )

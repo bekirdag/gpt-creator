@@ -56,7 +56,7 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 [\-\-project DIR] [\-\-jira FILE] [\-\-force]
 .br
 .B gpt-creator work-on-tasks
-[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-no-verify] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC]
+[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-no-verify] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC] [\-\-context-lines NUM] [\-\-context-none] [\-\-context-mode MODE] [\-\-context-file-lines NUM] [\-\-context-skip GLOB] [\-\-prompt-compact] [\-\-prompt-expanded] [\-\-context-doc-snippets] [\-\-sample-lines NUM]
 .br
 .B gpt-creator iterate
 [\-\-root DIR] [\-\-jira FILE] (deprecated)
@@ -160,6 +160,14 @@ Deprecated alias of \fBcreate-tasks\fR retained for backwards compatibility.
 Drive Codex over tasks sourced from the SQLite backlog, apply returned JSON diff/file instructions automatically, and persist task/story status back into the database for precise resume support.
 Artifacts (prompt/output pairs) are removed after each successful task to limit memory use unless \fB--keep-artifacts\fR is supplied.
 Use \fB--batch-size\fR to pause after a fixed number of tasks and \fB--sleep-between\fR to insert delays between Codex runs when conserving resources.
+\fB--context-lines\fR controls how many lines from the shared context appendix are appended to each prompt (default 400) and \fB--context-none\fR omits that appendix entirely for minimal prompts.
+\fB--context-mode\fR selects the appendix strategy: \fIdigest\fR (default) summarises staged files into short hashed excerpts, while \fIraw\fR streams the literal tail produced by \fB--context-lines\fR.
+\fB--context-file-lines\fR clips each staged document before inclusion, while \fB--context-skip\fR accepts repeatable glob patterns to drop noisy files (for example, \fB--context-skip '*.css'\fR).
+\fB--prompt-compact\fR keeps the default compact instruction/schema block, while \fB--prompt-expanded\fR restores the legacy verbose guidance if you need the older behaviour.
+\fB--context-doc-snippets\fR resolves known document references/endpoints to staged files and injects compact hashed summaries in place of broad shared-context dumps.
+Set \fBGC_CONTEXT_INCLUDE_UI=1\fR when you need the legacy raw UI dumps preserved in the generated context file.
+`work-on-tasks` now assumes `.gpt-creator/staging/plan/tasks/tasks.db` already exists; populate it with \fBgpt-creator create-tasks\fR (or `create-jira-tasks` + `migrate-tasks`) before invoking the loop.
+\fB--sample-lines\fR (default 0) streams minified sample payload chunks on demand; increase the value when a task needs raw request/response bodies beyond the default digest.
 \fB--memory-cycle\fR processes one task per invocation, performs a best-effort memory trim (including Docker cache pruning), and automatically restarts the command so long backlogs stay within bounded RAM.
 .TP
 .B iterate

@@ -2010,6 +2010,41 @@ conn.close()
 PY
 }
 
+gc_fetch_story_task_counts() {
+  local db_path="${1:?tasks database path required}"
+  local story_slug="${2:?story slug required}"
+  python3 - <<'PY' "$db_path" "$story_slug"
+import sqlite3
+import sys
+
+db_path, story_slug = sys.argv[1:3]
+slug = (story_slug or "").strip()
+if not slug:
+    print("0\t0")
+    sys.exit(0)
+
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+
+slug_lower = slug.lower()
+row = cur.execute(
+    """
+    SELECT
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'complete' THEN 1 ELSE 0 END) AS complete_count
+      FROM tasks
+     WHERE LOWER(COALESCE(story_slug, '')) = ?
+    """,
+    (slug_lower,),
+).fetchone()
+conn.close()
+
+total = int(row[0] or 0)
+completed = int(row[1] or 0)
+print(f"{total}\t{completed}")
+PY
+}
+
 gc_trim_memory() {
   local phase="${1:-memory-cycle}"
   info "[memory] Reclaiming resources (${phase})"
@@ -6042,6 +6077,26 @@ EOHELP
     mkdir -p "${story_run_dir}/prompts" "${story_run_dir}/out"
 
     info "Story ${story_prefix} (${story_id:-$slug}) — ${story_title:-Unnamed}"
+
+    if (( total_tasks_int == 0 )); then
+      local stats=""
+      if stats="$(gc_fetch_story_task_counts "$tasks_db" "$slug" 2>/dev/null)"; then
+        local actual_total=0 actual_completed=0
+        IFS=$'\t' read -r actual_total actual_completed <<<"$stats"
+        if [[ "$actual_total" =~ ^[0-9]+$ ]] && (( actual_total > 0 )); then
+          info "  Found ${actual_total} task(s) in backlog despite zero metadata; synchronising."
+          total_tasks_int=$actual_total
+          completed="${actual_completed}"
+          if [[ "$completed" =~ ^[0-9]+$ ]]; then
+            (( completed > actual_total )) && completed="$actual_total"
+            if (( next_task_int < completed )); then
+              next_task_int=$completed
+            fi
+          fi
+          gc_update_work_state "$tasks_db" "$slug" "pending" "$completed" "$total_tasks_int" "$run_stamp"
+        fi
+      fi
+    fi
 
     if (( total_tasks_int == 0 )); then
       info "  No tasks for this story; marking complete."

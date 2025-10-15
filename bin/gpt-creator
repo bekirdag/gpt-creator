@@ -1825,34 +1825,73 @@ gc_align_task_story_slugs() {
 import sqlite3
 import sys
 import time
+import re
+import difflib
 
 db_path = sys.argv[1]
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 cur = conn.cursor()
 
-story_slug_by_id = {}
-story_slug_by_key = {}
-for story in cur.execute("SELECT story_slug, story_key, story_id FROM stories"):
-    slug = (story["story_slug"] or "").strip()
+def normalize(value: str) -> str:
+    return (value or "").strip()
+
+def slug_norm(value: str) -> str:
+    value = normalize(value).lower()
+    if not value:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", value).strip("-")
+
+story_norm_map = {}
+story_norm_keys = []
+for story in cur.execute("SELECT story_slug, story_key, story_id, story_title FROM stories"):
+    slug = normalize(story["story_slug"])
     if not slug:
         continue
-    story_id = (story["story_id"] or "").strip().lower()
-    story_key = (story["story_key"] or "").strip().lower()
-    if story_id:
-        story_slug_by_id.setdefault(story_id, slug)
-    if story_key:
-        story_slug_by_key.setdefault(story_key, slug)
+    canonical = slug
+    for candidate in {
+        story["story_slug"],
+        story["story_key"],
+        story["story_id"],
+        story["story_title"],
+    }:
+        norm = slug_norm(candidate)
+        if norm and norm not in story_norm_map:
+            story_norm_map[norm] = canonical
+    lower_slug = canonical.lower()
+    if lower_slug not in story_norm_map:
+        story_norm_map[lower_slug] = canonical
+
+story_norm_keys = list(story_norm_map.keys())
 
 updates = []
 timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-for task in cur.execute("SELECT id, story_slug, story_id FROM tasks"):
-    current_slug = (task["story_slug"] or "").strip()
-    story_id = (task["story_id"] or "").strip().lower()
+for task in cur.execute("SELECT id, story_slug, story_id, story_title FROM tasks"):
+    current_slug = normalize(task["story_slug"])
+    story_id = normalize(task["story_id"])
+    story_title = normalize(task["story_title"])
+
     target_slug = None
-    if story_id:
-        target_slug = story_slug_by_id.get(story_id) or story_slug_by_key.get(story_id)
+    candidates = [
+        story_id,
+        current_slug,
+        story_title,
+    ]
+
+    for candidate in candidates:
+        norm = slug_norm(candidate)
+        if norm and norm in story_norm_map:
+            target_slug = story_norm_map[norm]
+            break
+
+    if not target_slug:
+        combined = slug_norm(f"{story_id}-{story_title}") or slug_norm(current_slug)
+        if combined:
+            match = difflib.get_close_matches(combined, story_norm_keys, n=1, cutoff=0.84)
+            if match:
+                target_slug = story_norm_map[match[0]]
+
     if target_slug and target_slug != current_slug:
         updates.append((target_slug, timestamp, task["id"]))
 
@@ -6106,6 +6145,7 @@ REM
     python3 - "$tasks_db" "${story_filter}" "$resume_flag" <<'PY'
 import sqlite3
 import sys
+import re
 
 DB_PATH = sys.argv[1]
 story_filter = (sys.argv[2] or '').strip().lower()
@@ -6120,15 +6160,24 @@ stories = cur.execute('SELECT story_slug, story_id, story_title, epic_key, epic_
 def norm(value):
     return (value or "").strip().lower()
 
+def normalize(value):
+    return (value or "").strip()
+
+def slug_norm(value):
+    value = norm(value)
+    if not value:
+        return ""
+    return re.sub(r'[^a-z0-9]+', '-', value).strip('-')
+
 start_allowed = not story_filter
 
 for story in stories:
-    slug = (story["story_slug"] or "").strip()
+    slug = normalize(story["story_slug"])
     sequence = story["sequence"] or 0
-    story_id = (story["story_id"] or "").strip()
-    epic_key = (story["epic_key"] or "").strip()
-    epic_title = (story["epic_title"] or "").strip()
-    story_title = (story["story_title"] or "").strip()
+    story_id = normalize(story["story_id"])
+    epic_key = normalize(story["epic_key"])
+    epic_title = normalize(story["epic_title"])
+    story_title = normalize(story["story_title"])
 
     story_title_clean = story_title.replace('\t', ' ').replace('\n', ' ')
     epic_title_clean = epic_title.replace('\t', ' ').replace('\n', ' ')
@@ -6142,16 +6191,48 @@ for story in stories:
         else:
             continue
 
-    task_rows = cur.execute('SELECT position, status FROM tasks WHERE story_slug = ? ORDER BY position ASC', (slug,)).fetchall()
+    task_rows = []
+    slug_lower = norm(slug)
+    if slug_lower:
+        task_rows = cur.execute(
+            'SELECT position, status FROM tasks WHERE LOWER(COALESCE(story_slug, "")) = ? ORDER BY position ASC',
+            (slug_lower,),
+        ).fetchall()
+
+    if not task_rows and story_id:
+        story_id_lower = norm(story_id)
+        if story_id_lower:
+            rows = cur.execute(
+                'SELECT id, position, status, story_slug FROM tasks WHERE LOWER(COALESCE(story_id, "")) = ? ORDER BY position ASC',
+                (story_id_lower,),
+            ).fetchall()
+            if rows:
+                task_rows = [(row["position"], row["status"]) for row in rows]
+                if slug_lower:
+                    cur.execute(
+                        'UPDATE tasks SET story_slug = ? WHERE LOWER(COALESCE(story_id, "")) = ?',
+                        (slug, story_id_lower),
+                    )
+                    conn.commit()
+
+    if not task_rows and slug_lower:
+        slug_key = slug_norm(slug)
+        if slug_key:
+            rows = cur.execute(
+                'SELECT position, status FROM tasks WHERE LOWER(COALESCE(story_slug, "")) = ? ORDER BY position ASC',
+                (slug_key,),
+            ).fetchall()
+            task_rows = rows
+
     total = len(task_rows)
     completed = 0
     next_index = 0
     for row in task_rows:
-        status = (row["status"] or "").strip().lower()
+        status = (row[1] or "").strip().lower()
         if status == "complete":
             completed += 1
             continue
-        next_index = row["position"] or 0
+        next_index = row[0] or 0
         break
     else:
         next_index = total

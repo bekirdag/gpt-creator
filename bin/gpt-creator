@@ -1939,6 +1939,73 @@ cur.execute(
 )
 
 conn.commit()
+  conn.close()
+PY
+}
+
+gc_sync_story_totals() {
+  local db_path="${1:?tasks database path required}"
+  python3 - <<'PY' "$db_path"
+import sqlite3
+import sys
+import time
+
+db_path = sys.argv[1]
+timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+cur = conn.cursor()
+
+stories = cur.execute("SELECT story_slug, status FROM stories").fetchall()
+
+def normalize(value: str) -> str:
+    return (value or "").strip()
+
+def status_for_counts(total: int, completed: int) -> str:
+    if total <= 0:
+        return "pending"
+    if completed >= total:
+        return "complete"
+    if completed > 0:
+        return "in-progress"
+    return "pending"
+
+updates = []
+for story in stories:
+    slug = normalize(story["story_slug"])
+    if not slug:
+        continue
+    slug_lower = slug.lower()
+    row = cur.execute(
+        """
+        SELECT
+            COUNT(*) AS total_count,
+            SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'complete' THEN 1 ELSE 0 END) AS complete_count
+          FROM tasks
+         WHERE LOWER(COALESCE(story_slug, '')) = ?
+        """,
+        (slug_lower,),
+    ).fetchone()
+    total = int(row["total_count"] or 0)
+    completed = int(row["complete_count"] or 0)
+    story_status = status_for_counts(total, completed)
+    updates.append((total, completed, story_status, timestamp, slug))
+
+if updates:
+    cur.executemany(
+        """
+        UPDATE stories
+           SET total_tasks = ?,
+               completed_tasks = ?,
+               status = ?,
+               updated_at = ?
+         WHERE story_slug = ?
+        """,
+        updates,
+    )
+    conn.commit()
+
 conn.close()
 PY
 }
@@ -5873,10 +5940,12 @@ EOHELP
   fi
 
   gc_align_task_story_slugs "$tasks_db"
+  gc_sync_story_totals "$tasks_db"
 
   if (( force_reset )); then
     info "Resetting backlog progress to pending (--force)."
     gc_reset_task_progress "$tasks_db"
+    gc_sync_story_totals "$tasks_db"
   fi
 
   ensure_node_dependencies "$PROJECT_ROOT"

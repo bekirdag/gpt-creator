@@ -141,7 +141,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
    # Execute and resume tasks directly from SQLite
    gpt-creator work-on-tasks --project /path/to/project
    ```
-  - `create-jira-tasks` crawls the staged docs (PDR, SDS, OpenAPI, SQL, UI samples) to synthesize epics → user stories → detailed task JSON under `.gpt-creator/staging/plan/create-jira-tasks/json/` and refreshes the consolidated payload/SQLite database. Progress is recorded in `.gpt-creator/staging/plan/create-jira-tasks/state.json` (use `--force` to restart).
+  - `create-jira-tasks` crawls the staged docs (PDR, SDS, OpenAPI, SQL, UI samples) to synthesize epics → user stories → detailed task JSON under `.gpt-creator/staging/plan/create-jira-tasks/json/` and refreshes the consolidated payload/SQLite database. Progress is recorded in `.gpt-creator/staging/plan/create-jira-tasks/state.json` (use `--force` to restart). The extractor now strips Codex code fences, normalizes smart quotes, removes stray comments/trailing commas, and even coerces Python-style literals before giving up.
   - `migrate-tasks` regenerates `.gpt-creator/staging/plan/tasks/tasks.db` directly from the JSON artifacts — ideal when you want to sync the DB without re-running Codex.
   - `refine-tasks` streams tasks from `tasks.db` one at a time, rehydrates the original story context, runs Codex against the staged docs, writes the refined JSON to `json/refined`, and updates the task row in SQLite immediately after each successful response. Use `--force` to reset refinement flags and reprocess every task.
   - `create-tasks` snapshots a Jira markdown export into the same database if you already maintain backlog files.
@@ -308,6 +308,7 @@ You can also create `~/.config/gpt-creator/config.sh` to export persistent overr
 | Symptom | Suggested Action |
 |---------|------------------|
 | `codex` binary not found | Install Codex CLI or set `CODEX_BIN` to a compatible wrapper. |
+| `create-jira-tasks` stops with “Failed to parse Codex JSON output” | Check `.gpt-creator/staging/plan/create-jira-tasks/output/*.raw.txt` for the offending response. The CLI auto-cleans common issues (code fences, smart quotes, comments, trailing commas, Python-style literals); if it still fails, rerun with `--force` after pruning the bad snippet or adjust the prompts/docs. |
 | Verification scripts skip with exit 3 | Install the missing dependency (`npx`, `pa11y`, `lighthouse`, `docker`). |
 | Docker stack fails health check | Run `gpt-creator run logs`, inspect `docker/docker-compose.yml`, confirm environment variables. |
 | Normalization misses a file | Place the artifact under a clearer name or rerun `gpt-creator scan` with the file already present. |

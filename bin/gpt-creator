@@ -2597,13 +2597,53 @@ import sys
 import time
 
 db_path, story_slug, status, completed, total, run_stamp = sys.argv[1:7]
+story_slug = (story_slug or "").strip()
+status_requested = (status or "pending").strip().lower()
 completed = int(completed or 0)
 total = int(total or 0)
 run_stamp = run_stamp or 'manual'
 timestamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
 conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
 cur = conn.cursor()
+
+row = cur.execute(
+    """
+    SELECT
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'complete' THEN 1 ELSE 0 END) AS complete_count,
+        SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'in-progress' THEN 1 ELSE 0 END) AS in_progress_count
+      FROM tasks
+     WHERE LOWER(COALESCE(story_slug, '')) = ?
+    """,
+    (story_slug.lower(),)
+).fetchone()
+
+total_count = int(row["total_count"] or 0)
+complete_count = int(row["complete_count"] or 0)
+in_progress_count = int(row["in_progress_count"] or 0)
+pending_count = max(total_count - complete_count - in_progress_count, 0)
+
+if total_count > 0:
+    status_final = status_requested
+    if complete_count >= total_count:
+        status_final = "complete"
+    elif complete_count > 0 or in_progress_count > 0:
+        if status_final == "complete":
+            status_final = "in-progress"
+        elif status_final not in {"blocked", "on-hold", "in-progress"}:
+            status_final = "in-progress"
+    else:
+        if status_final not in {"blocked", "on-hold"}:
+            status_final = "pending"
+    completed_value = complete_count
+    total_value = total_count
+else:
+    status_final = status_requested or "pending"
+    completed_value = completed
+    total_value = total
+
 cur.execute(
     """
     UPDATE stories
@@ -2614,7 +2654,7 @@ cur.execute(
            updated_at = ?
      WHERE story_slug = ?
     """,
-    (status, completed, total, run_stamp, timestamp, story_slug)
+    (status_final, completed_value, total_value, run_stamp, timestamp, story_slug)
 )
 if cur.rowcount == 0:
     cur.execute(
@@ -2622,8 +2662,9 @@ if cur.rowcount == 0:
         INSERT INTO stories (story_slug, story_key, status, completed_tasks, total_tasks, last_run, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (story_slug, story_slug, status, completed, total, run_stamp, timestamp, timestamp)
+        (story_slug, story_slug, status_final, completed_value, total_value, run_stamp, timestamp, timestamp)
     )
+
 conn.commit()
 conn.close()
 PY
@@ -6255,21 +6296,13 @@ def print_story_children(entry, identifier):
     for story in sorted(stories_for_epic, key=lambda s: (s.get("sequence") or 0, (s.get("story_title") or "").lower())):
         slug = (story.get("story_slug") or "").strip()
         title = (story.get("story_title") or story.get("story_id") or slug or "Story").strip()
-        status = (story.get("status") or "pending").strip().lower().replace("_", "-")
         epic_title = (story.get("epic_title") or entry["label"]).strip()
         counts = task_counts.get(story.get("story_slug"), {})
         total = counts.get("total", story.get("total_tasks") or 0) or 0
         complete = counts.get("completed", story.get("completed_tasks") or 0) or 0
         in_progress = counts.get("in_progress", 0) or 0
         pending = max(total - complete - in_progress, 0)
-        tasks_desc = f"{complete}/{total} complete"
-        if in_progress:
-            tasks_desc += f", {in_progress} in-progress"
-        if pending:
-            tasks_desc += f", {pending} pending"
-        progress = 0.0
-        if total:
-            progress = (complete / total) * 100
+        status, progress, tasks_desc = compute_story_metrics(total, complete, in_progress, pending, story.get("status"))
         rows.append([
             slug or (story.get("story_id") or "-"),
             title,
@@ -6305,6 +6338,33 @@ def print_task_children(story):
         estimate = (task.get("estimate") or "").strip() or "-"
         rows.append([index, task_id, title, status, estimate])
     print_table(headers, rows)
+
+def compute_story_metrics(total, complete, in_progress, pending, status_field):
+    status_field = (status_field or "pending").strip().lower().replace("_", "-")
+    if total > 0:
+        if complete >= total and in_progress == 0 and pending == 0:
+            status = "complete"
+            progress = 100.0
+        elif complete > 0 or in_progress > 0:
+            status = "in-progress"
+            progress = (complete / total) * 100
+        else:
+            status = "pending"
+            progress = 0.0
+    else:
+        status = status_field or "pending"
+        progress = 100.0 if status == "complete" else 0.0
+
+    if total > 0:
+        tasks_desc = f"{complete}/{total} complete"
+        if in_progress:
+            tasks_desc += f", {in_progress} in-progress"
+        if pending and status != "complete":
+            tasks_desc += f", {pending} pending"
+    else:
+        tasks_desc = "0 tasks"
+
+    return status, progress, tasks_desc
 
 def show_item_children(identifier):
     if not identifier:
@@ -6353,20 +6413,12 @@ def print_stories_overview():
         story_id = (story.get("story_id") or "").strip()
         title = (story.get("story_title") or story_id or slug or "Story").strip()
         epic_title = (story.get("epic_title") or "Unassigned").strip()
-        status = (story.get("status") or "pending").strip().lower().replace("_", "-")
         counts = task_counts.get(story.get("story_slug"), {})
         total = counts.get("total", story.get("total_tasks") or 0) or 0
         complete = counts.get("completed", story.get("completed_tasks") or 0) or 0
         in_progress = counts.get("in_progress", 0) or 0
         pending = max(total - complete - in_progress, 0)
-        tasks_desc = f"{complete}/{total} complete"
-        if in_progress:
-            tasks_desc += f", {in_progress} in-progress"
-        if pending:
-            tasks_desc += f", {pending} pending"
-        progress = 0.0
-        if total:
-            progress = (complete / total) * 100
+        status, progress, tasks_desc = compute_story_metrics(total, complete, in_progress, pending, story.get("status"))
         rows.append([
             slug or "-",
             story_id or "-",

@@ -18,6 +18,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Database synthesis**: `create-db-dump` reads the SDS (and PDR context) to draft a full MySQL schema plus production-grade seed data, then reviews both dumps for consistency before storing them under `.gpt-creator/staging/plan/create-db-dump/sql/`.
 - **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, and `work-on-tasks` executes/resumes backlog items. The legacy `iterate` command is deprecated.
 - **Backlog browser**: `backlog` prints non-interactive terminal summaries so you can list epics, enumerate stories, inspect children, or dump task details straight from the SQLite backlog.
+- **Backlog ETA**: `estimate` aggregates remaining story points in `.gpt-creator/staging/plan/tasks/tasks.db` and translates them into a formatted duration at 15 story points per hour. Point `--project` at another workspace if needed.
 - **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
 
 ---

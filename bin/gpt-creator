@@ -8269,6 +8269,105 @@ PY
   fi
 }
 
+cmd_estimate() {
+  local root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      -h|--help)
+        cat <<'USAGE'
+Usage: gpt-creator estimate [--project PATH]
+
+Estimate how long it will take to finish the remaining tasks based on story points (15 SP/hour).
+USAGE
+        return 0
+        ;;
+      *)
+        die "Unknown estimate option: $1"
+        ;;
+    esac
+  done
+
+  ensure_ctx "$root"
+  local tasks_db="${PLAN_DIR}/tasks/tasks.db"
+  if [[ ! -f "$tasks_db" ]]; then
+    die "Tasks database not found at ${tasks_db}. Run 'gpt-creator create-tasks' first."
+  fi
+
+  python3 - <<'PY' "$tasks_db"
+import math
+import re
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+rate = 15.0
+
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+cur = conn.cursor()
+rows = cur.execute("SELECT story_points, status FROM tasks").fetchall()
+conn.close()
+
+def parse_points(raw):
+    if raw is None:
+        return 0.0
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = str(raw).strip()
+    if not text:
+        return 0.0
+    normalized = text.lower().replace(",", ".")
+    match = re.search(r"-?\d+(?:\.\d+)?", normalized)
+    if not match:
+        return 0.0
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return 0.0
+
+done_statuses = {"complete", "completed", "done"}
+total_points = 0.0
+remaining_tasks = 0
+
+for row in rows:
+    status = (row["status"] or "").strip().lower()
+    if status in done_statuses:
+        continue
+    remaining_tasks += 1
+    points = parse_points(row["story_points"])
+    total_points += max(points, 0.0)
+
+if remaining_tasks == 0:
+    print("All tasks are complete. No remaining story points.")
+    raise SystemExit(0)
+
+total_minutes = math.ceil((total_points / rate) * 60) if total_points > 0 else 0
+days, rem_minutes = divmod(total_minutes, 1440)
+hours, minutes = divmod(rem_minutes, 60)
+
+parts = []
+if days:
+    parts.append(f"{days}d")
+if hours:
+    parts.append(f"{hours}h")
+if minutes or not parts:
+    parts.append(f"{minutes}m")
+
+def fmt_points(value: float) -> str:
+    if math.isclose(value, round(value), rel_tol=1e-9, abs_tol=1e-9):
+        return str(int(round(value)))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+estimate = " ".join(parts)
+print(f"Remaining tasks: {remaining_tasks}")
+print(f"Remaining story points: {fmt_points(total_points)}")
+print(f"Estimated completion time @15 SP/hour: {estimate}")
+PY
+}
 
 
 cmd_tokens() {
@@ -9613,6 +9712,7 @@ Usage:
   ${APP_NAME} refine-tasks [--project <path>] [--story SLUG] [--model NAME] [--dry-run]
   ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
   ${APP_NAME} backlog [--project <path>] [--type epics|stories] [--item-children ID] [--progress] [--task-details ID]
+  ${APP_NAME} estimate [--project <path>]
   ${APP_NAME} tokens [--project <path>] [--details] [--json]
   ${APP_NAME} reports [--project <path>] [list|backlog|show|work] [--branch NAME] [--no-push] [--prompt-only] [--open] [slug]
   ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]
@@ -9655,6 +9755,7 @@ main() {
     create-db-dump) "$shell_bin" "$CLI_ROOT/src/cli/create-db-dump.sh" "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
     backlog)        cmd_backlog "$@" ;;
+    estimate)       cmd_estimate "$@" ;;
     tokens)         cmd_tokens "$@" ;;
     reports)        cmd_reports "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;

@@ -22,6 +22,7 @@ _gpt_creator() {
     'refine-tasks:Refine tasks stored in the SQLite backlog'
     'create-tasks:Convert Jira tasks into a SQLite backlog'
     'backlog:Render backlog summaries from the tasks database'
+    'estimate:Estimate backlog completion time from story points'
     'work-on-tasks:Execute tasks from the SQLite backlog with Codex'
     'reports:List or show captured issue reports'
     'task-convert:[deprecated] Alias for create-tasks'

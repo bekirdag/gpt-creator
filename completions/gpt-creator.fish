@@ -1,6 +1,6 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks backlog work-on-tasks reports iterate help version
+set -l subcmds create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks backlog estimate work-on-tasks reports iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
@@ -57,6 +57,9 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l type -r -d "
 complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l item-children -r -d "Children of epic/story"
 complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l progress -d "Show overall backlog progress"
 complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l task-details -r -d "Show task details"
+
+# estimate
+complete -c gpt-creator -n "__fish_seen_subcommand_from estimate" -l project -r -d "Project root"
 
 # create-pdr
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-pdr" -l model -r -d "Codex model"

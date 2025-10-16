@@ -17,6 +17,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Doc synthesis**: `create-pdr` converts the staged RFP into a multi-level Product Requirements Document (PDR) by iteratively asking Codex to draft the table of contents, sections, and detailed subsections. `create-sds` continues the loop, transforming the staged PDR into a System Design Specification that drills from architecture overview down to low-level operational detail.
 - **Database synthesis**: `create-db-dump` reads the SDS (and PDR context) to draft a full MySQL schema plus production-grade seed data, then reviews both dumps for consistency before storing them under `.gpt-creator/staging/plan/create-db-dump/sql/`.
 - **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, and `work-on-tasks` executes/resumes backlog items. The legacy `iterate` command is deprecated.
+- **Backlog browser**: `backlog` provides an interactive terminal UI to list epics, drill into their stories, and review individual tasks directly from the SQLite backlog without leaving the shell.
 - **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
 
 ---
@@ -142,15 +143,33 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
    gpt-creator work-on-tasks --project /path/to/project
 
    # Browse epics → stories → tasks from the backlog database
-   gpt-creator backlog --project /path/to/project
+   gpt-creator backlog --project /path/to/project  # (--root works too)
    ```
   - `create-jira-tasks` crawls the staged docs (PDR, SDS, OpenAPI, SQL, UI samples) to synthesize epics → user stories → detailed task JSON under `.gpt-creator/staging/plan/create-jira-tasks/json/` and refreshes the consolidated payload/SQLite database. Progress is recorded in `.gpt-creator/staging/plan/create-jira-tasks/state.json` (use `--force` to restart). The extractor now strips Codex code fences, normalizes smart quotes, removes stray comments/trailing commas, and even coerces Python-style literals before giving up.
   - `migrate-tasks` regenerates `.gpt-creator/staging/plan/tasks/tasks.db` directly from the JSON artifacts — ideal when you want to sync the DB without re-running Codex.
   - `refine-tasks` streams tasks from `tasks.db` one at a time, rehydrates the original story context, runs Codex against the staged docs, writes the refined JSON to `json/refined`, and updates the task row in SQLite immediately after each successful response. Use `--force` to reset refinement flags and reprocess every task.
   - `create-tasks` snapshots a Jira markdown export into the same database if you already maintain backlog files.
   - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, or `--force` to reset all story/task statuses to `pending` before the run.
-  - `backlog` provides a lightweight TUI to drill from epics → stories → tasks without leaving the terminal.
+  - `backlog` provides a lightweight TUI to drill from epics → stories → tasks without leaving the terminal; use `--project` (or legacy `--root`) to point at a different workspace.
   - The legacy `iterate` command is deprecated.
+
+### Backlog Browser
+
+`gpt-creator backlog --project /path/to/project` opens an interactive inspector backed by `.gpt-creator/staging/plan/tasks/tasks.db`. It lists every epic with live story/task counts and lets you drill down without leaving the terminal.
+
+```bash
+$ gpt-creator backlog --project ~/apps/yoga
+Backlog browser - browse epics -> stories -> tasks.
+Enter the number for an epic to drill down, or 'q' to quit.
+  1. Unassigned backlog - stories (273 stories, 2 complete, 1 in-progress) | tasks (2075 tasks, 19 complete, 2 in-progress)
+  q. Quit
+Select an epic [q]:
+```
+
+- Pick a number to view the stories in that epic; press `b` to go back or `q` to exit at any prompt.
+- From the story list, select a story to see every task, its status, ID, title, and estimate in read-only form.
+- The summary counts reflect the latest data in `tasks.db`, so you can spot progress without running SQL by hand.
+- Run `gpt-creator create-tasks` or the `create-jira-tasks` + `migrate-tasks` pipeline first; the backlog browser requires a populated tasks database. Use `--project` (or backward-compatible `--root`) to target an alternate workspace.
 
 ---
 
@@ -196,8 +215,8 @@ gpt-creator generate all --project /path/to/project
 ### 5. Database Helpers
 ```
 gpt-creator db provision   # docker compose up db
-@gpt-creator db import      # mysql < staging/inputs/sql/*.sql
-@gpt-creator db seed        # placeholder for custom seeds
+gpt-creator db import      # mysql < staging/inputs/sql/*.sql
+gpt-creator db seed        # placeholder for custom seeds
 ```
 - The `.env` file already holds the DB host/user/password (including the mapped host port), so these commands work without extra setup.
 

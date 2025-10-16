@@ -99,6 +99,10 @@ _gpt_creator() {
         '--jira=[Jira tasks file]:file:_files' \
         '--force[Rebuild all story JSONs]'
       ;;
+    backlog)
+      _arguments \
+        '--root=[Project root]:dir:_files -/'
+      ;;
     work-on-tasks)
       _arguments \
         '--story=[Start from story id or slug]' \

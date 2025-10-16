@@ -52,6 +52,7 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l force -
 
 # backlog
 complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l project -r -d "Project root"
+complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l root -r -d "Project root"
 
 # create-pdr
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-pdr" -l model -r -d "Codex model"

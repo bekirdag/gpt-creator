@@ -5877,13 +5877,13 @@ cmd_backlog() {
   local root=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --project)
+      --project|--root)
         root="$(abs_path "$2")"
         shift 2
         ;;
       -h|--help)
         cat <<'EOUSAGE'
-Usage: gpt-creator backlog [--project PATH]
+Usage: gpt-creator backlog [--project PATH|--root PATH]
 
 Interactively browse the backlog stored in .gpt-creator/staging/plan/tasks/tasks.db.
 
@@ -5911,6 +5911,15 @@ import textwrap
 db_path = sys.argv[1]
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
+
+def pluralize(value, singular, plural=None):
+    try:
+        count = int(value or 0)
+    except Exception:
+        count = 0
+    if count == 1:
+        return f"{count} {singular}"
+    return f"{count} {plural or singular + 's'}"
 
 def empty_counts():
     return {
@@ -6084,12 +6093,12 @@ def format_story_line(story, task_counts):
 def format_epic_counts(counts):
     if not counts:
         return ""
-    story_bits = [f"{counts['stories']} story{'ies' if counts['stories'] != 1 else ''}"]
+    story_bits = [pluralize(counts["stories"], "story", "stories")]
     if counts["stories_complete"]:
         story_bits.append(f"{counts['stories_complete']} complete")
     if counts["stories_in_progress"]:
         story_bits.append(f"{counts['stories_in_progress']} in-progress")
-    task_bits = [f"{counts['tasks']} task{'s' if counts['tasks'] != 1 else ''}"]
+    task_bits = [pluralize(counts["tasks"], "task")]
     if counts["tasks_complete"]:
         task_bits.append(f"{counts['tasks_complete']} complete")
     if counts["tasks_in_progress"]:

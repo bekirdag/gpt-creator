@@ -58,6 +58,9 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 .B gpt-creator work-on-tasks
 [\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-force] [\-\-no-verify] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC] [\-\-context-lines NUM] [\-\-context-none] [\-\-context-mode MODE] [\-\-context-file-lines NUM] [\-\-context-skip GLOB] [\-\-prompt-compact] [\-\-prompt-expanded] [\-\-context-doc-snippets] [\-\-sample-lines NUM]
 .br
+.B gpt-creator reports
+[\-\-project DIR] [list|backlog|auto|show|work] [\-\-open] [\-\-branch NAME] [\-\-no-push] [\-\-prompt-only] [\-\-reporter NAME] [slug]
+.br
 .B gpt-creator iterate
 [\-\-root DIR] [\-\-jira FILE] (deprecated)
 .SH DESCRIPTION
@@ -78,6 +81,15 @@ Show version.
 .TP
 .B \-v, \-\-verbose
 Verbose output (repeatable).
+.TP
+.B \-\-reports-on
+Enable automatic crash/stall issue reporting for the current invocation.
+.TP
+.B \-\-reports-off
+Disable automatic crash/stall issue reporting even when \fBGC_REPORTS_ON\fR is set.
+.TP
+.B \-\-reports-idle-timeout \fIseconds\fR
+Override the idle/stall detection threshold (default 1800 seconds). Also configurable via \fBGC_REPORTS_IDLE_TIMEOUT\fR.
 .SH SUBCOMMANDS
 .TP
 .B create-project
@@ -171,6 +183,9 @@ Set \fBGC_CONTEXT_INCLUDE_UI=1\fR when you need the legacy raw UI dumps preserve
 \fB--sample-lines\fR (default 0) streams minified sample payload chunks on demand; increase the value when a task needs raw request/response bodies beyond the default digest.
 \fB--memory-cycle\fR processes one task per invocation, performs a best-effort memory trim (including Docker cache pruning), and automatically restarts the command so long backlogs stay within bounded RAM.
 .TP
+.B reports
+Inspect captured crash/stall reports under \fIPROJECT_ROOT/.gpt-creator/logs/issue-reports/\fR. Without arguments the command lists reports (newest first) with their slug identifiers; provide a slug (or use \fBshow\fR) to print the matching YAML. Pass \fB--open\fR to launch the report in \fBEDITOR_CMD\fR for annotation, and \fB--project\fR to target a different workspace. Use \fBbacklog\fR to filter to open issues and surface a popularity score derived from recorded likes/comments so maintainers can prioritise high-signal bugs. \fBauto\fR sweeps every matching report (defaulting to the current reporter or an explicit \fB--reporter\fR) and resolves them sequentially with Codex, honouring \fB--no-push\fR/\fB--prompt-only\fR. \fBwork <slug>\fR prepares a Codex prompt, marks the report in progress, and directs Codex to implement, commit, and push the fix (override with \fB--branch\fR, \fB--no-push\fR, or \fB--prompt-only\fR).
+.TP
 .B iterate
 Deprecated legacy Jira loop. The command runs with a deprecation warning; prefer \fBcreate-tasks\fR followed by \fBwork-on-tasks\fR.
 .SH ENVIRONMENT
@@ -186,12 +201,27 @@ Path to config file (default: \fI~/.config/gpt-creator/config.yaml\fR).
 .TP
 .B DOCKER_HOST, MYSQL_* 
 Standard Docker/MySQL variables honored by helpers.
+.TP
+.B GC_REPORTS_ON
+Set to 1 to enable automatic crash/stall issue reporting by default (overridden by \fB--reports-off\fR).
+.TP
+.B GC_REPORTS_IDLE_TIMEOUT
+Idle/stall detection threshold in seconds (default 1800).
+.TP
+.B GC_REPORTER
+Override reporter name stored in new issue reports (defaults to git \fIuser.name\fR or \fB$USER\fR).
+.TP
+.B GC_REPORT_ASSIGNEE
+Override the assignee recorded when Codex starts working on a report (defaults to \fBGC_REPORTER\fR).
 .SH FILES
 .I ~/.config/gpt-creator/config.yaml
 \- CLI configuration.
 .br
 .I ~/.cache/gpt-creator/
 \- cache and run artifacts.
+.br
+.I PROJECT_ROOT/.gpt-creator/logs/issue-reports/
+\- per-run issue reports captured when automatic reporting is enabled.
 .SH EXIT STATUS
 Zero for success; non‑zero on error.
 .SH EXAMPLES

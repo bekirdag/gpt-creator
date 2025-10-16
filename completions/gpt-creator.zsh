@@ -22,6 +22,7 @@ _gpt_creator() {
     'refine-tasks:Refine tasks stored in the SQLite backlog'
     'create-tasks:Convert Jira tasks into a SQLite backlog'
     'work-on-tasks:Execute tasks from the SQLite backlog with Codex'
+    'reports:List or show captured issue reports'
     'task-convert:[deprecated] Alias for create-tasks'
     'iterate:[deprecated] Legacy Jira loop'
     'help:Show help'
@@ -32,6 +33,9 @@ _gpt_creator() {
     '(-h --help)'{-h,--help}'[Show help]' \
     '(-v --version)'{-v,--version}'[Show version]' \
     '--project=[Project root]:dir:_files -/' \
+    '--reports-on[Enable automatic crash/stall reporting]' \
+    '--reports-off[Disable automatic crash/stall reporting]' \
+    '--reports-idle-timeout=[Idle timeout seconds]:seconds:(300 600 900 1800)' \
     '1: :->cmd' \
     '*::arg:->args'
 
@@ -140,6 +144,17 @@ _gpt_creator() {
         '--rfp=[Path to RFP file]:file:_files' \
         '--fresh[Restart the bootstrap pipeline from scratch]' \
         '1:project-dir:_files -/'
+      ;;
+    reports)
+      _arguments \
+        '--project=[Project root]:dir:_files -/' \
+        '--open[Open report in $EDITOR_CMD]' \
+        '--branch=[Working branch name]' \
+        '--no-push[Skip automatic push instructions]' \
+        '--push[Force push instructions]' \
+        '--prompt-only[Generate the Codex prompt without executing it]' \
+        '--reporter=[Filter reports by reporter name]' \
+        '*:slug-or-mode:(list backlog auto show work)'
       ;;
     *)
       ;;

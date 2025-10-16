@@ -1,12 +1,15 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version
+set -l subcmds create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks reports iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
 complete -c gpt-creator -s h -l help -d "Show help"
 complete -c gpt-creator -s v -l version -d "Show version"
 complete -c gpt-creator -l project -r -d "Project root"
+complete -c gpt-creator -l reports-on -d "Enable automatic crash/stall reporting"
+complete -c gpt-creator -l reports-off -d "Disable automatic crash/stall reporting"
+complete -c gpt-creator -l reports-idle-timeout -r -d "Idle timeout in seconds" -a "300 600 900 1800"
 
 # create-project
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-project" -a "(__fish_complete_directories)" -d "Project directory"
@@ -103,6 +106,16 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l sample
 # iterate (deprecated)
 complete -c gpt-creator -n "__fish_seen_subcommand_from iterate" -l jira -r -d "Jira tasks file"
 complete -c gpt-creator -n "__fish_seen_subcommand_from iterate" -l project -r
+
+# reports
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -a "list backlog auto show work" -d "Report commands"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l project -r -d "Project root"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l open -d "Open report in editor"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l branch -r -d "Working branch name"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l no-push -d "Skip push instructions"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l push -d "Force push instructions"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l prompt-only -d "Only create Codex prompt"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l reporter -r -d "Filter by reporter"
 
 # scan/normalize/plan
 for sub in scan normalize plan

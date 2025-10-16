@@ -290,6 +290,10 @@ gpt-creator iterate --project /path/to/project --jira docs/jira.md
 | `GC_DB_NAME`, `GC_DB_USER`, `GC_DB_PASSWORD` | Injected into rendered DB templates. | `app`, `app`, `app_pass` |
 | `CODEX_BIN`, `CODEX_MODEL` | Override Codex executable/model. | `codex`, `gpt-5-high` |
 | `DOCKER_BIN`, `MYSQL_BIN`, `EDITOR_CMD` | Command overrides used within scripts. | `docker`, `mysql`, `code` |
+| `GC_REPORTS_ON` | Enable automatic crash/stall issue reporting by default. | `0` |
+| `GC_REPORTS_IDLE_TIMEOUT` | Idle detection threshold (seconds) when reporting is enabled. | `1800` |
+| `GC_REPORTER` | Override reporter name recorded in new issue reports. | Git `user.name`/`$USER` |
+| `GC_REPORT_ASSIGNEE` | Name recorded when Codex takes ownership of a report. | `GC_REPORTER` |
 
 You can also create `~/.config/gpt-creator/config.sh` to export persistent overrides.
 
@@ -308,6 +312,16 @@ You can also create `~/.config/gpt-creator/config.sh` to export persistent overr
 ```
 
 ---
+
+## Automatic Issue Reporting
+
+- Pass `--reports-on` to any `gpt-creator` command to capture crashes or long-running stalls as structured issues under `.gpt-creator/logs/issue-reports/`. Each report records a summary, observed behaviour notes, and a priority tag for later triage.
+- Stalls are detected when the CLI sees no shell activity for `GC_REPORTS_IDLE_TIMEOUT` seconds (default `1800`). Adjust the threshold with `--reports-idle-timeout <seconds>` or by exporting the environment variable before invoking the CLI.
+- Disable reporting for a specific run with `--reports-off`, or enable it globally by exporting `GC_REPORTS_ON=1`.
+- Use `gpt-creator reports [--project PATH]` to list captured reports (newest first); pass the slug shown in the list to view the full YAML or add `--open` to launch the entry in `EDITOR_CMD` for further notes. `gpt-creator reports backlog` filters to open issues and shows a popularity score (likes + comments) so maintainers can prioritise high-signal bugs quickly.
+- Use `gpt-creator reports work <slug>` to hand an issue to Codex: the CLI prepares a focused prompt, records the assignee, and directs Codex to create a branch, implement the fix, commit, and push (unless `--no-push` is provided).
+- Use `gpt-creator reports auto` to sweep every open issue reported by your account (or a specified `--reporter`) and let Codex resolve them sequentially, respecting `--no-push`/`--prompt-only` flags.
+- Crash details continue to collect in `.gpt-creator/logs/crash.log`; enabling reports mirrors those failures into per-run issue files so the repo owner can follow up asynchronously.
 
 ## Troubleshooting
 

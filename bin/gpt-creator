@@ -12,6 +12,23 @@ GC_LAST_ERROR_STATUS=0
 GC_FAIL_LOG_DIR=""
 GC_INVOCATION=""
 
+GC_LAST_CRASH_LOG=""
+GC_MAIN_PID="$$"
+
+if [[ -n "${GC_REPORTS_ON:-}" && "${GC_REPORTS_ON}" != "0" ]]; then
+  GC_REPORTS_ON=1
+else
+  GC_REPORTS_ON=0
+fi
+GC_REPORTS_IDLE_TIMEOUT="${GC_REPORTS_IDLE_TIMEOUT:-1800}"
+GC_REPORTS_CHECK_INTERVAL="${GC_REPORTS_CHECK_INTERVAL:-60}"
+GC_REPORTS_INITIALIZED=0
+GC_REPORTS_STORE_DIR=""
+GC_REPORTS_ACTIVITY_FILE=""
+GC_REPORTS_IDLE_SENTINEL=""
+GC_REPORTS_WATCHDOG_PID=""
+GC_FILTERED_ARGS=()
+
 # Ensure docker compose commands have adequate timeouts unless caller overrides
 if [[ -n "${GC_DOCKER_COMPOSE_TIMEOUT:-}" ]]; then
   COMPOSE_HTTP_TIMEOUT="$GC_DOCKER_COMPOSE_TIMEOUT"
@@ -120,6 +137,11 @@ gc_env_sync_ports() {
   gc_reserve_port web "$GC_WEB_HOST_PORT"
   gc_reserve_port admin "$GC_ADMIN_HOST_PORT"
   gc_reserve_port proxy "$GC_PROXY_HOST_PORT"
+
+  if gc_reports_enabled; then
+    gc_reports_initialize
+    gc_reports_touch_activity "$(date +%s)"
+  fi
 }
 
 gc_sanitize_env_file() {
@@ -344,6 +366,11 @@ ensure_ctx() {
   COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$GC_DOCKER_PROJECT_NAME}"
   GC_FAIL_LOG_DIR="$LOG_DIR"
   export GC_DOCKER_PROJECT_NAME COMPOSE_PROJECT_NAME PROJECT_SLUG
+
+  if gc_reports_enabled; then
+    gc_reports_initialize
+    gc_reports_touch_activity "$(date +%s)"
+  fi
 }
 
 gc_project_templates_root() {
@@ -375,24 +402,636 @@ gc_capture_error_context() {
   GC_LAST_ERROR_CMD="$command"
 }
 
+gc_logs_dir() {
+  local dir="${GC_FAIL_LOG_DIR:-}"
+  if [[ -z "$dir" ]]; then
+    if [[ -n "${PROJECT_ROOT:-}" ]]; then
+      dir="${PROJECT_ROOT}/.gpt-creator/logs"
+    else
+      dir="${PWD}/.gpt-creator/logs"
+    fi
+  fi
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    return 1
+  fi
+  printf '%s\n' "$dir"
+}
+
+gc_reports_enabled() {
+  (( GC_REPORTS_ON != 0 ))
+}
+
+gc_reports_current_user() {
+  if [[ -n "${GC_REPORTER:-}" ]]; then
+    printf '%s\n' "$GC_REPORTER"
+    return 0
+  fi
+  local name
+  name="$(git config user.name 2>/dev/null || true)"
+  if [[ -z "$name" ]]; then
+    name="${USER:-}"
+  fi
+  if [[ -z "$name" ]]; then
+    name="$(whoami 2>/dev/null || true)"
+  fi
+  printf '%s\n' "${name:-maintainer}"
+}
+
+gc_reports_escape() {
+  local s="${1:-}"
+  s="${s//\\/\\\\}"
+  s="${s//$'\n'/\\n}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+gc_reports_issue_file() {
+  local kind="${1:-generic}"
+  local dir="${GC_REPORTS_STORE_DIR:-}"
+  if [[ -z "$dir" ]]; then
+    local base
+    base="$(gc_logs_dir)" || return 1
+    dir="${base}/issue-reports"
+  fi
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    return 1
+  fi
+  local stamp random file
+  stamp="$(date -u +"%Y%m%dT%H%M%SZ")"
+  random="$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
+  file="${dir}/${stamp}-${kind}-${random}.yml"
+  if [[ -e "$file" ]]; then
+    file="${dir}/${stamp}-${kind}-${random}-${RANDOM}.yml"
+  fi
+  if ! : >"$file" 2>/dev/null; then
+    return 1
+  fi
+  printf '%s\n' "$file"
+}
+
+gc_reports_write_issue() {
+  local kind="${1:-generic}"
+  local summary="${2:-}"
+  local definition="${3:-}"
+  local priority="${4:-P2-medium}"
+  local file
+  file="$(gc_reports_issue_file "$kind")" || return 1
+  local summary_escaped
+  summary_escaped="$(gc_reports_escape "$summary")"
+  local reporter
+  reporter="$(gc_reports_current_user)"
+  local timestamp
+  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  {
+    printf 'summary: "%s"\n' "$summary_escaped"
+    printf 'priority: %s\n' "$priority"
+    printf 'issue_definition: |\n'
+    if [[ -n "$definition" ]]; then
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        printf '  %s\n' "$line"
+      done <<<"$definition"
+    else
+      printf '  (no additional details provided)\n'
+    fi
+    printf 'metadata:\n'
+    printf '  type: %s\n' "$kind"
+    printf '  timestamp: "%s"\n' "$timestamp"
+    printf '  reporter: "%s"\n' "$(gc_reports_escape "$reporter")"
+    printf '  command: "%s"\n' "$(gc_reports_escape "${GC_INVOCATION:-$0}")"
+    if [[ -n "${GC_LAST_ERROR_STATUS:-}" ]]; then
+      printf '  exit_code: %s\n' "${GC_LAST_ERROR_STATUS}"
+    fi
+    if [[ -n "${GC_LAST_ERROR_CMD:-}" ]]; then
+      printf '  last_command: "%s"\n' "$(gc_reports_escape "${GC_LAST_ERROR_CMD}")"
+    fi
+    printf '  working_dir: "%s"\n' "$(gc_reports_escape "$PWD")"
+    printf '  status: open\n'
+    printf '  likes: 0\n'
+    printf '  comments: 0\n'
+  } >"$file"
+  printf '%s\n' "$file"
+}
+
+gc_reports_record_issue() {
+  local kind="${1:-generic}"
+  local summary="${2:-}"
+  local definition="${3:-}"
+  local priority="${4:-P2-medium}"
+  gc_reports_write_issue "$kind" "$summary" "$definition" "$priority"
+}
+
+gc_reports_touch_activity() {
+  local timestamp="${1:-$(date +%s)}"
+  local command="${2:-}"
+  local file="${GC_REPORTS_ACTIVITY_FILE:-}"
+  [[ -n "$file" ]] || return 0
+  if [[ -n "$command" ]]; then
+    command="${command//$'\n'/ }"
+    printf '%s\t%s\n' "$timestamp" "$command" >"$file" 2>/dev/null || true
+  else
+    printf '%s\n' "$timestamp" >"$file" 2>/dev/null || true
+  fi
+}
+
+gc_reports_activity_trap() {
+  gc_reports_touch_activity "$(date +%s)" "$1"
+  return 0
+}
+
+gc_reports_handle_crash() {
+  local status="${1:-1}"
+  gc_reports_enabled || return 0
+  local summary
+  printf -v summary "Crash (exit %s) while running '%s'" "$status" "${GC_INVOCATION:-$0}"
+  local log_dir
+  if ! log_dir="$(gc_logs_dir)"; then
+    log_dir="<unknown>"
+  fi
+  local -a lines
+  lines=("The CLI exited unexpectedly with status ${status}.")
+  if [[ -n "${GC_LAST_ERROR_CMD:-}" ]]; then
+    lines+=("Last command observed before exit: ${GC_LAST_ERROR_CMD}")
+  fi
+  if [[ -n "${GC_LAST_CRASH_LOG:-}" ]]; then
+    lines+=("Crash log stored at: ${GC_LAST_CRASH_LOG}")
+  fi
+  lines+=("Inspect logs under ${log_dir} for further diagnostics.")
+  local definition=""
+  if ((${#lines[@]})); then
+    printf -v definition '%s\n' "${lines[@]}"
+    definition="${definition%$'\n'}"
+  fi
+  local path
+  if path="$(gc_reports_record_issue "crash" "$summary" "$definition" "P0-critical")"; then
+    warn "Issue report recorded for crash → ${path}"
+  fi
+}
+
+gc_reports_handle_idle() {
+  local idle_seconds="${1:-0}"
+  local heartbeat="${2:-}"
+  local last_command="${3:-}"
+  gc_reports_enabled || return 0
+  local summary
+  printf -v summary "Idle/stall detected after %ss while running '%s'" "$idle_seconds" "${GC_INVOCATION:-$0}"
+  local log_dir
+  if ! log_dir="$(gc_logs_dir)"; then
+    log_dir="<unknown>"
+  fi
+  if [[ -n "$last_command" ]]; then
+    last_command="${last_command//$'\n'/ }"
+  fi
+  local -a lines
+  lines=("No CLI activity recorded for ${idle_seconds} seconds.")
+  if [[ -n "$heartbeat" ]]; then
+    lines+=("Heartbeat file: ${heartbeat}")
+  fi
+  if [[ -n "$last_command" ]]; then
+    lines+=("Last command observed: ${last_command}")
+  fi
+  lines+=("Inspect processes and logs under ${log_dir} to verify whether the command stalled.")
+  local definition=""
+  if ((${#lines[@]})); then
+    printf -v definition '%s\n' "${lines[@]}"
+    definition="${definition%$'\n'}"
+  fi
+  local path
+  if path="$(gc_reports_record_issue "idle" "$summary" "$definition" "P1-high")"; then
+    warn "Issue report recorded for idle stall → ${path}"
+  fi
+}
+
+gc_reports_watchdog_loop() {
+  local timeout="${1:-0}"
+  local interval="${2:-0}"
+  local activity_file="${3:-}"
+  local main_pid="${4:-0}"
+  local sentinel="${5:-}"
+
+  (( timeout > 0 )) || return 0
+  (( interval > 0 )) || interval="$timeout"
+  [[ -n "$activity_file" && -n "$main_pid" ]] || return 0
+
+  while kill -0 "$main_pid" 2>/dev/null; do
+    sleep "$interval" || break
+    [[ -f "$activity_file" ]] || continue
+    local raw
+    raw="$(cat "$activity_file" 2>/dev/null)" || continue
+    local payload="$raw"
+    local last="${payload%%$'\t'*}"
+    local activity_command=""
+    if [[ "$payload" == *$'\t'* ]]; then
+      activity_command="${payload#*$'\t'}"
+    fi
+    [[ "$last" =~ ^[0-9]+$ ]] || continue
+    local now
+    now="$(date +%s)"
+    local delta=$(( now - last ))
+    if (( delta >= timeout )); then
+      if [[ -n "$sentinel" ]]; then
+        printf '%s\n' "$now" >"$sentinel" 2>/dev/null || true
+      fi
+      gc_reports_handle_idle "$delta" "$activity_file" "$activity_command"
+      break
+    fi
+  done
+}
+
+gc_reports_start_watchdog() {
+  local timeout="${1:-0}"
+  local interval="${2:-0}"
+  local activity="${3:-}"
+  local main_pid="${4:-0}"
+  local sentinel="${5:-}"
+
+  if (( timeout <= 0 )); then
+    return 0
+  fi
+  if (( interval <= 0 || interval > timeout )); then
+    interval="$timeout"
+  fi
+  if [[ -z "$activity" || -z "$main_pid" ]]; then
+    return 0
+  fi
+  if [[ -n "${GC_REPORTS_WATCHDOG_PID:-}" ]] && kill -0 "$GC_REPORTS_WATCHDOG_PID" 2>/dev/null; then
+    return 0
+  fi
+
+  gc_reports_watchdog_loop "$timeout" "$interval" "$activity" "$main_pid" "$sentinel" &
+  GC_REPORTS_WATCHDOG_PID=$!
+}
+
+gc_reports_initialize() {
+  gc_reports_enabled || return 0
+  if (( GC_REPORTS_INITIALIZED )); then
+    return 0
+  fi
+  local log_dir
+  if ! log_dir="$(gc_logs_dir)"; then
+    warn "Unable to determine log directory for issue reporting"
+    return 0
+  fi
+  GC_REPORTS_STORE_DIR="${log_dir}/issue-reports"
+  if ! mkdir -p "$GC_REPORTS_STORE_DIR" 2>/dev/null; then
+    warn "Unable to prepare reports directory at ${GC_REPORTS_STORE_DIR}"
+    return 0
+  fi
+  GC_REPORTS_ACTIVITY_FILE="${GC_REPORTS_STORE_DIR}/heartbeat-${GC_MAIN_PID}.txt"
+  GC_REPORTS_IDLE_SENTINEL="${GC_REPORTS_STORE_DIR}/idle-${GC_MAIN_PID}.flag"
+  if ! : >"$GC_REPORTS_ACTIVITY_FILE" 2>/dev/null; then
+    warn "Unable to initialize heartbeat tracking for issue reporting"
+    return 0
+  fi
+  GC_REPORTS_INITIALIZED=1
+  gc_reports_touch_activity "$(date +%s)"
+  gc_reports_start_watchdog "$GC_REPORTS_IDLE_TIMEOUT" "$GC_REPORTS_CHECK_INTERVAL" "$GC_REPORTS_ACTIVITY_FILE" "$GC_MAIN_PID" "$GC_REPORTS_IDLE_SENTINEL"
+  return 0
+}
+
+gc_reports_cleanup() {
+  if [[ -n "${GC_REPORTS_WATCHDOG_PID:-}" ]]; then
+    kill "$GC_REPORTS_WATCHDOG_PID" 2>/dev/null || true
+    wait "$GC_REPORTS_WATCHDOG_PID" 2>/dev/null || true
+    GC_REPORTS_WATCHDOG_PID=""
+  fi
+}
+
+gc_reports_dir() {
+  if [[ -n "${GC_REPORTS_STORE_DIR:-}" ]]; then
+    printf '%s\n' "$GC_REPORTS_STORE_DIR"
+    return 0
+  fi
+  local base
+  base="$(gc_logs_dir)" || return 1
+  local dir="${base}/issue-reports"
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    return 1
+  fi
+  printf '%s\n' "$dir"
+}
+
+gc_reports_set_metadata_field() {
+  local report_file="${1:?report file required}"
+  local key="${2:?metadata key required}"
+  local value="${3:-}"
+  python3 - <<'PY' "$report_file" "$key" "$value"
+import sys
+
+path, key, value = sys.argv[1:4]
+
+try:
+    lines = []
+    with open(path, 'r', encoding='utf-8', errors='ignore') as fh:
+        lines = fh.read().splitlines()
+except FileNotFoundError:
+    raise SystemExit(f"report file not found: {path}")
+
+metadata_found = False
+metadata_active = False
+inserted = False
+result = []
+
+for line in lines:
+    if line.strip() == "metadata:":
+        metadata_found = True
+        metadata_active = True
+        result.append(line)
+        continue
+    if metadata_active:
+        if line.startswith("  "):
+            stripped = line.strip()
+            if ":" in stripped:
+                current_key = stripped.split(":", 1)[0].strip()
+                if current_key == key:
+                    result.append(f"  {key}: {value}".rstrip())
+                    inserted = True
+                    continue
+        else:
+            if not inserted:
+                result.append(f"  {key}: {value}".rstrip())
+                inserted = True
+            metadata_active = False
+    result.append(line)
+
+if metadata_active and not inserted:
+    result.append(f"  {key}: {value}".rstrip())
+    inserted = True
+
+if not metadata_found:
+    result.append("metadata:")
+    result.append(f"  {key}: {value}".rstrip())
+
+with open(path, 'w', encoding='utf-8', errors='ignore') as fh:
+    fh.write('\n'.join(result).rstrip() + '\n')
+PY
+}
+
+gc_reports_resolve_slug() {
+  local slug="${1:-}"
+  [[ -n "$slug" ]] || return 1
+  local dir
+  dir="$(gc_reports_dir)" || return 1
+  local candidate
+  for ext in yml yaml; do
+    candidate="${dir}/${slug}.${ext}"
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  candidate="${dir}/${slug}"
+  if [[ -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  local -a matches=()
+  while IFS= read -r file; do
+    local base
+    base="$(basename "$file")"
+    base="${base%.*}"
+    if [[ "$base" == "$slug"* ]]; then
+      matches+=("$file")
+    fi
+  done < <(find "$dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print 2>/dev/null)
+  local count="${#matches[@]}"
+  if (( count == 1 )); then
+    printf '%s\n' "${matches[0]}"
+    return 0
+  fi
+  if (( count > 1 )); then
+    warn "Multiple reports match slug '${slug}'."
+    local entry
+    for entry in "${matches[@]}"; do
+      warn "  $(basename "$entry")"
+    done
+    return 2
+  fi
+  return 1
+}
+
+gc_reports_run_work() {
+  local slug="${1:?slug required}"
+  local branch_hint="${2:-}"
+  local push_after="${3:-1}"
+  local prompt_only="${4:-0}"
+  local assignee_override="${5:-}"
+
+  local report_path
+  if ! report_path="$(gc_reports_resolve_slug "$slug")"; then
+    warn "No issue report found for slug: ${slug}"
+    return 1
+  fi
+
+  local branch="${branch_hint:-report/${slug}}"
+  local push_flag="$push_after"
+  if [[ "$push_flag" != "0" ]]; then
+    push_flag=1
+  fi
+  local prompt_only_flag="$prompt_only"
+  if [[ "$prompt_only_flag" != "0" ]]; then
+    prompt_only_flag=1
+  fi
+
+  local report_dir="${GC_DIR}/reports/${slug}"
+  mkdir -p "$report_dir"
+  local prompt_path="${report_dir}/work.md"
+  local project_root="${PROJECT_ROOT:-$PWD}"
+
+  if ! python3 - <<'PY' "$report_path" "$prompt_path" "$project_root" "$slug" "$branch" "$push_flag"
+import sys
+
+report_path, prompt_path, project_root, slug, branch, push_flag = sys.argv[1:6]
+push = push_flag == "1"
+
+with open(report_path, 'r', encoding='utf-8', errors='ignore') as fh:
+    raw_lines = fh.read().splitlines()
+
+summary = ""
+priority = ""
+definition_lines = []
+metadata = {}
+collect_definition = False
+metadata_active = False
+
+for line in raw_lines:
+    if line.startswith("summary:") and not summary:
+        value = line.split(":", 1)[1].strip()
+        if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+            value = value[1:-1]
+        summary = value
+    elif line.startswith("priority:") and not priority:
+        priority = line.split(":", 1)[1].strip()
+    elif line.startswith("issue_definition:"):
+        collect_definition = True
+        continue
+    elif collect_definition:
+        if line.startswith("  "):
+            definition_lines.append(line[2:])
+        else:
+            collect_definition = False
+    if line.strip() == "metadata:":
+        metadata_active = True
+        continue
+    if metadata_active:
+        if line.startswith("  "):
+            stripped = line.strip()
+            if ":" in stripped:
+                k, v = stripped.split(":", 1)
+                metadata[k.strip()] = v.strip().strip('"')
+        else:
+            metadata_active = False
+
+definition_text = "\n".join(definition_lines).strip()
+issue_type = metadata.get("type", "unknown")
+status = metadata.get("status", "open")
+timestamp = metadata.get("timestamp", "")
+likes = metadata.get("likes", "0")
+comments = metadata.get("comments", "0")
+try:
+    popularity = int(likes) + int(comments)
+except ValueError:
+    popularity = 0
+
+summary_for_commit = summary.replace('"', '').strip()
+if len(summary_for_commit) > 64:
+    summary_for_commit = summary_for_commit[:61] + "..."
+
+instructions = []
+instructions.append(f"# Resolve Issue {slug}\n")
+instructions.append("## Summary")
+instructions.append(f"- Summary: {summary or '(not provided)'}")
+instructions.append(f"- Priority: {priority or 'unknown'}")
+instructions.append(f"- Type: {issue_type}")
+instructions.append(f"- Current Status: {status}")
+instructions.append(f"- Popularity Score: {popularity} (likes={likes}, comments={comments})")
+if timestamp:
+    instructions.append(f"- Reported At: {timestamp}")
+instructions.append(f"- Report File: {report_path}")
+instructions.append(f"- Working Branch: {branch}")
+instructions.append("")
+instructions.append("## Issue Definition")
+instructions.append("```")
+instructions.append(definition_text or "(no issue definition provided)")
+instructions.append("```")
+instructions.append("")
+instructions.append("## Workflow Requirements")
+instructions.append(f"1. Checkout the branch `{branch}` (create it if missing).")
+instructions.append("2. Investigate and resolve the described issue with deterministic steps.")
+instructions.append("3. Run any relevant checks or tests (e.g. `gpt-creator verify acceptance`) to confirm the fix.")
+instructions.append(f"4. Stage and commit the changes with a concise message (suggested: `fix: {slug} {summary_for_commit}`).")
+if push:
+    instructions.append(f"5. Push the branch to origin via `git push origin {branch}`.")
+instructions.append("6. Provide a short summary of the fix in the commit message body if additional context is required.")
+instructions.append("")
+instructions.append("## Notes for Codex")
+instructions.append("- Operate deterministically and avoid modifying unrelated files.")
+instructions.append("- Do not edit the issue report YAML; the CLI updates metadata automatically.")
+instructions.append("- Focus on resolving the root cause and keep diffs as small as possible.")
+instructions.append("- If the issue cannot be resolved, leave the repository unchanged and exit with a failure code describing the blocker.")
+instructions.append("")
+instructions.append("## Repository Context")
+instructions.append(f"- Project Root: {project_root}")
+instructions.append(f"- Branch: {branch}")
+instructions.append("")
+
+with open(prompt_path, 'w', encoding='utf-8', errors='ignore') as fh:
+    fh.write("\n".join(instructions).rstrip() + "\n")
+PY
+  then
+    warn "Failed to prepare Codex prompt for report ${slug}"
+    return 1
+  fi
+
+  info "Prepared Codex prompt → ${prompt_path}"
+
+  local now_utc
+  now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local assignee="${assignee_override:-${GC_REPORT_ASSIGNEE:-$(gc_reports_current_user)}}"
+  if (( prompt_only_flag )); then
+    [[ -n "$assignee" ]] && gc_reports_set_metadata_field "$report_path" assigned "\"$(gc_reports_escape "$assignee")\""
+    gc_reports_set_metadata_field "$report_path" branch "\"$(gc_reports_escape "$branch")\""
+    gc_reports_set_metadata_field "$report_path" status open
+    info "Prompt generated (skipping Codex execution due to --prompt-only)."
+    info "Run: ${CODEX_BIN:-codex} exec --model ${CODEX_MODEL} --cd \"${PROJECT_ROOT:-$PWD}\" < ${prompt_path}"
+    return 0
+  fi
+
+  if [[ -n "$assignee" ]]; then
+    gc_reports_set_metadata_field "$report_path" assigned "\"$(gc_reports_escape "$assignee")\""
+  fi
+  gc_reports_set_metadata_field "$report_path" status in-progress
+  gc_reports_set_metadata_field "$report_path" branch "\"$(gc_reports_escape "$branch")\""
+  gc_reports_set_metadata_field "$report_path" last_started "\"$now_utc\""
+
+  if codex_call "report-${slug}" --prompt "$prompt_path"; then
+    local completed_utc
+    completed_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    gc_reports_set_metadata_field "$report_path" status resolved
+    gc_reports_set_metadata_field "$report_path" last_completed "\"$completed_utc\""
+    ok "Codex resolved report ${slug}"
+    return 0
+  else
+    local failed_utc
+    failed_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    gc_reports_set_metadata_field "$report_path" status open
+    gc_reports_set_metadata_field "$report_path" last_failed "\"$failed_utc\""
+    warn "Codex failed to resolve report ${slug}"
+    return 1
+  fi
+}
+
+gc_reports_set_idle_timeout() {
+  local value="${1:-}"
+  if [[ -z "$value" ]]; then
+    die "--reports-idle-timeout requires a value in seconds"
+  fi
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    die "--reports-idle-timeout expects an integer number of seconds (received: $value)"
+  fi
+  GC_REPORTS_IDLE_TIMEOUT="$value"
+}
+
+gc_reports_extract_global_flags() {
+  GC_FILTERED_ARGS=()
+  local -a args=("$@")
+  local idx=0
+  while (( idx < ${#args[@]} )); do
+    local arg="${args[idx]}"
+    case "$arg" in
+      --)
+        GC_FILTERED_ARGS+=("${args[@]:idx}")
+        return 0
+        ;;
+      --reports-on)
+        GC_REPORTS_ON=1
+        ;;
+      --reports-off)
+        GC_REPORTS_ON=0
+        ;;
+      --reports-idle-timeout=*)
+        gc_reports_set_idle_timeout "${arg#*=}"
+        ;;
+      --reports-idle-timeout)
+        (( idx + 1 < ${#args[@]} )) || die "--reports-idle-timeout requires a value in seconds"
+        idx=$((idx + 1))
+        gc_reports_set_idle_timeout "${args[idx]}"
+        ;;
+      *)
+        GC_FILTERED_ARGS+=("$arg")
+        ;;
+    esac
+    idx=$((idx + 1))
+  done
+}
+
 gc_write_crash_log() {
   local status="${1:-1}"
   if (( GC_CRASH_LOGGED )); then
     return
   fi
 
-  local log_dir="${GC_FAIL_LOG_DIR:-}"
-  if [[ -z "$log_dir" ]]; then
-    if [[ -n "${PROJECT_ROOT:-}" ]]; then
-      log_dir="${PROJECT_ROOT}/.gpt-creator/logs"
-    else
-      log_dir="${PWD}/.gpt-creator/logs"
-    fi
-  fi
-
-  if ! mkdir -p "$log_dir" 2>/dev/null; then
-    return
-  fi
+  local log_dir
+  log_dir="$(gc_logs_dir)" || return
 
   local log_file="${log_dir}/crash.log"
   local timestamp
@@ -414,16 +1053,22 @@ gc_write_crash_log() {
     printf -- '---\n'
   } >>"$log_file" 2>/dev/null || return
 
+  GC_LAST_CRASH_LOG="$log_file"
   GC_CRASH_LOGGED=1
 }
 
 gc_exit_handler() {
   local status="${1:-0}"
-  (( status == 0 )) && return
-  if [[ -z "${GC_LAST_ERROR_STATUS:-}" || "${GC_LAST_ERROR_STATUS}" -eq 0 ]]; then
-    GC_LAST_ERROR_STATUS="$status"
+  if (( status != 0 )); then
+    if [[ -z "${GC_LAST_ERROR_STATUS:-}" || "${GC_LAST_ERROR_STATUS}" -eq 0 ]]; then
+      GC_LAST_ERROR_STATUS="$status"
+    fi
+    gc_write_crash_log "$status"
+    if gc_reports_enabled; then
+      gc_reports_handle_crash "$status"
+    fi
   fi
-  gc_write_crash_log "$status"
+  gc_reports_cleanup
 }
 
 gc_record_codex_usage() {
@@ -6998,6 +7643,343 @@ PY
 }
 
 
+cmd_reports() {
+  local root=""
+  local mode="list"
+  local slug=""
+  local open_editor=0
+  local work_branch=""
+  local push_after=1
+  local prompt_only=0
+  local reporter_filter=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      list)
+        mode="list"
+        shift
+        ;;
+      backlog)
+        mode="backlog"
+        shift
+        ;;
+      auto)
+        mode="auto"
+        shift
+        ;;
+      work)
+        mode="work"
+        shift
+        if [[ $# -eq 0 ]]; then
+          die "reports work requires a slug identifier"
+        fi
+        slug="$1"
+        shift
+        ;;
+      show)
+        mode="show"
+        shift
+        if [[ $# -eq 0 ]]; then
+          die "reports show requires a slug identifier"
+        fi
+        slug="$1"
+        shift
+        ;;
+      --project)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      --open)
+        open_editor=1
+        shift
+        ;;
+      --branch)
+        work_branch="$2"
+        shift 2
+        ;;
+      --no-push)
+        push_after=0
+        shift
+        ;;
+      --push)
+        push_after=1
+        shift
+        ;;
+      --prompt-only)
+        prompt_only=1
+        shift
+        ;;
+      --reporter)
+        reporter_filter="$2"
+        shift 2
+        ;;
+      -h|--help)
+        cat <<'USAGE'
+Usage:
+  gpt-creator reports [--project PATH]
+  gpt-creator reports list [--project PATH]
+  gpt-creator reports backlog [--project PATH]
+  gpt-creator reports auto [--project PATH] [--reporter NAME] [--no-push] [--prompt-only]
+  gpt-creator reports work [--project PATH] [--branch NAME] [--no-push] [--prompt-only] <slug>
+  gpt-creator reports [--project PATH] [--open] <slug>
+  gpt-creator reports show [--project PATH] [--open] <slug>
+
+List captured crash/stall reports, show the open backlog, automatically resolve matching issues, assign Codex to resolve a single report, or display a specific entry.
+USAGE
+        return 0
+        ;;
+      *)
+        if [[ -z "$slug" && "$mode" == "list" ]]; then
+          mode="show"
+          slug="$1"
+          shift
+        else
+          die "Unknown reports argument: $1"
+        fi
+        ;;
+    esac
+  done
+
+  if [[ "$mode" == "show" && -z "$slug" ]]; then
+    die "reports show requires a slug identifier"
+  fi
+
+  if [[ "$mode" == "work" && -z "$slug" ]]; then
+    die "reports work requires a slug identifier"
+  fi
+
+  if [[ "$mode" == "work" && "$open_editor" -ne 0 ]]; then
+    die "--open cannot be combined with reports work"
+  fi
+
+  if [[ "$mode" == "auto" && "$open_editor" -ne 0 ]]; then
+    die "--open cannot be combined with reports auto"
+  fi
+
+  if [[ "$mode" == "auto" && -n "$work_branch" ]]; then
+    die "--branch is not supported for reports auto"
+  fi
+
+  if [[ "$mode" != "work" && "$mode" != "auto" ]]; then
+    if [[ -n "$work_branch" || "$prompt_only" -ne 0 || "$push_after" -ne 1 ]]; then
+      die "reports options --branch/--no-push/--prompt-only are only valid with 'work' or 'auto'"
+    fi
+  fi
+
+  if [[ "$mode" != "auto" && -n "$reporter_filter" ]]; then
+    die "--reporter is only supported with reports auto"
+  fi
+
+  if [[ -n "$root" ]]; then
+    ensure_ctx "$root"
+  else
+    ensure_ctx "${PROJECT_ROOT:-$PWD}"
+  fi
+
+  local reports_dir
+  reports_dir="$(gc_reports_dir)" || die "Unable to access issue report directory"
+
+  case "$mode" in
+    list|backlog)
+      if [[ -z "$(find "$reports_dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print -quit 2>/dev/null)" ]]; then
+        info "No issue reports recorded yet."
+        return 0
+      fi
+      python3 - <<'PY' "$reports_dir" "$mode"
+import datetime
+import os
+import sys
+
+dir_path = sys.argv[1]
+mode = sys.argv[2]
+entries = []
+
+for name in os.listdir(dir_path):
+    lower = name.lower()
+    if not (lower.endswith(".yml") or lower.endswith(".yaml")):
+        continue
+    path = os.path.join(dir_path, name)
+    if not os.path.isfile(path):
+        continue
+    try:
+        stat = os.stat(path)
+    except OSError:
+        continue
+    slug = os.path.splitext(name)[0]
+    summary = ""
+    priority = ""
+    timestamp = ""
+    issue_type = ""
+    status = ""
+    likes = 0
+    comments = 0
+    reporter = ""
+    metadata = False
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped.startswith("summary:") and not summary:
+                    value = stripped.split(":", 1)[1].strip()
+                    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+                        value = value[1:-1]
+                    summary = value
+                elif stripped.startswith("priority:") and not priority:
+                    priority = stripped.split(":", 1)[1].strip()
+                elif stripped.startswith("type:") and not issue_type:
+                    issue_type = stripped.split(":", 1)[1].strip()
+                elif stripped.startswith("timestamp:") and not timestamp:
+                    timestamp = stripped.split(":", 1)[1].strip().strip('"')
+                if stripped == "metadata:":
+                    metadata = True
+                    continue
+                if metadata:
+                    if not line.startswith("  "):
+                        metadata = False
+                    else:
+                        meta = line.strip()
+                        if meta.startswith("timestamp:") and not timestamp:
+                            timestamp = meta.split(":", 1)[1].strip().strip('"')
+                        elif meta.startswith("status:") and not status:
+                            status = meta.split(":", 1)[1].strip()
+                        elif meta.startswith("likes:") and likes == 0:
+                            try:
+                                likes = int(meta.split(":", 1)[1].strip())
+                            except ValueError:
+                                likes = 0
+                        elif meta.startswith("comments:") and comments == 0:
+                            try:
+                                comments = int(meta.split(":", 1)[1].strip())
+                            except ValueError:
+                                comments = 0
+                        elif meta.startswith("reporter:") and not reporter:
+                            reporter = meta.split(":", 1)[1].strip().strip('"')
+    except OSError:
+        continue
+    popularity = likes + comments
+    entries.append((stat.st_mtime, slug, summary, priority, timestamp, issue_type, status, popularity, likes, comments, reporter))
+
+entries.sort(key=lambda item: item[0], reverse=True)
+
+printed = False
+for mtime, slug, summary, priority, timestamp, issue_type, status, popularity, likes, comments, reporter in entries:
+    if mode == "backlog" and status and status.lower() not in ("open", "new", "todo"):
+        continue
+    summary = summary or "(no summary)"
+    priority = priority or "unknown"
+    issue_type = issue_type or "unknown"
+    status_display = status or "open"
+    display_time = timestamp or datetime.datetime.utcfromtimestamp(mtime).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[{slug}] {display_time} {priority} ({issue_type}) status={status_display} pop={popularity} (likes={likes}, comments={comments})")
+    if reporter:
+        print(f"  reporter={reporter}")
+    print(f"  {summary}")
+    print()
+    printed = True
+
+if mode == "backlog" and not printed:
+    print("No open reports found.")
+PY
+      ;;
+    auto)
+      local reporter="${reporter_filter:-$(gc_reports_current_user)}"
+      info "Auto-processing reports for reporter: ${reporter}"
+      local auto_slugs=()
+      while IFS= read -r slug_entry; do
+        [[ -n "$slug_entry" ]] && auto_slugs+=("$slug_entry")
+      done < <(python3 - <<'PY' "$reports_dir" "$reporter"
+import os
+import sys
+
+dir_path = sys.argv[1]
+reporter_filter = sys.argv[2].strip()
+entries = []
+
+for name in os.listdir(dir_path):
+    lower = name.lower()
+    if not (lower.endswith('.yml') or lower.endswith('.yaml')):
+        continue
+    path = os.path.join(dir_path, name)
+    if not os.path.isfile(path):
+        continue
+    try:
+        stat = os.stat(path)
+    except OSError:
+        continue
+    slug = os.path.splitext(name)[0]
+    metadata = {}
+    metadata_active = False
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                stripped = line.strip()
+                if stripped == 'metadata:':
+                    metadata_active = True
+                    continue
+                if metadata_active:
+                    if line.startswith('  '):
+                        if ':' in stripped:
+                            k, v = stripped.split(':', 1)
+                            metadata[k.strip()] = v.strip().strip('"')
+                    else:
+                        metadata_active = False
+    except OSError:
+        continue
+    reporter = metadata.get('reporter', '')
+    status = metadata.get('status', 'open').lower()
+    if reporter_filter and reporter.lower() != reporter_filter.lower():
+        continue
+    if status not in ('open', 'new', 'todo'):
+        continue
+    entries.append((stat.st_mtime, slug))
+
+entries.sort(key=lambda item: item[0], reverse=True)
+
+for _, slug in entries:
+    print(slug)
+PY
+)
+      if ((${#auto_slugs[@]} == 0)); then
+        info "No matching reports for reporter '${reporter}'."
+        return 0
+      fi
+      local slug_entry
+      for slug_entry in "${auto_slugs[@]}"; do
+        info "Resolving report ${slug_entry}"
+        if ! gc_reports_run_work "$slug_entry" "" "$push_after" "$prompt_only" "$reporter"; then
+          die "Codex failed while processing report ${slug_entry}"
+        fi
+      done
+      ;;
+    show)
+      local report_path=""
+      if ! report_path="$(gc_reports_resolve_slug "$slug")"; then
+        die "No issue report found for slug: ${slug}"
+      fi
+      info "Report file: ${report_path}"
+      printf '\n'
+      cat "$report_path"
+      printf '\n'
+      if (( open_editor )); then
+        local editor_cmd="${EDITOR_CMD:-${EDITOR:-vi}}"
+        if [[ -z "$editor_cmd" ]]; then
+          warn "EDITOR_CMD not set; skipping --open"
+        else
+          info "Opening report in ${editor_cmd}"
+          if ! bash -lc "${editor_cmd} \"${report_path}\""; then
+            warn "Failed to launch editor command: ${editor_cmd}"
+          fi
+        fi
+      fi
+      ;;
+    work)
+      if ! gc_reports_run_work "$slug" "$work_branch" "$push_after" "$prompt_only" ""; then
+        die "Codex failed to resolve report ${slug}"
+      fi
+      ;;
+  esac
+}
+
 cmd_create_project() {
   local template_request="auto"
   local path=""
@@ -7348,6 +8330,7 @@ cat <<EOF
 ${APP_NAME} v${VERSION}
 
 Usage:
+  ${APP_NAME} [--reports-on|--reports-off] [--reports-idle-timeout SECONDS] <command> [args]
   ${APP_NAME} create-project [--template NAME|auto|skip] [--skip-template] <path>
   ${APP_NAME} bootstrap [--template NAME|auto|skip] [--skip-template] [--rfp FILE] [--fresh] <path>
   ${APP_NAME} scan [--project <path>]
@@ -7366,11 +8349,17 @@ Usage:
   ${APP_NAME} refine-tasks [--project <path>] [--story SLUG] [--model NAME] [--dry-run]
   ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
   ${APP_NAME} tokens [--project <path>] [--details] [--json]
+  ${APP_NAME} reports [--project <path>] [list|backlog|show|work] [--branch NAME] [--no-push] [--prompt-only] [--open] [slug]
   ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]
   ${APP_NAME} iterate [--project <path>] [--jira <file>] [--no-verify] (deprecated)
   ${APP_NAME} update [--force]
   ${APP_NAME} version
   ${APP_NAME} help
+
+Global flags:
+  --reports-on               Enable automatic crash/stall reports for the current invocation
+  --reports-off              Disable automatic crash/stall reports (overrides GC_REPORTS_ON=1)
+  --reports-idle-timeout <s> Override idle detection threshold in seconds (default: ${GC_REPORTS_IDLE_TIMEOUT})
 
 Environment overrides:
   CODEX_BIN, CODEX_MODEL, DOCKER_BIN, MYSQL_BIN, EDITOR_CMD, GC_API_HEALTH_URL, GC_WEB_URL, GC_ADMIN_URL
@@ -7401,6 +8390,7 @@ main() {
     create-db-dump) "$shell_bin" "$CLI_ROOT/src/cli/create-db-dump.sh" "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
     tokens)         cmd_tokens "$@" ;;
+    reports)        cmd_reports "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;
     work-on-tasks)  cmd_work_on_tasks "$@" ;;
     iterate)        cmd_iterate "$@" ;;
@@ -7409,10 +8399,18 @@ main() {
   esac
 }
 
+GC_ORIGINAL_ARGS=("$@")
+gc_reports_extract_global_flags "$@"
+set -- "${GC_FILTERED_ARGS[@]}"
+
 GC_INVOCATION="$0"
-if (($#)); then
-  GC_INVOCATION+=" $(printf '%q ' "$@")"
+if ((${#GC_ORIGINAL_ARGS[@]})); then
+  GC_INVOCATION+=" $(printf '%q ' "${GC_ORIGINAL_ARGS[@]}")"
   GC_INVOCATION="${GC_INVOCATION% }"
+fi
+
+if gc_reports_enabled; then
+  trap 'gc_reports_activity_trap "$BASH_COMMAND"' DEBUG
 fi
 
 trap 'gc_capture_error_context $? "$BASH_COMMAND"' ERR

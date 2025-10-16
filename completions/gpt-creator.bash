@@ -9,8 +9,8 @@ _gpt_creator()
     prev="${COMP_WORDS[COMP_CWORD-1]}"
   }
 
-  local subcmds="create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks iterate help version"
-  local global_opts="--project -h --help -v --version"
+  local subcmds="create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks reports iterate help version"
+  local global_opts="--project -h --help -v --version --reports-on --reports-off --reports-idle-timeout"
 
   # find the subcommand (first non-option token)
   local cmd=""
@@ -18,6 +18,11 @@ _gpt_creator()
     [[ "$w" == -* ]] && continue
     cmd="$w"; break
   done
+
+  if [[ "$prev" == "--reports-idle-timeout" ]]; then
+    COMPREPLY=( $(compgen -W "300 600 900 1800" -- "$cur") )
+    return 0
+  fi
 
   if [[ $COMP_CWORD -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "${subcmds} ${global_opts}" -- "$cur") )
@@ -103,6 +108,13 @@ _gpt_creator()
           COMPREPLY=( $(compgen -W "${global_opts}" -- "$cur") )
           ;;
       esac
+      ;;
+    reports)
+      case "$prev" in
+        --project) COMPREPLY=( $(compgen -d -- "$cur") ); return 0;;
+      esac
+      local opts="list backlog auto show work --project --open --branch --no-push --push --prompt-only --reporter ${global_opts}"
+      COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
       ;;
     *)
       COMPREPLY=( $(compgen -W "${subcmds} ${global_opts}" -- "$cur") )

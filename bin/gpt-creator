@@ -6021,6 +6021,32 @@ def canonical_epic_descriptor(epic_id=None, epic_slug=None, epic_title=None):
             return norm, epic_id, epic_slug, display_title
     return UNASSIGNED_KEY, "", "", UNASSIGNED_LABEL
 
+def derive_pseudo_epic(identifier):
+    if not identifier:
+        return None
+    clean = identifier.replace("/", "-").replace("_", "-")
+    parts = [part for part in clean.split("-") if part]
+    if len(parts) >= 2:
+        return "-".join(parts[:2]).upper()
+    if len(parts) == 1:
+        return parts[0].upper()
+    return None
+
+def determine_epic_for_story(story):
+    norm, epic_id, epic_slug, epic_title = canonical_epic_descriptor(
+        story.get("epic_id"),
+        story.get("epic_key"),
+        story.get("epic_title"),
+    )
+    if norm != UNASSIGNED_KEY:
+        return norm, epic_id, epic_slug or epic_id.lower(), epic_title
+
+    for candidate in (story.get("story_id"), story.get("story_slug")):
+        pseudo = derive_pseudo_epic((candidate or "").strip())
+        if pseudo:
+            return pseudo.lower(), pseudo, pseudo.lower(), pseudo
+    return norm, epic_id, epic_slug, epic_title
+
 def format_epic_label(epic_id, epic_slug, epic_title):
     epic_title = (epic_title or "").strip()
     epic_id = (epic_id or "").strip()
@@ -6038,11 +6064,7 @@ def format_epic_label(epic_id, epic_slug, epic_title):
 def summarise_epics(stories, task_counts):
     summary = {}
     for story in stories:
-        norm_key, epic_id, epic_slug, epic_title = canonical_epic_descriptor(
-            story.get("epic_id"),
-            story.get("epic_key"),
-            story.get("epic_title"),
-        )
+        norm_key, epic_id, epic_slug, epic_title = determine_epic_for_story(story)
         entry = summary.setdefault(
             norm_key,
             {
@@ -6057,7 +6079,7 @@ def summarise_epics(stories, task_counts):
         if epic_slug and not entry["epic_slug"]:
             entry["epic_slug"] = epic_slug
         story_epic_title = (story.get("epic_title") or "").strip()
-        if story_epic_title:
+        if story_epic_title and entry["epic_title"] in (UNASSIGNED_LABEL, "", None):
             entry["epic_title"] = story_epic_title
 
         counts = entry["counts"]
@@ -6099,11 +6121,7 @@ def build_epic_entries(epics, stories, summary):
 
     stories_by_norm = {}
     for story in stories:
-        norm, _, _, _ = canonical_epic_descriptor(
-            story.get("epic_id"),
-            story.get("epic_key"),
-            story.get("epic_title"),
-        )
+        norm, _, _, _ = determine_epic_for_story(story)
         stories_by_norm.setdefault(norm, []).append(story)
 
     entries = []

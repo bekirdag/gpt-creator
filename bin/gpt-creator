@@ -462,28 +462,61 @@ else:
     raw_text = ""
 
 fields = {}
-patterns = [
-    ("prompt_tokens", r'prompt[_\s-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*(\d+)'),
-    ("completion_tokens", r'completion[_\s-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*(\d+)'),
-    ("total_tokens", r'total[_\s-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*(\d+)'),
-    ("input_tokens", r'input[_\s-]*tokens["\']?\s*[:=]\s*(\d+)'),
-    ("output_tokens", r'output[_\s-]*tokens["\']?\s*[:=]\s*(\d+)'),
-    ("cached_tokens", r'cached[_\s-]*tokens["\']?\s*[:=]\s*(\d+)'),
-    ("billable_units", r'billable[_\s-]*(?:tokens|units)["\']?\s*[:=]\s*(\d+)'),
-    ("request_units", r'request[_\s-]*units["\']?\s*[:=]\s*(\d+)'),
+def parse_number(text: str) -> int:
+    cleaned = re.sub(r"[,_]", "", text.strip())
+    if not cleaned:
+        raise ValueError("empty")
+    return int(cleaned)
+
+def capture(field: str, value: str) -> None:
+    if not value:
+        return
+    try:
+        fields[field] = parse_number(value)
+    except Exception:
+        pass
+
+specific_patterns = [
+    ("prompt_tokens", r'prompt[\s_\-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*([\d,._]+)'),
+    ("completion_tokens", r'completion[\s_\-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*([\d,._]+)'),
+    ("total_tokens", r'total[\s_\-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*([\d,._]+)'),
+    ("total_tokens", r'tokens[\s_\-]*used\s*[:=]\s*([\d,._]+)'),
+    ("total_tokens", r'tokens[\s_\-]*consumed\s*[:=]\s*([\d,._]+)'),
+    ("prompt_tokens", r'prompt\s*=\s*([\d,._]+)'),
+    ("completion_tokens", r'completion\s*=\s*([\d,._]+)'),
+    ("total_tokens", r'total\s*=\s*([\d,._]+)'),
+    ("prompt_tokens", r'input[\s_\-]*tokens?["\']?\s*[:=]\s*([\d,._]+)'),
+    ("completion_tokens", r'output[\s_\-]*tokens?["\']?\s*[:=]\s*([\d,._]+)'),
+    ("cached_tokens", r'cached[\s_\-]*tokens?["\']?\s*[:=]\s*([\d,._]+)'),
+    ("billable_units", r'(?:billable|chargeable)[\s_\-]*(?:tokens|units)?["\']?\s*[:=]\s*([\d,._]+)'),
+    ("request_units", r'request[\s_\-]*(?:tokens|units)?["\']?\s*[:=]\s*([\d,._]+)'),
 ]
 
-for key, pattern in patterns:
+for key, pattern in specific_patterns:
     matches = re.findall(pattern, raw_text, flags=re.IGNORECASE)
     if matches:
-        fields[key] = int(matches[-1])
+        capture(key, matches[-1])
 
-if "prompt_tokens" not in fields and "input_tokens" in fields:
-    fields["prompt_tokens"] = fields["input_tokens"]
-if "completion_tokens" not in fields and "output_tokens" in fields:
-    fields["completion_tokens"] = fields["output_tokens"]
-fields.pop("input_tokens", None)
-fields.pop("output_tokens", None)
+general_pattern = re.compile(
+    r'\b(?P<label>(?:prompt|completion|total|tokens|input|output|cached|billable|chargeable|request|requests)'
+    r'(?:[\s_-]*(?:tokens?|units?|used|consumed))?)\b[^0-9]{0,20}(\d[\d,._]*)',
+    re.IGNORECASE,
+)
+
+for label, value in general_pattern.findall(raw_text):
+    label_lower = label.lower()
+    if "prompt" in label_lower or "input" in label_lower:
+        capture("prompt_tokens", value)
+    elif "completion" in label_lower or "output" in label_lower:
+        capture("completion_tokens", value)
+    elif "cached" in label_lower:
+        capture("cached_tokens", value)
+    elif "billable" in label_lower or "chargeable" in label_lower:
+        capture("billable_units", value)
+    elif "request" in label_lower:
+        capture("request_units", value)
+    else:
+        capture("total_tokens", value)
 
 if "total_tokens" not in fields:
     prompt_val = fields.get("prompt_tokens")

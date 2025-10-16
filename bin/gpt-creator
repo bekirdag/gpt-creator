@@ -50,7 +50,10 @@ resolve_cli_root() {
     source="$(readlink "$source")"
     [[ "$source" != /* ]] && source="$dir/$source"
   done
-  cd "$(dirname "$source")/.." && pwd
+  local abs_dir
+  abs_dir="$(cd "$(dirname "$source")" && pwd)"
+  GC_SELF_PATH="${abs_dir}/$(basename "$source")"
+  cd "${abs_dir}/.." && pwd
 }
 
 cmd_task_convert() {
@@ -229,6 +232,11 @@ ADMIN_HOST_PORT=5174
 PROXY_HOST_PORT=8080
 DATABASE_URL=mysql://${db_user}:${db_password}@127.0.0.1:3306/${db_name}
 VITE_API_BASE=http://localhost:3000/api/v1
+# Optional: GitHub issue reporting
+GC_GITHUB_REPO=bekirdag/gpt-creator
+GC_GITHUB_TOKEN=
+# GC_REPORTER=
+# GC_REPORT_ASSIGNEE=
 EOF
   chmod 600 "$env_file" || true
 }
@@ -512,12 +520,192 @@ gc_reports_write_issue() {
   printf '%s\n' "$file"
 }
 
+gc_reports_sync_github() {
+  local report_file="${1:-}"
+  local kind="${2:-generic}"
+  local summary="${3:-}"
+  local definition="${4:-}"
+  local priority="${5:-P2-medium}"
+  local cli_version="${VERSION:-}"
+  local binary_path="${GC_SELF_PATH:-}"
+
+  if [[ -z "$binary_path" || ! -r "$binary_path" ]]; then
+    if [[ -n "${CLI_ROOT:-}" && -r "${CLI_ROOT}/bin/${APP_NAME}" ]]; then
+      binary_path="${CLI_ROOT}/bin/${APP_NAME}"
+    else
+      binary_path="$(command -v "${APP_NAME}" 2>/dev/null || true)"
+    fi
+  fi
+
+  local repo="${GC_GITHUB_REPO:-}"
+  local token="${GC_GITHUB_TOKEN:-}"
+  if [[ -z "$repo" || -z "$token" ]]; then
+    return 0
+  fi
+
+  local response
+  if ! response="$(
+    GC_REPORT_SUMMARY="$summary" \
+    GC_REPORT_DEFINITION="$definition" \
+    GC_REPORT_PRIORITY="$priority" \
+    GC_REPORT_KIND="$kind" \
+    GC_REPORT_FILE="$report_file" \
+    GC_REPORT_COMMAND="${GC_INVOCATION:-}" \
+    GC_REPORT_EXIT="${GC_LAST_ERROR_STATUS:-}" \
+    GC_REPORT_LAST_CMD="${GC_LAST_ERROR_CMD:-}" \
+    GC_REPORT_WORKDIR="$PWD" \
+    GC_REPORT_PROJECT="${PROJECT_ROOT:-$PWD}" \
+    GC_REPORTER="${GC_REPORTER:-}" \
+    GC_REPORT_VERSION="$cli_version" \
+    GC_REPORT_BINARY="${binary_path:-}" \
+    python3 - <<'PY' "$repo" "$token"
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+import hashlib
+import pathlib
+
+repo, token = sys.argv[1:3]
+
+summary = (os.environ.get("GC_REPORT_SUMMARY") or "").strip()
+definition = (os.environ.get("GC_REPORT_DEFINITION") or "").strip()
+priority = (os.environ.get("GC_REPORT_PRIORITY") or "P2-medium").strip() or "P2-medium"
+kind = (os.environ.get("GC_REPORT_KIND") or "generic").strip() or "generic"
+report_file = os.environ.get("GC_REPORT_FILE", "")
+invocation = os.environ.get("GC_REPORT_COMMAND", "")
+exit_code = os.environ.get("GC_REPORT_EXIT", "")
+last_cmd = os.environ.get("GC_REPORT_LAST_CMD", "")
+project_root = os.environ.get("GC_REPORT_PROJECT") or os.getcwd()
+workdir = os.environ.get("GC_REPORT_WORKDIR") or os.getcwd()
+reporter = os.environ.get("GC_REPORTER", "")
+version = (os.environ.get("GC_REPORT_VERSION") or "").strip()
+binary_path = (os.environ.get("GC_REPORT_BINARY") or "").strip()
+
+title = summary or f"{kind.capitalize()} report"
+title = title.strip()[:120] or "Automated crash report"
+
+body_lines = []
+if definition:
+    body_lines.append(definition)
+else:
+    body_lines.append("(no additional details provided)")
+body_lines.extend(["", "---", ""])
+
+binary_hash = ""
+if binary_path:
+    try:
+        path = pathlib.Path(binary_path)
+        if path.is_file():
+            hasher = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    hasher.update(chunk)
+            binary_hash = hasher.hexdigest()
+    except (OSError, ValueError):
+        binary_hash = ""
+
+signature = ""
+if version or binary_hash:
+    payload_source = f"{version}:{binary_hash}".encode("utf-8")
+    signature = hashlib.sha256(payload_source).hexdigest()
+
+metadata = [
+    ("Priority", priority),
+    ("Report Type", kind),
+    ("Reporter", reporter),
+    ("Invocation", invocation),
+    ("Exit Code", exit_code),
+    ("Last Command", last_cmd),
+    ("Project Root", project_root),
+    ("Working Directory", workdir),
+    ("Report File", report_file),
+    ("CLI Version", version),
+    ("CLI Binary SHA256", binary_hash),
+    ("CLI Signature", signature),
+]
+
+for label, value in metadata:
+    if value:
+        body_lines.append(f"- **{label}**: {value}")
+
+watermark = ""
+if signature:
+    watermark = f"{version or 'unknown'}:{signature}"
+elif version:
+    watermark = f"{version}:unsigned"
+if watermark:
+    body_lines.extend(["", f"<!-- gpt-creator:{watermark} -->"])
+
+labels = [
+    "auto-report",
+    f"kind:{kind}",
+    f"priority:{priority}",
+]
+if version:
+    labels.append(f"cli-version:{version.replace(' ', '_')}")
+
+payload = {
+    "title": title,
+    "body": "\n".join(body_lines),
+    "labels": labels,
+}
+
+request = urllib.request.Request(
+    f"https://api.github.com/repos/{repo}/issues",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    },
+    method="POST",
+)
+
+try:
+    with urllib.request.urlopen(request) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+except urllib.error.HTTPError as err:
+    message = err.read().decode("utf-8", "ignore")
+    print(f"HTTP {err.code}: {message}", file=sys.stderr)
+    sys.exit(1)
+except Exception as exc:
+    print(f"GitHub issue request failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+html_url = data.get("html_url", "")
+number = data.get("number")
+print(html_url)
+print(number if number is not None else "")
+PY
+  )"; then
+    warn "Failed to create GitHub issue for $(basename "$report_file")."
+    return 0
+  fi
+
+  local issue_url=""
+  local issue_number=""
+  IFS=$'\n' read -r issue_url issue_number <<<"$response"
+  if [[ -n "$issue_url" ]]; then
+    gc_reports_set_metadata_field "$report_file" issue_url "\"$issue_url\""
+    if [[ -n "$issue_number" ]]; then
+      gc_reports_set_metadata_field "$report_file" issue_number "$issue_number"
+    fi
+    info "GitHub issue created -> ${issue_url}"
+  fi
+}
+
 gc_reports_record_issue() {
   local kind="${1:-generic}"
   local summary="${2:-}"
   local definition="${3:-}"
   local priority="${4:-P2-medium}"
-  gc_reports_write_issue "$kind" "$summary" "$definition" "$priority"
+  local report_file
+  report_file="$(gc_reports_write_issue "$kind" "$summary" "$definition" "$priority")" || return 1
+  gc_reports_sync_github "$report_file" "$kind" "$summary" "$definition" "$priority"
+  printf '%s\n' "$report_file"
 }
 
 gc_reports_touch_activity() {
@@ -5685,6 +5873,353 @@ EOUSAGE
   fi
 }
 
+cmd_backlog() {
+  local root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      -h|--help)
+        cat <<'EOUSAGE'
+Usage: gpt-creator backlog [--project PATH]
+
+Interactively browse the backlog stored in .gpt-creator/staging/plan/tasks/tasks.db.
+
+Start by selecting an epic, drill into its stories, then view the tasks for a story.
+EOUSAGE
+        return 0
+        ;;
+      *)
+        die "Unknown argument for backlog: $1"
+        ;;
+    esac
+  done
+
+  ensure_ctx "$root"
+  local tasks_db="${PLAN_DIR}/tasks/tasks.db"
+  if [[ ! -f "$tasks_db" ]]; then
+    die "Tasks database not found at ${tasks_db}. Run 'gpt-creator create-tasks' first."
+  fi
+
+  python3 - <<'PY' "$tasks_db"
+import sqlite3
+import sys
+import textwrap
+
+db_path = sys.argv[1]
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+
+def empty_counts():
+    return {
+        "stories": 0,
+        "stories_complete": 0,
+        "stories_in_progress": 0,
+        "stories_pending": 0,
+        "tasks": 0,
+        "tasks_complete": 0,
+        "tasks_in_progress": 0,
+        "tasks_pending": 0,
+    }
+
+def fetch_stories():
+    query = """
+        SELECT story_slug, story_id, story_title, epic_key, epic_title,
+               status, completed_tasks, total_tasks, sequence
+        FROM stories
+        ORDER BY COALESCE(sequence, 0), story_title COLLATE NOCASE
+    """
+    return [dict(row) for row in conn.execute(query)]
+
+def fetch_epics():
+    query = """
+        SELECT epic_key, epic_id, title, slug
+        FROM epics
+        ORDER BY title COLLATE NOCASE
+    """
+    return [dict(row) for row in conn.execute(query)]
+
+def fetch_task_counts():
+    query = """
+        SELECT story_slug,
+               COUNT(*) AS total,
+               SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'complete' THEN 1 ELSE 0 END) AS completed,
+               SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'in-progress' THEN 1 ELSE 0 END) AS in_progress
+        FROM tasks
+        GROUP BY story_slug
+    """
+    counts = {}
+    for row in conn.execute(query):
+        counts[row["story_slug"]] = {
+            "total": row["total"] or 0,
+            "completed": row["completed"] or 0,
+            "in_progress": row["in_progress"] or 0,
+        }
+    return counts
+
+def fetch_tasks_for_story(slug):
+    query = """
+        SELECT position, task_id, title, status, estimate
+        FROM tasks
+        WHERE story_slug = ?
+        ORDER BY position
+    """
+    return [dict(row) for row in conn.execute(query, (slug,))]
+
+def normalise_key(value):
+    if value is None:
+        return None
+    stripped = str(value).strip()
+    return stripped if stripped else None
+
+def pretty_epic_label(epic, key):
+    title = (epic.get("title") or "").strip()
+    ident = (epic.get("epic_id") or epic.get("epic_key") or "").strip()
+    if not title and not ident and key is None:
+        return "Unassigned backlog"
+    if title:
+        if ident and ident.lower() not in title.lower():
+            return f"{title} [{ident}]"
+        return title
+    if ident:
+        return ident
+    return "Unassigned backlog"
+
+def summarise_epics(stories, task_counts):
+    summary = {}
+    for story in stories:
+        key = normalise_key(story.get("epic_key"))
+        entry = summary.setdefault(key, empty_counts())
+        entry["stories"] += 1
+        status = (story.get("status") or "pending").strip().lower()
+        if status == "complete":
+            entry["stories_complete"] += 1
+        elif status in {"in-progress", "in progress"}:
+            entry["stories_in_progress"] += 1
+        else:
+            entry["stories_pending"] += 1
+
+        counts = task_counts.get(story["story_slug"], {})
+        total = counts.get("total", story.get("total_tasks") or 0) or 0
+        completed = counts.get("completed", story.get("completed_tasks") or 0) or 0
+        in_progress = counts.get("in_progress", 0) or 0
+        pending = max(total - completed - in_progress, 0)
+
+        entry["tasks"] += total
+        entry["tasks_complete"] += completed
+        entry["tasks_in_progress"] += in_progress
+        entry["tasks_pending"] += pending
+    return summary
+
+def build_epic_entries(epics, stories, summary):
+    epics_by_key = {}
+    for epic in epics:
+        key = normalise_key(epic.get("epic_key"))
+        epics_by_key[key] = dict(epic)
+
+    stories_by_epic = {}
+    for story in stories:
+        key = normalise_key(story.get("epic_key"))
+        stories_by_epic.setdefault(key, []).append(story)
+        if key not in epics_by_key:
+            epics_by_key[key] = {
+                "epic_key": key,
+                "title": story.get("epic_title"),
+                "epic_id": None,
+                "slug": None,
+            }
+
+    entries = []
+    handled_keys = set()
+    for epic in epics:
+        key = normalise_key(epic.get("epic_key"))
+        handled_keys.add(key)
+        entries.append(
+            {
+                "key": key,
+                "label": pretty_epic_label(epic, key),
+                "counts": summary.get(key) or empty_counts(),
+                "stories": stories_by_epic.get(key, []),
+            }
+        )
+
+    remaining_keys = [k for k in summary.keys() if k not in handled_keys]
+    for key in sorted(remaining_keys, key=lambda value: ("" if value is None else str(value)).lower()):
+        epic = epics_by_key.get(key, {"epic_key": key, "title": None})
+        entries.append(
+            {
+                "key": key,
+                "label": pretty_epic_label(epic, key),
+                "counts": summary.get(key) or empty_counts(),
+                "stories": stories_by_epic.get(key, []),
+            }
+        )
+
+    # Ensure unassigned (None) appears last if present.
+    entries.sort(key=lambda item: (item["key"] is None, item["label"].lower()))
+    return entries
+
+def format_story_line(story, task_counts):
+    title = (story.get("story_title") or story.get("story_id") or story.get("story_slug") or "Story").strip()
+    ident = (story.get("story_id") or story.get("story_slug") or "").strip()
+    status = (story.get("status") or "pending").strip().lower().replace("_", "-")
+    counts = task_counts.get(story["story_slug"], {})
+    total = counts.get("total", story.get("total_tasks") or 0) or 0
+    completed = counts.get("completed", story.get("completed_tasks") or 0) or 0
+    in_progress = counts.get("in_progress", 0) or 0
+    parts = [f"{total} task{'s' if total != 1 else ''}"]
+    if completed:
+        parts.append(f"{completed} complete")
+    if in_progress:
+        parts.append(f"{in_progress} in-progress")
+    text = f"[{status}] {title}"
+    if ident and ident.lower() not in title.lower():
+        text += f" ({ident})"
+    if parts:
+        text += " - " + ", ".join(parts)
+    return textwrap.shorten(text, width=100, placeholder="...")
+
+def format_epic_counts(counts):
+    if not counts:
+        return ""
+    story_bits = [f"{counts['stories']} story{'ies' if counts['stories'] != 1 else ''}"]
+    if counts["stories_complete"]:
+        story_bits.append(f"{counts['stories_complete']} complete")
+    if counts["stories_in_progress"]:
+        story_bits.append(f"{counts['stories_in_progress']} in-progress")
+    task_bits = [f"{counts['tasks']} task{'s' if counts['tasks'] != 1 else ''}"]
+    if counts["tasks_complete"]:
+        task_bits.append(f"{counts['tasks_complete']} complete")
+    if counts["tasks_in_progress"]:
+        task_bits.append(f"{counts['tasks_in_progress']} in-progress")
+    return f"stories ({', '.join(story_bits)}) | tasks ({', '.join(task_bits)})"
+
+def show_tasks(story):
+    tasks = fetch_tasks_for_story(story["story_slug"])
+    title = story.get("story_title") or story.get("story_id") or story.get("story_slug") or "Story"
+    ident = story.get("story_id") or story.get("story_slug") or ""
+    status = (story.get("status") or "pending").strip().lower().replace("_", "-")
+    header = title.strip()
+    if ident and ident.lower() not in header.lower():
+        header += f" ({ident})"
+    header += f" - status: {status}"
+    print("\n" + header)
+    print("-" * len(header))
+    if not tasks:
+        print("  No tasks recorded for this story.")
+    else:
+        for idx, task in enumerate(tasks, start=1):
+            task_status = (task.get("status") or "pending").strip().lower().replace("_", "-")
+            identifier = (task.get("task_id") or f"{ident or story['story_slug']}-{idx:02d}").strip()
+            title_text = task.get("title") or ""
+            title_text = textwrap.shorten(title_text.strip() or "(untitled task)", width=100, placeholder="...")
+            line = f"  {idx:>2}. [{task_status}] {identifier}"
+            if title_text:
+                line += f" - {title_text}"
+            estimate = (task.get("estimate") or "").strip()
+            if estimate:
+                line += f" (estimate: {estimate})"
+            print(line)
+    try:
+        response = input("\nPress Enter to return to stories, or type 'q' to quit: ").strip().lower()
+    except EOFError:
+        response = "q"
+    if response in {"q", "quit", "exit"}:
+        return False
+    return True
+
+def show_stories(epic_entry, task_counts):
+    while True:
+        stories = epic_entry["stories"]
+        label = epic_entry["label"]
+        counts_text = format_epic_counts(epic_entry.get("counts") or {})
+        print(f"\nStories for epic: {label}")
+        if counts_text:
+            print(f"  {counts_text}")
+        if not stories:
+            print("  No stories found for this epic.")
+            try:
+                response = input("Press Enter to return to epics, or type 'q' to quit: ").strip().lower()
+            except EOFError:
+                response = "q"
+            if response in {"q", "quit", "exit"}:
+                return False
+            return True
+        for idx, story in enumerate(stories, start=1):
+            print(f"  {idx}. {format_story_line(story, task_counts)}")
+        print("  b. Back")
+        print("  q. Quit")
+        try:
+            choice = input("Select a story [b/q]: ").strip().lower()
+        except EOFError:
+            return False
+        if choice in {"q", "quit", "exit"}:
+            return False
+        if choice in {"b", "back", ""}:
+            return True
+        if not choice.isdigit():
+            print("Please enter a number, 'b' to go back, or 'q' to quit.")
+            continue
+        idx = int(choice)
+        if idx < 1 or idx > len(stories):
+            print(f"Select a number between 1 and {len(stories)}.")
+            continue
+        story = stories[idx - 1]
+        if not show_tasks(story):
+            return False
+
+def interactive_browser():
+    stories = fetch_stories()
+    if not stories:
+        print("No stories found in the backlog. Generate tasks with 'gpt-creator create-tasks' first.")
+        return
+    epics = fetch_epics()
+    task_counts = fetch_task_counts()
+    summary = summarise_epics(stories, task_counts)
+    entries = build_epic_entries(epics, stories, summary)
+    if not entries:
+        print("No epics found in the backlog.")
+        return
+
+    print("Backlog browser - browse epics -> stories -> tasks.")
+    print("Enter the number for an epic to drill down, or 'q' to quit.")
+
+    while True:
+        for idx, entry in enumerate(entries, start=1):
+            counts_text = format_epic_counts(entry.get("counts") or {})
+            line = f"  {idx}. {entry['label']}"
+            if counts_text:
+                line += f" - {counts_text}"
+            print(line)
+        print("  q. Quit")
+        try:
+            choice = input("Select an epic [q]: ").strip().lower()
+        except EOFError:
+            break
+        if choice in {"q", "quit", "exit"}:
+            break
+        if not choice:
+            continue
+        if not choice.isdigit():
+            print("Please enter a number or 'q' to quit.")
+            continue
+        idx = int(choice)
+        if idx < 1 or idx > len(entries):
+            print(f"Select a number between 1 and {len(entries)}.")
+            continue
+        epic_entry = entries[idx - 1]
+        if not show_stories(epic_entry, task_counts):
+            break
+
+try:
+    interactive_browser()
+finally:
+    conn.close()
+PY
+}
+
 cmd_migrate_tasks_json() {
   local root="" force=0
   while [[ $# -gt 0 ]]; do
@@ -7652,6 +8187,17 @@ cmd_reports() {
   local push_after=1
   local prompt_only=0
   local reporter_filter=""
+  local close_invalid=0
+  local close_comment="Authenticity failed (automated by gpt-creator reports audit)."
+  local close_comment_set=0
+  local include_closed=0
+  local audit_limit=""
+  local audit_limit_set=0
+  local digests_path=""
+  local digests_path_set=0
+  local invalid_label=""
+  local invalid_label_set=0
+  local allow_pairs=()
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -7665,6 +8211,10 @@ cmd_reports() {
         ;;
       auto)
         mode="auto"
+        shift
+        ;;
+      audit)
+        mode="audit"
         shift
         ;;
       work)
@@ -7713,6 +8263,47 @@ cmd_reports() {
         reporter_filter="$2"
         shift 2
         ;;
+      --close-invalid)
+        close_invalid=1
+        shift
+        ;;
+      --no-close-invalid)
+        close_invalid=0
+        shift
+        ;;
+      --comment)
+        close_comment="${2:?--comment requires text}"
+        close_comment_set=1
+        shift 2
+        ;;
+      --include-closed)
+        include_closed=1
+        shift
+        ;;
+      --limit)
+        audit_limit="${2:?--limit requires a positive integer}"
+        audit_limit_set=1
+        shift 2
+        ;;
+      --digests)
+        digests_path="${2:?--digests requires a file path}"
+        digests_path_set=1
+        shift 2
+        ;;
+      --allow)
+        allow_pairs+=("${2:?--allow requires VERSION=SHA256}")
+        shift 2
+        ;;
+      --label-invalid)
+        invalid_label="${2:?--label-invalid requires a value}"
+        invalid_label_set=1
+        shift 2
+        ;;
+      --no-label-invalid)
+        invalid_label=""
+        invalid_label_set=1
+        shift
+        ;;
       -h|--help)
         cat <<'USAGE'
 Usage:
@@ -7723,8 +8314,12 @@ Usage:
   gpt-creator reports work [--project PATH] [--branch NAME] [--no-push] [--prompt-only] <slug>
   gpt-creator reports [--project PATH] [--open] <slug>
   gpt-creator reports show [--project PATH] [--open] <slug>
+  gpt-creator reports audit [--close-invalid] [--include-closed] [--limit N]
+                               [--digests FILE] [--allow VERSION=SHA256]
+                               [--label-invalid NAME|--no-label-invalid]
+                               [--comment TEXT]
 
-List captured crash/stall reports, show the open backlog, automatically resolve matching issues, assign Codex to resolve a single report, or display a specific entry.
+List captured crash/stall reports, show the open backlog, automatically resolve matching issues, assign Codex to resolve a single report, display a specific entry, or audit GitHub auto-reports for authenticity.
 USAGE
         return 0
         ;;
@@ -7770,16 +8365,366 @@ USAGE
     die "--reporter is only supported with reports auto"
   fi
 
-  if [[ -n "$root" ]]; then
-    ensure_ctx "$root"
-  else
-    ensure_ctx "${PROJECT_ROOT:-$PWD}"
+  if [[ -n "$audit_limit" ]]; then
+    if [[ ! "$audit_limit" =~ ^[0-9]+$ ]]; then
+      die "--limit expects a non-negative integer"
+    fi
   fi
 
-  local reports_dir
-  reports_dir="$(gc_reports_dir)" || die "Unable to access issue report directory"
+  if [[ "$mode" != "audit" ]]; then
+    if (( close_invalid != 0 || include_closed != 0 || close_comment_set != 0 || audit_limit_set != 0 || digests_path_set != 0 || invalid_label_set != 0 || ${#allow_pairs[@]} != 0 )); then
+      die "reports options --close-invalid/--include-closed/--limit/--digests/--allow/--label-invalid/--comment are only valid with 'audit'"
+    fi
+  fi
+
+  local pair_entry
+  for pair_entry in "${allow_pairs[@]}"; do
+    if [[ ! "$pair_entry" =~ ^[^=]+=[0-9a-fA-F]{64}$ ]]; then
+      die "--allow expects VERSION=SHA256 (got '${pair_entry}')"
+    fi
+  done
+
+  if [[ "$mode" != "audit" ]]; then
+    if [[ -n "$root" ]]; then
+      ensure_ctx "$root"
+    else
+      ensure_ctx "${PROJECT_ROOT:-$PWD}"
+    fi
+  elif [[ -n "$root" ]]; then
+    ensure_ctx "$root"
+  fi
+
+  local reports_dir=""
+  if [[ "$mode" != "audit" ]]; then
+    reports_dir="$(gc_reports_dir)" || die "Unable to access issue report directory"
+  fi
 
   case "$mode" in
+    audit)
+      local repo="${GC_GITHUB_REPO:-}"
+      local token="${GC_GITHUB_TOKEN:-}"
+      if [[ -z "$repo" || -z "$token" ]]; then
+        die "reports audit requires GC_GITHUB_REPO and GC_GITHUB_TOKEN to be set"
+      fi
+      local state="open"
+      if (( include_closed )); then
+        state="all"
+      fi
+      if [[ -z "$digests_path" ]]; then
+        if [[ -n "${GC_REPORT_DIGESTS_PATH:-}" ]]; then
+          digests_path="${GC_REPORT_DIGESTS_PATH}"
+        elif [[ -n "${CLI_ROOT:-}" && -f "${CLI_ROOT}/config/release-digests.json" ]]; then
+          digests_path="${CLI_ROOT}/config/release-digests.json"
+        fi
+      fi
+      local allow_join=""
+      if ((${#allow_pairs[@]} > 0)); then
+        allow_join="$(printf '%s\n' "${allow_pairs[@]}")"
+      fi
+      python3 - <<'PY' "$repo" "$token" "$state" "$close_invalid" "$close_comment" "$audit_limit" "$digests_path" "$invalid_label" "$allow_join"
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+import hashlib
+from textwrap import indent
+
+repo, token, state, close_flag, close_comment, limit_value, digests_path, invalid_label, allow_payload = sys.argv[1:10]
+close_invalid = close_flag == "1"
+limit = None
+if limit_value:
+    try:
+        parsed_limit = int(limit_value)
+        if parsed_limit > 0:
+            limit = parsed_limit
+    except ValueError:
+        limit = None
+
+session_headers = {
+    "Authorization": f"Bearer {token}",
+    "Accept": "application/vnd.github+json",
+    "Content-Type": "application/json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "gpt-creator-reports-audit",
+}
+
+def github_request(url, method="GET", payload=None):
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers=session_headers, method=method)
+    with urllib.request.urlopen(request) as resp:
+        if resp.status == 204:
+            return None
+        body = resp.read().decode("utf-8")
+        if not body:
+            return None
+        return json.loads(body)
+
+def load_allowlist(path, inline_pairs):
+    mapping = {}
+    inline_pairs = [line.strip() for line in inline_pairs.splitlines() if line.strip()]
+    for entry in inline_pairs:
+        if "=" not in entry:
+            continue
+        version, digest = entry.split("=", 1)
+        version = version.strip()
+        digest = digest.strip().lower()
+        if not version or len(digest) != 64:
+            continue
+        mapping.setdefault(version, set()).add(digest)
+    if not path:
+        return mapping
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return mapping
+    except Exception as exc:
+        print(f"Failed to read digest allowlist '{path}': {exc}", file=sys.stderr)
+        return mapping
+    if isinstance(data, dict):
+        iterable = data.items()
+    elif isinstance(data, list):
+        iterable = []
+        for item in data:
+            if isinstance(item, dict):
+                version = str(item.get("version") or "").strip()
+                if not version:
+                    continue
+                sha_values = []
+                sha_field = item.get("sha256")
+                if isinstance(sha_field, str):
+                    sha_values = [sha_field]
+                elif isinstance(sha_field, list):
+                    sha_values = [val for val in sha_field if isinstance(val, str)]
+                elif isinstance(sha_field, dict):
+                    sha_values = []
+                    for val in sha_field.values():
+                        if isinstance(val, str):
+                            sha_values.append(val)
+                        elif isinstance(val, list):
+                            sha_values.extend(x for x in val if isinstance(x, str))
+                for digest in sha_values:
+                    mapping.setdefault(version, set()).add(digest.lower())
+            elif isinstance(item, str):
+                if "=" in item:
+                    version, digest = item.split("=", 1)
+                    mapping.setdefault(version.strip(), set()).add(digest.strip().lower())
+        return mapping
+    else:
+        return mapping
+    for version, values in iterable:
+        if isinstance(values, str):
+            mapping.setdefault(str(version), set()).add(values.lower())
+        elif isinstance(values, list):
+            mapping.setdefault(str(version), set()).update(val.lower() for val in values if isinstance(val, str))
+        elif isinstance(values, dict):
+            for val in values.values():
+                if isinstance(val, str):
+                    mapping.setdefault(str(version), set()).add(val.lower())
+                elif isinstance(val, list):
+                    mapping.setdefault(str(version), set()).update(v.lower() for v in val if isinstance(v, str))
+    return mapping
+
+digest_allowlist = load_allowlist(digests_path, allow_payload or "")
+
+def fetch_issues():
+    collected = []
+    page = 1
+    per_page = 100
+    while True:
+        url = f"https://api.github.com/repos/{repo}/issues?state={urllib.parse.quote(state)}&labels=auto-report&per_page={per_page}&page={page}"
+        try:
+            items = github_request(url)
+        except urllib.error.HTTPError as err:
+            text = err.read().decode("utf-8", "ignore")
+            print(f"GitHub API error while fetching issues: {err.code} {text}", file=sys.stderr)
+            return collected
+        except Exception as exc:
+            print(f"Failed to fetch GitHub issues: {exc}", file=sys.stderr)
+            return collected
+        if not items:
+            break
+        for issue in items:
+            if "pull_request" in issue:
+                continue
+            collected.append(issue)
+            if limit is not None and len(collected) >= limit:
+                return collected
+        if len(items) < per_page:
+            break
+        page += 1
+    return collected
+
+def parse_issue(issue):
+    body = issue.get("body") or ""
+    metadata = {}
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- **") and "**:" in stripped:
+            head, value = stripped.split("**:", 1)
+            label = head.replace("- **", "").strip()
+            metadata[label] = value.strip()
+    watermark_token = ""
+    start = body.find("<!--")
+    while start != -1:
+        end = body.find("-->", start + 4)
+        if end == -1:
+            break
+        comment = body[start + 4:end].strip()
+        if comment.lower().startswith("gpt-creator:"):
+            watermark_token = comment.split(":", 1)[1].strip()
+            break
+        start = body.find("<!--", end + 3)
+    version = metadata.get("CLI Version", "").strip()
+    binary_hash = metadata.get("CLI Binary SHA256", "").strip().lower()
+    signature = metadata.get("CLI Signature", "").strip().lower()
+    expected_signature = ""
+    signature_valid = False
+    watermark_valid = False
+    reasons = []
+    if version or binary_hash:
+        expected_signature = hashlib.sha256(f"{version}:{binary_hash}".encode("utf-8")).hexdigest()
+    if not binary_hash or len(binary_hash) != 64:
+        reasons.append("missing CLI binary hash")
+    if not version:
+        reasons.append("missing CLI version")
+    if signature and expected_signature:
+        if signature == expected_signature:
+            signature_valid = True
+        else:
+            reasons.append("signature mismatch")
+    else:
+        reasons.append("missing CLI signature")
+    if watermark_token:
+        watermark_expected = f"{version or 'unknown'}:{expected_signature}" if expected_signature else ""
+        if watermark_expected and watermark_token.lower() == watermark_expected.lower():
+            watermark_valid = True
+        elif version and signature_valid and watermark_token.lower() == f"{version.lower()}:unsigned":
+            watermark_valid = False
+            reasons.append("watermark unsigned but signature present")
+        else:
+            reasons.append("watermark mismatch")
+    else:
+        reasons.append("missing watermark")
+    digest_allowed = True
+    if digest_allowlist:
+        allowed_hashes = digest_allowlist.get(version, set())
+        if allowed_hashes:
+            if binary_hash not in allowed_hashes:
+                digest_allowed = False
+                reasons.append("binary hash not in allowlist")
+        else:
+            digest_allowed = False
+            reasons.append("version not present in allowlist")
+    valid = signature_valid and watermark_valid and digest_allowed
+    return {
+        "number": issue.get("number"),
+        "title": issue.get("title") or "",
+        "url": issue.get("html_url") or "",
+        "state": issue.get("state"),
+        "version": version,
+        "binary_hash": binary_hash,
+        "signature": signature,
+        "expected_signature": expected_signature,
+        "signature_valid": signature_valid,
+        "watermark": watermark_token,
+        "watermark_valid": watermark_valid,
+        "digest_allowed": digest_allowed,
+        "valid": valid,
+        "reasons": reasons,
+        "metadata": metadata,
+    }
+
+def ensure_label(issue_number):
+    if not invalid_label:
+        return
+    try:
+        issue = github_request(f"https://api.github.com/repos/{repo}/issues/{issue_number}")
+    except Exception:
+        return
+    if not issue:
+        return
+    labels = issue.get("labels") or []
+    label_names = {lbl["name"] if isinstance(lbl, dict) else str(lbl) for lbl in labels}
+    if invalid_label in label_names:
+        return
+    label_names.add(invalid_label)
+    payload = {"labels": sorted(label_names)}
+    try:
+        github_request(f"https://api.github.com/repos/{repo}/issues/{issue_number}", method="PATCH", payload=payload)
+    except Exception:
+        pass
+
+def close_issue(item):
+    number = item["number"]
+    if not close_invalid:
+        return
+    if str(item.get("state")) == "closed":
+        return
+    try:
+        github_request(
+            f"https://api.github.com/repos/{repo}/issues/{number}/comments",
+            method="POST",
+            payload={"body": close_comment},
+        )
+    except Exception as exc:
+        print(f"Failed to comment on issue #{number}: {exc}", file=sys.stderr)
+    try:
+        github_request(
+            f"https://api.github.com/repos/{repo}/issues/{number}",
+            method="PATCH",
+            payload={"state": "closed"},
+        )
+    except Exception as exc:
+        print(f"Failed to close issue #{number}: {exc}", file=sys.stderr)
+    else:
+        ensure_label(number)
+        print(f"Closed issue #{number} ({item['title']}) as authenticity failed.")
+
+issues = fetch_issues()
+if not issues:
+    print("No GitHub issues labelled 'auto-report' found.")
+    sys.exit(0)
+
+parsed = [parse_issue(issue) for issue in issues]
+valid_count = sum(1 for item in parsed if item["valid"])
+invalid_items = [item for item in parsed if not item["valid"]]
+
+print(f"Audited {len(parsed)} auto-report issue(s) [{state}].")
+print(f" - Valid:   {valid_count}")
+print(f" - Invalid: {len(invalid_items)}")
+if digest_allowlist:
+    print(f" - Allowlist source: {digests_path or 'inline overrides only'}")
+
+def summarize(item):
+    header = f"#{item['number']} [{item['state']}] {item['title']}"
+    verdict = "VALID" if item["valid"] else "INVALID"
+    print(f"\n{header}\nResult: {verdict}")
+    print(f"URL: {item['url']}")
+    print(f"Version: {item['version'] or '(missing)'}")
+    print(f"Binary SHA256: {item['binary_hash'] or '(missing)'}")
+    print(f"Signature: {item['signature'] or '(missing)'}")
+    print(f"Watermark: {item['watermark'] or '(missing)'}")
+    print(f"Signature OK: {'yes' if item['signature_valid'] else 'no'}")
+    print(f"Watermark OK: {'yes' if item['watermark_valid'] else 'no'}")
+    if digest_allowlist:
+        print(f"Allowlist OK: {'yes' if item['digest_allowed'] else 'no'}")
+    if item["reasons"]:
+        detail = "\n".join(f"- {reason}" for reason in item["reasons"])
+        print("Notes:\n" + indent(detail, "  "))
+
+for item in parsed:
+    summarize(item)
+    if not item["valid"]:
+        close_issue(item)
+
+PY
+      return
+      ;;
     list|backlog)
       if [[ -z "$(find "$reports_dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print -quit 2>/dev/null)" ]]; then
         info "No issue reports recorded yet."
@@ -8348,6 +9293,7 @@ Usage:
   ${APP_NAME} migrate-tasks [--project <path>] [--force]
   ${APP_NAME} refine-tasks [--project <path>] [--story SLUG] [--model NAME] [--dry-run]
   ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
+  ${APP_NAME} backlog [--project <path>]
   ${APP_NAME} tokens [--project <path>] [--details] [--json]
   ${APP_NAME} reports [--project <path>] [list|backlog|show|work] [--branch NAME] [--no-push] [--prompt-only] [--open] [slug]
   ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]
@@ -8389,6 +9335,7 @@ main() {
     create-jira-tasks) "$CLI_ROOT/src/cli/create-jira-tasks.sh" "$@" ;;
     create-db-dump) "$shell_bin" "$CLI_ROOT/src/cli/create-db-dump.sh" "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
+    backlog)        cmd_backlog "$@" ;;
     tokens)         cmd_tokens "$@" ;;
     reports)        cmd_reports "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;

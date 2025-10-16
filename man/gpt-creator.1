@@ -55,6 +55,9 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 .B gpt-creator create-tasks
 [\-\-project DIR] [\-\-jira FILE] [\-\-force]
 .br
+.B gpt-creator backlog
+[\-\-project DIR]
+.br
 .B gpt-creator work-on-tasks
 [\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-force] [\-\-no-verify] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC] [\-\-context-lines NUM] [\-\-context-none] [\-\-context-mode MODE] [\-\-context-file-lines NUM] [\-\-context-skip GLOB] [\-\-prompt-compact] [\-\-prompt-expanded] [\-\-context-doc-snippets] [\-\-sample-lines NUM]
 .br
@@ -168,6 +171,9 @@ Convert Jira markdown into a project-scoped SQLite backlog at \fI.gpt-creator/st
 .B task-convert
 Deprecated alias of \fBcreate-tasks\fR retained for backwards compatibility.
 .TP
+.B backlog
+Interactively browse the SQLite backlog at \fI.gpt-creator/staging/plan/tasks/tasks.db\fR. The command presents a lightweight terminal menu: start with the epic list, drill into a story, and review its tasks without leaving the shell. Pass \fB--project\fR to inspect a different workspace.
+.TP
 .B work-on-tasks
 Drive Codex over tasks sourced from the SQLite backlog, apply returned JSON diff/file instructions automatically, and persist task/story status back into the database for precise resume support.
 Artifacts (prompt/output pairs) are removed after each successful task to limit memory use unless \fB--keep-artifacts\fR is supplied.
@@ -184,7 +190,7 @@ Set \fBGC_CONTEXT_INCLUDE_UI=1\fR when you need the legacy raw UI dumps preserve
 \fB--memory-cycle\fR processes one task per invocation, performs a best-effort memory trim (including Docker cache pruning), and automatically restarts the command so long backlogs stay within bounded RAM.
 .TP
 .B reports
-Inspect captured crash/stall reports under \fIPROJECT_ROOT/.gpt-creator/logs/issue-reports/\fR. Without arguments the command lists reports (newest first) with their slug identifiers; provide a slug (or use \fBshow\fR) to print the matching YAML. Pass \fB--open\fR to launch the report in \fBEDITOR_CMD\fR for annotation, and \fB--project\fR to target a different workspace. Use \fBbacklog\fR to filter to open issues and surface a popularity score derived from recorded likes/comments so maintainers can prioritise high-signal bugs. \fBauto\fR sweeps every matching report (defaulting to the current reporter or an explicit \fB--reporter\fR) and resolves them sequentially with Codex, honouring \fB--no-push\fR/\fB--prompt-only\fR. \fBwork <slug>\fR prepares a Codex prompt, marks the report in progress, and directs Codex to implement, commit, and push the fix (override with \fB--branch\fR, \fB--no-push\fR, or \fB--prompt-only\fR).
+Inspect captured crash/stall reports under \fIPROJECT_ROOT/.gpt-creator/logs/issue-reports/\fR. Without arguments the command lists reports (newest first) with their slug identifiers; provide a slug (or use \fBshow\fR) to print the matching YAML. Pass \fB--open\fR to launch the report in \fBEDITOR_CMD\fR for annotation, and \fB--project\fR to target a different workspace. Use \fBbacklog\fR to filter to open issues and surface a popularity score derived from recorded likes/comments so maintainers can prioritise high-signal bugs. \fBauto\fR sweeps every matching report (defaulting to the current reporter or an explicit \fB--reporter\fR) and resolves them sequentially with Codex, honouring \fB--no-push\fR/\fB--prompt-only\fR. \fBwork <slug>\fR prepares a Codex prompt, marks the report in progress, and directs Codex to implement, commit, and push the fix (override with \fB--branch\fR, \fB--no-push\fR, or \fB--prompt-only\fR). \fBaudit\fR queries GitHub for issues labelled `auto-report`, recomputes the CLI watermark/signature against a trusted digest manifest, and (with \fB--close-invalid\fR) posts an "Authenticity failed" comment before closing each mismatched issue. Provide additional digests via \fIconfig/release-digests.json\fR, the \fB--digests\fR flag, or inline overrides such as \fB--allow 0.2.0=<sha256>\fR.
 .TP
 .B iterate
 Deprecated legacy Jira loop. The command runs with a deprecation warning; prefer \fBcreate-tasks\fR followed by \fBwork-on-tasks\fR.
@@ -208,8 +214,17 @@ Set to 1 to enable automatic crash/stall issue reporting by default (overridden 
 .B GC_REPORTS_IDLE_TIMEOUT
 Idle/stall detection threshold in seconds (default 1800).
 .TP
+.B GC_GITHUB_REPO
+GitHub repository (`owner/name`) that receives automated crash reports.
+.TP
+.B GC_GITHUB_TOKEN
+Personal access token with `repo` scope used to authenticate the issue creation request.
+.TP
 .B GC_REPORTER
 Override reporter name stored in new issue reports (defaults to git \fIuser.name\fR or \fB$USER\fR).
+.TP
+.B GC_REPORT_DIGESTS_PATH
+Override the JSON allowlist of trusted CLI SHA-256 digests checked by \fBgpt-creator reports audit\fR (defaults to \fIconfig/release-digests.json\fR).
 .TP
 .B GC_REPORT_ASSIGNEE
 Override the assignee recorded when Codex starts working on a report (defaults to \fBGC_REPORTER\fR).

@@ -9,7 +9,7 @@ _gpt_creator()
     prev="${COMP_WORDS[COMP_CWORD-1]}"
   }
 
-  local subcmds="create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks reports iterate help version"
+  local subcmds="create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks backlog work-on-tasks reports iterate help version"
   local global_opts="--project -h --help -v --version --reports-on --reports-off --reports-idle-timeout"
 
   # find the subcommand (first non-option token)
@@ -40,7 +40,7 @@ _gpt_creator()
       local opts="--template --skip-template"
       COMPREPLY=( $(compgen -W "$opts" -- "$cur") $(compgen -d -- "$cur") )
       ;;
-    scan|normalize|plan|iterate|verify|run|refresh-stack|db|generate|create-pdr|create-sds|create-db-dump|create-jira-tasks|migrate-tasks|refine-tasks|create-tasks|work-on-tasks|task-convert|bootstrap)
+    scan|normalize|plan|iterate|verify|run|refresh-stack|db|generate|create-pdr|create-sds|create-db-dump|create-jira-tasks|migrate-tasks|refine-tasks|create-tasks|backlog|work-on-tasks|task-convert|bootstrap)
       case "$prev" in
         --project) COMPREPLY=( $(compgen -d -- "$cur") ); return 0;;
         --jira) COMPREPLY=( $(compgen -f -- "$cur") ); return 0;;
@@ -79,6 +79,9 @@ _gpt_creator()
         create-tasks|task-convert)
           COMPREPLY=( $(compgen -W "--project --jira --force ${global_opts}" -- "$cur") )
           ;;
+        backlog)
+          COMPREPLY=( $(compgen -W "--project ${global_opts}" -- "$cur") )
+          ;;
         work-on-tasks)
           COMPREPLY=( $(compgen -W "--project --story --from-story --fresh --force --no-verify --keep-artifacts --memory-cycle --batch-size --sleep-between --context-lines --context-none --context-mode --context-file-lines --context-skip --prompt-compact --prompt-expanded --context-doc-snippets --sample-lines ${global_opts}" -- "$cur") )
           ;;
@@ -112,8 +115,13 @@ _gpt_creator()
     reports)
       case "$prev" in
         --project) COMPREPLY=( $(compgen -d -- "$cur") ); return 0;;
+        --digests) COMPREPLY=( $(compgen -f -- "$cur") ); return 0;;
+        --limit) COMPREPLY=( $(compgen -W "10 20 50 100" -- "$cur") ); return 0;;
+        --allow) COMPREPLY=(); return 0;;
+        --label-invalid) COMPREPLY=(); return 0;;
+        --comment) COMPREPLY=(); return 0;;
       esac
-      local opts="list backlog auto show work --project --open --branch --no-push --push --prompt-only --reporter ${global_opts}"
+      local opts="list backlog auto show work audit --project --open --branch --no-push --push --prompt-only --reporter --close-invalid --no-close-invalid --include-closed --limit --digests --allow --label-invalid --no-label-invalid --comment ${global_opts}"
       COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
       ;;
     *)

@@ -140,12 +140,16 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
 
    # Execute and resume tasks directly from SQLite
    gpt-creator work-on-tasks --project /path/to/project
+
+   # Browse epics → stories → tasks from the backlog database
+   gpt-creator backlog --project /path/to/project
    ```
   - `create-jira-tasks` crawls the staged docs (PDR, SDS, OpenAPI, SQL, UI samples) to synthesize epics → user stories → detailed task JSON under `.gpt-creator/staging/plan/create-jira-tasks/json/` and refreshes the consolidated payload/SQLite database. Progress is recorded in `.gpt-creator/staging/plan/create-jira-tasks/state.json` (use `--force` to restart). The extractor now strips Codex code fences, normalizes smart quotes, removes stray comments/trailing commas, and even coerces Python-style literals before giving up.
   - `migrate-tasks` regenerates `.gpt-creator/staging/plan/tasks/tasks.db` directly from the JSON artifacts — ideal when you want to sync the DB without re-running Codex.
   - `refine-tasks` streams tasks from `tasks.db` one at a time, rehydrates the original story context, runs Codex against the staged docs, writes the refined JSON to `json/refined`, and updates the task row in SQLite immediately after each successful response. Use `--force` to reset refinement flags and reprocess every task.
   - `create-tasks` snapshots a Jira markdown export into the same database if you already maintain backlog files.
   - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, or `--force` to reset all story/task statuses to `pending` before the run.
+  - `backlog` provides a lightweight TUI to drill from epics → stories → tasks without leaving the terminal.
   - The legacy `iterate` command is deprecated.
 
 ---
@@ -292,6 +296,8 @@ gpt-creator iterate --project /path/to/project --jira docs/jira.md
 | `DOCKER_BIN`, `MYSQL_BIN`, `EDITOR_CMD` | Command overrides used within scripts. | `docker`, `mysql`, `code` |
 | `GC_REPORTS_ON` | Enable automatic crash/stall issue reporting by default. | `0` |
 | `GC_REPORTS_IDLE_TIMEOUT` | Idle detection threshold (seconds) when reporting is enabled. | `1800` |
+| `GC_GITHUB_REPO` | GitHub repository (`owner/name`) for automated crash issues. | `unset` |
+| `GC_GITHUB_TOKEN` | Personal access token with `repo` scope used to create issues. | `unset` |
 | `GC_REPORTER` | Override reporter name recorded in new issue reports. | Git `user.name`/`$USER` |
 | `GC_REPORT_ASSIGNEE` | Name recorded when Codex takes ownership of a report. | `GC_REPORTER` |
 
@@ -320,6 +326,8 @@ You can also create `~/.config/gpt-creator/config.sh` to export persistent overr
 - Disable reporting for a specific run with `--reports-off`, or enable it globally by exporting `GC_REPORTS_ON=1`.
 - Use `gpt-creator reports [--project PATH]` to list captured reports (newest first); pass the slug shown in the list to view the full YAML or add `--open` to launch the entry in `EDITOR_CMD` for further notes. `gpt-creator reports backlog` filters to open issues and shows a popularity score (likes + comments) so maintainers can prioritise high-signal bugs quickly.
 - Use `gpt-creator reports work <slug>` to hand an issue to Codex: the CLI prepares a focused prompt, records the assignee, and directs Codex to create a branch, implement the fix, commit, and push (unless `--no-push` is provided).
+- Export `GC_GITHUB_REPO` (`owner/name`) and `GC_GITHUB_TOKEN` (PAT with `repo` scope) to have gpt-creator raise GitHub issues automatically whenever a crash/stall report is captured; the local YAML is still written for offline reference. GitHub issues now include the CLI version plus a SHA-256 watermark so maintainers can confirm the report originated from an unmodified gpt-creator binary.
+- Maintainers can run `gpt-creator reports audit` to list GitHub issues created by `--reports-on`, verify their watermark/signature against the trusted digest manifest, and optionally close suspicious entries with an "Authenticity failed" comment. Trusted digests default to `config/release-digests.json`; pass `--digests FILE` or inline overrides like `--allow 0.2.0=<sha256>` for bespoke builds.
 - Use `gpt-creator reports auto` to sweep every open issue reported by your account (or a specified `--reporter`) and let Codex resolve them sequentially, respecting `--no-push`/`--prompt-only` flags.
 - Crash details continue to collect in `.gpt-creator/logs/crash.log`; enabling reports mirrors those failures into per-run issue files so the repo owner can follow up asynchronously.
 

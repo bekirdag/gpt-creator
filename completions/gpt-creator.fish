@@ -1,6 +1,6 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks work-on-tasks reports iterate help version
+set -l subcmds create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks backlog work-on-tasks reports iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
@@ -49,6 +49,9 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from verify" -l project -r
 # create-tasks
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l jira -r -d "Jira tasks file"
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l force -d "Rebuild tasks database (ignore saved progress)"
+
+# backlog
+complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l project -r -d "Project root"
 
 # create-pdr
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-pdr" -l model -r -d "Codex model"
@@ -108,7 +111,7 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from iterate" -l jira -r -d "
 complete -c gpt-creator -n "__fish_seen_subcommand_from iterate" -l project -r
 
 # reports
-complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -a "list backlog auto show work" -d "Report commands"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -a "list backlog auto show work audit" -d "Report commands"
 complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l project -r -d "Project root"
 complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l open -d "Open report in editor"
 complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l branch -r -d "Working branch name"
@@ -116,6 +119,15 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l no-push -d "
 complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l push -d "Force push instructions"
 complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l prompt-only -d "Only create Codex prompt"
 complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l reporter -r -d "Filter by reporter"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l close-invalid -d "Close GitHub auto-reports that fail authenticity checks"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l no-close-invalid -d "Do not close invalid GitHub auto-reports"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l include-closed -d "Include closed GitHub auto-reports in the audit"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l limit -r -d "Maximum GitHub issues to audit" -a "10 20 50 100"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l digests -r -d "Trusted CLI digest manifest" -a "(__fish_complete_path)"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l allow -r -d "Inline VERSION=SHA256 override"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l label-invalid -r -d "Label applied to invalid reports"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l no-label-invalid -d "Skip labeling invalid reports"
+complete -c gpt-creator -n "__fish_seen_subcommand_from reports" -l comment -r -d "Comment to add when closing invalid reports"
 
 # scan/normalize/plan
 for sub in scan normalize plan

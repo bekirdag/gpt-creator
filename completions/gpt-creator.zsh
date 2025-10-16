@@ -21,6 +21,7 @@ _gpt_creator() {
     'migrate-tasks:Rebuild tasks.db from generated JSON'
     'refine-tasks:Refine tasks stored in the SQLite backlog'
     'create-tasks:Convert Jira tasks into a SQLite backlog'
+    'backlog:Browse epics -> stories -> tasks from the backlog database'
     'work-on-tasks:Execute tasks from the SQLite backlog with Codex'
     'reports:List or show captured issue reports'
     'task-convert:[deprecated] Alias for create-tasks'
@@ -154,7 +155,16 @@ _gpt_creator() {
         '--push[Force push instructions]' \
         '--prompt-only[Generate the Codex prompt without executing it]' \
         '--reporter=[Filter reports by reporter name]' \
-        '*:slug-or-mode:(list backlog auto show work)'
+        '--close-invalid[Close GitHub auto-reports that fail authenticity checks]' \
+        '--no-close-invalid[Do not close invalid GitHub auto-reports]' \
+        '--include-closed[Include closed GitHub auto-reports in the audit]' \
+        '--limit=[Maximum number of GitHub issues to audit]:count:' \
+        '--digests=[Path to trusted CLI digest manifest]:file:_files' \
+        '--allow=[Inline VERSION=SHA256 override for trusted CLI digests]' \
+        '--label-invalid=[Label to apply when closing invalid reports]' \
+        '--no-label-invalid[Do not add a label when closing invalid reports]' \
+        '--comment=[Custom comment when closing invalid reports]' \
+        '*:slug-or-mode:(list backlog auto show work audit)'
       ;;
     *)
       ;;

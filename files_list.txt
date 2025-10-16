@@ -98,6 +98,7 @@ src/lib/render/nginx-conf.sh
 config/defaults.sh
 config/aliases.sh
 config/requirements.sh
+config/release-digests.json
 
 templates/docker/docker-compose.yml.tmpl
 templates/docker/Dockerfile.api.tmpl

@@ -36,6 +36,7 @@ Usage:
   gpt-creator run (compose up|logs|open) [options]
   gpt-creator verify [options]
   gpt-creator create-tasks [options]
+  gpt-creator backlog [options]
   gpt-creator work-on-tasks [options]
   gpt-creator iterate [options]  # deprecated
   gpt-creator help

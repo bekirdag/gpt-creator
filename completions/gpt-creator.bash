@@ -80,7 +80,12 @@ _gpt_creator()
           COMPREPLY=( $(compgen -W "--project --jira --force ${global_opts}" -- "$cur") )
           ;;
         backlog)
-          COMPREPLY=( $(compgen -W "--project --root ${global_opts}" -- "$cur") )
+          case "$prev" in
+            --project|--root) COMPREPLY=( $(compgen -d -- "$cur") ); return 0;;
+            --type) COMPREPLY=( $(compgen -W "epics" -- "$cur") ); return 0;;
+            --item-children) COMPREPLY=(); return 0;;
+          esac
+          COMPREPLY=( $(compgen -W "--project --root --type --item-children --progress ${global_opts}" -- "$cur") )
           ;;
         work-on-tasks)
           COMPREPLY=( $(compgen -W "--project --story --from-story --fresh --force --no-verify --keep-artifacts --memory-cycle --batch-size --sleep-between --context-lines --context-none --context-mode --context-file-lines --context-skip --prompt-compact --prompt-expanded --context-doc-snippets --sample-lines ${global_opts}" -- "$cur") )

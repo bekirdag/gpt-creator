@@ -101,7 +101,10 @@ _gpt_creator() {
       ;;
     backlog)
       _arguments \
-        '--root=[Project root]:dir:_files -/'
+        '--root=[Project root]:dir:_files -/' \
+        '--type=[Backlog listing type]:type:(epics)' \
+        '--item-children=[Epic or story identifier]' \
+        '--progress[Show overall backlog progress]'
       ;;
     work-on-tasks)
       _arguments \

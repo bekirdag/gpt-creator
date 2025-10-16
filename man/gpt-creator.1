@@ -56,7 +56,7 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 [\-\-project DIR] [\-\-jira FILE] [\-\-force]
 .br
 .B gpt-creator backlog
-[\-\-project DIR]
+[\-\-project DIR] [\-\-root DIR] [\-\-type epics] [\-\-item-children ID] [\-\-progress]
 .br
 .B gpt-creator work-on-tasks
 [\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-force] [\-\-no-verify] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC] [\-\-context-lines NUM] [\-\-context-none] [\-\-context-mode MODE] [\-\-context-file-lines NUM] [\-\-context-skip GLOB] [\-\-prompt-compact] [\-\-prompt-expanded] [\-\-context-doc-snippets] [\-\-sample-lines NUM]
@@ -172,7 +172,7 @@ Convert Jira markdown into a project-scoped SQLite backlog at \fI.gpt-creator/st
 Deprecated alias of \fBcreate-tasks\fR retained for backwards compatibility.
 .TP
 .B backlog
-Interactively browse the SQLite backlog at \fI.gpt-creator/staging/plan/tasks/tasks.db\fR. The command presents a lightweight terminal menu: start with the epic list, drill into a story, and review its tasks without leaving the shell. Pass \fB--project\fR to inspect a different workspace.
+Render backlog summaries from \fI.gpt-creator/staging/plan/tasks/tasks.db\fR without entering an interactive menu. Use \fB--type epics\fR to list every epic with story/task counts and completion ratios, \fB--item-children\fR to print the direct children of an epic or story (identified by slug/key/ID), and \fB--progress\fR to emit an overall task progress bar. Pass \fB--project\fR (or legacy \fB--root\fR) to inspect a different workspace.
 .TP
 .B work-on-tasks
 Drive Codex over tasks sourced from the SQLite backlog, apply returned JSON diff/file instructions automatically, and persist task/story status back into the database for precise resume support.

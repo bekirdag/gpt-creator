@@ -10,7 +10,9 @@ gpt-creator db {provision|import|seed} --root DIR
 gpt-creator run {up|down|logs|open} --root DIR
 gpt-creator verify --root DIR
 gpt-creator create-tasks --root DIR [--jira tasks.md] [--force]
-gpt-creator backlog --project DIR
+gpt-creator backlog --project DIR --type epics
+gpt-creator backlog --project DIR --item-children ITEM
+gpt-creator backlog --project DIR --progress
 gpt-creator work-on-tasks --root DIR [--story ID|SLUG] [--fresh] [--no-verify]
 gpt-creator iterate --root DIR [--jira tasks.md]  # deprecated
 ```
@@ -29,7 +31,7 @@ Common flow:
    - Use `--batch-size` to pause after a fixed number of tasks and `--sleep-between` to insert delays if Codex runs are exhausting local resources.
    - The CLI will try to install workspace dependencies automatically (preferring pnpm) before running tasks, reporting any failure to `/tmp/gc_deps_install.log`.
   - `create-tasks` now emits `.gpt-creator/staging/plan/tasks/tasks.db` (SQLite) with epics, stories, and tasks; reruns preserve task status unless `--force` is provided.
-  - `backlog` gives you a lightweight terminal browser: pick an epic, drill into its stories, and list the tasks without leaving the shell. Pass `--project` (or legacy `--root`) to target another workspace.
+  - `backlog` prints structured summaries: use `--type epics` for an epic table, `--item-children <slug>` to inspect an epic/story, and `--progress` for a percentage bar. Pass `--project` (or legacy `--root`) to target another workspace.
   - `work-on-tasks` reads and updates that database so resuming after interruptions requires no extra state files.
    - Trim shared context with `--context-lines`, `--context-file-lines`, `--context-skip`, or drop it entirely with `--context-none` when Codex prompts get too large.
   - Prompts are compact by default; use `--prompt-expanded` if you need the legacy verbose instruction/schema block.

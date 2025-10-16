@@ -53,9 +53,10 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from create-tasks" -l force -
 # backlog
 complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l project -r -d "Project root"
 complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l root -r -d "Project root"
-complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l type -r -d "Backlog listing type" -a "epics"
+complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l type -r -d "Backlog listing type" -a "epics stories"
 complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l item-children -r -d "Children of epic/story"
 complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l progress -d "Show overall backlog progress"
+complete -c gpt-creator -n "__fish_seen_subcommand_from backlog" -l task-details -r -d "Show task details"
 
 # create-pdr
 complete -c gpt-creator -n "__fish_seen_subcommand_from create-pdr" -l model -r -d "Codex model"

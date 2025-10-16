@@ -47,5 +47,6 @@ Tips:
   • 'verify' pings API/Web/Admin, checks MySQL, and ensures docs are present in staging.
   • 'create-tasks' snapshots Jira markdown; 'work-on-tasks' executes those stories with Codex.
   • 'work-on-tasks' supports batching (`--batch-size`) and pacing (`--sleep-between`) to control resource usage.
+  • 'backlog' prints summaries (`--type epics|stories`), drills into hierarchy (`--item-children`), shows overall progress (`--progress`), or dumps a single task (`--task-details`).
   • 'iterate' is deprecated; it runs the legacy loop but prints a warning that suggests the commands above.
 EOF

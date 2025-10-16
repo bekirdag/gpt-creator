@@ -17,7 +17,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Doc synthesis**: `create-pdr` converts the staged RFP into a multi-level Product Requirements Document (PDR) by iteratively asking Codex to draft the table of contents, sections, and detailed subsections. `create-sds` continues the loop, transforming the staged PDR into a System Design Specification that drills from architecture overview down to low-level operational detail.
 - **Database synthesis**: `create-db-dump` reads the SDS (and PDR context) to draft a full MySQL schema plus production-grade seed data, then reviews both dumps for consistency before storing them under `.gpt-creator/staging/plan/create-db-dump/sql/`.
 - **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, and `work-on-tasks` executes/resumes backlog items. The legacy `iterate` command is deprecated.
-- **Backlog browser**: `backlog` provides an interactive terminal UI to list epics, drill into their stories, and review individual tasks directly from the SQLite backlog without leaving the shell.
+- **Backlog browser**: `backlog` prints non-interactive terminal summaries so you can list epics, enumerate stories, inspect children, or dump task details straight from the SQLite backlog.
 - **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
 
 ---
@@ -143,7 +143,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
    gpt-creator work-on-tasks --project /path/to/project
 
    # Browse epics → stories → tasks from the backlog database
-   gpt-creator backlog --project /path/to/project --type epics
+   gpt-creator backlog --project /path/to/project          # defaults to epic summaries
 
    # Drill into a specific epic or story
    gpt-creator backlog --project /path/to/project --item-children epic-slug
@@ -156,7 +156,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
   - `refine-tasks` streams tasks from `tasks.db` one at a time, rehydrates the original story context, runs Codex against the staged docs, writes the refined JSON to `json/refined`, and updates the task row in SQLite immediately after each successful response. Use `--force` to reset refinement flags and reprocess every task.
   - `create-tasks` snapshots a Jira markdown export into the same database if you already maintain backlog files.
   - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, or `--force` to reset all story/task statuses to `pending` before the run.
-  - `backlog` renders summaries directly to the terminal: `--type epics` lists every epic with progress metrics, `--item-children <slug>` drills into an epic or story, and `--progress` draws an overall task progress bar. Use `--project` (or legacy `--root`) to point at a different workspace.
+  - `backlog` renders summaries directly to the terminal: run it with no extra flags (or `--type epics`) to list each epic with progress metrics, `--type stories` for an all-story table, `--item-children <slug>` to drill into an epic or story, `--task-details <id>` to print a single task, and `--progress` to draw an overall task progress bar. Use `--project` (or legacy `--root`) to point at a different workspace.
   - The legacy `iterate` command is deprecated.
 
 ### Backlog Browser
@@ -164,23 +164,33 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
 `gpt-creator backlog` emits structured summaries straight to the console, backed by `.gpt-creator/staging/plan/tasks/tasks.db`.
 
 ```bash
-$ gpt-creator backlog --project ~/apps/yoga --type epics
-Identifier   Epic                  Stories                                Tasks                                  Progress
------------  --------------------  -------------------------------------  -------------------------------------  --------
-gc-api       API Platform [GC-01]  12 stories (6 complete, 3 in-progress)  98 tasks (54 complete, 12 in-progress)  55.1%
-gc-admin     Admin Console [GC-02]  8 stories (2 complete, 4 in-progress)  74 tasks (28 complete, 20 in-progress)  37.8%
-(none)       Unassigned backlog     5 stories                              23 tasks                               0.0%
+$ gpt-creator backlog --project ~/apps/yoga
+Epic ID  Slug        Title                 Stories                                Tasks                                  Progress
+-------  ----------  --------------------  -------------------------------------  -------------------------------------  --------
+GC-01    gc-api      API Platform          12 stories (6 complete, 3 in-progress)  98 tasks (54 complete, 12 in-progress)  55.1%
+GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)   74 tasks (28 complete, 20 in-progress)  37.8%
+-        (none)      Unassigned backlog    5 stories                               23 tasks                                0.0%
 ```
+
+- `--type stories` lists every story with its epic, status, and task progress:
+
+  ```bash
+  $ gpt-creator backlog --project ~/apps/yoga --type stories
+  Story Slug     Story ID  Title                     Epic               Status       Tasks                                 Progress
+  -------------  --------  ------------------------  ------------------ ------------ ------------------------------------ --------
+  user-onboard   GC-201    User onboarding flow      API Platform       in-progress  3/8 complete, 2 in-progress, 3 pending 37.5%
+  reporting-api  GC-305    Reporting endpoints       API Platform       pending      0/5 complete, 0 in-progress, 5 pending  0.0%
+  ```
 
 - `--item-children <id>` accepts an epic slug/key/ID (or a story slug/ID) and prints its immediate children:
 
   ```bash
   $ gpt-creator backlog --project ~/apps/yoga --item-children gc-api
   Stories for epic: API Platform [GC-01] (gc-api)
-  Story Slug     Title                           Status     Tasks                                 Progress
-  -------------  ------------------------------  ---------  ------------------------------------  --------
-  user-onboard   User onboarding flow            in-progress  3/8 complete, 2 in-progress, 3 pending  37.5%
-  reporting-api  Reporting endpoints             pending    0/5 complete, 0 in-progress, 5 pending  0.0%
+  Story Slug     Title                           Status       Epic            Tasks                                 Progress
+  -------------  ------------------------------  -----------  --------------  ------------------------------------  --------
+  user-onboard   User onboarding flow            in-progress  API Platform    3/8 complete, 2 in-progress, 3 pending 37.5%
+  reporting-api  Reporting endpoints             pending      API Platform    0/5 complete, 0 in-progress, 5 pending 0.0%
   ```
 
   ```bash
@@ -189,6 +199,21 @@ gc-admin     Admin Console [GC-02]  8 stories (2 complete, 4 in-progress)  74 ta
   #  Task ID    Title                                                Status      Estimate
   1  GC-101     Implement signup API                                 in-progress 3d
   2  GC-102     Persist marketing opt-in                             pending     1d
+  ```
+
+- `--task-details <id>` prints a single task in detail:
+
+  ```bash
+  $ gpt-creator backlog --project ~/apps/yoga --task-details GC-101
+  Task details
+  ------------
+  Task ID: GC-101
+  Story Slug: user-onboard
+  Story Title: User onboarding flow
+  Epic: API Platform [GC-01]
+  Status: in-progress
+  Estimate: 3d
+  …
   ```
 
 - `--progress` summarises global task progress with a percentage bar:

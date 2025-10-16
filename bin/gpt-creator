@@ -5874,7 +5874,7 @@ EOUSAGE
 }
 
 cmd_backlog() {
-  local root="" type_arg="" item_children="" show_progress=0
+  local root="" type_arg="" item_children="" show_progress=0 task_details=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project|--root)
@@ -5893,15 +5893,24 @@ cmd_backlog() {
         show_progress=1
         shift
         ;;
+      --task-details)
+        task_details="$2"
+        shift 2
+        ;;
       -h|--help)
         cat <<'EOUSAGE'
-Usage: gpt-creator backlog [--project PATH|--root PATH] [--type epics] [--item-children ID] [--progress]
+Usage: gpt-creator backlog [--project PATH|--root PATH]
+                           [--type epics|stories]
+                           [--item-children ID]
+                           [--progress]
+                           [--task-details ID]
 
-Inspect the backlog stored in .gpt-creator/staging/plan/tasks/tasks.db without entering an interactive prompt.
+Inspect the backlog stored in .gpt-creator/staging/plan/tasks/tasks.db without an interactive prompt.
 
-  --type epics             List all epics with story/task counts and completion ratios.
+  --type epics|stories     List backlog summaries (defaults to 'epics' when no other flag is provided).
   --item-children ID       Show the direct children of the epic/story identified by ID (slug, key, or ID).
   --progress               Print an overall progress bar summarising task completion.
+  --task-details ID        Show a detailed view for the matching task ID (case-insensitive).
 
 Pass any combination of the flags above; each requested view is printed sequentially.
 EOUSAGE
@@ -5913,8 +5922,8 @@ EOUSAGE
     esac
   done
 
-  if [[ -z "$type_arg" && -z "$item_children" && "$show_progress" -eq 0 ]]; then
-    die "Specify at least one of --type, --item-children, or --progress. See 'gpt-creator backlog --help'."
+  if [[ -z "$type_arg" && -z "$item_children" && "$show_progress" -eq 0 && -z "$task_details" ]]; then
+    type_arg="epics"
   fi
 
   ensure_ctx "$root"
@@ -5923,12 +5932,12 @@ EOUSAGE
     die "Tasks database not found at ${tasks_db}. Run 'gpt-creator create-tasks' first."
   fi
 
-  python3 - <<'PY' "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress"
+  python3 - <<'PY' "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}"
 import sqlite3
 import sys
 import textwrap
 
-db_path, type_arg, item_children, progress_flag = sys.argv[1:5]
+db_path, type_arg, item_children, progress_flag, task_details = sys.argv[1:6]
 
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
@@ -6096,31 +6105,27 @@ def print_table(headers, rows):
     if not rows:
         print("No records found.")
         return
-    widths = [len(h) for h in headers]
+    widths = [len(str(h)) for h in headers]
     for row in rows:
         for idx, cell in enumerate(row):
-            widths[idx] = max(widths[idx], len(cell))
+            widths[idx] = max(widths[idx], len(str(cell)))
 
     def fmt(row):
-        return "  ".join(cell.ljust(widths[idx]) for idx, cell in enumerate(row))
+        return "  ".join(str(cell).ljust(widths[idx]) for idx, cell in enumerate(row))
 
-    print(fmt(headers))
+    print(fmt(list(headers)))
     print("  ".join("-" * w for w in widths))
     for row in rows:
         print(fmt(row))
-
-def safe_identifier(epic):
-    for key in ("slug", "epic_id", "epic_key"):
-        value = (epic or {}).get(key)
-        if value and value.strip():
-            return value.strip()
-    return "(none)"
 
 stories = fetch_stories()
 epics = fetch_epics()
 task_counts = fetch_task_counts()
 summary = summarise_epics(stories, task_counts)
 entries = build_epic_entries(epics, stories, summary)
+
+def entries_sorted_by_label(entries):
+    return sorted(entries, key=lambda item: (item.get("epic", {}).get("title") or item["label"]).lower())
 
 stories_by_slug = {}
 stories_by_id = {}
@@ -6146,14 +6151,15 @@ def print_epics_table():
     if not entries:
         print("No epics found in the backlog.")
         return
-    headers = ["Identifier", "Epic", "Stories", "Tasks", "Progress"]
+    headers = ["Epic ID", "Slug", "Title", "Stories", "Tasks", "Progress"]
     rows = []
-    for entry in entries:
+    for entry in entries_sorted_by_label(entries):
         counts = entry.get("counts") or empty_counts()
         epic = entry.get("epic") or {}
-        identifier = safe_identifier(epic)
-        label = entry["label"]
-        stories_desc = pluralize(counts["stories"], "story")
+        epic_id = (epic.get("epic_id") or "").strip() or "-"
+        slug = (epic.get("slug") or epic.get("epic_key") or "").strip() or "-"
+        title = entry["label"]
+        stories_desc = pluralize(counts["stories"], "story", "stories")
         story_bits = []
         if counts["stories_complete"]:
             story_bits.append(f"{counts['stories_complete']} complete")
@@ -6180,8 +6186,9 @@ def print_epics_table():
         if total_tasks:
             progress = (counts["tasks_complete"] / total_tasks) * 100
         rows.append([
-            identifier,
-            label,
+            epic_id,
+            slug,
+            title,
             stories_desc,
             tasks_desc,
             f"{progress:5.1f}%",
@@ -6193,12 +6200,13 @@ def print_story_children(entry, identifier):
     if not stories_for_epic:
         print(f"No stories found for epic '{identifier}'.")
         return
-    headers = ["Story Slug", "Title", "Status", "Tasks", "Progress"]
+    headers = ["Story Slug", "Title", "Status", "Epic", "Tasks", "Progress"]
     rows = []
     for story in sorted(stories_for_epic, key=lambda s: (s.get("sequence") or 0, (s.get("story_title") or "").lower())):
         slug = (story.get("story_slug") or "").strip()
         title = (story.get("story_title") or story.get("story_id") or slug or "Story").strip()
         status = (story.get("status") or "pending").strip().lower().replace("_", "-")
+        epic_title = (story.get("epic_title") or entry["label"]).strip()
         counts = task_counts.get(story.get("story_slug"), {})
         total = counts.get("total", story.get("total_tasks") or 0) or 0
         complete = counts.get("completed", story.get("completed_tasks") or 0) or 0
@@ -6216,6 +6224,7 @@ def print_story_children(entry, identifier):
             slug or (story.get("story_id") or "-"),
             title,
             status,
+            epic_title,
             tasks_desc,
             f"{progress:5.1f}%",
         ])
@@ -6254,7 +6263,9 @@ def show_item_children(identifier):
     entry = epic_lookup.get(ident)
     if entry:
         label = entry["label"]
-        print(f"Stories for epic: {label} ({safe_identifier(entry.get('epic'))})")
+        epic = entry.get("epic") or {}
+        epic_ident = (epic.get("epic_id") or epic.get("slug") or epic.get("epic_key") or "unassigned").strip()
+        print(f"Stories for epic: {label} ({epic_ident})")
         print_story_children(entry, identifier)
         return
 
@@ -6273,6 +6284,102 @@ def show_item_children(identifier):
 
     print(f"No epic or story found for identifier '{identifier}'.", file=sys.stderr)
     sys.exit(1)
+
+def print_stories_overview():
+    if not stories:
+        print("No stories found in the backlog.")
+        return
+    headers = ["Story Slug", "Story ID", "Title", "Epic", "Status", "Tasks", "Progress"]
+    rows = []
+    for story in sorted(
+        stories,
+        key=lambda s: (
+            (s.get("epic_title") or "").lower(),
+            s.get("sequence") or 0,
+            (s.get("story_title") or "").lower(),
+        ),
+    ):
+        slug = (story.get("story_slug") or "").strip()
+        story_id = (story.get("story_id") or "").strip()
+        title = (story.get("story_title") or story_id or slug or "Story").strip()
+        epic_title = (story.get("epic_title") or "Unassigned").strip()
+        status = (story.get("status") or "pending").strip().lower().replace("_", "-")
+        counts = task_counts.get(story.get("story_slug"), {})
+        total = counts.get("total", story.get("total_tasks") or 0) or 0
+        complete = counts.get("completed", story.get("completed_tasks") or 0) or 0
+        in_progress = counts.get("in_progress", 0) or 0
+        pending = max(total - complete - in_progress, 0)
+        tasks_desc = f"{complete}/{total} complete"
+        if in_progress:
+            tasks_desc += f", {in_progress} in-progress"
+        if pending:
+            tasks_desc += f", {pending} pending"
+        progress = 0.0
+        if total:
+            progress = (complete / total) * 100
+        rows.append([
+            slug or "-",
+            story_id or "-",
+            title,
+            epic_title,
+            status,
+            tasks_desc,
+            f"{progress:5.1f}%",
+        ])
+    print_table(headers, rows)
+
+def print_task_details(task_identifier):
+    if not task_identifier:
+        return
+    ident = task_identifier.strip().lower()
+    query = """
+        SELECT *
+        FROM tasks
+        WHERE LOWER(COALESCE(task_id, '')) = ?
+           OR CAST(id AS TEXT) = ?
+    """
+    row = conn.execute(query, (ident, ident)).fetchone()
+    if row is None:
+        print(f"No task found for identifier '{task_identifier}'.", file=sys.stderr)
+        sys.exit(1)
+
+    print("Task details")
+    print("------------")
+
+    def emit(label, value):
+        text = value if isinstance(value, str) else ("" if value is None else str(value))
+        if isinstance(text, str):
+            text = text.strip()
+        print(f"{label}: {text if text else '-'}")
+
+    emit("Task ID", row["task_id"])
+    emit("Story Slug", row["story_slug"])
+    emit("Story Title", row["story_title"])
+    emit("Epic", row["epic_title"] or row["epic_key"])
+    emit("Status", row["status"])
+    emit("Estimate", row["estimate"])
+    emit("Assignees", row["assignee_text"])
+    emit("Tags", row["tags_text"])
+    emit("Dependencies", row["dependencies_text"])
+    emit("Story Points", row["story_points"])
+    emit("Document Reference", row["document_reference"])
+    emit("Idempotency", row["idempotency"])
+    emit("Rate Limits", row["rate_limits"])
+    emit("RBAC", row["rbac"])
+    emit("Messaging/Workflows", row["messaging_workflows"])
+    emit("Performance Targets", row["performance_targets"])
+    emit("Observability", row["observability"])
+    emit("Endpoints", row["endpoints"])
+    emit("Sample Create Request", row["sample_create_request"])
+    emit("Sample Create Response", row["sample_create_response"])
+    emit("Acceptance Criteria", row["acceptance_text"])
+    emit("User Story Ref", row["user_story_ref_id"])
+    emit("Epic Ref", row["epic_ref_id"])
+    emit("Started At", row["started_at"])
+    emit("Completed At", row["completed_at"])
+    emit("Last Run", row["last_run"])
+    emit("Created At", row["created_at"])
+    emit("Updated At", row["updated_at"])
 
 def print_progress():
     row = conn.execute(
@@ -6299,19 +6406,32 @@ def print_progress():
     print(f"[{bar}]")
 
 try:
+    printed = False
     if type_arg:
-        if type_arg.strip().lower() != "epics":
+        t = type_arg.strip().lower()
+        if t == "epics":
+            print_epics_table()
+            printed = True
+        elif t == "stories":
+            print_stories_overview()
+            printed = True
+        else:
             print(f"Unsupported backlog type: {type_arg}", file=sys.stderr)
             sys.exit(1)
-        print_epics_table()
-        if item_children or progress_flag == "1":
+        if printed and (item_children or progress_flag == "1" or task_details):
             print()
     if item_children:
         show_item_children(item_children)
-        if progress_flag == "1":
+        printed = True
+        if progress_flag == "1" or task_details:
             print()
     if progress_flag == "1":
         print_progress()
+        printed = True
+        if task_details:
+            print()
+    if task_details:
+        print_task_details(task_details)
 finally:
     conn.close()
 PY
@@ -9390,7 +9510,7 @@ Usage:
   ${APP_NAME} migrate-tasks [--project <path>] [--force]
   ${APP_NAME} refine-tasks [--project <path>] [--story SLUG] [--model NAME] [--dry-run]
   ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
-  ${APP_NAME} backlog [--project <path>] [--type epics] [--item-children ID] [--progress]
+  ${APP_NAME} backlog [--project <path>] [--type epics|stories] [--item-children ID] [--progress] [--task-details ID]
   ${APP_NAME} tokens [--project <path>] [--details] [--json]
   ${APP_NAME} reports [--project <path>] [list|backlog|show|work] [--branch NAME] [--no-push] [--prompt-only] [--open] [slug]
   ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]

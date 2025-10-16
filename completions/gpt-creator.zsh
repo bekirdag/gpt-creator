@@ -21,7 +21,7 @@ _gpt_creator() {
     'migrate-tasks:Rebuild tasks.db from generated JSON'
     'refine-tasks:Refine tasks stored in the SQLite backlog'
     'create-tasks:Convert Jira tasks into a SQLite backlog'
-    'backlog:Browse epics -> stories -> tasks from the backlog database'
+    'backlog:Render backlog summaries from the tasks database'
     'work-on-tasks:Execute tasks from the SQLite backlog with Codex'
     'reports:List or show captured issue reports'
     'task-convert:[deprecated] Alias for create-tasks'
@@ -102,9 +102,10 @@ _gpt_creator() {
     backlog)
       _arguments \
         '--root=[Project root]:dir:_files -/' \
-        '--type=[Backlog listing type]:type:(epics)' \
+        '--type=[Backlog listing type]:type:(epics stories)' \
         '--item-children=[Epic or story identifier]' \
-        '--progress[Show overall backlog progress]'
+        '--progress[Show overall backlog progress]' \
+        '--task-details=[Task identifier]'
       ;;
     work-on-tasks)
       _arguments \

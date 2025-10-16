@@ -172,7 +172,7 @@ Convert Jira markdown into a project-scoped SQLite backlog at \fI.gpt-creator/st
 Deprecated alias of \fBcreate-tasks\fR retained for backwards compatibility.
 .TP
 .B backlog
-Render backlog summaries from \fI.gpt-creator/staging/plan/tasks/tasks.db\fR without entering an interactive menu. Use \fB--type epics\fR to list every epic with story/task counts and completion ratios, \fB--item-children\fR to print the direct children of an epic or story (identified by slug/key/ID), and \fB--progress\fR to emit an overall task progress bar. Pass \fB--project\fR (or legacy \fB--root\fR) to inspect a different workspace.
+Render backlog summaries from \fI.gpt-creator/staging/plan/tasks/tasks.db\fR without entering an interactive menu. Use \fB--type epics\fR (default) to list every epic with story/task counts and completion ratios, \fB--type stories\fR to show every story across epics, \fB--item-children\fR to print the direct children of an epic or story (identified by slug/key/ID), \fB--task-details\fR to display a single task record, and \fB--progress\fR to emit an overall task progress bar. Pass \fB--project\fR (or legacy \fB--root\fR) to inspect a different workspace.
 .TP
 .B work-on-tasks
 Drive Codex over tasks sourced from the SQLite backlog, apply returned JSON diff/file instructions automatically, and persist task/story status back into the database for precise resume support.

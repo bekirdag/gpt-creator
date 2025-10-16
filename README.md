@@ -345,6 +345,15 @@ gpt-creator work-on-tasks --project /path/to/project
 - Automatically installs Node.js dependencies before the first task when a pnpm workspace or package manifest is present; inspect `/tmp/gc_deps_install.log` if installation fails.
 - Review the generated commits/diffs afterwards and run project tests as needed.
 
+### Backlog ETA
+```
+gpt-creator estimate --project /path/to/project
+```
+- Aggregates story points for every non-complete task in `.gpt-creator/staging/plan/tasks/tasks.db`.
+- Converts the remaining total into a formatted duration at 15 story points per hour (for example `1d 2h 30m`).
+- Defaults to the current directory; point `--project` at another workspace when estimating elsewhere.
+- Exits early with a friendly message if all tasks are already complete.
+
 ### 10. Migrate & Refine Tasks
 ```
 gpt-creator migrate-tasks --project /path/to/project [--force]

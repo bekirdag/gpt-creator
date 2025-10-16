@@ -6007,94 +6007,129 @@ def fetch_tasks_for_story(slug):
     """
     return [dict(row) for row in conn.execute(query, (slug,))]
 
-def normalise_key(value):
-    if value is None:
-        return None
-    stripped = str(value).strip()
-    return stripped if stripped else None
+UNASSIGNED_KEY = "__unassigned__"
+UNASSIGNED_LABEL = "Unassigned backlog"
 
-def pretty_epic_label(epic, key):
-    title = (epic.get("title") or "").strip()
-    ident = (epic.get("epic_id") or epic.get("epic_key") or "").strip()
-    if not title and not ident and key is None:
-        return "Unassigned backlog"
-    if title:
-        if ident and ident.lower() not in title.lower():
-            return f"{title} [{ident}]"
-        return title
-    if ident:
-        return ident
-    return "Unassigned backlog"
+def canonical_epic_descriptor(epic_id=None, epic_slug=None, epic_title=None):
+    epic_id = (epic_id or "").strip()
+    epic_slug = (epic_slug or "").strip()
+    epic_title = (epic_title or "").strip()
+    for candidate in (epic_slug, epic_id, epic_title):
+        if candidate:
+            norm = candidate.lower()
+            display_title = epic_title or epic_slug or epic_id
+            return norm, epic_id, epic_slug, display_title
+    return UNASSIGNED_KEY, "", "", UNASSIGNED_LABEL
+
+def format_epic_label(epic_id, epic_slug, epic_title):
+    epic_title = (epic_title or "").strip()
+    epic_id = (epic_id or "").strip()
+    epic_slug = (epic_slug or "").strip()
+    if epic_title and epic_title != UNASSIGNED_LABEL:
+        if epic_id and epic_id.lower() not in epic_title.lower():
+            return f"{epic_title} [{epic_id}]"
+        return epic_title
+    if epic_id:
+        return epic_id
+    if epic_slug:
+        return epic_slug
+    return UNASSIGNED_LABEL
 
 def summarise_epics(stories, task_counts):
     summary = {}
     for story in stories:
-        key = normalise_key(story.get("epic_key"))
-        entry = summary.setdefault(key, empty_counts())
-        entry["stories"] += 1
+        norm_key, epic_id, epic_slug, epic_title = canonical_epic_descriptor(
+            story.get("epic_id"),
+            story.get("epic_key"),
+            story.get("epic_title"),
+        )
+        entry = summary.setdefault(
+            norm_key,
+            {
+                "counts": empty_counts(),
+                "epic_id": epic_id,
+                "epic_slug": epic_slug,
+                "epic_title": epic_title,
+            },
+        )
+        if epic_id and not entry["epic_id"]:
+            entry["epic_id"] = epic_id
+        if epic_slug and not entry["epic_slug"]:
+            entry["epic_slug"] = epic_slug
+        story_epic_title = (story.get("epic_title") or "").strip()
+        if story_epic_title:
+            entry["epic_title"] = story_epic_title
+
+        counts = entry["counts"]
+        counts["stories"] += 1
         status = (story.get("status") or "pending").strip().lower()
         if status == "complete":
-            entry["stories_complete"] += 1
+            counts["stories_complete"] += 1
         elif status in {"in-progress", "in progress"}:
-            entry["stories_in_progress"] += 1
+            counts["stories_in_progress"] += 1
         else:
-            entry["stories_pending"] += 1
+            counts["stories_pending"] += 1
 
-        counts = task_counts.get(story["story_slug"], {})
-        total = counts.get("total", story.get("total_tasks") or 0) or 0
-        completed = counts.get("completed", story.get("completed_tasks") or 0) or 0
-        in_progress = counts.get("in_progress", 0) or 0
+        counts_dict = task_counts.get(story["story_slug"], {})
+        total = counts_dict.get("total", story.get("total_tasks") or 0) or 0
+        completed = counts_dict.get("completed", story.get("completed_tasks") or 0) or 0
+        in_progress = counts_dict.get("in_progress", 0) or 0
         pending = max(total - completed - in_progress, 0)
 
-        entry["tasks"] += total
-        entry["tasks_complete"] += completed
-        entry["tasks_in_progress"] += in_progress
-        entry["tasks_pending"] += pending
+        counts["tasks"] += total
+        counts["tasks_complete"] += completed
+        counts["tasks_in_progress"] += in_progress
+        counts["tasks_pending"] += pending
     return summary
 
 def build_epic_entries(epics, stories, summary):
-    epics_by_key = {}
+    epics_by_norm = {}
     for epic in epics:
-        key = normalise_key(epic.get("epic_key"))
-        epics_by_key[key] = dict(epic)
+        norm, epic_id, epic_slug, epic_title = canonical_epic_descriptor(
+            epic.get("epic_id"),
+            epic.get("epic_key") or epic.get("slug"),
+            epic.get("title"),
+        )
+        epics_by_norm[norm] = {
+            "epic_id": epic_id,
+            "slug": (epic.get("slug") or epic.get("epic_key") or epic_slug or "").strip(),
+            "title": epic_title or format_epic_label(epic_id, epic_slug, epic.get("title")),
+            "raw": dict(epic),
+        }
 
-    stories_by_epic = {}
+    stories_by_norm = {}
     for story in stories:
-        key = normalise_key(story.get("epic_key"))
-        stories_by_epic.setdefault(key, []).append(story)
-        if key not in epics_by_key:
-            epics_by_key[key] = {
-                "epic_key": key,
-                "title": story.get("epic_title"),
-                "epic_id": None,
-                "slug": None,
-            }
+        norm, _, _, _ = canonical_epic_descriptor(
+            story.get("epic_id"),
+            story.get("epic_key"),
+            story.get("epic_title"),
+        )
+        stories_by_norm.setdefault(norm, []).append(story)
 
     entries = []
-    handled_keys = set()
-    for epic in epics:
-        key = normalise_key(epic.get("epic_key"))
-        handled_keys.add(key)
-        entries.append(
-            {
-                "key": key,
-                "label": pretty_epic_label(epic, key),
-                "counts": summary.get(key) or empty_counts(),
-                "stories": stories_by_epic.get(key, []),
-                "epic": dict(epic),
-            }
-        )
+    all_keys = set(summary.keys()) | set(epics_by_norm.keys())
+    if not all_keys:
+        all_keys.add(UNASSIGNED_KEY)
 
-    remaining_keys = [k for k in summary.keys() if k not in handled_keys]
-    for key in sorted(remaining_keys, key=lambda value: ("" if value is None else str(value)).lower()):
-        epic = epics_by_key.get(key, {"epic_key": key, "title": None})
+    for norm in all_keys:
+        meta = summary.get(norm, {})
+        epic_info = epics_by_norm.get(norm, {})
+        counts = meta.get("counts") or empty_counts()
+        epic_id = meta.get("epic_id") or epic_info.get("epic_id") or ""
+        epic_slug = meta.get("epic_slug") or epic_info.get("slug") or ""
+        epic_title = meta.get("epic_title") or epic_info.get("title") or UNASSIGNED_LABEL
+        label = format_epic_label(epic_id, epic_slug, epic_title)
         entries.append(
             {
-                "key": key,
-                "label": pretty_epic_label(epic, key),
-                "counts": summary.get(key) or empty_counts(),
-                "stories": stories_by_epic.get(key, []),
-                "epic": epic,
+                "key": None if norm == UNASSIGNED_KEY else norm,
+                "label": label,
+                "counts": counts,
+                "stories": stories_by_norm.get(norm, []),
+                "epic": {
+                    "epic_id": epic_id,
+                    "slug": epic_slug,
+                    "title": epic_title,
+                },
             }
         )
 
@@ -6124,9 +6159,6 @@ task_counts = fetch_task_counts()
 summary = summarise_epics(stories, task_counts)
 entries = build_epic_entries(epics, stories, summary)
 
-def entries_sorted_by_label(entries):
-    return sorted(entries, key=lambda item: (item.get("epic", {}).get("title") or item["label"]).lower())
-
 stories_by_slug = {}
 stories_by_id = {}
 for story in stories:
@@ -6140,9 +6172,9 @@ for story in stories:
 epic_lookup = {}
 for entry in entries:
     epic = entry.get("epic") or {}
-    for candidate in (epic.get("slug"), epic.get("epic_id"), epic.get("epic_key")):
-        if candidate and candidate.strip():
-            epic_lookup[candidate.strip().lower()] = entry
+    for candidate in (epic.get("slug"), epic.get("epic_id"), epic.get("title"), entry["label"]):
+        if candidate and str(candidate).strip():
+            epic_lookup[str(candidate).strip().lower()] = entry
     if entry["key"] is None:
         for alias in ("unassigned", "none", "no-epic", "noepic"):
             epic_lookup[alias] = entry
@@ -6153,11 +6185,11 @@ def print_epics_table():
         return
     headers = ["Epic ID", "Slug", "Title", "Stories", "Tasks", "Progress"]
     rows = []
-    for entry in entries_sorted_by_label(entries):
+    for entry in entries:
         counts = entry.get("counts") or empty_counts()
         epic = entry.get("epic") or {}
         epic_id = (epic.get("epic_id") or "").strip() or "-"
-        slug = (epic.get("slug") or epic.get("epic_key") or "").strip() or "-"
+        slug = (epic.get("slug") or "").strip() or "-"
         title = entry["label"]
         stories_desc = pluralize(counts["stories"], "story", "stories")
         story_bits = []
@@ -6264,7 +6296,7 @@ def show_item_children(identifier):
     if entry:
         label = entry["label"]
         epic = entry.get("epic") or {}
-        epic_ident = (epic.get("epic_id") or epic.get("slug") or epic.get("epic_key") or "unassigned").strip()
+        epic_ident = (epic.get("epic_id") or epic.get("slug") or entry["label"] or "unassigned").strip()
         print(f"Stories for epic: {label} ({epic_ident})")
         print_story_children(entry, identifier)
         return

@@ -213,7 +213,7 @@ GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)
   Epic: API Platform [GC-01]
   Status: in-progress
   Estimate: 3d
-  …
+  ...
   ```
 
 - `--progress` summarises global task progress with a percentage bar:

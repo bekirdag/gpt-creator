@@ -30,6 +30,7 @@ logs/
 .tmp/
 temp/
 .cache/
+.gomodcache/
 
 # Docker (local volumes/artifacts)
 docker/.data/
@@ -48,3 +49,4 @@ Thumbs.db
 
 # Misc
 *.orig
+

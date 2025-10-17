@@ -156,7 +156,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
   - `migrate-tasks` regenerates `.gpt-creator/staging/plan/tasks/tasks.db` directly from the JSON artifacts — ideal when you want to sync the DB without re-running Codex.
   - `refine-tasks` streams tasks from `tasks.db` one at a time, rehydrates the original story context, runs Codex against the staged docs, writes the refined JSON to `json/refined`, and updates the task row in SQLite immediately after each successful response. Use `--force` to reset refinement flags and reprocess every task.
   - `create-tasks` snapshots a Jira markdown export into the same database if you already maintain backlog files.
-  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, or `--force` to reset all story/task statuses to `pending` before the run.
+  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, `--from-task TASK` (or `--fresh-from`) to rewind the backlog so execution resumes from that task id or `story-slug:position` reference, and `--force` to reset all story/task statuses to `pending` before the run.
   - `backlog` renders summaries directly to the terminal: run it with no extra flags (or `--type epics`) to list each epic with progress metrics, `--type stories` for an all-story table, `--item-children <slug>` to drill into an epic or story, `--task-details <id>` to print a single task, and `--progress` to draw an overall task progress bar. Use `--project` (or legacy `--root`) to point at a different workspace.
   - The legacy `iterate` command is deprecated.
 
@@ -331,7 +331,7 @@ gpt-creator work-on-tasks --project /path/to/project
 ```
 - Reads pending work directly from the SQLite tasks database and generates Codex prompts per story/task, storing run artifacts in `.gpt-creator/staging/plan/work/runs/<timestamp>/`.
 - Expects Codex responses in JSON (plan + `changes` array); diffs and file payloads are applied automatically via `git apply`/direct writes before moving to the next task.
-- Saves progress back into the SQLite database (task status + story-level counters); on restart it resumes at the first incomplete story unless `--fresh` is provided.
+- Saves progress back into the SQLite database (task status + story-level counters); on restart it resumes at the first incomplete story unless `--fresh` is provided, or `--from-task` is used to jump to a specific task.
 - Use `--story ST-123` (or slug) to jump to a specific story and `--no-verify` to skip the automatic `verify all` invocation after a successful run.
 - Cleans prompt/output artifacts after each successful task to keep memory usage low; pass `--keep-artifacts` if you need to retain the raw Codex exchange for auditing.
 - Control resource usage with batching/pacing flags: `--batch-size 10` pauses after 10 tasks (resume with the same command) and `--sleep-between 2` inserts a short delay between tasks.

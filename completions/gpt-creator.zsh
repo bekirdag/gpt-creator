@@ -112,6 +112,9 @@ _gpt_creator() {
       _arguments \
         '--story=[Start from story id or slug]' \
         '--from-story=[Alias for --story]' \
+        '--from-task=[Resume from a specific task id or story:position reference]' \
+        '--fresh-from=[Alias for --from-task]' \
+        '--task=[Alias for --from-task]' \
         '--force[Reset stored progress and restart from the first story]' \
         '--fresh[Ignore saved progress]' \
         '--no-verify[Skip final verify run]' \

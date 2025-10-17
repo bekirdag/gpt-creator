@@ -5,6 +5,11 @@
 
 set -Eeuo pipefail
 
+if [[ -t 1 && $# -eq 0 && -z "${GC_SKIP_TUI_AUTO:-}" ]]; then
+  export GC_SKIP_TUI_AUTO=1
+  exec "$0" tui
+fi
+
 # Crash logging globals
 GC_CRASH_LOGGED=0
 GC_LAST_ERROR_CMD=""
@@ -1274,7 +1279,9 @@ gc_record_codex_usage() {
   local timestamp
   timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-  if python3 - <<'PY' "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code"; then
+  local py_output=""
+  if py_output="$(
+    python3 - <<'PY' "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code"
 import hashlib
 import json
 import pathlib
@@ -1371,11 +1378,52 @@ for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens
     if key in fields:
         record[key] = fields[key]
 
+limit_needles = [
+    "usage limit",
+    "usage-limit",
+    "usage cap",
+    "usage-cap",
+    "quota exceeded",
+    "quota has been reached",
+    "exceeded your current quota",
+    "exceeded your quota",
+    "quota reached",
+    "credit balance is too low",
+    "billing hard limit",
+    "hard usage limit",
+    "usage credits exhausted",
+]
+
+limit_message = None
+if raw_text:
+    for line in raw_text.splitlines():
+        lower = line.lower()
+        if not lower.strip():
+            continue
+        if any(needle in lower for needle in limit_needles):
+            limit_message = line.strip()
+            break
+
+if limit_message:
+    record["limit_detected"] = True
+    record["limit_message"] = limit_message
+
 usage_path.parent.mkdir(parents=True, exist_ok=True)
 with usage_path.open("a", encoding="utf-8") as fh:
     fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
     fh.write("\n")
+
+if limit_message:
+    print(f"LIMIT_DETECTED\t{limit_message}")
 PY
+  )"; then
+    if [[ "$py_output" == LIMIT_DETECTED$'\t'* ]]; then
+      GC_CODEX_USAGE_LIMIT_REACHED=1
+      GC_CODEX_USAGE_LIMIT_MESSAGE="${py_output#LIMIT_DETECTED$'\t'}"
+    elif [[ "$py_output" == "LIMIT_DETECTED" ]]; then
+      GC_CODEX_USAGE_LIMIT_REACHED=1
+      GC_CODEX_USAGE_LIMIT_MESSAGE=""
+    fi
     rm -f "$log_file" || true
     return 0
   else
@@ -2723,6 +2771,242 @@ if row is not None:
 
 conn.commit()
 conn.close()
+PY
+}
+
+gc_rewind_backlog_from_task() {
+  local db_path="${1:?tasks database path required}"
+  local task_ref_raw="${2:?task reference required}"
+  local story_hint_raw="${3:-}"
+  python3 - "$db_path" "$task_ref_raw" "$story_hint_raw" <<'PY'
+import re
+import sqlite3
+import sys
+import time
+
+args = sys.argv[1:]
+if len(args) < 2:
+    print("Task reference required.", file=sys.stderr)
+    sys.exit(1)
+
+db_path, task_ref = args[0], args[1]
+story_hint = args[2] if len(args) > 2 else ""
+task_ref = (task_ref or "").strip()
+if not task_ref:
+    print("Task reference required.", file=sys.stderr)
+    sys.exit(1)
+
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+cur = conn.cursor()
+
+timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+stories = cur.execute(
+    "SELECT story_slug, story_key, story_id, story_title, sequence FROM stories ORDER BY sequence ASC, story_slug ASC"
+).fetchall()
+
+if not stories:
+    print("No stories available in backlog.", file=sys.stderr)
+    sys.exit(1)
+
+def clean(value: str) -> str:
+    return (value or "").strip()
+
+def norm(value: str) -> str:
+    return clean(value).lower()
+
+def slug_norm(value: str) -> str:
+    text = norm(value)
+    if not text:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+
+story_by_keys = {}
+story_order = []
+for story in stories:
+    slug = clean(story["story_slug"])
+    if not slug:
+        continue
+    story_order.append(story)
+    keys = {
+        norm(story["story_key"]),
+        norm(story["story_id"]),
+        norm(slug),
+        slug_norm(story["story_key"]),
+        slug_norm(story["story_id"]),
+        slug_norm(slug),
+    }
+    for key in keys:
+        if key and key not in story_by_keys:
+            story_by_keys[key] = story
+
+def resolve_story(token: str):
+    token_norm = norm(token)
+    if token_norm in story_by_keys:
+        return story_by_keys[token_norm]
+    token_slug = slug_norm(token)
+    if token_slug and token_slug in story_by_keys:
+        return story_by_keys[token_slug]
+    return None
+
+def locate_by_story_and_position(story_token: str, position_text: str):
+    story = resolve_story(story_token)
+    if story is None:
+        print(f"Story not found for reference '{story_token}'.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        position_input = int(position_text)
+    except ValueError:
+        print(f"Invalid task position '{position_text}'. Use a positive integer (1-based).", file=sys.stderr)
+        sys.exit(1)
+    if position_input <= 0:
+        print(f"Task position must be at least 1 (got {position_input}).", file=sys.stderr)
+        sys.exit(1)
+    index = position_input - 1
+    row = cur.execute(
+        """
+        SELECT t.story_slug, t.position, t.task_id, t.title, s.story_title
+          FROM tasks t
+          LEFT JOIN stories s ON s.story_slug = t.story_slug
+         WHERE LOWER(COALESCE(t.story_slug, '')) = ?
+           AND t.position = ?
+        """,
+        (norm(story["story_slug"]), index),
+    ).fetchone()
+    if row is None:
+        print(
+            f"No task found for story '{story['story_slug']}' at position {position_input}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return row
+
+def locate_by_task_id(task_id: str):
+    token = norm(task_id)
+    if not token:
+        return None
+    row = cur.execute(
+        """
+        SELECT t.story_slug, t.position, t.task_id, t.title, s.story_title, s.sequence
+          FROM tasks t
+          LEFT JOIN stories s ON s.story_slug = t.story_slug
+         WHERE LOWER(COALESCE(t.task_id, '')) = ?
+         ORDER BY s.sequence ASC, t.position ASC
+         LIMIT 1
+        """,
+        (token,),
+    ).fetchone()
+    return row
+
+target_row = None
+
+if ":" in task_ref:
+    story_part, position_part = task_ref.split(":", 1)
+    story_part = story_part.strip()
+    position_part = position_part.strip()
+    if not story_part or not position_part:
+        print(
+            "Invalid task reference. Expected format STORY:POSITION (e.g. auth-login:3).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    target_row = locate_by_story_and_position(story_part, position_part)
+else:
+    target_row = locate_by_task_id(task_ref)
+    if target_row is None:
+        print(
+            "Task reference not found. Use a task id (e.g. TASK-123) or story-slug:position.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+target_story_slug = clean(target_row["story_slug"])
+target_position = int(target_row["position"] or 0)
+target_task_id = clean(target_row["task_id"])
+target_title = clean(target_row["title"]) or "(untitled task)"
+target_story_title = clean(target_row["story_title"])
+
+story_hint_clean = clean(story_hint)
+if story_hint_clean:
+    hint_story = resolve_story(story_hint_clean)
+    if hint_story is None:
+        print(
+            f"Story reference '{story_hint}' not found; expected story '{target_story_slug}'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    hint_slug = clean(hint_story["story_slug"])
+    if norm(hint_slug) != norm(target_story_slug):
+        print(
+            f"Story reference '{story_hint}' resolves to '{hint_slug}', which does not match task story '{target_story_slug}'.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+ordered_slugs = [clean(story["story_slug"]) for story in story_order if clean(story["story_slug"])]
+try:
+    story_index = ordered_slugs.index(target_story_slug)
+except ValueError:
+    print(f"Story slug '{target_story_slug}' missing from ordered backlog.", file=sys.stderr)
+    sys.exit(1)
+
+affected_slugs = ordered_slugs[story_index:]
+if not affected_slugs:
+    print(f"No stories found from '{target_story_slug}'.", file=sys.stderr)
+    sys.exit(1)
+
+cur.execute(
+    """
+    UPDATE tasks
+       SET status = 'pending',
+           started_at = NULL,
+           completed_at = NULL,
+           last_run = NULL,
+           updated_at = ?
+     WHERE story_slug = ?
+       AND position >= ?
+    """,
+    (timestamp, target_story_slug, target_position),
+)
+
+if len(affected_slugs) > 1:
+    placeholders = ",".join("?" * (len(affected_slugs) - 1))
+    cur.execute(
+        f"""
+        UPDATE tasks
+           SET status = 'pending',
+               started_at = NULL,
+               completed_at = NULL,
+               last_run = NULL,
+               updated_at = ?
+         WHERE story_slug IN ({placeholders})
+        """,
+        (timestamp, *affected_slugs[1:]),
+    )
+
+placeholders = ",".join("?" * len(affected_slugs))
+cur.execute(
+    f"""
+    UPDATE stories
+       SET status = 'pending',
+           last_run = NULL,
+           updated_at = ?
+     WHERE story_slug IN ({placeholders})
+    """,
+    (timestamp, *affected_slugs),
+)
+
+conn.commit()
+conn.close()
+
+print("\t".join([
+    target_story_slug,
+    target_story_title or target_story_slug,
+    str(target_position + 1),
+    target_task_id,
+    target_title.replace("\t", " ").replace("\n", " "),
+]))
 PY
 }
 
@@ -5141,6 +5425,8 @@ cmd_verify() {
   done
   ensure_ctx "$root"
 
+  kind="$(printf '%s' "$kind" | tr '[:upper:]' '[:lower:]')"
+
   local compose_file="${PROJECT_ROOT}/docker/docker-compose.yml"
   local ports_updated=0
   if [[ -f "$compose_file" ]]; then
@@ -5187,56 +5473,303 @@ cmd_verify() {
   local verify_root="$CLI_ROOT/verify"
   [[ -d "$verify_root" ]] || die "verify scripts directory missing at ${verify_root}"
 
-  local -a check_names
   case "$kind" in
-    acceptance) check_names=(acceptance) ;;
-    nfr) check_names=(openapi a11y lighthouse consent program_filters) ;;
-    all) check_names=(acceptance openapi a11y lighthouse consent program_filters) ;;
+    program_filters) kind="program-filters" ;;
+    program-filters|acceptance|openapi|a11y|lighthouse|consent|nfr|all) ;;
     *) die "Unknown verify target: ${kind}";;
   esac
 
+  local -a check_names
+  case "$kind" in
+    acceptance) check_names=(acceptance) ;;
+    openapi|a11y|lighthouse|consent|program-filters)
+      check_names=("$kind")
+      ;;
+    nfr)
+      check_names=(openapi a11y lighthouse consent program-filters)
+      ;;
+    all)
+      check_names=(acceptance openapi a11y lighthouse consent program-filters)
+      ;;
+  esac
+
+  local summary_dir="${PROJECT_ROOT}/.gpt-creator/staging/verify"
+  local logs_dir="${summary_dir}/logs"
+  mkdir -p "$summary_dir" "$logs_dir"
+
+  local summary_path="${summary_dir}/summary.json"
+  local python_available=0
+  local python_bin=""
+  if command -v python3 >/dev/null 2>&1; then
+    python_available=1
+    python_bin="$(command -v python3)"
+  fi
+  local check_order="acceptance,openapi,lighthouse,a11y,consent,program-filters"
+
   local pass=0 fail=0 skip=0
-  compose_file="${PROJECT_ROOT}/docker/docker-compose.yml"
+
+  update_verify_summary() {
+    [[ "$python_available" -eq 1 ]] || return 0
+    local name="$1"
+    local status="$2"
+    local label="$3"
+    local message="$4"
+    local log_path="$5"
+    local report_path="$6"
+    local score="$7"
+    local duration="$8"
+    local run_kind="$9"
+    local timestamp="${10}"
+    local event=""
+    event="$(
+      CHECK_NAME="$name" \
+      CHECK_STATUS="$status" \
+      CHECK_LABEL="$label" \
+      CHECK_MESSAGE="$message" \
+      CHECK_LOG="$log_path" \
+      CHECK_REPORT="$report_path" \
+      CHECK_SCORE="$score" \
+      CHECK_DURATION="$duration" \
+      CHECK_RUN_KIND="$run_kind" \
+      CHECK_TIMESTAMP="$timestamp" \
+      CHECK_ORDER="$check_order" \
+      PROJECT_ROOT="$PROJECT_ROOT" \
+      "$python_bin" - "$summary_path" <<'PY'
+import json, os, sys, datetime
+path = sys.argv[1]
+root = os.environ.get("PROJECT_ROOT", "")
+name = os.environ.get("CHECK_NAME", "")
+if not name:
+    sys.exit(0)
+label = os.environ.get("CHECK_LABEL", name.title())
+status = os.environ.get("CHECK_STATUS", "unknown")
+message = os.environ.get("CHECK_MESSAGE", "")
+log_path = os.environ.get("CHECK_LOG", "")
+report_path = os.environ.get("CHECK_REPORT", "")
+score_raw = os.environ.get("CHECK_SCORE", "")
+duration_raw = os.environ.get("CHECK_DURATION", "")
+run_kind = os.environ.get("CHECK_RUN_KIND", "")
+timestamp = os.environ.get("CHECK_TIMESTAMP", datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z")
+order_raw = os.environ.get("CHECK_ORDER", "")
+
+def relify(path_value):
+    if not path_value:
+        return ""
+    if not os.path.isabs(path_value) and root:
+        abs_path = os.path.normpath(os.path.join(root, path_value))
+    else:
+        abs_path = os.path.normpath(path_value)
+    if root:
+        try:
+            rel = os.path.relpath(abs_path, root)
+        except Exception:
+            rel = abs_path
+    else:
+        rel = abs_path
+    return rel.replace(os.sep, "/")
+
+score = None
+if score_raw:
+    try:
+        score = float(score_raw)
+    except Exception:
+        score = None
+
+duration = None
+if duration_raw:
+    try:
+        duration = float(duration_raw)
+    except Exception:
+        duration = None
+
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    data = {}
+
+checks = data.get("checks")
+if not isinstance(checks, dict):
+    checks = {}
+
+entry = checks.get(name, {})
+entry["name"] = name
+entry["label"] = label
+entry["status"] = status
+if message:
+    entry["message"] = message
+elif "message" in entry:
+    del entry["message"]
+
+log_rel = relify(log_path)
+if log_rel:
+    entry["log"] = log_rel
+elif "log" in entry:
+    del entry["log"]
+
+report_rel = relify(report_path)
+if report_rel:
+    entry["report"] = report_rel
+elif "report" in entry:
+    del entry["report"]
+
+if score is not None:
+    entry["score"] = score
+elif "score" in entry:
+    del entry["score"]
+
+if duration is not None:
+    entry["duration_seconds"] = duration
+elif "duration_seconds" in entry:
+    del entry["duration_seconds"]
+
+entry["updated"] = timestamp
+if run_kind:
+    entry["run_kind"] = run_kind
+
+checks[name] = entry
+data["checks"] = checks
+data["last_updated"] = timestamp
+if run_kind:
+    data["last_run_kind"] = run_kind
+
+stats = {"passed": 0, "failed": 0, "skipped": 0, "total": 0}
+for chk in checks.values():
+    status_value = str(chk.get("status", "")).lower()
+    if status_value in ("pass", "passed", "ok", "success"):
+        stats["passed"] += 1
+    elif status_value in ("skip", "skipped"):
+        stats["skipped"] += 1
+    else:
+        stats["failed"] += 1
+    stats["total"] += 1
+data["stats"] = stats
+
+order = [part.strip() for part in order_raw.split(",") if part.strip()]
+if order:
+    merged = []
+    seen = set()
+    for item in order:
+        if item not in seen:
+            merged.append(item); seen.add(item)
+    for item in checks.keys():
+        if item not in seen:
+            merged.append(item); seen.add(item)
+    data["order"] = merged
+else:
+    existing = data.get("order")
+    merged = []
+    seen = set()
+    if isinstance(existing, list):
+        for item in existing:
+            if isinstance(item, str) and item not in seen:
+                merged.append(item); seen.add(item)
+    for item in checks.keys():
+        if item not in seen:
+            merged.append(item); seen.add(item)
+    data["order"] = merged
+
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+
+event = {
+    "name": name,
+    "label": label,
+    "status": status,
+    "message": message,
+    "log": entry.get("log", ""),
+    "report": entry.get("report", ""),
+    "score": entry.get("score"),
+    "updated": timestamp,
+    "run_kind": run_kind,
+    "stats": stats,
+    "duration_seconds": entry.get("duration_seconds"),
+}
+print(json.dumps(event))
+PY
+    )" || event=""
+    if [[ -n "$event" ]]; then
+      printf '::verify::%s\n' "$event"
+    fi
+  }
+
   run_check() {
+    local name="$1"; shift
     local label="$1"; shift
-    if "$@"; then
-      ((pass++))
-    else
-      local status=$?
-      if [[ $status -eq 3 ]]; then
+    local -a cmd=("$@")
+    local timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    local stamp="$(date -u +"%Y%m%d-%H%M%S")"
+    local log_file="${logs_dir}/${stamp}-${name}.log"
+    SECONDS=0
+    set +e
+    "${cmd[@]}" 2>&1 | tee "$log_file"
+    local exit_status=${PIPESTATUS[0]}
+    set -e
+    local duration="$SECONDS"
+    local status message
+    case "$exit_status" in
+      0)
+        status="pass"
+        message="${label} checks passed."
+        ((pass++))
+        ;;
+      3)
+        status="skip"
+        message="${label} check skipped (missing dependency)."
         ((skip++))
         warn "${label} check skipped (missing dependency)"
-      else
+        ;;
+      *)
+        status="fail"
+        message="${label} check failed (exit ${exit_status})."
         ((fail++))
-        warn "${label} check failed (exit ${status})"
+        warn "${label} check failed (exit ${exit_status})"
+        ;;
+    esac
+    cp -f "$log_file" "${logs_dir}/${name}-latest.log" 2>/dev/null || true
+    local log_rel="${log_file#$PROJECT_ROOT/}"
+    log_rel="${log_rel#./}"
+    update_verify_summary "$name" "$status" "$label" "$message" "$log_rel" "" "" "$duration" "$kind" "$timestamp"
+    return 0
+  }
+
+  find_openapi_candidate() {
+    local spec=""
+    for cand in "$INPUT_DIR/openapi.yaml" "$INPUT_DIR/openapi.yml" "$INPUT_DIR/openapi.json"; do
+      if [[ -f "$cand" ]]; then
+        spec="$cand"
+        break
       fi
-    fi
+    done
+    printf '%s' "$spec"
   }
 
   for name in "${check_names[@]}"; do
     case "$name" in
       acceptance)
-        run_check "acceptance" \
+        run_check "acceptance" "Acceptance" \
           env PROJECT_ROOT="$PROJECT_ROOT" GC_COMPOSE_FILE="$compose_file" \
           bash "$verify_root/acceptance.sh" "${api_base}" "${web_url}" "${admin_url}" "${api_health}"
         ;;
       openapi)
-        local spec=""
-        for cand in "$INPUT_DIR/openapi.yaml" "$INPUT_DIR/openapi.yml" "$INPUT_DIR/openapi.json"; do
-          [[ -f "$cand" ]] && { spec="$cand"; break; }
-        done
-        run_check "openapi" bash "$verify_root/check-openapi.sh" "${spec}" ;;
+        run_check "openapi" "OpenAPI" \
+          bash "$verify_root/check-openapi.sh" "$(find_openapi_candidate)"
+        ;;
       a11y)
-        run_check "a11y" bash "$verify_root/check-a11y.sh" "${web_url}" "${admin_url}"
+        run_check "a11y" "Accessibility" \
+          bash "$verify_root/check-a11y.sh" "${web_url}" "${admin_url}"
         ;;
       lighthouse)
-        run_check "lighthouse" bash "$verify_root/check-lighthouse.sh" "${web_url}" "${admin_url}"
+        run_check "lighthouse" "Lighthouse" \
+          bash "$verify_root/check-lighthouse.sh" "${web_url}" "${admin_url}"
         ;;
       consent)
-        run_check "consent" bash "$verify_root/check-consent.sh" "${web_url}"
+        run_check "consent" "Consent" \
+          bash "$verify_root/check-consent.sh" "${web_url}"
         ;;
-      program_filters)
-        run_check "program-filters" bash "$verify_root/check-program-filters.sh" "${api_base}"
+      program-filters)
+        run_check "program-filters" "Program Filters" \
+          bash "$verify_root/check-program-filters.sh" "${api_base}"
         ;;
     esac
   done
@@ -5276,6 +5809,11 @@ codex_call() {
 You are Codex (gpt-5-codex) assisting the gpt-creator pipeline. Apply requested changes deterministically.
 PROMPT
     fi
+  fi
+
+  if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
+    warn "Codex usage limit previously reached; skipping ${task}."
+    return 95
   fi
 
   if command -v "$CODEX_BIN" >/dev/null 2>&1; then
@@ -5332,6 +5870,9 @@ PROMPT
           (( cmd_status == 0 )) && cmd_status=1
         fi
         gc_record_codex_usage "$codex_log" "$task" "$model" "$prompt_file" "$cmd_status"
+        if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
+          return 95
+        fi
         return "$cmd_status"
       else
         local cmd_status=0
@@ -5340,17 +5881,33 @@ PROMPT
         else
           cmd_status=$?
         fi
+        if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
+          return 95
+        fi
         return "$cmd_status"
       fi
     }
     if run_codex_model "$CODEX_MODEL"; then
-      :
-    elif [[ "$CODEX_MODEL" != "$fallback_model" ]]; then
-      warn "Codex model ${CODEX_MODEL} failed; retrying with ${fallback_model}."
-      run_codex_model "$fallback_model" || warn "Codex invocation returned non-zero."
-    else
-      warn "Codex invocation returned non-zero."
+      return 0
     fi
+    local primary_status="$?"
+    if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
+      return "$primary_status"
+    fi
+    if [[ "$CODEX_MODEL" != "$fallback_model" ]]; then
+      warn "Codex model ${CODEX_MODEL} failed; retrying with ${fallback_model}."
+      if run_codex_model "$fallback_model"; then
+        return 0
+      fi
+      primary_status="$?"
+      if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
+        return "$primary_status"
+      fi
+      warn "Codex invocation returned non-zero."
+      return "$primary_status"
+    fi
+    warn "Codex invocation returned non-zero."
+    return "$primary_status"
   else
     warn "Codex binary (${CODEX_BIN}) not found — skipping ${task}."
   fi
@@ -7359,7 +7916,7 @@ PY
 }
 
 cmd_work_on_tasks() {
-  local root="" resume=1 story_filter="" no_verify=0 keep_artifacts=0 memory_cycle=0 force_reset=0
+  local root="" resume=1 story_filter="" start_task_ref="" no_verify=0 keep_artifacts=0 memory_cycle=0 force_reset=0
   local batch_size=0 sleep_between=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=0
   local context_mode="digest"
   local -a context_mode_flags=()
@@ -7374,6 +7931,11 @@ cmd_work_on_tasks() {
     case "$1" in
       --project) root="$(abs_path "$2")"; shift 2;;
       --story|--from-story) story_filter="$2"; shift 2;;
+      --from-task|--fresh-from|--task)
+        start_task_ref="${2:-}"
+        [[ -n "$start_task_ref" ]] || die "--from-task requires a task id or story:position reference"
+        shift 2
+        ;;
       --fresh) resume=0; shift;;
       --force)
         resume=0
@@ -7443,6 +8005,7 @@ Execute tasks from the project SQLite backlog using Codex, with resumable progre
 Options:
   --project PATH       Project root (defaults to current directory)
   --story ID|SLUG      Start from the matching story id or slug (inclusive)
+  --from-task REF      Resume from task REF (task id or story-slug:position) and continue forward
   --fresh              Ignore saved progress and start from the first story
   --no-verify          Skip running gpt-creator verify after tasks complete
   --keep-artifacts     Retain Codex prompt/output files for each task (default cleans up)
@@ -7490,6 +8053,11 @@ EOHELP
     *) die "Invalid --context-mode value: ${context_mode}" ;;
   esac
 
+  if [[ -n "$start_task_ref" && $resume -eq 0 ]]; then
+    info "--fresh ignored when --from-task is provided; resuming from the specified task instead."
+    resume=1
+  fi
+
   if (( memory_cycle )); then
     if (( batch_size == 0 || batch_size > 1 )); then
       info "Memory-cycle enabled; forcing --batch-size 1 for iterative runs."
@@ -7513,6 +8081,33 @@ EOHELP
     info "Resetting backlog progress to pending (--force)."
     gc_reset_task_progress "$tasks_db"
     gc_sync_story_totals "$tasks_db"
+  fi
+
+  local start_task_story_slug="" start_task_story_title="" start_task_position="" start_task_id="" start_task_title=""
+  if [[ -n "$start_task_ref" ]]; then
+    info "Rewinding backlog starting from task reference '${start_task_ref}'."
+    local rewind_info=""
+    local original_story_filter="$story_filter"
+    if ! rewind_info="$(gc_rewind_backlog_from_task "$tasks_db" "$start_task_ref" "$original_story_filter")"; then
+      die "Unable to rewind backlog from task reference '${start_task_ref}'."
+    fi
+    IFS=$'\t' read -r start_task_story_slug start_task_story_title start_task_position start_task_id start_task_title <<<"$rewind_info"
+    if [[ -z "$start_task_story_slug" || -z "$start_task_position" ]]; then
+      die "Invalid response while rewinding backlog; aborting."
+    fi
+    if [[ -n "$original_story_filter" && "${original_story_filter,,}" != "${start_task_story_slug,,}" ]]; then
+      info "Normalizing story filter '${original_story_filter}' to story slug '${start_task_story_slug}'."
+    fi
+    story_filter="$start_task_story_slug"
+    gc_sync_story_totals "$tasks_db"
+    local story_display="$start_task_story_slug"
+    if [[ -n "$start_task_story_title" && "${start_task_story_title,,}" != "${start_task_story_slug,,}" ]]; then
+      story_display+=" — ${start_task_story_title}"
+    fi
+    info "Starting from task ${start_task_position} (${start_task_id:-no-id}) in story ${story_display}."
+    if [[ -n "$start_task_title" ]]; then
+      info "  ${start_task_title}"
+    fi
   fi
 
   ensure_node_dependencies "$PROJECT_ROOT"
@@ -7585,6 +8180,7 @@ EOHELP
   local batch_limit_reached=0
   local any_changes=0
   local manual_followups=0
+  local usage_limit_triggered=0
 
   while IFS=$'\t' read -r sequence slug story_id story_title epic_id epic_title total_tasks next_task completed status; do
     if [[ -z "${sequence}${slug}${story_id}${story_title}${epic_id}${epic_title}" ]]; then
@@ -7606,7 +8202,8 @@ EOHELP
     printf -v story_prefix "%03d" "${sequence:-0}"
     [[ -n "$slug" ]] || slug="story-${story_prefix}"
     local story_run_dir="${run_dir}/story_${story_prefix}_${slug}"
-    mkdir -p "${story_run_dir}/prompts" "${story_run_dir}/out"
+    mkdir -p "${story_run_dir}/prompts" "${story_run_dir}/out" "${story_run_dir}/reports"
+    local report_dir="${story_run_dir}/reports"
 
     info "Story ${story_prefix} (${story_id:-$slug}) — ${story_title:-Unnamed}"
 
@@ -7663,7 +8260,8 @@ EOHELP
 
       local task_id="" task_title=""
       IFS=$'\t' read -r task_id task_title <<<"$prompt_meta"
-      info "  Task ${task_number}: ${task_id:-no-id} — ${task_title:-(untitled)}"
+      info "  → Working on task ${task_number} (${task_id:-no-id})"
+      info "    ${task_title:-(untitled)}"
 
       local call_name="story-${slug}-task-${task_number}"
       local codex_ok=0
@@ -7673,48 +8271,88 @@ EOHELP
       local keep_output=$keep_artifacts
       local parse_error_final=0
       local break_after_update=0
-      local updated_state_for_task=0
+      local task_result_status="in-progress"
+      local task_needs_review=0
+      local -a task_notes=()
+      local -a task_written_paths=()
+      local -a task_patched_paths=()
+      local -a task_commands=()
+      local task_changes_applied=0
+      local apply_status="pending"
+      local task_report_path="${report_dir}/task_${task_number}.log"
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
+
       while (( attempt < max_attempts )); do
         (( ++attempt ))
         if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
           if [[ ! -s "$output_path" ]]; then
             warn "  Codex produced no output for ${call_name}; manual review required."
+            task_needs_review=1
             manual_followups=1
             keep_output=1
-            gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
-            updated_state_for_task=1
+            task_result_status="on-hold"
+            task_notes+=("Codex produced no output; manual review required.")
             codex_ok=1
             break
           fi
           local apply_output
           if ! apply_output="$(gc_apply_codex_changes "$output_path" "$PROJECT_ROOT")"; then
             warn "  Failed to apply changes for ${call_name}; manual review required (see ${output_path})."
+            task_needs_review=1
             manual_followups=1
             keep_output=1
-            gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
-            updated_state_for_task=1
+            task_result_status="on-hold"
+            task_notes+=("Codex changes could not be applied automatically; review ${output_path}.")
             codex_ok=1
             break
           fi
           if [[ "$apply_output" == "no-output" || "$apply_output" == "empty-output" ]]; then
             warn "  Codex produced no actionable JSON for ${call_name}; manual review required."
+            task_needs_review=1
             manual_followups=1
             keep_output=1
-            gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
-            updated_state_for_task=1
+            task_result_status="on-hold"
+            task_notes+=("Codex response lacked actionable changes.")
             codex_ok=1
             break
           fi
-          local apply_status="ok"
+          apply_status="ok"
           while IFS= read -r change_line; do
             case "$change_line" in
-              STATUS\ *) apply_status="${change_line#STATUS }" ;;
-              APPLIED) info "    Changes applied." ;;
-              WRITE\ *) info "    Wrote ${change_line#WRITE }"; any_changes=1 ;;
-              PATCH\ *) info "    Patched ${change_line#PATCH }"; any_changes=1 ;;
-              CMD\ *) info "    Suggested command: ${change_line#CMD }" ;;
-              NOTE\ *) warn "    Note: ${change_line#NOTE }" ;;
+              STATUS\ *)
+                apply_status="${change_line#STATUS }"
+                ;;
+              APPLIED)
+                info "    Changes applied."
+                ;;
+              WRITE\ *)
+                local written_path="${change_line#WRITE }"
+                info "    Wrote ${written_path}"
+                any_changes=1
+                task_changes_applied=1
+                task_written_paths+=("$written_path")
+                ;;
+              PATCH\ *)
+                local patched_path="${change_line#PATCH }"
+                info "    Patched ${patched_path}"
+                any_changes=1
+                task_changes_applied=1
+                task_patched_paths+=("$patched_path")
+                ;;
+              CMD\ *)
+                local suggested_cmd="${change_line#CMD }"
+                info "    Suggested command: ${suggested_cmd}"
+                task_commands+=("$suggested_cmd")
+                ;;
+              NOTE\ *)
+                local note_text="${change_line#NOTE }"
+                warn "    Note: ${note_text}"
+                task_notes+=("$note_text")
+                local note_lower="${note_text,,}"
+                if [[ "$note_lower" == *"manual"* || "$note_lower" == *"review"* || "$note_lower" == *"error"* ]]; then
+                  task_needs_review=1
+                fi
+                ;;
             esac
           done <<<"$apply_output"
 
@@ -7734,44 +8372,178 @@ REM
               continue
             else
               warn "  Codex output was invalid JSON after retry; manual review required (see ${output_path})."
+              task_needs_review=1
               manual_followups=1
               keep_output=1
-              gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
-              updated_state_for_task=1
+              task_result_status="on-hold"
+              task_notes+=("Codex output remained invalid JSON after retries; inspect ${output_path}.")
               codex_ok=1
               parse_error_final=1
               break_after_update=1
             fi
           fi
 
-          if (( updated_state_for_task == 0 )); then
-            gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
-            updated_state_for_task=1
-          fi
           if (( keep_output == 0 )); then
             rm -f "$prompt_path" "$output_path"
           fi
           codex_ok=1
         else
+          if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
+            warn "  Codex usage limit reached for ${call_name}; halting further tasks."
+            if [[ -n "${GC_CODEX_USAGE_LIMIT_MESSAGE:-}" ]]; then
+              warn "    ${GC_CODEX_USAGE_LIMIT_MESSAGE}"
+            fi
+            task_result_status="blocked"
+            task_needs_review=1
+            manual_followups=1
+            keep_output=1
+            task_notes+=("Codex usage limit reached; wait for quota reset before rerunning work-on-tasks.")
+            codex_ok=1
+            usage_limit_triggered=1
+            work_failed=1
+            break
+          fi
           warn "  Codex execution failed for ${call_name}; progress saved."
+          task_result_status="blocked"
+          task_needs_review=1
           manual_followups=1
           keep_output=1
-          gc_update_work_state "$tasks_db" "$slug" "in-progress" $((task_index + 1)) "$total_tasks_int" "$run_stamp"
-          updated_state_for_task=1
+          task_notes+=("Codex execution failed; no automated changes were applied.")
           codex_ok=1
           break
         fi
         break
       done
 
+      if (( task_needs_review )); then
+        manual_followups=1
+        if [[ "$task_result_status" != "blocked" ]]; then
+          task_result_status="on-hold"
+        fi
+      fi
+
       if (( codex_ok == 0 )); then
-        gc_update_task_state "$tasks_db" "$slug" "$task_index" "blocked" "$run_stamp"
+        task_result_status="blocked"
+        task_notes+=("Codex execution did not complete; no changes were applied.")
+      fi
+
+      if [[ "$task_result_status" == "in-progress" ]]; then
+        task_result_status="complete"
+      fi
+
+      local story_status_hint="in-progress"
+      case "$task_result_status" in
+        blocked) story_status_hint="blocked" ;;
+        on-hold) story_status_hint="on-hold" ;;
+      esac
+
+      local completed_hint="$task_index"
+      if [[ "$task_result_status" == "complete" ]]; then
+        completed_hint=$((task_index + 1))
+      fi
+
+      gc_update_task_state "$tasks_db" "$slug" "$task_index" "$task_result_status" "$run_stamp"
+      gc_update_work_state "$tasks_db" "$slug" "$story_status_hint" "$completed_hint" "$total_tasks_int" "$run_stamp"
+
+      local timestamp_utc
+      timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      local prompt_entry="$prompt_path"
+      local output_entry="$output_path"
+      local report_entry="$task_report_path"
+      local project_prefix="${PROJECT_ROOT}/"
+      if [[ -n "$PROJECT_ROOT" ]]; then
+        if [[ "$prompt_entry" == "$project_prefix"* ]]; then
+          prompt_entry="${prompt_entry#$project_prefix}"
+        fi
+        if [[ "$output_entry" == "$project_prefix"* ]]; then
+          output_entry="${output_entry#$project_prefix}"
+        fi
+        if [[ "$report_entry" == "$project_prefix"* ]]; then
+          report_entry="${report_entry#$project_prefix}"
+        fi
+      fi
+      if [[ ! -f "$prompt_path" ]]; then
+        if (( keep_artifacts == 0 )); then
+          prompt_entry="(discarded)"
+        else
+          prompt_entry="(missing)"
+        fi
+      fi
+      if [[ ! -f "$output_path" ]]; then
+        if (( keep_output == 0 )); then
+          output_entry="(discarded)"
+        else
+          output_entry="(missing)"
+        fi
+      fi
+
+      local changes_flag="false"
+      if (( task_changes_applied > 0 )); then
+        changes_flag="true"
+      fi
+
+      {
+        printf 'task_number: %s\n' "$task_number"
+        printf 'task_id: %s\n' "${task_id:-}"
+        printf 'task_title: %s\n' "${task_title//$'\n'/ }"
+        printf 'story_slug: %s\n' "$slug"
+        printf 'status: %s\n' "$task_result_status"
+        printf 'timestamp: %s\n' "$timestamp_utc"
+        printf 'attempts: %s\n' "$attempt"
+        printf 'apply_status: %s\n' "$apply_status"
+        printf 'changes_applied: %s\n' "$changes_flag"
+        printf 'prompt_path: %s\n' "$prompt_entry"
+        printf 'output_path: %s\n' "$output_entry"
+        if ((${#task_written_paths[@]} > 0)); then
+          printf 'written:\n'
+          for path in "${task_written_paths[@]}"; do
+            printf '  - %s\n' "$path"
+          done
+        fi
+        if ((${#task_patched_paths[@]} > 0)); then
+          printf 'patched:\n'
+          for path in "${task_patched_paths[@]}"; do
+            printf '  - %s\n' "$path"
+          done
+        fi
+        if ((${#task_commands[@]} > 0)); then
+          printf 'commands:\n'
+          for cmd in "${task_commands[@]}"; do
+            printf '  - %s\n' "$cmd"
+          done
+        fi
+        printf 'notes:\n'
+        if ((${#task_notes[@]} > 0)); then
+          for note in "${task_notes[@]}"; do
+            printf '  - %s\n' "${note//$'\n'/ }"
+          done
+        else
+          printf '  - (none)\n'
+        fi
+      } >"$task_report_path"
+
+      case "$task_result_status" in
+        complete)
+          info "  ✓ Task ${task_number} (${task_id:-no-id}) completed with status: ${task_result_status}"
+          ;;
+        on-hold)
+          warn "  Task ${task_number} (${task_id:-no-id}) marked ${task_result_status}; review ${report_entry}."
+          ;;
+        blocked)
+          warn "  Task ${task_number} (${task_id:-no-id}) blocked; see ${report_entry}."
+          ;;
+        *)
+          info "  Task ${task_number} (${task_id:-no-id}) finished with status: ${task_result_status}"
+          ;;
+      esac
+
+      (( ++processed_total ))
+
+      if [[ "$task_result_status" == "blocked" ]]; then
         story_failed=1
         break
       fi
-
-      gc_update_task_state "$tasks_db" "$slug" "$task_index" "complete" "$run_stamp"
-      (( ++processed_total ))
 
       if (( break_after_update )); then
         continue
@@ -8055,6 +8827,10 @@ PY
 
   if (( batch_limit_reached )); then
     info "Batch size limit hit after ${processed_total} task(s); rerun to continue from the next pending task."
+  fi
+
+  if (( usage_limit_triggered )); then
+    warn "Codex usage limit detected; halt further work until additional quota is available."
   fi
 
   if [[ $work_failed -eq 0 ]]; then
@@ -9688,6 +10464,22 @@ EOF
   ok "gpt-creator updated successfully"
 }
 
+cmd_tui() {
+  local go_bin="${GO_BIN:-go}"
+  if ! command -v "$go_bin" >/dev/null 2>&1; then
+    die "'go' is required to run the gpt-creator TUI; install Go 1.21+ or set GO_BIN to an alternative."
+  fi
+  local tui_dir="${CLI_ROOT}/tui"
+  if [[ ! -d "$tui_dir" ]]; then
+    die "TUI sources not found at ${tui_dir}"
+  fi
+  info "Launching gpt-creator TUI (preview)"
+  (
+    cd "$tui_dir"
+    "$go_bin" run . "$@"
+  )
+}
+
 usage() {
 cat <<EOF
 ${APP_NAME} v${VERSION}
@@ -9717,6 +10509,7 @@ Usage:
   ${APP_NAME} reports [--project <path>] [list|backlog|show|work] [--branch NAME] [--no-push] [--prompt-only] [--open] [slug]
   ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]
   ${APP_NAME} iterate [--project <path>] [--jira <file>] [--no-verify] (deprecated)
+  ${APP_NAME} tui
   ${APP_NAME} update [--force]
   ${APP_NAME} version
   ${APP_NAME} help
@@ -9761,6 +10554,7 @@ main() {
     task-convert)   cmd_task_convert "$@" ;;
     work-on-tasks)  cmd_work_on_tasks "$@" ;;
     iterate)        cmd_iterate "$@" ;;
+    tui)            cmd_tui "$@" ;;
     update)         cmd_update "$@" ;;
     *) die "Unknown command: ${cmd}. See '${APP_NAME} help'" ;;
   esac

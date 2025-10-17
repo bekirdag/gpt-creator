@@ -97,6 +97,9 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from task-convert" -l force -
 # work-on-tasks
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l story -r -d "Start from story id or slug"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l from-story -r -d "Alias for --story"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l from-task -r -d "Resume from task id or story:position"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l fresh-from -r -d "Alias for --from-task"
+complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l task -r -d "Alias for --from-task"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l force -d "Reset stored progress and restart from the first story"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l fresh -d "Ignore saved progress"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l no-verify -d "Skip verify"

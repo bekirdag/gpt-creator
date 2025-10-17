@@ -11,8 +11,9 @@ gpt-creator run {up|down|logs|open} --root DIR
 gpt-creator verify --root DIR
 gpt-creator create-tasks --root DIR [--jira tasks.md] [--force]
 gpt-creator backlog --project DIR [--type epics|stories] [--item-children ITEM] [--progress] [--task-details ID]
-gpt-creator work-on-tasks --root DIR [--story ID|SLUG] [--fresh] [--no-verify]
+gpt-creator work-on-tasks --root DIR [--story ID|SLUG] [--from-task REF] [--fresh] [--no-verify]
 gpt-creator iterate --root DIR [--jira tasks.md]  # deprecated
+gpt-creator tui  # preview TUI with placeholder data
 ```
 
 Global flags:
@@ -31,6 +32,7 @@ Common flow:
   - `create-tasks` now emits `.gpt-creator/staging/plan/tasks/tasks.db` (SQLite) with epics, stories, and tasks; reruns preserve task status unless `--force` is provided.
   - `backlog` prints structured summaries: run it bare (or `--type epics`) for an epic table, `--type stories` to list every story, `--item-children <slug>` to inspect an epic/story, `--task-details <id>` for a single task, and `--progress` for a percentage bar. Pass `--project` (or legacy `--root`) to target another workspace.
   - `work-on-tasks` reads and updates that database so resuming after interruptions requires no extra state files.
+  - Use `--from-task TASK` (or `--fresh-from`) to rewind backlog state so execution resumes from the referenced task id or `story-slug:position`.
    - Trim shared context with `--context-lines`, `--context-file-lines`, `--context-skip`, or drop it entirely with `--context-none` when Codex prompts get too large.
   - Prompts are compact by default; use `--prompt-expanded` if you need the legacy verbose instruction/schema block.
   - Sample payloads default to a compact digest; increase `--sample-lines` when you need the first N minified chunks of the raw request/response.

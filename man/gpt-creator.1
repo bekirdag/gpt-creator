@@ -189,6 +189,7 @@ Use \fB--batch-size\fR to pause after a fixed number of tasks and \fB--sleep-bet
 Set \fBGC_CONTEXT_INCLUDE_UI=1\fR when you need the legacy raw UI dumps preserved in the generated context file.
 `work-on-tasks` now assumes `.gpt-creator/staging/plan/tasks/tasks.db` already exists; populate it with \fBgpt-creator create-tasks\fR (or `create-jira-tasks` + `migrate-tasks`) before invoking the loop.
 \fB--fresh\fR restarts from the first story without mutating stored progress, while \fB--force\fR additionally resets every story/task status in the database back to `pending` before the loop begins.
+\fB--from-task\fR (and its aliases \fB--fresh-from\fR/\fB--task\fR) rewinds backlog progress starting from the referenced task id or `story-slug:position`, marking that task and everything after it as `pending` before the loop resumes.
 \fB--sample-lines\fR (default 0) streams minified sample payload chunks on demand; increase the value when a task needs raw request/response bodies beyond the default digest.
 \fB--memory-cycle\fR processes one task per invocation, performs a best-effort memory trim (including Docker cache pruning), and automatically restarts the command so long backlogs stay within bounded RAM.
 .TP

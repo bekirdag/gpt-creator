@@ -8280,19 +8280,37 @@ EOHELP
   [[ $resume -eq 1 ]] || resume_flag=0
 
   local work_failed=0
-  local processed_any=0
-  local processed_total=0
-  local batch_limit_reached=0
   local any_changes=0
   local manual_followups=0
   local usage_limit_triggered=0
+  local batch_limit_reached=0
 
-  while IFS=$'\t' read -r sequence slug story_id story_title epic_id epic_title total_tasks next_task completed status; do
-    if [[ -z "${sequence}${slug}${story_id}${story_title}${epic_id}${epic_title}" ]]; then
-      continue
+  local processed_total=0
+  local processed_any_total=0
+  local remaining_tasks=0
+  local memory_cycle_single=0
+
+  while :; do
+    local iteration_processed_any=0
+    local iteration_processed=0
+    local continue_current_run=0
+    local pending_tasks=0
+
+    local effective_batch_size="$batch_size"
+    if (( memory_cycle )); then
+      if (( memory_cycle_single )); then
+        effective_batch_size=1
+      else
+        effective_batch_size="$batch_size"
+      fi
     fi
 
-    processed_any=1
+    while IFS=$'\t' read -r sequence slug story_id story_title epic_id epic_title total_tasks next_task completed status; do
+      if [[ -z "${sequence}${slug}${story_id}${story_title}${epic_id}${epic_title}" ]]; then
+        continue
+      fi
+
+      iteration_processed_any=1
 
     : "${total_tasks:=0}"; : "${next_task:=0}"
     local total_tasks_int=0
@@ -8347,7 +8365,7 @@ EOHELP
     local task_index
     local story_failed=0
     for (( task_index = next_task_int; task_index < total_tasks_int; task_index++ )); do
-      if (( batch_size > 0 && processed_total >= batch_size )); then
+      if (( effective_batch_size > 0 && iteration_processed >= effective_batch_size )); then
         batch_limit_reached=1
         break
       fi
@@ -8644,6 +8662,7 @@ REM
       esac
 
       (( ++processed_total ))
+      (( ++iteration_processed ))
 
       if [[ "$task_result_status" == "blocked" ]]; then
         story_failed=1
@@ -8803,119 +8822,63 @@ conn.close()
 PY
   )
 
-  if (( processed_any == 0 )); then
-    info "No stories to process (already complete)."
-    return 0
-  fi
+    if (( iteration_processed_any )); then
+      processed_any_total=1
+    else
+      if (( processed_any_total == 0 )); then
+        info "No stories to process (already complete)."
+      fi
+      break
+    fi
 
-  local pending_tasks=0
-  if (( memory_cycle )); then
-    pending_tasks="$(gc_count_pending_tasks "$tasks_db" || echo 0)"
-    [[ "$pending_tasks" =~ ^[0-9]+$ ]] || pending_tasks=0
+    if (( batch_limit_reached )); then
+      remaining_tasks="$(gc_count_pending_tasks "$tasks_db" || echo 0)"
+      [[ "$remaining_tasks" =~ ^[0-9]+$ ]] || remaining_tasks=0
+      break
+    fi
 
-    if (( work_failed == 0 )); then
-      if (( processed_total > 0 )) && (( pending_tasks > 0 )); then
-        gc_trim_memory "memory-cycle"
-        info "Memory-cycle paused after ${processed_total} task(s); ${pending_tasks} pending."
-        local -a restart_cmd=("$0" work-on-tasks)
-        if [[ -n "$PROJECT_ROOT" ]]; then
-          restart_cmd+=(--project "$PROJECT_ROOT")
+    if (( memory_cycle )); then
+      pending_tasks="$(gc_count_pending_tasks "$tasks_db" || echo 0)"
+      [[ "$pending_tasks" =~ ^[0-9]+$ ]] || pending_tasks=0
+      remaining_tasks="$pending_tasks"
+      if (( work_failed == 0 )); then
+        if (( iteration_processed > 0 )) && (( pending_tasks > 0 )); then
+          gc_trim_memory "memory-cycle"
+          info "Memory-cycle paused after ${iteration_processed} task(s); ${pending_tasks} pending."
+          memory_cycle_single=1
+          continue_current_run=1
+        elif (( pending_tasks == 0 )); then
+          gc_trim_memory "memory-cycle-final"
+        else
+          gc_trim_memory "memory-cycle"
         fi
-        if [[ -n "$story_filter" ]]; then
-          restart_cmd+=(--story "$story_filter")
-        fi
-        if (( no_verify )); then
-          restart_cmd+=(--no-verify)
-        fi
-        if (( keep_artifacts )); then
-          restart_cmd+=(--keep-artifacts)
-        fi
-        if (( sleep_between > 0 )); then
-          restart_cmd+=(--sleep-between "$sleep_between")
-        fi
-        if (( doc_snippets )); then
-          restart_cmd+=("${doc_snippets_flag[@]}")
-        fi
-        if ((${#sample_lines_flag[@]} > 0)); then
-          restart_cmd+=("${sample_lines_flag[@]}")
-        fi
-        if ((${#prompt_mode_flag[@]} > 0)); then
-          restart_cmd+=("${prompt_mode_flag[@]}")
-        fi
-        if ((${#context_mode_flags[@]} > 0)); then
-          restart_cmd+=("${context_mode_flags[@]}")
-        fi
-        if ((${#context_mode_choice_flag[@]} > 0)); then
-          restart_cmd+=("${context_mode_choice_flag[@]}")
-        fi
-        if ((${#context_file_flag[@]} > 0)); then
-          restart_cmd+=("${context_file_flag[@]}")
-        fi
-        if ((${#context_skip_flags[@]} > 0)); then
-          restart_cmd+=("${context_skip_flags[@]}")
-        fi
-        restart_cmd+=(--batch-size 1 --memory-cycle)
-        info "Restarting work-on-tasks to continue processing."
-        exec "${restart_cmd[@]}"
-      elif (( pending_tasks == 0 )); then
-        gc_trim_memory "memory-cycle-final"
-        batch_limit_reached=0
       else
-        gc_trim_memory "memory-cycle"
+        gc_trim_memory "memory-cycle-error"
       fi
-    else
-      gc_trim_memory "memory-cycle-error"
     fi
-  fi
 
-  local remaining_tasks=0
-  if (( work_failed == 0 )); then
-    remaining_tasks="$(gc_count_pending_tasks "$tasks_db" || echo 0)"
-    [[ "$remaining_tasks" =~ ^[0-9]+$ ]] || remaining_tasks=0
-  fi
-
-  if (( work_failed == 0 && memory_cycle == 0 && batch_limit_reached == 0 && batch_size == 0 && processed_total > 0 && remaining_tasks > 0 )); then
-    if [[ -n "$story_filter" ]]; then
-      info "Remaining tasks detected beyond filtered story; rerun with a broader filter to continue."
-    else
-      info "${remaining_tasks} task(s) remain; continuing work-on-tasks automatically."
-      local -a restart_cmd=("$0" work-on-tasks)
-      if [[ -n "$PROJECT_ROOT" ]]; then
-        restart_cmd+=(--project "$PROJECT_ROOT")
+    if (( continue_current_run == 0 )); then
+      remaining_tasks="$(gc_count_pending_tasks "$tasks_db" || echo 0)"
+      [[ "$remaining_tasks" =~ ^[0-9]+$ ]] || remaining_tasks=0
+      if (( work_failed == 0 && memory_cycle == 0 && batch_limit_reached == 0 && effective_batch_size == 0 && iteration_processed > 0 && remaining_tasks > 0 )); then
+        if [[ -n "$story_filter" ]]; then
+          info "Remaining tasks detected beyond filtered story; rerun with a broader filter to continue."
+        else
+          info "${remaining_tasks} task(s) remain; continuing work-on-tasks automatically."
+          continue_current_run=1
+        fi
       fi
-      if (( no_verify )); then
-        restart_cmd+=(--no-verify)
-      fi
-      if (( keep_artifacts )); then
-        restart_cmd+=(--keep-artifacts)
-      fi
-      if (( sleep_between > 0 )); then
-        restart_cmd+=(--sleep-between "$sleep_between")
-      fi
-      if (( doc_snippets )); then
-        restart_cmd+=("${doc_snippets_flag[@]}")
-      fi
-      if ((${#sample_lines_flag[@]} > 0)); then
-        restart_cmd+=("${sample_lines_flag[@]}")
-      fi
-      if ((${#prompt_mode_flag[@]} > 0)); then
-        restart_cmd+=("${prompt_mode_flag[@]}")
-      fi
-      if ((${#context_mode_flags[@]} > 0)); then
-        restart_cmd+=("${context_mode_flags[@]}")
-      fi
-      if ((${#context_mode_choice_flag[@]} > 0)); then
-        restart_cmd+=("${context_mode_choice_flag[@]}")
-      fi
-      if ((${#context_file_flag[@]} > 0)); then
-        restart_cmd+=("${context_file_flag[@]}")
-      fi
-      if ((${#context_skip_flags[@]} > 0)); then
-        restart_cmd+=("${context_skip_flags[@]}")
-      fi
-      info "Restarting work-on-tasks to process remaining backlog."
-      exec "${restart_cmd[@]}"
     fi
+
+    if (( continue_current_run )); then
+      continue
+    fi
+
+    break
+  done
+
+  if (( processed_any_total == 0 )); then
+    return 0
   fi
 
   if [[ $work_failed -eq 0 && $batch_limit_reached -eq 0 && $no_verify -eq 0 && $remaining_tasks -eq 0 ]]; then

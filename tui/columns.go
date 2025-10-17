@@ -42,12 +42,8 @@ func (e listEntry) Title() string       { return e.title }
 func (e listEntry) Description() string { return e.desc }
 func (e listEntry) FilterValue() string { return e.title }
 
-func newSelectableColumn(title string, items []list.Item, width int, onSelect func(listEntry) tea.Cmd, s styles) *selectableColumn {
+func newSelectableColumn(title string, items []list.Item, width int, onSelect func(listEntry) tea.Cmd) *selectableColumn {
 	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = s.listSel
-	delegate.Styles.SelectedDesc = s.listSel
-	delegate.Styles.NormalTitle = s.listItem
-	delegate.Styles.NormalDesc = s.listItem.Foreground(palette.textMuted)
 
 	m := list.New(items, delegate, width, 20)
 	m.Title = title
@@ -183,12 +179,8 @@ type backlogTreeColumn struct {
 	onActivate  func(backlogNode) tea.Cmd
 }
 
-func newBacklogTreeColumn(title string, s styles) *backlogTreeColumn {
+func newBacklogTreeColumn(title string) *backlogTreeColumn {
 	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = s.listSel
-	delegate.Styles.SelectedDesc = s.listSel
-	delegate.Styles.NormalTitle = s.listItem
-	delegate.Styles.NormalDesc = s.listItem.Foreground(palette.textMuted)
 
 	model := list.New([]list.Item{}, delegate, 28, 20)
 	model.Title = title
@@ -310,7 +302,7 @@ type backlogTableColumn struct {
 	onToggle    func(backlogRow) tea.Cmd
 }
 
-func newBacklogTableColumn(title string, s styles) *backlogTableColumn {
+func newBacklogTableColumn(title string) *backlogTableColumn {
 	columns := []table.Column{
 		{Title: "Key", Width: 10},
 		{Title: "Title", Width: 32},
@@ -324,21 +316,6 @@ func newBacklogTableColumn(title string, s styles) *backlogTableColumn {
 		table.WithFocused(true),
 		table.WithHeight(10),
 	)
-	tStyles := table.DefaultStyles()
-	tStyles.Header = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(palette.textMuted).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(palette.border).
-		Padding(0, 1)
-	tStyles.Cell = lipgloss.NewStyle().
-		Padding(0, 1)
-	tStyles.Selected = lipgloss.NewStyle().
-		Foreground(palette.text).
-		Background(palette.selection).
-		Padding(0, 1)
-	model.SetStyles(tStyles)
-
 	return &backlogTableColumn{
 		title: title,
 		table: model,
@@ -540,12 +517,8 @@ type artifactTreeColumn struct {
 	onActivate  func(artifactNode) tea.Cmd
 }
 
-func newArtifactTreeColumn(title string, s styles) *artifactTreeColumn {
+func newArtifactTreeColumn(title string) *artifactTreeColumn {
 	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = s.listSel
-	delegate.Styles.SelectedDesc = s.listSel
-	delegate.Styles.NormalTitle = s.listItem
-	delegate.Styles.NormalDesc = s.listItem.Foreground(palette.textMuted)
 
 	model := list.New([]list.Item{}, delegate, 36, 20)
 	model.Title = title
@@ -712,7 +685,7 @@ type actionColumn struct {
 	onHighlight func(featureItemDefinition, bool) tea.Cmd
 }
 
-func newActionColumn(title string, s styles) *actionColumn {
+func newActionColumn(title string) *actionColumn {
 	columns := []table.Column{
 		{Title: "Action", Width: 18},
 		{Title: "Details", Width: 42},
@@ -722,19 +695,6 @@ func newActionColumn(title string, s styles) *actionColumn {
 		table.WithFocused(true),
 		table.WithHeight(8),
 	)
-	tStyles := table.DefaultStyles()
-	tStyles.Header = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(palette.textMuted).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(palette.border).
-		Padding(0, 1)
-	tStyles.Cell = lipgloss.NewStyle().Padding(0, 1)
-	tStyles.Selected = lipgloss.NewStyle().
-		Foreground(palette.text).
-		Background(palette.selection).
-		Padding(0, 1)
-	t.SetStyles(tStyles)
 
 	return &actionColumn{
 		title: title,
@@ -857,7 +817,7 @@ func (c *actionColumn) View(s styles, focused bool) string {
 	title := s.columnTitle.Render(c.title)
 	var body string
 	if len(c.items) == 0 {
-		body = s.listItem.Foreground(palette.textMuted).Render("No actions available")
+		body = s.listItem.Copy().Faint(true).Render("No actions available")
 	} else {
 		body = c.table.View()
 	}
@@ -891,7 +851,7 @@ type envTableColumn struct {
 	onCopy   func(envEntry) tea.Cmd
 }
 
-func newEnvTableColumn(title string, s styles) *envTableColumn {
+func newEnvTableColumn(title string) *envTableColumn {
 	columns := []table.Column{
 		{Title: "Key", Width: 24},
 		{Title: "Value", Width: 44},
@@ -903,19 +863,6 @@ func newEnvTableColumn(title string, s styles) *envTableColumn {
 		table.WithFocused(true),
 		table.WithHeight(8),
 	)
-	tStyles := table.DefaultStyles()
-	tStyles.Header = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(palette.textMuted).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(palette.border).
-		Padding(0, 1)
-	tStyles.Cell = lipgloss.NewStyle().Padding(0, 1)
-	tStyles.Selected = lipgloss.NewStyle().
-		Foreground(palette.text).
-		Background(palette.selection).
-		Padding(0, 1)
-	t.SetStyles(tStyles)
 
 	return &envTableColumn{
 		title:  title,
@@ -1092,7 +1039,7 @@ func (c *envTableColumn) View(s styles, focused bool) string {
 	title := s.columnTitle.Render(c.title)
 	var body string
 	if len(c.entries) == 0 {
-		body = s.listItem.Foreground(palette.textMuted).Render("No variables detected")
+		body = s.listItem.Copy().Faint(true).Render("No variables detected")
 	} else {
 		body = c.table.View()
 	}
@@ -1138,7 +1085,7 @@ type servicesTableColumn struct {
 	onHighlight func(featureItemDefinition, bool) tea.Cmd
 }
 
-func newServicesTableColumn(title string, s styles) *servicesTableColumn {
+func newServicesTableColumn(title string) *servicesTableColumn {
 	columns := []table.Column{
 		{Title: "Service", Width: 16},
 		{Title: "Container", Width: 28},
@@ -1152,20 +1099,6 @@ func newServicesTableColumn(title string, s styles) *servicesTableColumn {
 		table.WithFocused(true),
 		table.WithHeight(10),
 	)
-	tStyles := table.DefaultStyles()
-	tStyles.Header = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(palette.textMuted).
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(palette.border).
-		Padding(0, 1)
-	tStyles.Cell = lipgloss.NewStyle().Padding(0, 1)
-	tStyles.Selected = lipgloss.NewStyle().
-		Foreground(palette.text).
-		Background(palette.selection).
-		Padding(0, 1)
-	t.SetStyles(tStyles)
-
 	return &servicesTableColumn{
 		title: title,
 		table: t,
@@ -1299,7 +1232,7 @@ func (c *servicesTableColumn) View(s styles, focused bool) string {
 	title := s.columnTitle.Render(c.title)
 	var body string
 	if len(c.items) == 0 {
-		body = s.listItem.Foreground(palette.textMuted).Render("No services detected")
+		body = s.listItem.Copy().Faint(true).Render("No services detected")
 	} else {
 		body = c.table.View()
 	}
@@ -1964,11 +1897,21 @@ func renderOverviewPreview(project *discoveredProject, item featureItemDefinitio
 		stats := project.Stats
 		percent := percentOf(stats.TasksDone, stats.TasksTotal)
 		b.WriteString(fmt.Sprintf("Tasks: %d/%d complete (%d%%).\n", stats.TasksDone, stats.TasksTotal, percent))
+		if stats.TasksTotal > 0 {
+			bar := renderProgressBar(float64(stats.TasksDone)/float64(max(stats.TasksTotal, 1)), 42)
+			b.WriteString(bar)
+			b.WriteRune('\n')
+		}
 		b.WriteString("Use backlog commands to drill into epics/stories.\n")
 	case "verify":
 		stats := project.Stats
 		percent := percentOf(stats.VerifyPass, stats.VerifyTotal)
 		b.WriteString(fmt.Sprintf("Verify: %d/%d passing (%d%%).\n", stats.VerifyPass, stats.VerifyTotal, percent))
+		if stats.VerifyTotal > 0 {
+			bar := renderProgressBar(float64(stats.VerifyPass)/float64(max(stats.VerifyTotal, 1)), 42)
+			b.WriteString(bar)
+			b.WriteRune('\n')
+		}
 		b.WriteString("Re-run `verify all` to refresh acceptance and NFR checks.\n")
 	case "action":
 		switch item.Meta["action"] {

@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/lipgloss v0.8.0
 	github.com/creack/pty v1.1.21
 	github.com/atotto/clipboard v0.1.4
+	github.com/charmbracelet/harmonica v0.0.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.27.0
 )
@@ -55,3 +56,5 @@ require (
 	modernc.org/strutil v1.1.3 // indirect
 	modernc.org/token v1.0.1 // indirect
 )
+
+replace github.com/charmbracelet/harmonica => ./internal/harmonica

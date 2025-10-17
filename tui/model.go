@@ -15,9 +15,17 @@ import (
 	"time"
 
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/bubbles/filepicker"
+	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/paginator"
+	"github.com/charmbracelet/bubbles/progress"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/stopwatch"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/timer"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -196,14 +204,14 @@ type servicesLoadedMsg struct {
 	items []featureItemDefinition
 }
 
-type servicesPollMsg struct{}
-
 const servicesPollInterval = 2 * time.Second
 
 type keyMap struct {
 	quit        key.Binding
 	nextFocus   key.Binding
 	prevFocus   key.Binding
+	nextFeature key.Binding
+	prevFeature key.Binding
 	toggleLogs  key.Binding
 	openPalette key.Binding
 	closePal    key.Binding
@@ -213,22 +221,94 @@ type keyMap struct {
 	copyPath    key.Binding
 	copySnippet key.Binding
 	toggleSplit key.Binding
+	toggleHelp  key.Binding
 }
 
 func newKeyMap() keyMap {
 	return keyMap{
-		quit:        key.NewBinding(key.WithKeys("q", "ctrl+c")),
-		nextFocus:   key.NewBinding(key.WithKeys("tab")),
-		prevFocus:   key.NewBinding(key.WithKeys("shift+tab")),
-		toggleLogs:  key.NewBinding(key.WithKeys("f6")),
-		openPalette: key.NewBinding(key.WithKeys(":")),
-		closePal:    key.NewBinding(key.WithKeys("esc")),
-		runPal:      key.NewBinding(key.WithKeys("enter")),
-		openEditor:  key.NewBinding(key.WithKeys("o")),
-		togglePin:   key.NewBinding(key.WithKeys("p")),
-		copyPath:    key.NewBinding(key.WithKeys("y")),
-		copySnippet: key.NewBinding(key.WithKeys("Y")),
-		toggleSplit: key.NewBinding(key.WithKeys("s")),
+		quit: key.NewBinding(
+			key.WithKeys("q", "ctrl+c"),
+			key.WithHelp("q", "quit"),
+		),
+		nextFocus: key.NewBinding(
+			key.WithKeys("tab"),
+			key.WithHelp("tab", "next panel"),
+		),
+		prevFocus: key.NewBinding(
+			key.WithKeys("shift+tab"),
+			key.WithHelp("shift+tab", "prev panel"),
+		),
+		nextFeature: key.NewBinding(
+			key.WithKeys("]"),
+			key.WithHelp("]", "next feature"),
+		),
+		prevFeature: key.NewBinding(
+			key.WithKeys("["),
+			key.WithHelp("[", "prev feature"),
+		),
+		toggleLogs: key.NewBinding(
+			key.WithKeys("f6"),
+			key.WithHelp("F6", "toggle logs"),
+		),
+		openPalette: key.NewBinding(
+			key.WithKeys(":"),
+			key.WithHelp(":", "command palette"),
+		),
+		closePal: key.NewBinding(
+			key.WithKeys("esc"),
+			key.WithHelp("esc", "close palette"),
+		),
+		runPal: key.NewBinding(
+			key.WithKeys("enter"),
+			key.WithHelp("enter", "run palette entry"),
+		),
+		openEditor: key.NewBinding(
+			key.WithKeys("o"),
+			key.WithHelp("o", "open in editor"),
+		),
+		togglePin: key.NewBinding(
+			key.WithKeys("p"),
+			key.WithHelp("p", "pin workspace"),
+		),
+		copyPath: key.NewBinding(
+			key.WithKeys("y"),
+			key.WithHelp("y", "copy path"),
+		),
+		copySnippet: key.NewBinding(
+			key.WithKeys("Y"),
+			key.WithHelp("Y", "copy snippet"),
+		),
+		toggleSplit: key.NewBinding(
+			key.WithKeys("s"),
+			key.WithHelp("s", "toggle split"),
+		),
+		toggleHelp: key.NewBinding(
+			key.WithKeys("?"),
+			key.WithHelp("?", "toggle help"),
+		),
+	}
+}
+
+func (k keyMap) ShortHelp() []key.Binding {
+	return []key.Binding{
+		k.nextFocus,
+		k.prevFocus,
+		k.nextFeature,
+		k.prevFeature,
+		k.openPalette,
+		k.toggleLogs,
+		k.toggleHelp,
+		k.quit,
+	}
+}
+
+func (k keyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.nextFocus, k.prevFocus, k.nextFeature, k.prevFeature},
+		{k.openPalette, k.runPal, k.closePal},
+		{k.openEditor, k.togglePin, k.toggleSplit},
+		{k.copyPath, k.copySnippet},
+		{k.toggleLogs, k.toggleHelp, k.quit},
 	}
 }
 
@@ -238,6 +318,7 @@ type model struct {
 
 	styles styles
 	keys   keyMap
+	help   help.Model
 
 	workspaceRoots []workspaceRoot
 	currentRoot    *workspaceRoot
@@ -273,28 +354,41 @@ type model struct {
 	logs       viewport.Model
 	logLines   []string
 
-	inputActive bool
-	inputMode   inputMode
-	inputPrompt string
-	inputField  textinput.Model
+	inputActive     bool
+	inputMode       inputMode
+	inputPrompt     string
+	inputField      textinput.Model
+	inputArea       textarea.Model
+	textAreaEnabled bool
+	spinner         spinner.Model
+	spinnerActive   bool
+	spinnerMessage  string
+
+	filePicker           filepicker.Model
+	filePickerEnabled    bool
+	filePickerAllowDirs  bool
+	filePickerAllowFiles bool
 
 	jobRunner *jobManager
 
-	commandEntries []paletteEntry
-	paletteMatches []paletteEntry
-	paletteIndex   int
+	commandEntries   []paletteEntry
+	paletteMatches   []paletteEntry
+	paletteIndex     int
+	palettePaginator paginator.Model
 
-	pinnedPaths        map[string]bool
-	uiConfig           *uiConfig
-	uiConfigPath       string
-	telemetry          *telemetryLogger
-	serviceHealth      map[string]string
-	servicesPolling    bool
-	dockerAvailable    bool
-	seenProjects       map[string]bool
-	createProjectJobs  map[string]string
-	lastProjectRefresh map[string]time.Time
-	jobProjectPaths    map[string]string
+	pinnedPaths         map[string]bool
+	uiConfig            *uiConfig
+	uiConfigPath        string
+	telemetry           *telemetryLogger
+	serviceHealth       map[string]string
+	servicesPolling     bool
+	servicesTimer       timer.Model
+	servicesTimerActive bool
+	dockerAvailable     bool
+	seenProjects        map[string]bool
+	createProjectJobs   map[string]string
+	lastProjectRefresh  map[string]time.Time
+	jobProjectPaths     map[string]string
 
 	toastMessage string
 	toastExpires time.Time
@@ -343,6 +437,11 @@ type model struct {
 	selectedEpics        map[string]bool
 	pendingBacklogReason string
 	credentialHint       string
+
+	jobStopwatch    stopwatch.Model
+	jobTimingActive bool
+	jobTimingTitle  string
+	jobLastDuration time.Duration
 }
 
 func initialModel() *model {
@@ -350,6 +449,7 @@ func initialModel() *model {
 	m := &model{
 		styles:     s,
 		keys:       newKeyMap(),
+		help:       help.New(),
 		logsHeight: 8,
 		logLines: []string{
 			"[INFO] Select a workspace root or add a project path to begin.",
@@ -358,9 +458,31 @@ func initialModel() *model {
 		},
 	}
 
+	m.help.ShortSeparator = " │ "
+	m.help.Styles.ShortKey = m.styles.statusHint.Copy()
+	m.help.Styles.ShortDesc = m.styles.statusHint.Copy()
+	m.help.Styles.ShortSeparator = m.styles.statusSeg.Copy()
+	m.help.Styles.Ellipsis = m.styles.statusSeg.Copy()
+	m.help.Styles.FullKey = m.styles.statusHint.Copy()
+	m.help.Styles.FullDesc = m.styles.statusHint.Copy()
+	m.help.Styles.FullSeparator = m.styles.statusSeg.Copy()
+
 	m.inputField = textinput.New()
 	m.inputField.Prompt = "> "
 	m.inputField.CharLimit = 256
+	m.inputArea = textarea.New()
+	m.inputArea.Prompt = ""
+	m.inputArea.CharLimit = 4096
+	m.inputArea.ShowLineNumbers = false
+	m.inputArea.SetHeight(6)
+	m.inputArea.SetWidth(48)
+	m.inputArea.Blur()
+	m.spinner = spinner.New(spinner.WithSpinner(spinner.Dot))
+	m.spinner.Style = m.styles.statusHint.Copy().Bold(true)
+	m.palettePaginator = paginator.New()
+	m.palettePaginator.Type = paginator.Dots
+	m.palettePaginator.PerPage = 6
+	m.palettePaginator.TotalPages = 1
 	m.jobRunner = newJobManager()
 	m.seenProjects = make(map[string]bool)
 	m.pinnedPaths = make(map[string]bool)
@@ -384,6 +506,7 @@ func initialModel() *model {
 	m.dockerAvailable = dockerCLIAvailable()
 	m.telemetry = newTelemetryLogger(filepath.Join(resolveConfigDir(), "ui-events.ndjson"))
 	m.serviceHealth = make(map[string]string)
+	m.jobStopwatch = stopwatch.NewWithInterval(500 * time.Millisecond)
 
 	m.workspaceRoots = defaultWorkspaceRoots()
 	m.ensurePinnedRoots()
@@ -393,14 +516,14 @@ func initialModel() *model {
 			return func() tea.Msg { return workspaceSelectedMsg{item: item} }
 		}
 		return nil
-	}, s)
+	})
 
 	m.projectsCol = newSelectableColumn("Projects", nil, 26, func(entry listEntry) tea.Cmd {
 		if payload, ok := entry.payload.(projectItem); ok && payload.project != nil {
 			return func() tea.Msg { return projectSelectedMsg{project: payload.project} }
 		}
 		return nil
-	}, s)
+	})
 
 	m.featureCol = newSelectableColumn("Feature", nil, 26, func(entry listEntry) tea.Cmd {
 		switch payload := entry.payload.(type) {
@@ -415,7 +538,7 @@ func initialModel() *model {
 		default:
 			return nil
 		}
-	}, s)
+	})
 	m.featureSelectDefault = m.featureCol.onSelect
 	m.featureHighlightDefault = nil
 
@@ -424,7 +547,7 @@ func initialModel() *model {
 			return func() tea.Msg { return artifactCategorySelectedMsg{category: cat} }
 		}
 		return nil
-	}, s)
+	})
 	m.artifactsCol.SetHighlightFunc(func(entry listEntry) tea.Cmd {
 		if cat, ok := entry.payload.(artifactCategory); ok {
 			return func() tea.Msg { return artifactCategorySelectedMsg{category: cat} }
@@ -432,7 +555,7 @@ func initialModel() *model {
 		return nil
 	})
 
-	m.envTableCol = newEnvTableColumn("Variables", s)
+	m.envTableCol = newEnvTableColumn("Variables")
 	m.envTableCol.SetOnEdit(func(entry envEntry) tea.Cmd {
 		m.promptEnvValueEdit(entry)
 		return nil
@@ -446,7 +569,7 @@ func initialModel() *model {
 		return nil
 	})
 
-	m.itemsCol = newActionColumn("Actions", s)
+	m.itemsCol = newActionColumn("Actions")
 	m.itemsCol.SetHighlightFunc(func(item featureItemDefinition, activate bool) tea.Cmd {
 		if m.currentProject == nil {
 			return nil
@@ -462,7 +585,7 @@ func initialModel() *model {
 		}
 	})
 
-	m.servicesCol = newServicesTableColumn("Services", s)
+	m.servicesCol = newServicesTableColumn("Services")
 	m.servicesCol.SetHighlightFunc(func(item featureItemDefinition, activate bool) tea.Cmd {
 		if m.currentProject == nil {
 			return nil
@@ -478,19 +601,19 @@ func initialModel() *model {
 		}
 	})
 
-	m.backlogCol = newBacklogTreeColumn("Epics/Stories/Tasks", s)
+	m.backlogCol = newBacklogTreeColumn("Epics/Stories/Tasks")
 	m.backlogCol.SetCallbacks(
 		m.backlogHighlightCmd,
 		m.backlogToggleCmd,
 		m.backlogActivateCmd,
 	)
-	m.backlogTable = newBacklogTableColumn("Backlog", s)
+	m.backlogTable = newBacklogTableColumn("Backlog")
 	m.backlogTable.SetCallbacks(
 		m.backlogRowHighlightCmd,
 		m.backlogRowToggleCmd,
 	)
 
-	m.artifactTreeCol = newArtifactTreeColumn("Files", s)
+	m.artifactTreeCol = newArtifactTreeColumn("Files")
 	m.artifactTreeCol.SetCallbacks(
 		func(node artifactNode) tea.Cmd {
 			return func() tea.Msg { return artifactNodeHighlightedMsg{node: node} }
@@ -535,14 +658,135 @@ func initialModel() *model {
 }
 
 func (m *model) Init() tea.Cmd {
-	return nil
+	return m.spinner.Tick
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
+	if tick, ok := msg.(spinner.TickMsg); ok {
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(tick)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	if swTick, ok := msg.(stopwatch.TickMsg); ok {
+		var cmd tea.Cmd
+		m.jobStopwatch, cmd = m.jobStopwatch.Update(swTick)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if swStartStop, ok := msg.(stopwatch.StartStopMsg); ok {
+		var cmd tea.Cmd
+		m.jobStopwatch, cmd = m.jobStopwatch.Update(swStartStop)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if swReset, ok := msg.(stopwatch.ResetMsg); ok {
+		var cmd tea.Cmd
+		m.jobStopwatch, cmd = m.jobStopwatch.Update(swReset)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	if tickMsg, ok := msg.(timer.TickMsg); ok && m.servicesTimerActive {
+		var cmd tea.Cmd
+		m.servicesTimer, cmd = m.servicesTimer.Update(tickMsg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if startStopMsg, ok := msg.(timer.StartStopMsg); ok && m.servicesTimerActive {
+		var cmd tea.Cmd
+		m.servicesTimer, cmd = m.servicesTimer.Update(startStopMsg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if timeoutMsg, ok := msg.(timer.TimeoutMsg); ok && m.servicesTimerActive && timeoutMsg.ID == m.servicesTimer.ID() {
+		m.servicesTimerActive = false
+		if cmd := m.loadServicesCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if m.servicesPolling {
+			m.servicesTimer = timer.NewWithInterval(servicesPollInterval, time.Second)
+			m.servicesTimerActive = true
+			if cmd := m.servicesTimer.Init(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+	}
+
 	if m.inputActive {
-		if paletteActive := m.inputMode == inputCommandPalette; paletteActive {
+		if m.filePickerEnabled {
+			if keyMsg, ok := msg.(tea.KeyMsg); ok {
+				switch keyMsg.String() {
+				case "esc":
+					m.closeInput()
+					return m, tea.Batch(cmds...)
+				case "ctrl+t":
+					if toggleCmd := m.toggleFilePickerMode(); toggleCmd != nil {
+						cmds = append(cmds, toggleCmd)
+					}
+					return m, tea.Batch(cmds...)
+				}
+			}
+			var cmd tea.Cmd
+			m.filePicker, cmd = m.filePicker.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			if selected, path := m.filePicker.DidSelectFile(msg); selected {
+				cmd, keepOpen := m.handleInputSubmit(path)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				if !keepOpen {
+					m.closeInput()
+				}
+				return m, tea.Batch(cmds...)
+			}
+			if disabled, path := m.filePicker.DidSelectDisabledFile(msg); disabled {
+				m.setToast(fmt.Sprintf("Selection not allowed: %s", filepath.Base(path)), 4*time.Second)
+				return m, tea.Batch(cmds...)
+			}
+			return m, tea.Batch(cmds...)
+		}
+
+		if m.textAreaEnabled {
+			if keyMsg, ok := msg.(tea.KeyMsg); ok {
+				switch keyMsg.String() {
+				case "esc":
+					m.closeInput()
+					return m, tea.Batch(cmds...)
+				case "ctrl+enter", "ctrl+s":
+					value := m.inputArea.Value()
+					cmd, keepOpen := m.handleInputSubmit(value)
+					if cmd != nil {
+						cmds = append(cmds, cmd)
+					}
+					if !keepOpen {
+						m.closeInput()
+					}
+					return m, tea.Batch(cmds...)
+				}
+			}
+			var cmd tea.Cmd
+			m.inputArea, cmd = m.inputArea.Update(msg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return m, tea.Batch(cmds...)
+		}
+
+		if m.inputMode == inputCommandPalette {
+			m.palettePaginator, _ = m.palettePaginator.Update(msg)
+			m.configurePalettePaginator()
 			if keyMsg, ok := msg.(tea.KeyMsg); ok {
 				switch keyMsg.String() {
 				case "up", "ctrl+p":
@@ -561,12 +805,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		switch keyMsg := msg.(type) {
-		case tea.KeyMsg:
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
 			switch keyMsg.String() {
 			case "esc":
 				m.closeInput()
 				return m, nil
+			case "ctrl+t":
+				if m.inputMode == inputAddRoot || m.inputMode == inputAttachRFP {
+					if toggleCmd := m.toggleFilePickerMode(); toggleCmd != nil {
+						cmds = append(cmds, toggleCmd)
+					}
+					return m, tea.Batch(cmds...)
+				}
 			case "enter":
 				raw := m.inputField.Value()
 				value := raw
@@ -577,11 +827,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					value = strings.TrimSpace(raw)
 				}
 				cmd, keepOpen := m.handleInputSubmit(value)
-				if !keepOpen {
-					m.closeInput()
-				}
 				if cmd != nil {
 					cmds = append(cmds, cmd)
+				}
+				if !keepOpen {
+					m.closeInput()
 				}
 				return m, tea.Batch(cmds...)
 			}
@@ -623,7 +873,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch message := msg.(type) {
 	case workspaceSelectedMsg:
-		m.handleWorkspaceSelected(message.item)
+		if cmd := m.handleWorkspaceSelected(message.item); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case projectSelectedMsg:
 		if cmd := m.handleProjectSelected(message.project); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -639,7 +891,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case envFileSelectedMsg:
 		m.handleEnvFileSelected(message)
 	case itemSelectedMsg:
-		m.handleItemSelected(message)
+		if cmd := m.handleItemSelected(message); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case artifactCategorySelectedMsg:
 		if cmd := m.handleArtifactCategorySelected(message.category); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -660,15 +914,6 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case servicesLoadedMsg:
 		m.handleServicesLoaded(message.items)
-	case servicesPollMsg:
-		if m.servicesPolling && m.currentFeature == "services" {
-			if cmd := m.loadServicesCmd(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-			if cmd := m.scheduleServicePoll(); cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
 	case backlogLoadedMsg:
 		m.handleBacklogLoaded(message)
 	case backlogNodeHighlightedMsg:
@@ -693,6 +938,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *model) View() string {
 	var builder strings.Builder
+
+	helpWidth := m.width - 4
+	if helpWidth < 0 {
+		helpWidth = 0
+	}
+	m.help.Width = helpWidth
 
 	title := "gpt-creator • Miller Columns TUI"
 	if m.currentRoot != nil {
@@ -719,6 +970,13 @@ func (m *model) View() string {
 		builder.WriteRune('\n')
 	}
 
+	if helpView := m.help.View(m.keys); helpView != "" {
+		builder.WriteString(helpView)
+		if !strings.HasSuffix(helpView, "\n") {
+			builder.WriteRune('\n')
+		}
+	}
+
 	status := m.renderStatus()
 	builder.WriteString(status)
 
@@ -730,11 +988,69 @@ func (m *model) View() string {
 		if overlayWidth < 24 {
 			overlayWidth = 24
 		}
-		content := m.styles.cmdPrompt.Render(m.inputPrompt) + "\n" + m.inputField.View()
-		if m.inputMode == inputCommandPalette && len(m.paletteMatches) > 0 {
-			content += "\n\n" + m.renderPaletteMatches(overlayWidth)
+		var contentBuilder strings.Builder
+		contentBuilder.WriteString(m.styles.cmdPrompt.Render(m.inputPrompt))
+		contentBuilder.WriteRune('\n')
+		if m.filePickerEnabled {
+			pickerView := m.filePicker.View()
+			if pickerView != "" {
+				contentBuilder.WriteString(pickerView)
+				if !strings.HasSuffix(pickerView, "\n") {
+					contentBuilder.WriteRune('\n')
+				}
+			}
+			selected := strings.TrimSpace(m.filePicker.Path)
+			if selected == "" {
+				selected = strings.TrimSpace(m.filePicker.CurrentDirectory)
+			}
+			if trimmed := strings.TrimSpace(selected); trimmed != "" {
+				contentBuilder.WriteString(m.styles.cmdHint.Render(abbreviatePath(trimmed)))
+				contentBuilder.WriteRune('\n')
+			}
+			hintParts := []string{"enter select", "ctrl+t manual entry", "esc cancel"}
+			contentBuilder.WriteString(m.styles.cmdHint.Render(strings.Join(hintParts, " • ")))
+		} else if m.textAreaEnabled {
+			areaWidth := overlayWidth - 4
+			if areaWidth < 24 {
+				areaWidth = overlayWidth - 2
+			}
+			if areaWidth < 24 {
+				areaWidth = 24
+			}
+			m.inputArea.SetWidth(areaWidth)
+			lineCount := strings.Count(m.inputArea.Value(), "\n") + 1
+			areaHeight := lineCount + 1
+			if areaHeight < 4 {
+				areaHeight = 4
+			}
+			if areaHeight > 12 {
+				areaHeight = 12
+			}
+			m.inputArea.SetHeight(areaHeight)
+			contentBuilder.WriteString(m.inputArea.View())
+			contentBuilder.WriteRune('\n')
+			contentBuilder.WriteString(m.styles.cmdHint.Render("ctrl+enter save • esc cancel"))
+		} else {
+			contentBuilder.WriteString(m.inputField.View())
+			if m.inputMode == inputCommandPalette && len(m.paletteMatches) > 0 {
+				contentBuilder.WriteString("\n\n")
+				contentBuilder.WriteString(m.renderPaletteMatches(overlayWidth))
+			}
+			var hintParts []string
+			switch m.inputMode {
+			case inputCommandPalette:
+				hintParts = []string{"tab cycle", "enter run", "esc close", "←/→ page"}
+			default:
+				if m.inputMode == inputAddRoot || m.inputMode == inputAttachRFP {
+					hintParts = append(hintParts, "ctrl+t file picker")
+				}
+				hintParts = append(hintParts, "enter confirm", "esc cancel")
+			}
+			contentBuilder.WriteRune('\n')
+			contentBuilder.WriteString(m.styles.cmdHint.Render(strings.Join(hintParts, " • ")))
 		}
-		overlay := m.styles.cmdOverlay.Width(overlayWidth).Render(content)
+		overlayContent := strings.TrimRight(contentBuilder.String(), "\n")
+		overlay := m.styles.cmdOverlay.Width(overlayWidth).Render(overlayContent)
 		builder.WriteString("\n")
 		builder.WriteString(lipgloss.Place(m.width, m.height/2, lipgloss.Center, lipgloss.Center, overlay))
 	}
@@ -773,8 +1089,22 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	case key.Matches(msg, m.keys.prevFocus):
 		m.focus = (m.focus - 1 + len(m.columns)) % len(m.columns)
 		return true, nil
+	case key.Matches(msg, m.keys.nextFeature):
+		if cmd := m.cycleFeature(1); cmd != nil {
+			return true, cmd
+		}
+		return true, nil
+	case key.Matches(msg, m.keys.prevFeature):
+		if cmd := m.cycleFeature(-1); cmd != nil {
+			return true, cmd
+		}
+		return true, nil
 	case key.Matches(msg, m.keys.toggleLogs):
 		m.showLogs = !m.showLogs
+		m.applyLayout()
+		return true, nil
+	case key.Matches(msg, m.keys.toggleHelp):
+		m.help.ShowAll = !m.help.ShowAll
 		m.applyLayout()
 		return true, nil
 	case key.Matches(msg, m.keys.openPalette):
@@ -844,8 +1174,10 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			if len(m.currentItem.Command) > 0 {
 				return true, m.runCurrentItemCommand()
 			}
-			if m.currentFeature == "docs" && m.handleDocsPreviewEnter() {
-				return true, nil
+			if m.currentFeature == "docs" {
+				if handled, cmd := m.handleDocsPreviewEnter(); handled {
+					return true, cmd
+				}
 			}
 			return true, nil
 		}
@@ -944,7 +1276,7 @@ func (m *model) stepBack() {
 	}
 }
 
-func (m *model) handleWorkspaceSelected(item workspaceItem) {
+func (m *model) handleWorkspaceSelected(item workspaceItem) tea.Cmd {
 	switch item.kind {
 	case workspaceKindRoot:
 		root := m.findRoot(item.path)
@@ -973,8 +1305,11 @@ func (m *model) handleWorkspaceSelected(item workspaceItem) {
 		}
 		m.startNewProjectFlow(defaultPath)
 	case workspaceKindAddRoot:
-		m.openInput("Add workspace path", "", inputAddRoot)
+		cmd := m.openPathPicker("Add workspace root", "", inputAddRoot, true, false)
+		m.inputField.Placeholder = "~/projects"
+		return cmd
 	}
+	return nil
 }
 
 func (m *model) handleProjectSelected(project *discoveredProject) tea.Cmd {
@@ -1033,6 +1368,9 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 	m.currentVerifyCheck = ""
 	m.stopServicePolling()
 	m.currentServiceEndpoints = nil
+	if feature.Key != "tasks" {
+		m.hideSpinner()
+	}
 	if feature.Key == "env" {
 		return m.startEnvEditor()
 	}
@@ -1043,6 +1381,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		m.updateCredentialHint()
 		m.focus = int(focusFeatures)
 		m.backlogLoading = true
+		m.showSpinner("Loading backlog…")
 		return m.loadBacklogCmd()
 	}
 	m.useTasksLayout(false)
@@ -1083,45 +1422,88 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		m.itemsCol.SetTitle("Actions")
 	}
 	m.itemsCol.SetItems(featureItemEntries(m.currentProject, feature.Key, m.dockerAvailable))
+	var followCmds []tea.Cmd
 	if item, ok := m.itemsCol.SelectedItem(); ok {
 		if feature.Key == "overview" {
 			m.suppressPipelineTelemetry = true
 		}
-		m.applyItemSelection(m.currentProject, feature.Key, item, false)
+		if cmd := m.applyItemSelection(m.currentProject, feature.Key, item, false); cmd != nil {
+			followCmds = append(followCmds, cmd)
+		}
 	} else {
 		m.previewCol.SetContent("Select an item to preview details.\n")
 	}
 	m.focus = int(focusItems)
+	if len(followCmds) > 0 {
+		return tea.Batch(followCmds...)
+	}
 	return nil
 }
 
-func (m *model) handleItemSelected(msg itemSelectedMsg) {
+func (m *model) cycleFeature(delta int) tea.Cmd {
+	if delta == 0 || m.featureCol == nil {
+		return nil
+	}
+	items := m.featureCol.model.Items()
+	length := len(items)
+	if length == 0 {
+		return nil
+	}
+
+	index := m.featureCol.model.Index()
+	for i := 0; i < length; i++ {
+		index = (index + delta + length) % length
+		entry, ok := items[index].(listEntry)
+		if !ok {
+			continue
+		}
+		def, ok := entry.payload.(featureDefinition)
+		if !ok || def.Key == "" {
+			continue
+		}
+		m.featureCol.model.Select(index)
+		return m.handleFeatureSelected(def)
+	}
+
+	if entry, ok := items[m.featureCol.model.Index()].(listEntry); ok {
+		if def, ok := entry.payload.(featureDefinition); ok && def.Key != "" {
+			return m.handleFeatureSelected(def)
+		}
+	}
+	return nil
+}
+
+func (m *model) handleItemSelected(msg itemSelectedMsg) tea.Cmd {
 	targetProject := msg.project
 	if targetProject == nil {
 		targetProject = m.currentProject
 	}
 	if targetProject == nil {
-		return
+		return nil
 	}
 	featureKey := msg.feature.Key
 	if featureKey == "" {
 		featureKey = m.currentFeature
 	}
-	m.applyItemSelection(targetProject, featureKey, msg.item, msg.activate)
+	cmd := m.applyItemSelection(targetProject, featureKey, msg.item, msg.activate)
 	if msg.activate {
 		m.focus = int(focusPreview)
 	}
+	return cmd
 }
 
-func (m *model) applyItemSelection(project *discoveredProject, featureKey string, item featureItemDefinition, activate bool) {
+func (m *model) applyItemSelection(project *discoveredProject, featureKey string, item featureItemDefinition, activate bool) tea.Cmd {
 	if project == nil {
-		return
+		return nil
 	}
 	m.currentItem = item
 	m.currentFeature = featureKey
 	m.currentProject = project
+	var followCmds []tea.Cmd
 	if featureKey == "docs" {
-		m.handleDocItemSelection(item, activate)
+		if cmd := m.handleDocItemSelection(item, activate); cmd != nil {
+			followCmds = append(followCmds, cmd)
+		}
 	}
 	if featureKey == "verify" {
 		m.handleVerifyItemSelection(item)
@@ -1164,6 +1546,10 @@ func (m *model) applyItemSelection(project *discoveredProject, featureKey string
 	if activate {
 		m.appendLog(fmt.Sprintf("Selected action: %s", item.Title))
 	}
+	if len(followCmds) > 0 {
+		return tea.Batch(followCmds...)
+	}
+	return nil
 }
 
 func (m *model) prepareArtifactsView() tea.Cmd {
@@ -1590,10 +1976,14 @@ func (m *model) copyCurrentArtifactSnippet() {
 }
 
 func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
+	var cmds []tea.Cmd
 	var followCmd tea.Cmd
 	var reason string
 	switch message := msg.(type) {
 	case jobStartedMsg:
+		if timingCmd := m.beginJobTiming(message.Title); timingCmd != nil {
+			cmds = append(cmds, timingCmd)
+		}
 		m.appendLog(fmt.Sprintf("[job] %s started", message.Title))
 		m.refreshCreateProjectProgress(message.Title)
 	case jobLogMsg:
@@ -1606,10 +1996,20 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 		m.appendLog(message.Line)
 		m.refreshCreateProjectProgress(message.Title)
 	case jobFinishedMsg:
+		if timingCmd := m.stopJobTiming(); timingCmd != nil {
+			cmds = append(cmds, timingCmd)
+		}
+		elapsed := m.jobLastDuration
 		if message.Err != nil {
 			m.appendLog(fmt.Sprintf("[job] %s failed: %v", message.Title, message.Err))
+			if elapsed > 0 {
+				m.setToast(fmt.Sprintf("%s failed after %s", message.Title, formatElapsed(elapsed)), 6*time.Second)
+			}
 		} else {
 			m.appendLog(fmt.Sprintf("[job] %s completed successfully", message.Title))
+			if elapsed > 0 {
+				m.setToast(fmt.Sprintf("%s completed in %s", message.Title, formatElapsed(elapsed)), 6*time.Second)
+			}
 			lower := strings.ToLower(message.Title)
 			switch {
 			case strings.Contains(lower, "create-jira-tasks"):
@@ -1647,28 +2047,56 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 				}
 				m.pendingBacklogReason = reason
 				m.backlogLoading = true
+				label := "Refreshing backlog…"
+				if reason != "" {
+					label = fmt.Sprintf("Refreshing backlog (%s)…", strings.ReplaceAll(reason, "-", " "))
+				}
+				m.showSpinner(label)
 				followCmd = m.loadBacklogCmd()
 			}
 		}
 		delete(m.jobProjectPaths, message.Title)
 		m.refreshCreateProjectProgress(message.Title)
 	case jobChannelClosedMsg:
-		// silence
+		if timingCmd := m.stopJobTiming(); timingCmd != nil {
+			cmds = append(cmds, timingCmd)
+		}
 	}
 	var runnerCmd tea.Cmd
 	if m.jobRunner != nil {
 		runnerCmd = m.jobRunner.Handle(msg)
 	}
-	if followCmd != nil && runnerCmd != nil {
-		return tea.Batch(runnerCmd, followCmd)
-	}
 	if followCmd != nil {
-		return followCmd
+		cmds = append(cmds, followCmd)
 	}
 	if runnerCmd != nil {
-		return runnerCmd
+		cmds = append(cmds, runnerCmd)
 	}
-	return nil
+	switch len(cmds) {
+	case 0:
+		return nil
+	case 1:
+		return cmds[0]
+	default:
+		return tea.Batch(cmds...)
+	}
+}
+
+func (m *model) beginJobTiming(title string) tea.Cmd {
+	m.jobTimingTitle = title
+	m.jobTimingActive = true
+	m.jobLastDuration = 0
+	return tea.Batch(m.jobStopwatch.Reset(), m.jobStopwatch.Start())
+}
+
+func (m *model) stopJobTiming() tea.Cmd {
+	if !m.jobTimingActive {
+		return nil
+	}
+	m.jobTimingActive = false
+	m.jobLastDuration = m.jobStopwatch.Elapsed()
+	m.jobTimingTitle = ""
+	return m.jobStopwatch.Stop()
 }
 
 type verifyEventMessage struct {
@@ -1804,7 +2232,7 @@ func (m *model) handleInputSubmit(value string) (tea.Cmd, bool) {
 			return nil, true
 		}
 		m.pendingEnvKey = key
-		m.openInput(fmt.Sprintf("Value for %s", key), "", inputEnvNewValue)
+		m.openTextarea(fmt.Sprintf("Value for %s", key), "", inputEnvNewValue)
 		return nil, true
 	case inputEnvNewValue:
 		if m.applyEnvNewValue(value) {
@@ -1927,21 +2355,123 @@ func (m *model) openInput(prompt, placeholder string, mode inputMode) {
 	m.inputMode = mode
 	m.inputPrompt = prompt
 	m.inputActive = true
+	m.filePickerEnabled = false
+	m.textAreaEnabled = false
 	m.inputField.SetValue(placeholder)
 	m.inputField.CursorEnd()
 	m.inputField.Focus()
 }
 
+func (m *model) openTextarea(prompt, initial string, mode inputMode) {
+	m.inputMode = mode
+	m.inputPrompt = prompt
+	m.inputActive = true
+	m.filePickerEnabled = false
+	m.textAreaEnabled = true
+	m.inputField.Blur()
+	m.inputArea.SetValue(initial)
+	m.inputArea.CursorEnd()
+	m.inputArea.Focus()
+}
+
+func (m *model) openPathPicker(prompt, initial string, mode inputMode, allowDirs, allowFiles bool) tea.Cmd {
+	m.inputMode = mode
+	m.inputPrompt = prompt
+	m.inputActive = true
+	m.filePickerAllowDirs = allowDirs
+	m.filePickerAllowFiles = allowFiles
+	m.filePickerEnabled = true
+	m.textAreaEnabled = false
+	initial = strings.TrimSpace(initial)
+	m.inputField.SetValue(initial)
+	m.inputField.Blur()
+	return m.setupFilePicker(initial)
+}
+
+func (m *model) setupFilePicker(initial string) tea.Cmd {
+	fp := filepicker.New()
+	fp.DirAllowed = m.filePickerAllowDirs
+	fp.FileAllowed = m.filePickerAllowFiles
+	fp.ShowHidden = false
+	fp.AutoHeight = false
+	height := 12
+	if m.height > 0 {
+		maxHeight := m.height - 6
+		if maxHeight < 8 {
+			maxHeight = 8
+		}
+		height = min(maxHeight, 18)
+	}
+	fp.Height = height
+	dir, suggestion := m.resolvePickerStart(initial)
+	fp.CurrentDirectory = dir
+	if m.filePickerAllowFiles && suggestion != "" {
+		fp.Path = suggestion
+	}
+	m.filePicker = fp
+	return m.filePicker.Init()
+}
+
+func (m *model) resolvePickerStart(initial string) (string, string) {
+	path := strings.TrimSpace(initial)
+	if path != "" {
+		resolved := m.resolvePath(path)
+		if info, err := os.Stat(resolved); err == nil {
+			if info.IsDir() {
+				return resolved, ""
+			}
+			return filepath.Dir(resolved), resolved
+		}
+		parent := filepath.Dir(resolved)
+		if parent != "" && parent != "." && dirExists(parent) {
+			return parent, ""
+		}
+	}
+	if m.currentRoot != nil && dirExists(m.currentRoot.Path) {
+		return m.currentRoot.Path, ""
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return home, ""
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		return cwd, ""
+	}
+	return ".", ""
+}
+
+func (m *model) toggleFilePickerMode() tea.Cmd {
+	if m.filePickerEnabled {
+		selected := strings.TrimSpace(m.filePicker.Path)
+		if selected == "" {
+			selected = strings.TrimSpace(m.filePicker.CurrentDirectory)
+		}
+		m.filePickerEnabled = false
+		m.inputField.SetValue(selected)
+		m.inputField.CursorEnd()
+		m.inputField.Focus()
+		return nil
+	}
+	m.filePickerEnabled = true
+	m.inputField.Blur()
+	return m.setupFilePicker(m.inputField.Value())
+}
+
 func (m *model) closeInput() {
 	prevMode := m.inputMode
+	m.filePickerEnabled = false
+	m.textAreaEnabled = false
 	if prevMode == inputCommandPalette {
 		m.paletteMatches = nil
 		m.paletteIndex = 0
+		m.palettePaginator.Page = 0
+		m.palettePaginator.TotalPages = 1
 	}
 	m.inputActive = false
 	m.inputField.Blur()
 	m.inputField.SetValue("")
 	m.inputField.Placeholder = ""
+	m.inputArea.Blur()
+	m.inputArea.Reset()
 	m.inputMode = inputNone
 	if prevMode == inputNewProjectPath || prevMode == inputNewProjectTemplate || prevMode == inputNewProjectConfirm {
 		m.pendingNewProjectPath = ""
@@ -1961,6 +2491,8 @@ func (m *model) openCommandPalette() {
 	m.inputMode = inputCommandPalette
 	m.inputPrompt = "Command"
 	m.inputActive = true
+	m.filePickerEnabled = false
+	m.textAreaEnabled = false
 	m.inputField.Placeholder = "e.g. run up"
 	m.inputField.SetValue("")
 	m.inputField.Focus()
@@ -2094,14 +2626,15 @@ func (m *model) updatePaletteMatches(query string) {
 	if len(m.commandEntries) == 0 {
 		m.paletteMatches = nil
 		m.paletteIndex = 0
+		m.palettePaginator.Page = 0
+		m.configurePalettePaginator()
 		return
 	}
 	if q == "" {
 		m.paletteMatches = append([]paletteEntry(nil), m.commandEntries...)
-		if len(m.paletteMatches) > 8 {
-			m.paletteMatches = m.paletteMatches[:8]
-		}
 		m.paletteIndex = 0
+		m.palettePaginator.Page = 0
+		m.configurePalettePaginator()
 		return
 	}
 
@@ -2125,15 +2658,12 @@ func (m *model) updatePaletteMatches(query string) {
 	m.paletteMatches = nil
 	for _, item := range scoredMatches {
 		m.paletteMatches = append(m.paletteMatches, item.entry)
-		if len(m.paletteMatches) >= 8 {
-			break
-		}
 	}
 	if len(m.paletteMatches) == 0 {
 		m.paletteIndex = 0
-	} else if m.paletteIndex >= len(m.paletteMatches) {
-		m.paletteIndex = len(m.paletteMatches) - 1
 	}
+	m.palettePaginator.Page = 0
+	m.configurePalettePaginator()
 }
 
 func paletteScore(entry paletteEntry, query string) int {
@@ -2155,10 +2685,18 @@ func paletteScore(entry paletteEntry, query string) int {
 func (m *model) movePaletteSelection(delta int) {
 	if len(m.paletteMatches) == 0 {
 		m.paletteIndex = 0
+		m.palettePaginator.Page = 0
+		m.configurePalettePaginator()
 		return
 	}
 	count := len(m.paletteMatches)
 	m.paletteIndex = (m.paletteIndex + delta + count) % count
+	perPage := m.palettePaginator.PerPage
+	if perPage <= 0 {
+		perPage = count
+	}
+	m.palettePaginator.Page = m.paletteIndex / perPage
+	m.configurePalettePaginator()
 }
 
 func (m *model) selectedPaletteEntry() (paletteEntry, bool) {
@@ -2169,6 +2707,66 @@ func (m *model) selectedPaletteEntry() (paletteEntry, bool) {
 		return paletteEntry{}, false
 	}
 	return m.paletteMatches[m.paletteIndex], true
+}
+
+func (m *model) configurePalettePaginator() {
+	if m.palettePaginator.PerPage <= 0 {
+		m.palettePaginator.PerPage = 6
+	}
+	total := len(m.paletteMatches)
+	if total == 0 {
+		m.palettePaginator.TotalPages = 1
+		m.palettePaginator.Page = 0
+		m.paletteIndex = 0
+		return
+	}
+	totalPages := total / m.palettePaginator.PerPage
+	if total%m.palettePaginator.PerPage != 0 {
+		totalPages++
+	}
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	m.palettePaginator.TotalPages = totalPages
+	if m.palettePaginator.Page >= totalPages {
+		m.palettePaginator.Page = totalPages - 1
+	}
+	if m.palettePaginator.Page < 0 {
+		m.palettePaginator.Page = 0
+	}
+	if m.paletteIndex >= total {
+		m.paletteIndex = total - 1
+	}
+	if m.paletteIndex < 0 {
+		m.paletteIndex = 0
+	}
+	start := m.palettePaginator.Page * m.palettePaginator.PerPage
+	if start >= total {
+		start = (totalPages - 1) * m.palettePaginator.PerPage
+		if start < 0 {
+			start = 0
+		}
+		m.palettePaginator.Page = totalPages - 1
+	}
+	end := start + m.palettePaginator.PerPage
+	if end > total {
+		end = total
+	}
+	if end <= start {
+		end = start + 1
+		if end > total {
+			end = total
+		}
+	}
+	if m.paletteIndex < start {
+		m.paletteIndex = start
+	}
+	if m.paletteIndex >= end {
+		m.paletteIndex = end - 1
+	}
+	if m.paletteIndex < 0 {
+		m.paletteIndex = 0
+	}
 }
 
 func (m *model) executePaletteCommand(raw string) tea.Cmd {
@@ -2260,17 +2858,32 @@ func (m *model) renderPaletteMatches(width int) string {
 	if len(m.paletteMatches) == 0 {
 		return "No matches"
 	}
-	limit := len(m.paletteMatches)
-	if limit > 8 {
-		limit = 8
-	}
 	if width < 10 {
 		width = 10
 	}
-	header := m.styles.statusHint.Render("↑/↓ select • Enter run • Esc cancel")
+	start, end := m.palettePaginator.GetSliceBounds(len(m.paletteMatches))
+	if start < 0 {
+		start = 0
+	}
+	if end > len(m.paletteMatches) {
+		end = len(m.paletteMatches)
+	}
+	if start >= end {
+		start = 0
+		if m.palettePaginator.PerPage > 0 {
+			end = min(len(m.paletteMatches), start+m.palettePaginator.PerPage)
+		} else {
+			end = len(m.paletteMatches)
+		}
+	}
+	headerParts := []string{"↑/↓ select", "Enter run", "Esc cancel"}
+	if m.palettePaginator.TotalPages > 1 {
+		headerParts = append(headerParts, fmt.Sprintf("←/→ page %s", m.palettePaginator.View()))
+	}
+	header := m.styles.statusHint.Render(strings.Join(headerParts, " • "))
 	var lines []string
 	lines = append(lines, header)
-	for i := 0; i < limit; i++ {
+	for i := start; i < end; i++ {
 		entry := m.paletteMatches[i]
 		label := entry.label
 		needsProject := entry.requiresProject && m.currentProject == nil
@@ -2292,7 +2905,7 @@ func (m *model) renderPaletteMatches(width int) string {
 			style = m.styles.listSel
 		}
 		if disabled {
-			style = style.Foreground(palette.textMuted)
+			style = style.Faint(true)
 		}
 		lines = append(lines, style.Width(width-4).Render(line))
 	}
@@ -2515,10 +3128,10 @@ func (m *model) runCurrentItemCommand() tea.Cmd {
 	return m.enqueueJob(req)
 }
 
-func (m *model) handleDocItemSelection(item featureItemDefinition, activate bool) {
+func (m *model) handleDocItemSelection(item featureItemDefinition, activate bool) tea.Cmd {
 	if item.Meta == nil {
 		m.resetDocSelection()
-		return
+		return nil
 	}
 	docRel := strings.TrimSpace(item.Meta["docRelPath"])
 	if docRel == "" {
@@ -2527,10 +3140,12 @@ func (m *model) handleDocItemSelection(item featureItemDefinition, activate bool
 	m.currentDocRelPath = docRel
 	m.currentDocDiffBase = strings.TrimSpace(item.Meta["docDiffBase"])
 	m.currentDocType = strings.TrimSpace(item.Meta["docType"])
+	var cmd tea.Cmd
 	if activate && item.Meta["docsAction"] == "attach-rfp" {
-		m.startAttachRFP()
+		cmd = m.startAttachRFP()
 	}
 	m.recordDocPreviewTelemetry(item)
+	return cmd
 }
 
 func (m *model) recordDocPreviewTelemetry(item featureItemDefinition) {
@@ -2793,21 +3408,18 @@ func (m *model) openSelectedServiceEndpoint(index int) {
 }
 
 func (m *model) startServicePolling() tea.Cmd {
+	if m.servicesPolling && m.servicesTimerActive {
+		return nil
+	}
 	m.servicesPolling = true
-	return m.scheduleServicePoll()
+	m.servicesTimer = timer.NewWithInterval(servicesPollInterval, time.Second)
+	m.servicesTimerActive = true
+	return m.servicesTimer.Init()
 }
 
 func (m *model) stopServicePolling() {
 	m.servicesPolling = false
-}
-
-func (m *model) scheduleServicePoll() tea.Cmd {
-	if !m.servicesPolling {
-		return nil
-	}
-	return tea.Tick(servicesPollInterval, func(time.Time) tea.Msg {
-		return servicesPollMsg{}
-	})
+	m.servicesTimerActive = false
 }
 
 func (m *model) loadServicesCmd() tea.Cmd {
@@ -2883,28 +3495,28 @@ func (m *model) recordServiceHealth(items []featureItemDefinition) {
 	}
 }
 
-func (m *model) handleDocsPreviewEnter() bool {
+func (m *model) handleDocsPreviewEnter() (bool, tea.Cmd) {
 	if m.currentItem.Meta == nil {
-		return false
+		return false, nil
 	}
 	switch m.currentItem.Meta["docsAction"] {
 	case "attach-rfp":
-		m.startAttachRFP()
-		return true
+		return true, m.startAttachRFP()
 	}
-	return false
+	return false, nil
 }
 
-func (m *model) startAttachRFP() {
+func (m *model) startAttachRFP() tea.Cmd {
 	if m.currentProject == nil {
 		m.appendLog("Select a project before attaching artifacts.")
 		m.setToast("Select a project first", 5*time.Second)
-		return
+		return nil
 	}
-	m.openInput("Attach RFP path", "", inputAttachRFP)
+	cmd := m.openPathPicker("Attach RFP file", "", inputAttachRFP, false, true)
 	m.inputField.Placeholder = "~/path/to/rfp.md"
-	m.appendLog("Attach RFP: Enter a file path to copy into .gpt-creator/staging/inputs/.")
-	m.setToast("Provide RFP file path", 5*time.Second)
+	m.appendLog("Attach RFP: Pick or enter a file to copy into .gpt-creator/staging/inputs/.")
+	m.setToast("Choose an RFP file", 5*time.Second)
+	return cmd
 }
 
 func (m *model) handleAttachRFPSubmit(raw string) bool {
@@ -3155,6 +3767,16 @@ func (m *model) refreshLogs() {
 	m.logs.SetContent(strings.Join(m.logLines, "\n"))
 }
 
+func (m *model) showSpinner(message string) {
+	m.spinnerActive = true
+	m.spinnerMessage = strings.TrimSpace(message)
+}
+
+func (m *model) hideSpinner() {
+	m.spinnerActive = false
+	m.spinnerMessage = ""
+}
+
 func (m *model) applyLayout() {
 	if m.width == 0 || m.height == 0 {
 		return
@@ -3162,6 +3784,20 @@ func (m *model) applyLayout() {
 
 	topChrome := 1
 	bottomChrome := 1
+
+	helpWidth := m.width - 4
+	if helpWidth < 0 {
+		helpWidth = 0
+	}
+	m.help.Width = helpWidth
+	helpView := ""
+	if m.width > 0 {
+		helpView = m.help.View(m.keys)
+	}
+	if helpView != "" {
+		bottomChrome += lipgloss.Height(helpView)
+	}
+
 	bodyHeight := m.height - topChrome - bottomChrome
 	if bodyHeight < 6 {
 		bodyHeight = 6
@@ -3629,7 +4265,7 @@ func (m *model) promptEnvValueEdit(entry envEntry) {
 	}
 	m.envEditingFile = m.currentEnvFile
 	m.envEditingEntry = entry
-	m.openInput(fmt.Sprintf("Value for %s", entry.Key), entry.Value, inputEnvEditValue)
+	m.openTextarea(fmt.Sprintf("Value for %s", entry.Key), entry.Value, inputEnvEditValue)
 }
 
 func (m *model) toggleEnvReveal(entry envEntry) {
@@ -3947,6 +4583,7 @@ func (m *model) applyBacklogFilters() {
 }
 
 func (m *model) handleBacklogLoaded(msg backlogLoadedMsg) {
+	m.hideSpinner()
 	m.backlogLoading = false
 	if msg.err != nil {
 		m.backlog = nil
@@ -4068,6 +4705,7 @@ func (m *model) handleBacklogStatusUpdated(msg backlogStatusUpdatedMsg) tea.Cmd 
 	m.backlogActive = msg.node
 	m.pendingBacklogReason = "status change"
 	m.backlogLoading = true
+	m.showSpinner("Updating task status…")
 	fields := map[string]string{"status": msg.status}
 	if m.currentProject != nil {
 		fields["project"] = filepath.Clean(m.currentProject.Path)
@@ -4111,6 +4749,13 @@ func (m *model) renderBacklogSummary() string {
 		fmt.Sprintf("Epics %d • Stories %d • Tasks %d", s.Epics, s.Stories, s.Tasks),
 		fmt.Sprintf("Done %d • Doing %d • Todo %d • Blocked %d", s.DoneTasks, s.DoingTasks, s.TodoTasks, s.BlockedTasks),
 	}
+	if s.Tasks > 0 {
+		percent := float64(s.DoneTasks) / float64(max(s.Tasks, 1))
+		lines = append(lines,
+			fmt.Sprintf("Progress %d/%d", s.DoneTasks, s.Tasks),
+			renderProgressBar(percent, 36),
+		)
+	}
 	if !s.LastUpdatedAt.IsZero() {
 		lines = append(lines, fmt.Sprintf("Last update %s ago", formatRelativeTime(s.LastUpdatedAt)))
 	}
@@ -4146,6 +4791,11 @@ func (m *model) renderBacklogPreview(row backlogRow) string {
 				b.WriteString(fmt.Sprintf("Key: %s\n", story.Key))
 			}
 			b.WriteString(fmt.Sprintf("Tasks: %d/%d complete\nStatus: %s\n", story.Completed, story.Total, strings.ToUpper(displayStatus(story.Status))))
+			if story.Total > 0 {
+				percent := float64(story.Completed) / float64(max(story.Total, 1))
+				b.WriteString(renderProgressBar(percent, 32))
+				b.WriteRune('\n')
+			}
 			if story.LastRun != "" {
 				b.WriteString(fmt.Sprintf("Last run: %s\n", story.LastRun))
 			}
@@ -4282,6 +4932,27 @@ func (m *model) renderStatus() string {
 	if m.currentProject != nil {
 		segments = append(segments, m.styles.statusSeg.Render("Project: "+m.currentProject.Name))
 	}
+	if m.spinnerActive {
+		spin := m.spinner.View()
+		if trimmed := strings.TrimSpace(m.spinnerMessage); trimmed != "" {
+			spin = fmt.Sprintf("%s %s", spin, trimmed)
+		}
+		segments = append(segments, m.styles.statusSeg.Render(spin))
+	}
+	if m.jobTimingActive && strings.TrimSpace(m.jobTimingTitle) != "" {
+		title := strings.TrimSpace(m.jobTimingTitle)
+		elapsed := m.jobStopwatch.Elapsed()
+		segments = append(segments, m.styles.statusSeg.Render(fmt.Sprintf("Job: %s %s", title, formatElapsed(elapsed))))
+	} else if !m.jobTimingActive && m.jobLastDuration > 0 {
+		segments = append(segments, m.styles.statusSeg.Render("Last job "+formatElapsed(m.jobLastDuration)))
+	}
+	if m.servicesPolling && m.currentFeature == "services" && m.servicesTimerActive {
+		remaining := m.servicesTimer.Timeout
+		if remaining < 0 {
+			remaining = 0
+		}
+		segments = append(segments, m.styles.statusSeg.Render("Refresh in "+formatElapsed(remaining)))
+	}
 	segments = append(segments, m.styles.statusSeg.Render(fmt.Sprintf("Logs: %s", ternary(m.showLogs, "on", "off"))))
 	if m.currentFeature == "tasks" {
 		segments = append(segments, m.styles.statusSeg.Render("Type: "+m.backlogFilterType.String()))
@@ -4294,7 +4965,7 @@ func (m *model) renderStatus() string {
 			segments = append(segments, m.styles.statusSeg.Render(m.toastMessage))
 		}
 	}
-	left := strings.Join(segments, lipgloss.NewStyle().Foreground(palette.border).Render("│"))
+	left := strings.Join(segments, lipgloss.NewStyle().Render("│"))
 
 	timeStr := m.styles.statusHint.Render(time.Now().Format("15:04:05"))
 	gap := max(0, m.width-lipgloss.Width(left)-lipgloss.Width(timeStr))
@@ -4353,19 +5024,10 @@ func defaultWorkspaceRoots() []workspaceRoot {
 	var roots []workspaceRoot
 	seen := make(map[string]struct{})
 
-	cwd, err := os.Getwd()
-	if err == nil {
-		addRootIfExists(&roots, seen, cwd)
-		workspaceDir := filepath.Join(cwd, "workspace")
-		addRootIfExists(&roots, seen, workspaceDir)
-	}
 	if home, err := os.UserHomeDir(); err == nil {
 		addRootIfExists(&roots, seen, filepath.Join(home, "gpt-projects"))
 	}
 
-	if len(roots) == 0 && err == nil {
-		roots = append(roots, workspaceRoot{Label: labelForPath(cwd), Path: cwd})
-	}
 	return roots
 }
 
@@ -4934,25 +5596,71 @@ func renderPipeline(project *discoveredProject) string {
 		return "Pipeline progress unavailable.\n"
 	}
 
+	done := 0
 	blocks := make([]string, len(stats.Pipeline))
 	for i, step := range stats.Pipeline {
 		label := pipelineSteps[i].Label
-		style := lipgloss.NewStyle().Foreground(palette.textMuted)
+		style := lipgloss.NewStyle()
 		icon := "…"
 		switch step.State {
 		case pipelineStateDone:
-			style = lipgloss.NewStyle().Foreground(palette.success)
+			style = style.Bold(true)
 			icon = "✓"
+			done++
 		case pipelineStateActive:
-			style = lipgloss.NewStyle().Foreground(palette.info)
+			style = style.Underline(true)
 			icon = "●"
 		default:
-			style = lipgloss.NewStyle().Foreground(palette.textMuted)
+			style = style.Faint(true)
 			icon = "…"
 		}
 		blocks[i] = style.Render("[" + icon + "] " + label)
 	}
-	return strings.Join(blocks, "  ") + "\n"
+	total := len(stats.Pipeline)
+	percent := 0.0
+	if total > 0 {
+		percent = float64(done) / float64(total)
+	}
+	bar := renderProgressBar(percent, 42)
+	summary := fmt.Sprintf("Pipeline %d/%d\n%s\n", done, total, bar)
+	return summary + strings.Join(blocks, "  ") + "\n"
+}
+
+func renderProgressBar(percent float64, width int) string {
+	if percent < 0 {
+		percent = 0
+	} else if percent > 1 {
+		percent = 1
+	}
+	if width <= 0 {
+		width = 32
+	}
+	bar := progress.New(
+		progress.WithDefaultGradient(),
+		progress.WithWidth(width),
+	)
+	return bar.ViewAs(percent)
+}
+
+func formatElapsed(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	if d < time.Second {
+		return "<1s"
+	}
+	totalSeconds := int(d / time.Second)
+	if totalSeconds < 60 {
+		return fmt.Sprintf("%ds", totalSeconds)
+	}
+	totalMinutes := totalSeconds / 60
+	if totalMinutes < 60 {
+		seconds := totalSeconds % 60
+		return fmt.Sprintf("%dm%02ds", totalMinutes, seconds)
+	}
+	hours := totalMinutes / 60
+	minutes := totalMinutes % 60
+	return fmt.Sprintf("%dh%02dm", hours, minutes)
 }
 
 func ternary[T any](cond bool, a, b T) T {

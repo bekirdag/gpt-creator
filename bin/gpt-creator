@@ -5928,7 +5928,7 @@ ensure_go_runtime() {
     fi
   fi
 
-  if [[ -z "$resolved_bin" && command -v go >/dev/null 2>&1 ]]; then
+  if [[ -z "$resolved_bin" ]] && command -v go >/dev/null 2>&1; then
     resolved_bin="$(command -v go)"
   fi
 

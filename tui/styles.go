@@ -48,9 +48,6 @@ func newStyles() styles {
 		TopRight:    " ",
 		BottomLeft:  "╰",
 		BottomRight: "╯",
-		MiddleLeft:  " ",
-		MiddleRight: " ",
-		Middle:      " ",
 	}
 
 	panelBorder := lipgloss.RoundedBorder()

@@ -10894,9 +10894,19 @@ cmd_tui() {
   if [[ ! -d "$tui_dir" ]]; then
     die "TUI sources not found at ${tui_dir}"
   fi
+  local skip_tidy="${GC_SKIP_TUI_TIDY:-}"
   info "Launching gpt-creator TUI (preview)"
   (
     cd "$tui_dir"
+    if [[ -z "$skip_tidy" ]]; then
+      info "Ensuring TUI Go modules are tidy"
+      if ! "$go_bin" mod tidy >/dev/null 2>&1; then
+        warn "'go mod tidy' reported issues; retrying with output"
+        if ! "$go_bin" mod tidy; then
+          die "Failed to tidy Go modules required for the TUI"
+        fi
+      fi
+    fi
     "$go_bin" run . "$@"
   )
 }

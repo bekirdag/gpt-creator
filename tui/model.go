@@ -41,6 +41,8 @@ const (
 	focusPreview
 )
 
+const horizontalScrollStep = 4
+
 type workspaceItemKind int
 
 const (
@@ -320,6 +322,8 @@ type model struct {
 	keys   keyMap
 	help   help.Model
 
+	markdownTheme markdownTheme
+
 	workspaceRoots []workspaceRoot
 	currentRoot    *workspaceRoot
 	projects       []discoveredProject
@@ -447,10 +451,12 @@ type model struct {
 func initialModel() *model {
 	s := newStyles()
 	m := &model{
-		styles:     s,
-		keys:       newKeyMap(),
-		help:       help.New(),
-		logsHeight: 8,
+		styles:        s,
+		keys:          newKeyMap(),
+		help:          help.New(),
+		markdownTheme: currentMarkdownTheme(),
+		showLogs:      true,
+		logsHeight:    8,
 		logLines: []string{
 			"[INFO] Select a workspace root or add a project path to begin.",
 			"[TIP] Use Tab/Shift+Tab or h/l to move focus across columns.",
@@ -466,6 +472,8 @@ func initialModel() *model {
 	m.help.Styles.FullKey = m.styles.statusHint.Copy()
 	m.help.Styles.FullDesc = m.styles.statusHint.Copy()
 	m.help.Styles.FullSeparator = m.styles.statusSeg.Copy()
+
+	m.help.ShowAll = true
 
 	m.inputField = textinput.New()
 	m.inputField.Prompt = "> "
@@ -639,6 +647,7 @@ func initialModel() *model {
 	m.previewCol = newPreviewColumn(32)
 	m.previewCol.SetContent("Select an item to preview details.\n")
 	m.previewCol.ApplyStyles(m.styles)
+	m.applyMarkdownTheme(m.markdownTheme, false)
 
 	m.columns = []column{
 		m.workspaceCol,
@@ -1093,6 +1102,14 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		}
 	}
 	switch {
+	case msg.String() == "H":
+		if m.scrollFocusedColumn(-horizontalScrollStep) {
+			return true, nil
+		}
+	case msg.String() == "L":
+		if m.scrollFocusedColumn(horizontalScrollStep) {
+			return true, nil
+		}
 	case key.Matches(msg, m.keys.quit):
 		return true, tea.Quit
 	case key.Matches(msg, m.keys.nextFocus):
@@ -1236,6 +1253,40 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	}
 
 	return false, nil
+}
+
+func (m *model) scrollFocusedColumn(delta int) bool {
+	if delta == 0 || m.focus < 0 || m.focus >= len(m.columns) {
+		return false
+	}
+	col := m.columns[m.focus]
+	if col == nil {
+		return false
+	}
+	if col.ScrollHorizontal(delta) {
+		m.columns[m.focus] = col
+		return true
+	}
+	return false
+}
+
+func (m *model) applyMarkdownTheme(theme markdownTheme, announce bool) {
+	setMarkdownTheme(theme)
+	m.markdownTheme = theme
+	if m.previewCol != nil {
+		m.previewCol.Refresh()
+	}
+	m.refreshCommandCatalog()
+	if announce {
+		message := fmt.Sprintf("Markdown theme: %s", markdownThemeLabel(theme))
+		m.appendLog(message)
+		m.setToast(message, 3*time.Second)
+	}
+}
+
+func (m *model) toggleMarkdownTheme() {
+	next := nextMarkdownTheme(m.markdownTheme)
+	m.applyMarkdownTheme(next, true)
 }
 
 func (m *model) stepBack() {
@@ -2622,15 +2673,57 @@ func (m *model) refreshCommandCatalog() {
 			seen[key] = entry
 		}
 	}
-	entries := make([]paletteEntry, 0, len(seen))
+	entries := make([]paletteEntry, 0, len(seen)+4)
 	for _, entry := range seen {
 		entries = append(entries, entry)
 	}
+	currentTheme := m.markdownTheme
+	entries = append(entries,
+		paletteEntry{
+			label:       "Markdown Theme: Auto",
+			description: themePaletteDescription(markdownThemeAuto, currentTheme),
+			meta: map[string]string{
+				"action": "set-markdown-theme",
+				"theme":  markdownThemeAuto.String(),
+			},
+		},
+		paletteEntry{
+			label:       "Markdown Theme: Dark",
+			description: themePaletteDescription(markdownThemeDark, currentTheme),
+			meta: map[string]string{
+				"action": "set-markdown-theme",
+				"theme":  markdownThemeDark.String(),
+			},
+		},
+		paletteEntry{
+			label:       "Markdown Theme: Light",
+			description: themePaletteDescription(markdownThemeLight, currentTheme),
+			meta: map[string]string{
+				"action": "set-markdown-theme",
+				"theme":  markdownThemeLight.String(),
+			},
+		},
+		paletteEntry{
+			label:       "Markdown Theme: Toggle",
+			description: fmt.Sprintf("Cycle Markdown theme (current: %s)", markdownThemeLabel(currentTheme)),
+			meta: map[string]string{
+				"action": "toggle-markdown-theme",
+			},
+		},
+	)
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].label < entries[j].label
 	})
 	m.commandEntries = entries
 	m.updatePaletteMatches(m.inputField.Value())
+}
+
+func themePaletteDescription(theme, current markdownTheme) string {
+	suffix := ""
+	if theme == current {
+		suffix = " (current)"
+	}
+	return fmt.Sprintf("Use %s theme%s", markdownThemeLabel(theme), suffix)
 }
 
 func (m *model) updatePaletteMatches(query string) {
@@ -2806,6 +2899,17 @@ func (m *model) executePaletteCommand(raw string) tea.Cmd {
 }
 
 func (m *model) runPaletteEntry(entry paletteEntry) tea.Cmd {
+	if len(entry.command) == 0 {
+		if entry.meta != nil {
+			switch entry.meta["action"] {
+			case "toggle-markdown-theme":
+				m.toggleMarkdownTheme()
+			case "set-markdown-theme":
+				m.applyMarkdownTheme(markdownThemeFromString(entry.meta["theme"]), true)
+			}
+		}
+		return nil
+	}
 	if entry.requiresProject && m.currentProject == nil {
 		m.appendLog("Select a project before running this command.")
 		return nil
@@ -3828,15 +3932,15 @@ func (m *model) applyLayout() {
 		m.logs.Height = m.logsHeight - 2
 	}
 
-	widths := []int{22, 26, 26, 28}
+	widths := []int{44, 52, 52, 28}
 	if m.usingTasksLayout {
-		widths = []int{22, 26, 32, 36}
+		widths = []int{44, 52, 64, 36}
 	} else if m.usingServicesLayout {
-		widths = []int{22, 26, 24, 44}
+		widths = []int{44, 52, 48, 44}
 	} else if m.usingArtifactsLayout {
-		widths = []int{22, 26, 26, 36}
+		widths = []int{44, 52, 52, 36}
 	} else if m.usingEnvLayout {
-		widths = []int{22, 26, 28, 42}
+		widths = []int{44, 52, 56, 42}
 	}
 	remaining := availableWidth
 	for i := range widths {
@@ -4977,15 +5081,8 @@ func (m *model) renderStatus() string {
 			segments = append(segments, m.styles.statusSeg.Render(m.toastMessage))
 		}
 	}
-	left := strings.Join(segments, lipgloss.NewStyle().Render("│"))
-
-	timeStr := m.styles.statusHint.Render(time.Now().Format("15:04:05"))
-	gap := max(0, m.width-lipgloss.Width(left)-lipgloss.Width(timeStr))
-	line := lipgloss.JoinHorizontal(lipgloss.Top,
-		left,
-		lipgloss.PlaceHorizontal(gap, lipgloss.Right, timeStr),
-	)
-	return m.styles.statusBar.Width(m.width).Render(line)
+	content := strings.Join(segments, lipgloss.NewStyle().Render("│"))
+	return m.styles.statusBar.Width(m.width).Render(content)
 }
 
 func (m *model) findRoot(path string) *workspaceRoot {

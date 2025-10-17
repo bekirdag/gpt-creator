@@ -13,7 +13,11 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
+	reansi "github.com/muesli/reflow/ansi"
 )
+
+const maxColumnScroll = 240
 
 type column interface {
 	SetSize(width, height int)
@@ -21,6 +25,7 @@ type column interface {
 	View(styles styles, focused bool) string
 	Title() string
 	FocusValue() string
+	ScrollHorizontal(delta int) bool
 }
 
 type selectableColumn struct {
@@ -29,6 +34,7 @@ type selectableColumn struct {
 	delegate    *list.DefaultDelegate
 	width       int
 	height      int
+	scrollX     int
 	onSelect    func(entry listEntry) tea.Cmd
 	onHighlight func(entry listEntry) tea.Cmd
 }
@@ -76,7 +82,19 @@ func (c *selectableColumn) SetSize(width, height int) {
 		height = 3
 	}
 	c.height = height
-	c.model.SetSize(width, height-2)
+	c.applyModelSize()
+}
+
+func (c *selectableColumn) applyModelSize() {
+	effectiveWidth := c.width + c.scrollX
+	if effectiveWidth < c.width {
+		effectiveWidth = c.width
+	}
+	contentHeight := c.height - 2
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+	c.model.SetSize(effectiveWidth, contentHeight)
 }
 
 func (c *selectableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
@@ -105,12 +123,16 @@ func (c *selectableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 }
 
 func (c *selectableColumn) View(s styles, focused bool) string {
+	title := s.columnTitle.Render(c.title)
 	content := c.model.View()
-	body := lipgloss.JoinVertical(lipgloss.Left, s.columnTitle.Render(c.title), content)
+	body := lipgloss.JoinVertical(lipgloss.Left, title, content)
+	panel := s.panel
+	bg := crushSurface
 	if focused {
-		return s.panelFocused.Width(c.width).Render(body)
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
 	}
-	return s.panel.Width(c.width).Render(body)
+	return renderPanelWithScroll(panel, c.width, c.height, c.scrollX, body, bg)
 }
 
 func (c *selectableColumn) Title() string {
@@ -122,6 +144,25 @@ func (c *selectableColumn) FocusValue() string {
 		return item.title
 	}
 	return ""
+}
+
+func (c *selectableColumn) ScrollHorizontal(delta int) bool {
+	if delta == 0 {
+		return false
+	}
+	newOffset := c.scrollX + delta
+	if newOffset < 0 {
+		newOffset = 0
+	}
+	if newOffset > maxColumnScroll {
+		newOffset = maxColumnScroll
+	}
+	if newOffset == c.scrollX {
+		return false
+	}
+	c.scrollX = newOffset
+	c.applyModelSize()
+	return true
 }
 
 func (c *selectableColumn) SelectedEntry() (listEntry, bool) {
@@ -329,10 +370,13 @@ func (c *backlogTreeColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 
 func (c *backlogTreeColumn) View(s styles, focused bool) string {
 	body := lipgloss.JoinVertical(lipgloss.Left, s.columnTitle.Render(c.title), c.model.View())
+	panel := s.panel
+	bg := crushSurface
 	if focused {
-		return s.panelFocused.Width(c.width).Render(body)
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
 	}
-	return s.panel.Width(c.width).Render(body)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg)
 }
 
 func (c *backlogTreeColumn) Title() string {
@@ -344,6 +388,10 @@ func (c *backlogTreeColumn) FocusValue() string {
 		return entry.title
 	}
 	return ""
+}
+
+func (c *backlogTreeColumn) ScrollHorizontal(delta int) bool {
+	return false
 }
 
 func (c *backlogTreeColumn) SelectNode(node backlogNode) {
@@ -516,10 +564,13 @@ func (c *backlogTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 
 func (c *backlogTableColumn) View(s styles, focused bool) string {
 	body := lipgloss.JoinVertical(lipgloss.Left, s.columnTitle.Render(c.title), c.table.View())
+	panel := s.panel
+	bg := crushSurface
 	if focused {
-		return s.panelFocused.Width(c.width).Render(body)
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
 	}
-	return s.panel.Width(c.width).Render(body)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg)
 }
 
 func (c *backlogTableColumn) Title() string {
@@ -531,6 +582,10 @@ func (c *backlogTableColumn) FocusValue() string {
 		return row.Title
 	}
 	return ""
+}
+
+func (c *backlogTableColumn) ScrollHorizontal(delta int) bool {
+	return false
 }
 
 func (c *backlogTableColumn) SelectNode(node backlogNode) {
@@ -772,10 +827,13 @@ func (c *artifactTreeColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 
 func (c *artifactTreeColumn) View(s styles, focused bool) string {
 	body := lipgloss.JoinVertical(lipgloss.Left, s.columnTitle.Render(c.title), c.model.View())
+	panel := s.panel
+	bg := crushSurface
 	if focused {
-		return s.panelFocused.Width(c.width).Render(body)
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
 	}
-	return s.panel.Width(c.width).Render(body)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg)
 }
 
 func (c *artifactTreeColumn) Title() string {
@@ -787,6 +845,10 @@ func (c *artifactTreeColumn) FocusValue() string {
 		return node.Rel
 	}
 	return ""
+}
+
+func (c *artifactTreeColumn) ScrollHorizontal(delta int) bool {
+	return false
 }
 
 type actionColumn struct {
@@ -943,10 +1005,13 @@ func (c *actionColumn) View(s styles, focused bool) string {
 		body = c.table.View()
 	}
 	inner := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	panel := s.panel
+	bg := crushSurface
 	if focused {
-		return s.panelFocused.Width(c.width).Render(inner)
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
 	}
-	return s.panel.Width(c.width).Render(inner)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, inner, bg)
 }
 
 func (c *actionColumn) Title() string {
@@ -958,6 +1023,10 @@ func (c *actionColumn) FocusValue() string {
 		return item.Title
 	}
 	return ""
+}
+
+func (c *actionColumn) ScrollHorizontal(delta int) bool {
+	return false
 }
 
 type envTableColumn struct {
@@ -1173,10 +1242,13 @@ func (c *envTableColumn) View(s styles, focused bool) string {
 		body = c.table.View()
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	panel := s.panel
+	bg := crushSurface
 	if focused {
-		return s.panelFocused.Width(c.width).Render(content)
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
 	}
-	return s.panel.Width(c.width).Render(content)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg)
 }
 
 func (c *envTableColumn) Title() string {
@@ -1188,6 +1260,10 @@ func (c *envTableColumn) FocusValue() string {
 		return entry.Key
 	}
 	return ""
+}
+
+func (c *envTableColumn) ScrollHorizontal(delta int) bool {
+	return false
 }
 
 func envEntryIdentifier(entry envEntry) string {
@@ -1366,10 +1442,13 @@ func (c *servicesTableColumn) View(s styles, focused bool) string {
 		body = c.table.View()
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	panel := s.panel
+	bg := crushSurface
 	if focused {
-		return s.panelFocused.Width(c.width).Render(content)
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
 	}
-	return s.panel.Width(c.width).Render(content)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg)
 }
 
 func (c *servicesTableColumn) Title() string {
@@ -1386,6 +1465,10 @@ func (c *servicesTableColumn) FocusValue() string {
 	return ""
 }
 
+func (c *servicesTableColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
 func (c *servicesTableColumn) ApplyStyles(s styles) {
 	c.table.SetStyles(table.Styles{
 		Header:   s.tableHeader,
@@ -1395,11 +1478,13 @@ func (c *servicesTableColumn) ApplyStyles(s styles) {
 }
 
 type previewColumn struct {
-	title   string
-	width   int
-	height  int
-	content string
-	view    viewport.Model
+	title       string
+	width       int
+	height      int
+	rawContent  string
+	rendered    string
+	useMarkdown bool
+	view        viewport.Model
 }
 
 func newPreviewColumn(width int) *previewColumn {
@@ -1422,11 +1507,20 @@ func (p *previewColumn) SetSize(width, height int) {
 	p.height = height
 	p.view.Width = width - 2
 	p.view.Height = height - 3
+	setMarkdownWordWrap(p.view.Width)
+	p.refresh()
 }
 
 func (p *previewColumn) SetContent(content string) {
-	p.content = content
-	p.view.SetContent(content)
+	p.rawContent = content
+	p.useMarkdown = shouldRenderAsMarkdown(content)
+	p.refresh()
+}
+
+func (p *previewColumn) SetMarkdownContent(content string) {
+	p.rawContent = content
+	p.useMarkdown = true
+	p.refresh()
 }
 
 func (p *previewColumn) Update(msg tea.Msg) (column, tea.Cmd) {
@@ -1438,10 +1532,13 @@ func (p *previewColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 func (p *previewColumn) View(s styles, focused bool) string {
 	header := s.columnTitle.Render(p.title)
 	body := header + "\n" + p.view.View()
+	panel := s.panel
+	bg := crushSurface
 	if focused {
-		return s.panelFocused.Width(p.width).Render(body)
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
 	}
-	return s.panel.Width(p.width).Render(body)
+	return renderPanelWithScroll(panel, p.width, p.height, 0, body, bg)
 }
 
 func (p *previewColumn) Title() string {
@@ -1450,6 +1547,50 @@ func (p *previewColumn) Title() string {
 
 func (p *previewColumn) FocusValue() string {
 	return ""
+}
+
+func (p *previewColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func (p *previewColumn) Refresh() {
+	p.refresh()
+}
+
+func (p *previewColumn) refresh() {
+	rendered := p.rawContent
+	if p.useMarkdown {
+		setMarkdownWordWrap(p.view.Width)
+		rendered = RenderMarkdown(p.rawContent)
+	}
+	p.rendered = rendered
+	p.view.SetContent(rendered)
+}
+
+func shouldRenderAsMarkdown(content string) bool {
+	if strings.Contains(content, "\x1b[") {
+		return false
+	}
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return false
+	}
+	if strings.Contains(trimmed, "```") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "#") || strings.Contains(trimmed, "\n#") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "> ") || strings.Contains(trimmed, "\n> ") {
+		return true
+	}
+	if strings.Contains(trimmed, "[") && strings.Contains(trimmed, "](") {
+		return true
+	}
+	if strings.Contains(trimmed, "\n|") && strings.Contains(trimmed, "|") {
+		return true
+	}
+	return false
 }
 
 // helpers to build column items
@@ -2611,6 +2752,158 @@ func itemRequiresDocker(item featureItemDefinition) bool {
 		return true
 	}
 	return false
+}
+
+func renderPanelWithScroll(panel lipgloss.Style, width, height, scrollX int, content string, background lipgloss.Color) string {
+	if width <= 0 {
+		return ""
+	}
+	if height <= 0 {
+		height = 1
+	}
+
+	innerWidth := width - panel.GetHorizontalFrameSize()
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	innerHeight := height - panel.GetVerticalFrameSize()
+	if innerHeight < 1 {
+		innerHeight = 1
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) < innerHeight {
+		padding := innerHeight - len(lines)
+		for i := 0; i < padding; i++ {
+			lines = append(lines, "")
+		}
+	} else if len(lines) > innerHeight {
+		lines = lines[:innerHeight]
+	}
+
+	bgSeq := ansiBackgroundSequence(background)
+
+	for i := range lines {
+		lines[i] = sliceLineANSI(lines[i], scrollX, innerWidth, bgSeq)
+	}
+
+	body := strings.Join(lines, "\n")
+	return panel.Copy().
+		Width(width).
+		Height(height).
+		Render(body)
+}
+
+func sliceLineANSI(line string, start, width int, fillerSeq string) string {
+	if width <= 0 {
+		return ""
+	}
+	if start < 0 {
+		start = 0
+	}
+
+	var out strings.Builder
+	var seq strings.Builder
+	active := []string{}
+	if fillerSeq != "" {
+		active = append(active, fillerSeq)
+	}
+	var capturing bool
+	var ansiMode bool
+	var cellPos int
+	var captured int
+
+	writeActive := func() {
+		if capturing {
+			return
+		}
+		for _, s := range active {
+			out.WriteString(s)
+		}
+		capturing = true
+	}
+
+	for _, r := range line {
+		if ansiMode {
+			seq.WriteRune(r)
+			if reansi.IsTerminator(r) {
+				sequence := seq.String()
+				if capturing {
+					out.WriteString(sequence)
+				} else {
+					if sequence == ansiReset {
+						active = nil
+						if fillerSeq != "" {
+							active = append(active, fillerSeq)
+						}
+					} else {
+						active = append(active, sequence)
+					}
+				}
+				ansiMode = false
+				seq.Reset()
+			}
+			continue
+		}
+		if r == reansi.Marker {
+			ansiMode = true
+			seq.Reset()
+			seq.WriteRune(r)
+			continue
+		}
+
+		rw := runewidth.RuneWidth(r)
+		nextPos := cellPos + rw
+		if nextPos <= start {
+			cellPos = nextPos
+			continue
+		}
+
+		writeActive()
+		if captured+rw > width {
+			break
+		}
+		out.WriteRune(r)
+		captured += rw
+		cellPos = nextPos
+		if captured == width {
+			break
+		}
+	}
+
+	if !capturing {
+		if fillerSeq != "" {
+			return fillerSeq + strings.Repeat(" ", width) + ansiReset
+		}
+		return strings.Repeat(" ", width)
+	}
+
+	if captured < width {
+		if fillerSeq != "" {
+			out.WriteString(fillerSeq)
+		}
+		out.WriteString(strings.Repeat(" ", width-captured))
+	}
+	out.WriteString(ansiReset)
+	return out.String()
+}
+
+func ansiBackgroundSequence(color lipgloss.Color) string {
+	value := strings.TrimSpace(string(color))
+	if value == "" {
+		return ""
+	}
+	value = strings.TrimPrefix(value, "#")
+	if len(value) != 6 {
+		return ""
+	}
+	r, errR := strconv.ParseUint(value[0:2], 16, 8)
+	g, errG := strconv.ParseUint(value[2:4], 16, 8)
+	b, errB := strconv.ParseUint(value[4:6], 16, 8)
+	if errR != nil || errG != nil || errB != nil {
+		return ""
+	}
+	return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
 }
 
 func maxInt(a, b int) int {

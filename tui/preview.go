@@ -9,10 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-
-	"github.com/charmbracelet/glamour"
 )
 
 const (
@@ -28,12 +25,6 @@ const (
 	ansiRed   = "\x1b[31m"
 	ansiGreen = "\x1b[32m"
 	ansiDim   = "\x1b[2m"
-)
-
-var (
-	glamourOnce     sync.Once
-	glamourRenderer *glamour.TermRenderer
-	glamourErr      error
 )
 
 func renderDetailedPreview(project *discoveredProject, featureKey string, item featureItemDefinition) string {
@@ -312,7 +303,7 @@ func previewDocFile(project *discoveredProject, rel string) string {
 	if strings.TrimSpace(content) == "" {
 		return fmt.Sprintf("%s\n\n(empty document)\n", abs)
 	}
-	rendered := renderMarkdown(content)
+	rendered := RenderMarkdown(content)
 	rendered = limitLines(rendered, maxDocPreviewLines)
 	header := fmt.Sprintf("%s\nUpdated: %s (%s ago)\nSize: %s\n", abs, info.ModTime().Format(time.RFC822), formatRelativeTime(info.ModTime()), formatByteSize(info.Size()))
 	return header + "\n" + rendered
@@ -679,31 +670,6 @@ func readFileLimited(path string, maxBytes, maxLines int) string {
 		lines = lines[:maxLines]
 	}
 	return strings.Join(lines, "\n")
-}
-
-func renderMarkdown(content string) string {
-	renderer := getGlamourRenderer()
-	if renderer == nil {
-		return content
-	}
-	out, err := renderer.Render(content)
-	if err != nil {
-		return content
-	}
-	return out
-}
-
-func getGlamourRenderer() *glamour.TermRenderer {
-	glamourOnce.Do(func() {
-		glamourRenderer, glamourErr = glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
-			glamour.WithWordWrap(0),
-		)
-	})
-	if glamourErr != nil {
-		return nil
-	}
-	return glamourRenderer
 }
 
 type diffOp int

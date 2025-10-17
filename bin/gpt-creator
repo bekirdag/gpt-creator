@@ -5913,6 +5913,111 @@ PROMPT
   fi
 }
 
+ensure_go_runtime() {
+  local min_major=1
+  local min_minor=21
+  local target_version="1.22.4"
+  local requested_bin="${GO_BIN:-}"
+  local resolved_bin=""
+
+  if [[ -n "$requested_bin" ]]; then
+    if command -v "$requested_bin" >/dev/null 2>&1; then
+      resolved_bin="$(command -v "$requested_bin")"
+    else
+      warn "GO_BIN is set to '${requested_bin}' but that binary was not found on PATH."
+    fi
+  fi
+
+  if [[ -z "$resolved_bin" && command -v go >/dev/null 2>&1 ]]; then
+    resolved_bin="$(command -v go)"
+  fi
+
+  if [[ -n "$resolved_bin" ]]; then
+    local raw_version
+    raw_version="$("$resolved_bin" version 2>/dev/null | awk '{print $3}')"
+    local version="${raw_version#go}"
+    version="${version%%[^0-9.]*}"
+    local IFS=.
+    read -r version_major version_minor _ <<<"${version}"
+    version_major="${version_major:-0}"
+    version_minor="${version_minor:-0}"
+    if (( 10#$version_major > min_major )) || { (( 10#$version_major == min_major )) && (( 10#$version_minor >= min_minor )); }; then
+      GC_GO_BIN="$resolved_bin"
+      export GO_BIN="$GC_GO_BIN"
+      return
+    fi
+    warn "Found Go ${version:-unknown} at ${resolved_bin}, but need ≥ ${min_major}.${min_minor}."
+  fi
+
+  local os_name arch_name go_os go_arch
+  os_name="$(uname -s)"
+  arch_name="$(uname -m)"
+  case "$os_name" in
+    Linux) go_os="linux" ;;
+    Darwin) go_os="darwin" ;;
+    *)
+      die "Unsupported OS (${os_name}) for automatic Go installation. Install Go ${min_major}.${min_minor}+ and set GO_BIN."
+      ;;
+  esac
+
+  case "$arch_name" in
+    x86_64|amd64) go_arch="amd64" ;;
+    arm64|aarch64) go_arch="arm64" ;;
+    *)
+      die "Unsupported architecture (${arch_name}) for automatic Go installation. Install Go ${min_major}.${min_minor}+ and set GO_BIN."
+      ;;
+  esac
+
+  local base_dir
+  if [[ -n "${PLAN_DIR:-}" ]]; then
+    base_dir="$PLAN_DIR"
+  else
+    base_dir="${XDG_CACHE_HOME:-$HOME/.cache}/gpt-creator"
+    mkdir -p "$base_dir"
+  fi
+  local runtime_root="${base_dir}/.runtime/go"
+  local archive_basename="go${target_version}.${go_os}-${go_arch}"
+  local target_dir="${runtime_root}/${archive_basename}"
+  local go_root="${target_dir}/go"
+  local go_binary="${go_root}/bin/go"
+
+  mkdir -p "$runtime_root"
+
+  if [[ ! -x "$go_binary" ]]; then
+    info "Installing Go ${target_version} (${go_os}-${go_arch})"
+    local url="https://go.dev/dl/${archive_basename}.tar.gz"
+    local tmp_archive
+    tmp_archive="$(mktemp "${runtime_root}/go-${target_version}.XXXXXX")"
+    if ! curl -fsSL "$url" -o "$tmp_archive"; then
+      rm -f "$tmp_archive"
+      die "Failed to download Go toolchain from ${url}"
+    fi
+    rm -rf "$target_dir"
+    mkdir -p "$target_dir"
+    if ! tar -xzf "$tmp_archive" -C "$target_dir"; then
+      rm -f "$tmp_archive"
+      die "Failed to extract Go toolchain archive (${url})"
+    fi
+    rm -f "$tmp_archive"
+  fi
+
+  if [[ ! -x "$go_binary" ]]; then
+    die "Go toolchain installation incomplete; expected executable at ${go_binary}"
+  fi
+
+  local gopath="${target_dir}/gopath"
+  local cache_dir="${target_dir}/cache"
+  mkdir -p "${gopath}/bin" "${gopath}/pkg/mod" "${cache_dir}"
+  export PATH="${go_root}/bin:${PATH}"
+  export GOROOT="${go_root}"
+  export GOPATH="${gopath}"
+  export GOMODCACHE="${gopath}/pkg/mod"
+  export GOCACHE="${cache_dir}"
+  GC_GO_BIN="$go_binary"
+  export GO_BIN="$GC_GO_BIN"
+  ok "Go runtime pinned to ${target_version}"
+}
+
 ensure_node_runtime() {
   local root_dir="${1:-$PROJECT_ROOT}"
   local target_version="20.10.0"
@@ -10465,9 +10570,10 @@ EOF
 }
 
 cmd_tui() {
-  local go_bin="${GO_BIN:-go}"
+  ensure_go_runtime
+  local go_bin="${GC_GO_BIN:-${GO_BIN:-go}}"
   if ! command -v "$go_bin" >/dev/null 2>&1; then
-    die "'go' is required to run the gpt-creator TUI; install Go 1.21+ or set GO_BIN to an alternative."
+    die "Go 1.21+ is required to run the gpt-creator TUI. Automatic setup failed; install Go manually and set GO_BIN."
   fi
   local tui_dir="${CLI_ROOT}/tui"
   if [[ ! -d "$tui_dir" ]]; then

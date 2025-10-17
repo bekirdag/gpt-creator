@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +51,9 @@ const (
 	inputNewProjectConfirm
 	inputAttachRFP
 	inputCommandPalette
+	inputEnvEditValue
+	inputEnvNewKey
+	inputEnvNewValue
 )
 
 type workspaceRoot struct {
@@ -68,12 +72,27 @@ type projectItem struct {
 	project *discoveredProject
 }
 
+type envFileItem struct {
+	index int
+	state *envFileState
+}
+
 type paletteEntry struct {
 	label           string
 	command         []string
 	description     string
 	requiresProject bool
 	meta            map[string]string
+}
+
+type envFilesLoadedMsg struct {
+	states []*envFileState
+	err    error
+}
+
+type envFileSelectedMsg struct {
+	index    int
+	activate bool
 }
 
 type jobMsg interface {
@@ -227,21 +246,25 @@ type model struct {
 	currentFeature string
 	currentItem    featureItemDefinition
 
-	workspaceCol         *selectableColumn
-	projectsCol          *selectableColumn
-	featureCol           *selectableColumn
-	itemsCol             *actionColumn
-	servicesCol          *servicesTableColumn
-	artifactsCol         *selectableColumn
-	artifactTreeCol      *artifactTreeColumn
-	previewCol           *previewColumn
-	columns              []column
-	defaultColumns       []column
-	usingTasksLayout     bool
-	usingServicesLayout  bool
-	usingArtifactsLayout bool
-	backlogCol           *backlogTreeColumn
-	backlogTable         *backlogTableColumn
+	workspaceCol            *selectableColumn
+	projectsCol             *selectableColumn
+	featureCol              *selectableColumn
+	itemsCol                *actionColumn
+	envTableCol             *envTableColumn
+	servicesCol             *servicesTableColumn
+	artifactsCol            *selectableColumn
+	artifactTreeCol         *artifactTreeColumn
+	previewCol              *previewColumn
+	columns                 []column
+	defaultColumns          []column
+	featureSelectDefault    func(listEntry) tea.Cmd
+	featureHighlightDefault func(listEntry) tea.Cmd
+	usingTasksLayout        bool
+	usingServicesLayout     bool
+	usingArtifactsLayout    bool
+	usingEnvLayout          bool
+	backlogCol              *backlogTreeColumn
+	backlogTable            *backlogTableColumn
 
 	focus int
 
@@ -299,6 +322,16 @@ type model struct {
 	artifactSplit           artifactSplitState
 
 	suppressPipelineTelemetry bool
+
+	envFiles              []*envFileState
+	currentEnvFile        *envFileState
+	envSelection          int
+	envReveal             map[string]bool
+	envEditingFile        *envFileState
+	envEditingEntry       envEntry
+	pendingEnvKey         string
+	envValidationNotified map[string]bool
+	envOpenTelemetrySent  bool
 
 	backlog              *backlogData
 	backlogLoading       bool
@@ -370,13 +403,21 @@ func initialModel() *model {
 	}, s)
 
 	m.featureCol = newSelectableColumn("Feature", nil, 26, func(entry listEntry) tea.Cmd {
-		if def, ok := entry.payload.(featureDefinition); ok {
+		switch payload := entry.payload.(type) {
+		case featureDefinition:
 			return func() tea.Msg {
-				return featureSelectedMsg{project: m.currentProject, feature: def}
+				return featureSelectedMsg{project: m.currentProject, feature: payload}
 			}
+		case envFileItem:
+			return func() tea.Msg {
+				return envFileSelectedMsg{index: payload.index, activate: true}
+			}
+		default:
+			return nil
 		}
-		return nil
 	}, s)
+	m.featureSelectDefault = m.featureCol.onSelect
+	m.featureHighlightDefault = nil
 
 	m.artifactsCol = newSelectableColumn("Artifacts", nil, 26, func(entry listEntry) tea.Cmd {
 		if cat, ok := entry.payload.(artifactCategory); ok {
@@ -388,6 +429,20 @@ func initialModel() *model {
 		if cat, ok := entry.payload.(artifactCategory); ok {
 			return func() tea.Msg { return artifactCategorySelectedMsg{category: cat} }
 		}
+		return nil
+	})
+
+	m.envTableCol = newEnvTableColumn("Variables", s)
+	m.envTableCol.SetOnEdit(func(entry envEntry) tea.Cmd {
+		m.promptEnvValueEdit(entry)
+		return nil
+	})
+	m.envTableCol.SetOnToggle(func(entry envEntry) tea.Cmd {
+		m.toggleEnvReveal(entry)
+		return nil
+	})
+	m.envTableCol.SetOnCopy(func(entry envEntry) tea.Cmd {
+		m.copyEnvValue(entry)
 		return nil
 	})
 
@@ -460,6 +515,10 @@ func initialModel() *model {
 	}
 	m.defaultColumns = append([]column(nil), m.columns...)
 
+	m.envReveal = make(map[string]bool)
+	m.envValidationNotified = make(map[string]bool)
+	m.envSelection = -1
+
 	m.logs = viewport.New(80, m.logsHeight)
 	m.refreshLogs()
 
@@ -509,7 +568,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.closeInput()
 				return m, nil
 			case "enter":
-				value := strings.TrimSpace(m.inputField.Value())
+				raw := m.inputField.Value()
+				value := raw
+				switch m.inputMode {
+				case inputEnvEditValue, inputEnvNewValue:
+					// keep raw value to preserve whitespace
+				default:
+					value = strings.TrimSpace(raw)
+				}
 				cmd, keepOpen := m.handleInputSubmit(value)
 				if !keepOpen {
 					m.closeInput()
@@ -566,6 +632,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.handleFeatureSelected(message.feature); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case envFilesLoadedMsg:
+		if cmd := m.handleEnvFilesLoaded(message); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case envFileSelectedMsg:
+		m.handleEnvFileSelected(message)
 	case itemSelectedMsg:
 		m.handleItemSelected(message)
 	case artifactCategorySelectedMsg:
@@ -750,6 +822,17 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		}
 	}
 
+	if m.currentFeature == "env" && m.usingEnvLayout {
+		switch strings.ToLower(msg.String()) {
+		case "ctrl+s":
+			m.saveCurrentEnvFile()
+			return true, nil
+		case "n":
+			m.promptEnvNewEntry()
+			return true, nil
+		}
+	}
+
 	switch msg.String() {
 	case "O":
 		if (focusArea(m.focus) == focusPreview || focusArea(m.focus) == focusItems) && m.currentFeature == "database" {
@@ -812,6 +895,23 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 }
 
 func (m *model) stepBack() {
+	if m.currentFeature == "env" && m.usingEnvLayout {
+		switch focusArea(m.focus) {
+		case focusPreview:
+			m.focus = int(focusItems)
+			return
+		case focusItems:
+			m.focus = int(focusFeatures)
+			return
+		case focusFeatures:
+			m.exitEnvEditor()
+			m.currentFeature = ""
+			m.itemsCol.SetItems(nil)
+			m.previewCol.SetContent("Select an item to preview details.\n")
+			m.focus = int(focusFeatures)
+			return
+		}
+	}
 	switch focusArea(m.focus) {
 	case focusPreview:
 		m.focus = int(focusItems)
@@ -881,6 +981,9 @@ func (m *model) handleProjectSelected(project *discoveredProject) tea.Cmd {
 	if project == nil {
 		return nil
 	}
+	if m.usingEnvLayout {
+		m.exitEnvEditor()
+	}
 	prevFeature := m.currentFeature
 	m.currentProject = project
 	m.currentFeature = ""
@@ -896,6 +999,7 @@ func (m *model) handleProjectSelected(project *discoveredProject) tea.Cmd {
 	m.focus = int(focusFeatures)
 	m.appendLog(fmt.Sprintf("Project loaded: %s", project.Name))
 	m.emitTelemetry("project_opened", map[string]string{"path": filepath.Clean(project.Path)})
+	m.envOpenTelemetrySent = false
 	if prevFeature == "tasks" {
 		if def := findFeatureDefinition("tasks"); def.Key != "" {
 			return m.handleFeatureSelected(def)
@@ -916,6 +1020,9 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 	if m.currentProject == nil {
 		return nil
 	}
+	if feature.Key != "env" && m.usingEnvLayout {
+		m.exitEnvEditor()
+	}
 	m.currentFeature = feature.Key
 	m.currentItem = featureItemDefinition{}
 	m.resetDocSelection()
@@ -926,6 +1033,9 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 	m.currentVerifyCheck = ""
 	m.stopServicePolling()
 	m.currentServiceEndpoints = nil
+	if feature.Key == "env" {
+		return m.startEnvEditor()
+	}
 	if feature.Key == "tasks" {
 		m.useTasksLayout(true)
 		m.backlogScope = backlogNode{}
@@ -938,12 +1048,14 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 	m.useTasksLayout(false)
 	if feature.Key == "artifacts" {
 		m.useServicesLayout(false)
+		m.useEnvLayout(false)
 		m.useArtifactsLayout(true)
 		cmd := m.prepareArtifactsView()
 		m.focus = int(focusFeatures)
 		return cmd
 	}
 	if feature.Key == "services" {
+		m.useEnvLayout(false)
 		m.useServicesLayout(true)
 		m.servicesCol.SetItems(nil)
 		m.previewCol.SetContent("Gathering docker-compose services…\n")
@@ -957,6 +1069,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		m.focus = int(focusItems)
 		return tea.Batch(cmds...)
 	}
+	m.useEnvLayout(false)
 	m.useServicesLayout(false)
 	m.useArtifactsLayout(false)
 	if feature.Key == "overview" {
@@ -1621,7 +1734,8 @@ func (m *model) updateProjectStats(path string) {
 }
 
 func (m *model) handleInputSubmit(value string) (tea.Cmd, bool) {
-	if value == "" {
+	allowEmpty := m.inputMode == inputEnvEditValue || m.inputMode == inputEnvNewValue
+	if value == "" && !allowEmpty {
 		return nil, false
 	}
 
@@ -1680,6 +1794,23 @@ func (m *model) handleInputSubmit(value string) (tea.Cmd, bool) {
 		return nil, keep
 	case inputCommandPalette:
 		return m.executePaletteCommand(value), false
+	case inputEnvEditValue:
+		m.applyEnvValueEdit(value)
+		return nil, false
+	case inputEnvNewKey:
+		key := strings.TrimSpace(value)
+		if key == "" {
+			m.setToast("Key required", 4*time.Second)
+			return nil, true
+		}
+		m.pendingEnvKey = key
+		m.openInput(fmt.Sprintf("Value for %s", key), "", inputEnvNewValue)
+		return nil, true
+	case inputEnvNewValue:
+		if m.applyEnvNewValue(value) {
+			return nil, false
+		}
+		return nil, true
 	}
 	return nil, false
 }
@@ -1815,6 +1946,13 @@ func (m *model) closeInput() {
 	if prevMode == inputNewProjectPath || prevMode == inputNewProjectTemplate || prevMode == inputNewProjectConfirm {
 		m.pendingNewProjectPath = ""
 		m.pendingNewProjectTemplate = ""
+	}
+	if prevMode == inputEnvEditValue {
+		m.envEditingFile = nil
+		m.envEditingEntry = envEntry{}
+	}
+	if prevMode == inputEnvNewKey || prevMode == inputEnvNewValue {
+		m.pendingEnvKey = ""
 	}
 }
 
@@ -3049,6 +3187,8 @@ func (m *model) applyLayout() {
 		widths = []int{22, 26, 24, 44}
 	} else if m.usingArtifactsLayout {
 		widths = []int{22, 26, 26, 36}
+	} else if m.usingEnvLayout {
+		widths = []int{22, 26, 28, 42}
 	}
 	remaining := availableWidth
 	for i := range widths {
@@ -3182,6 +3322,500 @@ func (m *model) useArtifactsLayout(enable bool) {
 		}
 	}
 	m.applyLayout()
+}
+
+func (m *model) useEnvLayout(enable bool) {
+	if enable {
+		if m.usingEnvLayout {
+			return
+		}
+		m.columns = []column{
+			m.workspaceCol,
+			m.projectsCol,
+			m.featureCol,
+			m.envTableCol,
+			m.previewCol,
+		}
+		m.usingEnvLayout = true
+		if m.focus >= len(m.columns) {
+			m.focus = len(m.columns) - 1
+		}
+	} else {
+		if !m.usingEnvLayout {
+			return
+		}
+		if len(m.defaultColumns) == len(m.columns) && len(m.defaultColumns) > 0 {
+			m.columns = append([]column(nil), m.defaultColumns...)
+		} else {
+			m.columns = []column{
+				m.workspaceCol,
+				m.projectsCol,
+				m.featureCol,
+				m.itemsCol,
+				m.previewCol,
+			}
+		}
+		m.usingEnvLayout = false
+		if m.focus >= len(m.columns) {
+			m.focus = len(m.columns) - 1
+		}
+	}
+	m.applyLayout()
+}
+
+func (m *model) startEnvEditor() tea.Cmd {
+	if m.currentProject == nil {
+		return nil
+	}
+	m.useTasksLayout(false)
+	m.useArtifactsLayout(false)
+	m.useServicesLayout(false)
+	m.useEnvLayout(true)
+
+	m.envFiles = nil
+	m.currentEnvFile = nil
+	m.envSelection = -1
+	m.envEditingFile = nil
+	m.envEditingEntry = envEntry{}
+	m.pendingEnvKey = ""
+	m.envOpenTelemetrySent = false
+	m.envReveal = make(map[string]bool)
+	m.envValidationNotified = make(map[string]bool)
+
+	m.featureCol.title = "Env Editor"
+	m.featureCol.SetHighlightFunc(func(entry listEntry) tea.Cmd {
+		if item, ok := entry.payload.(envFileItem); ok {
+			return func() tea.Msg { return envFileSelectedMsg{index: item.index, activate: false} }
+		}
+		return nil
+	})
+	m.featureCol.SetItems([]list.Item{
+		listEntry{title: "Loading…", desc: "", payload: nil},
+	})
+	m.envTableCol.SetEntries(nil, m.envReveal)
+	m.previewCol.SetContent("Loading environment files…\n")
+	m.focus = int(focusFeatures)
+	return m.loadEnvFilesCmd()
+}
+
+func (m *model) exitEnvEditor() {
+	if !m.usingEnvLayout {
+		return
+	}
+	m.useEnvLayout(false)
+	m.featureCol.title = "Feature"
+	m.featureCol.SetHighlightFunc(m.featureHighlightDefault)
+	m.featureCol.SetItems(featureListEntries())
+	m.envTableCol.SetEntries(nil, m.envReveal)
+	m.envFiles = nil
+	m.currentEnvFile = nil
+	m.envSelection = -1
+	m.envEditingFile = nil
+	m.envEditingEntry = envEntry{}
+	m.pendingEnvKey = ""
+	m.previewCol.SetContent("Select an item to preview details.\n")
+}
+
+func (m *model) loadEnvFilesCmd() tea.Cmd {
+	if m.currentProject == nil {
+		return nil
+	}
+	projectPath := filepath.Clean(m.currentProject.Path)
+	return func() tea.Msg {
+		states, err := loadEnvFiles(projectPath)
+		return envFilesLoadedMsg{states: states, err: err}
+	}
+}
+
+func (m *model) handleEnvFilesLoaded(msg envFilesLoadedMsg) tea.Cmd {
+	if msg.err != nil {
+		m.envFiles = nil
+		m.envSelection = -1
+		m.featureCol.SetItems([]list.Item{
+			listEntry{title: "Load failed", desc: msg.err.Error(), payload: nil},
+		})
+		m.envTableCol.SetEntries(nil, m.envReveal)
+		m.previewCol.SetContent(fmt.Sprintf("Failed to load environment files: %v\n", msg.err))
+		return nil
+	}
+
+	m.envFiles = msg.states
+	m.envSelection = -1
+	m.envEditingFile = nil
+	m.envEditingEntry = envEntry{}
+	m.pendingEnvKey = ""
+	if m.envReveal == nil {
+		m.envReveal = make(map[string]bool)
+	}
+	if m.envValidationNotified == nil {
+		m.envValidationNotified = make(map[string]bool)
+	}
+
+	m.refreshEnvFileList()
+	if len(m.envFiles) == 0 {
+		m.previewCol.SetContent("No .env files found. Press 'n' to add keys and save to create one.\n")
+		return nil
+	}
+	if !m.envOpenTelemetrySent && m.currentProject != nil {
+		fields := map[string]string{
+			"path":  filepath.Clean(m.currentProject.Path),
+			"files": strconv.Itoa(len(m.envFiles)),
+		}
+		m.emitTelemetry("env_opened", fields)
+		m.envOpenTelemetrySent = true
+	}
+	return func() tea.Msg { return envFileSelectedMsg{index: 0, activate: false} }
+}
+
+func (m *model) refreshEnvFileList() {
+	if !m.usingEnvLayout {
+		return
+	}
+	if len(m.envFiles) == 0 {
+		m.envSelection = -1
+		m.featureCol.SetItems([]list.Item{
+			listEntry{title: "No .env files", desc: "Press 'n' to capture new entries", payload: nil},
+		})
+		return
+	}
+	items := make([]list.Item, 0, len(m.envFiles))
+	for i, state := range m.envFiles {
+		items = append(items, listEntry{
+			title:   m.envFileTitle(state),
+			desc:    m.envFileDescription(state),
+			payload: envFileItem{index: i, state: state},
+		})
+	}
+	m.featureCol.SetItems(items)
+	if m.envSelection >= 0 && m.envSelection < len(items) {
+		m.featureCol.model.Select(m.envSelection)
+	}
+}
+
+func (m *model) handleEnvFileSelected(msg envFileSelectedMsg) {
+	if msg.index < 0 || msg.index >= len(m.envFiles) {
+		return
+	}
+	if !m.usingEnvLayout {
+		return
+	}
+	state := m.envFiles[msg.index]
+	m.envSelection = msg.index
+	m.featureCol.model.Select(msg.index)
+	m.currentEnvFile = state
+	m.envEditingFile = nil
+	m.envEditingEntry = envEntry{}
+	state.rebuildEntries()
+	state.refreshValidation()
+	m.refreshEnvFileList()
+	m.refreshEnvTable("")
+	m.updateEnvPreview()
+	if msg.activate {
+		m.focus = int(focusItems)
+	}
+}
+
+func (m *model) refreshEnvTable(selectID string) {
+	if !m.usingEnvLayout {
+		return
+	}
+	if m.currentEnvFile == nil {
+		m.envTableCol.SetEntries(nil, m.envReveal)
+		return
+	}
+	entries := append([]envEntry(nil), m.currentEnvFile.Entries...)
+	m.envTableCol.SetEntries(entries, m.envReveal)
+	if selectID != "" {
+		for idx, entry := range entries {
+			if envEntryIdentifier(entry) == selectID {
+				m.envTableCol.table.SetCursor(idx)
+				break
+			}
+		}
+	}
+}
+
+func (m *model) updateEnvPreview() {
+	m.previewCol.SetContent(m.renderEnvPreview())
+}
+
+func (m *model) renderEnvPreview() string {
+	if !m.usingEnvLayout {
+		return "Env Editor not active.\n"
+	}
+	if m.currentEnvFile == nil {
+		if len(m.envFiles) == 0 {
+			return "No .env files detected. Press 'n' to add a key and save to create one.\n"
+		}
+		return "Select an environment file to review keys and validation results.\n"
+	}
+	state := m.currentEnvFile
+	var b strings.Builder
+	name := state.RelPath
+	if strings.TrimSpace(name) == "" {
+		name = state.Path
+	}
+	status := []string{}
+	if state.Dirty {
+		status = append(status, "dirty")
+	} else {
+		status = append(status, "clean")
+	}
+	if !state.Exists {
+		status = append(status, "will create on save")
+	}
+	if state.Validation.IsClean() {
+		status = append(status, "validation ok")
+	} else {
+		status = append(status, "needs attention")
+	}
+	b.WriteString(fmt.Sprintf("%s (%s)\n", name, strings.Join(status, ", ")))
+	b.WriteString(fmt.Sprintf("Keys: %d\n", len(state.Entries)))
+
+	if len(state.Validation.Missing) > 0 {
+		b.WriteString("Missing: " + strings.Join(state.Validation.Missing, ", ") + "\n")
+	} else {
+		b.WriteString("Missing: none\n")
+	}
+	if len(state.Validation.Empty) > 0 {
+		b.WriteString("Empty values: " + strings.Join(state.Validation.Empty, ", ") + "\n")
+	} else {
+		b.WriteString("Empty values: none\n")
+	}
+	if len(state.Validation.Duplicates) > 0 {
+		b.WriteString("Duplicates: " + strings.Join(state.Validation.Duplicates, ", ") + "\n")
+	} else {
+		b.WriteString("Duplicates: none\n")
+	}
+
+	allMissing := m.aggregateEnvMissingKeys()
+	if len(allMissing) > 0 {
+		b.WriteString("\nProject-wide missing keys:\n")
+		for _, key := range allMissing {
+			b.WriteString("  - " + key + "\n")
+		}
+	}
+
+	b.WriteString("\nShortcuts: enter edit • n new key • r reveal/hide • y copy • ctrl+s save\n")
+	b.WriteString("Secrets stay masked unless revealed; copied values are not logged.\n")
+	b.WriteString("After saving, restart affected services from Run/Services.\n")
+	return b.String()
+}
+
+func (m *model) aggregateEnvMissingKeys() []string {
+	if len(m.envFiles) == 0 {
+		return nil
+	}
+	unique := make(map[string]struct{})
+	for _, state := range m.envFiles {
+		for _, key := range state.Validation.Missing {
+			unique[key] = struct{}{}
+		}
+	}
+	if len(unique) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(unique))
+	for key := range unique {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (m *model) promptEnvValueEdit(entry envEntry) {
+	if m.currentFeature != "env" || !m.usingEnvLayout || m.currentEnvFile == nil {
+		return
+	}
+	m.envEditingFile = m.currentEnvFile
+	m.envEditingEntry = entry
+	m.openInput(fmt.Sprintf("Value for %s", entry.Key), entry.Value, inputEnvEditValue)
+}
+
+func (m *model) toggleEnvReveal(entry envEntry) {
+	if m.envReveal == nil {
+		m.envReveal = make(map[string]bool)
+	}
+	id := envEntryIdentifier(entry)
+	m.envReveal[id] = !m.envReveal[id]
+	m.refreshEnvTable(id)
+}
+
+func (m *model) copyEnvValue(entry envEntry) {
+	if m.currentFeature != "env" || !m.usingEnvLayout {
+		return
+	}
+	if err := clipboard.WriteAll(entry.Value); err != nil {
+		m.setToast(fmt.Sprintf("Copy failed: %v", err), 5*time.Second)
+		return
+	}
+	m.setToast(fmt.Sprintf("Copied %s", entry.Key), 4*time.Second)
+}
+
+func (m *model) promptEnvNewEntry() {
+	if m.currentFeature != "env" || !m.usingEnvLayout || m.currentEnvFile == nil {
+		return
+	}
+	m.pendingEnvKey = ""
+	m.openInput("New key name", "", inputEnvNewKey)
+}
+
+func (m *model) applyEnvValueEdit(value string) {
+	if m.envEditingFile == nil {
+		return
+	}
+	state := m.envEditingFile
+	entry := m.envEditingEntry
+	key := entry.Key
+	state.setValue(entry.LineIndex, value)
+	if idxEntry, ok := findEnvEntryByLine(state, entry.LineIndex); ok {
+		entry = idxEntry
+	}
+	selectID := envEntryIdentifier(entry)
+	m.refreshEnvFileList()
+	m.refreshEnvTable(selectID)
+	m.updateEnvPreview()
+	if m.envValidationNotified != nil {
+		delete(m.envValidationNotified, state.RelPath)
+	}
+	m.envEditingFile = nil
+	m.envEditingEntry = envEntry{}
+	m.setToast(fmt.Sprintf("Updated %s", key), 4*time.Second)
+}
+
+func (m *model) applyEnvNewValue(value string) bool {
+	if m.currentEnvFile == nil {
+		return false
+	}
+	key := strings.TrimSpace(m.pendingEnvKey)
+	if key == "" {
+		m.setToast("Key required", 4*time.Second)
+		return false
+	}
+	for _, entry := range m.currentEnvFile.Entries {
+		if entry.Key == key {
+			m.setToast("Key already exists in this file", 4*time.Second)
+			return false
+		}
+	}
+	index := m.currentEnvFile.addEntry(key, value)
+	m.currentEnvFile.ensureTrailingNewline()
+	selectID := ""
+	if index >= 0 && index < len(m.currentEnvFile.Entries) {
+		selectID = envEntryIdentifier(m.currentEnvFile.Entries[index])
+	}
+	m.pendingEnvKey = ""
+	m.refreshEnvFileList()
+	m.refreshEnvTable(selectID)
+	m.updateEnvPreview()
+	if m.envValidationNotified != nil {
+		delete(m.envValidationNotified, m.currentEnvFile.RelPath)
+	}
+	m.setToast(fmt.Sprintf("Added %s", key), 4*time.Second)
+	return true
+}
+
+func (m *model) saveCurrentEnvFile() {
+	if m.currentFeature != "env" || !m.usingEnvLayout || m.currentEnvFile == nil {
+		return
+	}
+	state := m.currentEnvFile
+	if !state.Dirty {
+		m.setToast("No env changes to save", 3*time.Second)
+		return
+	}
+	if !state.Validation.IsClean() {
+		key := state.RelPath
+		if _, seen := m.envValidationNotified[key]; !seen && m.currentProject != nil {
+			fields := map[string]string{
+				"path":            filepath.Clean(m.currentProject.Path),
+				"file":            key,
+				"missing_count":   strconv.Itoa(len(state.Validation.Missing)),
+				"empty_count":     strconv.Itoa(len(state.Validation.Empty)),
+				"duplicate_count": strconv.Itoa(len(state.Validation.Duplicates)),
+			}
+			m.emitTelemetry("env_validation_failed", fields)
+			m.envValidationNotified[key] = true
+		}
+		m.setToast("Validation failed - fix missing/empty keys before saving", 5*time.Second)
+		m.updateEnvPreview()
+		return
+	}
+	if m.currentProject != nil {
+		delete(m.envValidationNotified, state.RelPath)
+	}
+	if err := writeEnvFile(state); err != nil {
+		m.setToast(fmt.Sprintf("Save failed: %v", err), 5*time.Second)
+		return
+	}
+	state.refreshValidation()
+	m.refreshEnvFileList()
+	m.refreshEnvTable("")
+	m.updateEnvPreview()
+	if m.currentProject != nil {
+		fields := map[string]string{
+			"path": filepath.Clean(m.currentProject.Path),
+			"file": state.RelPath,
+			"keys": strconv.Itoa(len(state.Entries)),
+		}
+		m.emitTelemetry("env_saved", fields)
+	}
+	m.appendLog(fmt.Sprintf("Saved env file: %s", state.RelPath))
+	m.setToast("Saved. Restart affected services to apply changes.", 6*time.Second)
+}
+
+func (m *model) envFileTitle(state *envFileState) string {
+	label := strings.TrimSpace(state.RelPath)
+	if label == "" {
+		label = strings.TrimSpace(state.Path)
+	}
+	if label == "" {
+		label = ".env"
+	}
+	if state.Dirty {
+		label = "* " + label
+	}
+	return label
+}
+
+func (m *model) envFileDescription(state *envFileState) string {
+	var parts []string
+	if state.Exists {
+		parts = append(parts, fmt.Sprintf("%d keys", len(state.Entries)))
+	} else {
+		parts = append(parts, "not created")
+	}
+	if !state.Validation.IsClean() {
+		var issues []string
+		if len(state.Validation.Missing) > 0 {
+			issues = append(issues, fmt.Sprintf("missing %d", len(state.Validation.Missing)))
+		}
+		if len(state.Validation.Empty) > 0 {
+			issues = append(issues, fmt.Sprintf("empty %d", len(state.Validation.Empty)))
+		}
+		if len(state.Validation.Duplicates) > 0 {
+			issues = append(issues, fmt.Sprintf("dup %d", len(state.Validation.Duplicates)))
+		}
+		if len(issues) > 0 {
+			parts = append(parts, strings.Join(issues, ", "))
+		}
+	} else {
+		if !state.Dirty {
+			parts = append(parts, "ready")
+		} else {
+			parts = append(parts, "unsaved")
+		}
+	}
+	return strings.Join(parts, " • ")
+}
+
+func findEnvEntryByLine(state *envFileState, lineIndex int) (envEntry, bool) {
+	for _, entry := range state.Entries {
+		if entry.LineIndex == lineIndex {
+			return entry, true
+		}
+	}
+	return envEntry{}, false
 }
 
 func (m *model) backlogHighlightCmd(node backlogNode) tea.Cmd {

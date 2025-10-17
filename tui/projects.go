@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -188,7 +187,7 @@ func collectProjectStats(path string) projectStats {
 
 	stats.TasksDone, stats.TasksTotal = gatherTaskMetrics(path)
 	stats.VerifyPass, stats.VerifyTotal = gatherVerifyMetrics(path)
-	stats.LastRun = latestModTime(path)
+	stats.LastRun = latestProjectModTime(path)
 	return stats
 }
 
@@ -280,7 +279,7 @@ func gatherVerifyMetrics(root string) (passed, total int) {
 	return 0, 0
 }
 
-func latestModTime(root string) time.Time {
+func latestProjectModTime(root string) time.Time {
 	var latest time.Time
 
 	candidates := []string{

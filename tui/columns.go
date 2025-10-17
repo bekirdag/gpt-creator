@@ -879,6 +879,256 @@ func (c *actionColumn) FocusValue() string {
 	return ""
 }
 
+type envTableColumn struct {
+	title    string
+	table    table.Model
+	width    int
+	height   int
+	entries  []envEntry
+	reveal   map[string]bool
+	onEdit   func(envEntry) tea.Cmd
+	onToggle func(envEntry) tea.Cmd
+	onCopy   func(envEntry) tea.Cmd
+}
+
+func newEnvTableColumn(title string, s styles) *envTableColumn {
+	columns := []table.Column{
+		{Title: "Key", Width: 24},
+		{Title: "Value", Width: 44},
+		{Title: "Secret?", Width: 9},
+		{Title: "Source", Width: 24},
+	}
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithFocused(true),
+		table.WithHeight(8),
+	)
+	tStyles := table.DefaultStyles()
+	tStyles.Header = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(palette.textMuted).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(palette.border).
+		Padding(0, 1)
+	tStyles.Cell = lipgloss.NewStyle().Padding(0, 1)
+	tStyles.Selected = lipgloss.NewStyle().
+		Foreground(palette.text).
+		Background(palette.selection).
+		Padding(0, 1)
+	t.SetStyles(tStyles)
+
+	return &envTableColumn{
+		title:  title,
+		table:  t,
+		reveal: make(map[string]bool),
+	}
+}
+
+func (c *envTableColumn) SetOnEdit(fn func(envEntry) tea.Cmd) {
+	c.onEdit = fn
+}
+
+func (c *envTableColumn) SetOnToggle(fn func(envEntry) tea.Cmd) {
+	c.onToggle = fn
+}
+
+func (c *envTableColumn) SetOnCopy(fn func(envEntry) tea.Cmd) {
+	c.onCopy = fn
+}
+
+func (c *envTableColumn) SelectedEntry() (envEntry, bool) {
+	cursor := c.table.Cursor()
+	if cursor < 0 || cursor >= len(c.entries) {
+		return envEntry{}, false
+	}
+	return c.entries[cursor], true
+}
+
+func (c *envTableColumn) SetEntries(entries []envEntry, reveal map[string]bool) {
+	selectedID := ""
+	if entry, ok := c.SelectedEntry(); ok {
+		selectedID = envEntryIdentifier(entry)
+	}
+	c.entries = append([]envEntry(nil), entries...)
+	if reveal == nil {
+		reveal = make(map[string]bool)
+	}
+	c.reveal = make(map[string]bool, len(reveal))
+	for k, v := range reveal {
+		c.reveal[k] = v
+	}
+	rows := make([]table.Row, len(entries))
+	for i, entry := range entries {
+		rows[i] = c.buildRow(entry)
+	}
+	c.table.SetRows(rows)
+	if len(rows) == 0 {
+		return
+	}
+	target := 0
+	if selectedID != "" {
+		for idx, entry := range c.entries {
+			if envEntryIdentifier(entry) == selectedID {
+				target = idx
+				break
+			}
+		}
+	}
+	if target < 0 {
+		target = 0
+	}
+	if target >= len(rows) {
+		target = len(rows) - 1
+	}
+	c.table.SetCursor(target)
+}
+
+func (c *envTableColumn) buildRow(entry envEntry) table.Row {
+	value := entry.Value
+	id := envEntryIdentifier(entry)
+	revealed := c.reveal[id]
+	if entry.Secret && !revealed {
+		if strings.TrimSpace(value) == "" {
+			value = "[hidden empty]"
+		} else {
+			value = maskedSecret(value)
+		}
+	} else if strings.TrimSpace(value) == "" {
+		value = "(empty)"
+	}
+	secretLabel := ""
+	if entry.Secret {
+		if revealed {
+			secretLabel = "yes (shown)"
+		} else {
+			secretLabel = "yes"
+		}
+	}
+	source := entry.Source
+	if strings.TrimSpace(source) == "" {
+		source = "(unknown)"
+	}
+	return table.Row{
+		entry.Key,
+		value,
+		secretLabel,
+		source,
+	}
+}
+
+func (c *envTableColumn) SetSize(width, height int) {
+	if width < 20 {
+		width = 20
+	}
+	if height < 5 {
+		height = 5
+	}
+	c.width = width
+	c.height = height
+
+	keyWidth := maxInt(16, width/4)
+	valueWidth := maxInt(width-keyWidth-28, 28)
+	if valueWidth > 64 {
+		valueWidth = 64
+	}
+	secretWidth := 9
+	sourceWidth := maxInt(width-keyWidth-valueWidth-secretWidth-4, 18)
+
+	c.table.SetColumns([]table.Column{
+		{Title: "Key", Width: keyWidth},
+		{Title: "Value", Width: valueWidth},
+		{Title: "Secret?", Width: secretWidth},
+		{Title: "Source", Width: sourceWidth},
+	})
+	c.table.SetHeight(height - 3)
+}
+
+func (c *envTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	var cmd tea.Cmd
+	c.table, cmd = c.table.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		key := strings.ToLower(keyMsg.String())
+		switch key {
+		case "enter":
+			if c.onEdit != nil {
+				if entry, ok := c.SelectedEntry(); ok {
+					if run := c.onEdit(entry); run != nil {
+						cmds = append(cmds, run)
+					}
+				}
+			}
+		case "r":
+			if c.onToggle != nil {
+				if entry, ok := c.SelectedEntry(); ok {
+					if run := c.onToggle(entry); run != nil {
+						cmds = append(cmds, run)
+					}
+				}
+			}
+		case "y":
+			if c.onCopy != nil {
+				if entry, ok := c.SelectedEntry(); ok {
+					if run := c.onCopy(entry); run != nil {
+						cmds = append(cmds, run)
+					}
+				}
+			}
+		}
+	}
+
+	if len(cmds) == 0 {
+		return c, nil
+	}
+	return c, tea.Batch(cmds...)
+}
+
+func (c *envTableColumn) View(s styles, focused bool) string {
+	title := s.columnTitle.Render(c.title)
+	var body string
+	if len(c.entries) == 0 {
+		body = s.listItem.Foreground(palette.textMuted).Render("No variables detected")
+	} else {
+		body = c.table.View()
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	if focused {
+		return s.panelFocused.Width(c.width).Render(content)
+	}
+	return s.panel.Width(c.width).Render(content)
+}
+
+func (c *envTableColumn) Title() string {
+	return c.title
+}
+
+func (c *envTableColumn) FocusValue() string {
+	if entry, ok := c.SelectedEntry(); ok {
+		return entry.Key
+	}
+	return ""
+}
+
+func envEntryIdentifier(entry envEntry) string {
+	return fmt.Sprintf("%s::%s::%d", entry.Source, entry.Key, entry.LineIndex)
+}
+
+func maskedSecret(value string) string {
+	length := len(value)
+	if length <= 0 {
+		return "[hidden]"
+	}
+	if length > 16 {
+		length = 16
+	}
+	return strings.Repeat("*", length)
+}
+
 type servicesTableColumn struct {
 	title       string
 	table       table.Model

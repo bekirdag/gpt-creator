@@ -55,7 +55,7 @@ func gatherDatabaseDumpInfo(root string) databaseDumpInfo {
 			}
 			continue
 		}
-		latest := latestModTime(files)
+		latest := latestDumpModTime(files)
 		if !info.Found || latest.After(bestScore) {
 			bestScore = latest
 			info = databaseDumpInfo{
@@ -118,7 +118,7 @@ func sortDumpFiles(files []databaseDumpFile) []databaseDumpFile {
 	return out
 }
 
-func latestModTime(files []databaseDumpFile) time.Time {
+func latestDumpModTime(files []databaseDumpFile) time.Time {
 	var latest time.Time
 	for _, file := range files {
 		if file.ModTime.After(latest) {

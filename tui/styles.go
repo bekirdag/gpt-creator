@@ -66,6 +66,7 @@ func newStyles() styles {
 		Bold(true).
 		Foreground(crushForeground).
 		Background(crushSurfaceElevated).
+		ColorWhitespace(true).
 		BorderStyle(lipgloss.Border{
 			Left:        "┃",
 			Right:       " ",

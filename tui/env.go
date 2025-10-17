@@ -37,8 +37,8 @@ type envEntry struct {
 }
 
 type envValidationResult struct {
-	Missing   []string
-	Empty     []string
+	Missing    []string
+	Empty      []string
 	Duplicates []string
 }
 
@@ -99,11 +99,14 @@ func loadEnvFiles(projectPath string) ([]*envFileState, error) {
 
 func newEmptyEnvFile(path, projectRoot string) *envFileState {
 	rel := relPath(projectRoot, path)
-	return &envFileState{
+	state := &envFileState{
 		Path:    path,
 		RelPath: rel,
 		Exists:  false,
 	}
+	state.expectedKeys = discoverExpectedKeys(path)
+	state.Validation = state.validate()
+	return state
 }
 
 func parseEnvFile(path, projectRoot string) (*envFileState, error) {
@@ -451,7 +454,7 @@ func discoverExpectedKeys(path string) []string {
 	}
 	if len(keysSet) == 0 {
 		return nil
-}
+	}
 	var keys []string
 	for key := range keysSet {
 		keys = append(keys, key)

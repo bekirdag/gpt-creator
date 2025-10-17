@@ -202,6 +202,24 @@ type backlogStatusUpdatedMsg struct {
 	err    error
 }
 
+type tokensLoadedMsg struct {
+	usage *tokensUsage
+	err   error
+}
+
+type tokensRowSelectedMsg struct {
+	row tokensTableRow
+}
+
+type tokensExportedMsg struct {
+	path     string
+	err      error
+	rangeKey string
+	group    tokensGroupMode
+	records  int
+	tokens   int
+}
+
 type servicesLoadedMsg struct {
 	items []featureItemDefinition
 }
@@ -337,6 +355,7 @@ type model struct {
 	itemsCol                *actionColumn
 	envTableCol             *envTableColumn
 	servicesCol             *servicesTableColumn
+	tokensCol               *tokensTableColumn
 	artifactsCol            *selectableColumn
 	artifactTreeCol         *artifactTreeColumn
 	previewCol              *previewColumn
@@ -348,6 +367,7 @@ type model struct {
 	usingServicesLayout     bool
 	usingArtifactsLayout    bool
 	usingEnvLayout          bool
+	usingTokensLayout       bool
 	backlogCol              *backlogTreeColumn
 	backlogTable            *backlogTableColumn
 
@@ -441,6 +461,15 @@ type model struct {
 	selectedEpics        map[string]bool
 	pendingBacklogReason string
 	credentialHint       string
+
+	tokensUsage         *tokensUsage
+	tokensViewData      tokensViewData
+	tokensRangeIndex    int
+	tokensGroup         tokensGroupMode
+	tokensCurrentRow    string
+	tokensLoading       bool
+	tokensError         error
+	tokensTelemetrySent bool
 
 	jobStopwatch    stopwatch.Model
 	jobTimingActive bool
@@ -616,6 +645,12 @@ func initialModel() *model {
 	})
 	m.servicesCol.ApplyStyles(m.styles)
 
+	m.tokensCol = newTokensTableColumn("Tokens")
+	m.tokensCol.SetHighlightFunc(func(row tokensTableRow) tea.Cmd {
+		return func() tea.Msg { return tokensRowSelectedMsg{row: row} }
+	})
+	m.tokensCol.ApplyStyles(m.styles)
+
 	m.backlogCol = newBacklogTreeColumn("Epics/Stories/Tasks")
 	m.backlogCol.SetCallbacks(
 		m.backlogHighlightCmd,
@@ -661,6 +696,13 @@ func initialModel() *model {
 	m.envReveal = make(map[string]bool)
 	m.envValidationNotified = make(map[string]bool)
 	m.envSelection = -1
+
+	m.tokensGroup = tokensGroupByDay
+	if len(tokensRangeOptions) > 1 {
+		m.tokensRangeIndex = 1
+	} else if len(tokensRangeOptions) > 0 {
+		m.tokensRangeIndex = 0
+	}
 
 	m.logs = viewport.New(80, m.logsHeight)
 	m.logs.Style = m.styles.body.Copy().Foreground(crushForegroundMuted)
@@ -951,6 +993,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.handleBacklogStatusUpdated(message); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case tokensLoadedMsg:
+		if cmd := m.handleTokensLoaded(message); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case tokensRowSelectedMsg:
+		m.handleTokensRowSelected(message.row)
+	case tokensExportedMsg:
+		m.handleTokensExported(message)
 	}
 
 	m.applyLayout()
@@ -1099,6 +1149,30 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 					return true, nil
 				}
 			}
+		}
+	}
+	if m.currentFeature == "tokens" {
+		switch msg.String() {
+		case "-", "_":
+			if cmd := m.adjustTokensRange(-1); cmd != nil {
+				return true, cmd
+			}
+			return true, nil
+		case "=", "+":
+			if cmd := m.adjustTokensRange(1); cmd != nil {
+				return true, cmd
+			}
+			return true, nil
+		case "g", "G":
+			if cmd := m.toggleTokensGroup(); cmd != nil {
+				return true, cmd
+			}
+			return true, nil
+		case "e", "E":
+			if cmd := m.exportTokensCSV(); cmd != nil {
+				return true, cmd
+			}
+			return true, nil
 		}
 	}
 	switch {
@@ -1421,6 +1495,9 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 	if feature.Key != "env" && m.usingEnvLayout {
 		m.exitEnvEditor()
 	}
+	if feature.Key != "tokens" && m.usingTokensLayout {
+		m.exitTokensView()
+	}
 	m.currentFeature = feature.Key
 	m.currentItem = featureItemDefinition{}
 	m.resetDocSelection()
@@ -1448,6 +1525,30 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		return m.loadBacklogCmd()
 	}
 	m.useTasksLayout(false)
+	if feature.Key == "tokens" {
+		m.useArtifactsLayout(false)
+		m.useServicesLayout(false)
+		m.useEnvLayout(false)
+		m.useTokensLayout(true)
+		if len(tokensRangeOptions) == 0 {
+			m.tokensRangeIndex = 0
+		} else {
+			if m.tokensRangeIndex < 0 {
+				m.tokensRangeIndex = 0
+			}
+			if m.tokensRangeIndex >= len(tokensRangeOptions) {
+				m.tokensRangeIndex = len(tokensRangeOptions) - 1
+			}
+		}
+		m.tokensLoading = true
+		m.tokensError = nil
+		m.tokensUsage = nil
+		m.tokensTelemetrySent = false
+		m.tokensCol.SetPlaceholder("Loading token usage…")
+		m.previewCol.SetContent("Loading token usage…\n")
+		m.focus = int(focusItems)
+		return m.loadTokensUsageCmd()
+	}
 	if feature.Key == "artifacts" {
 		m.useServicesLayout(false)
 		m.useEnvLayout(false)
@@ -1474,6 +1575,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 	m.useEnvLayout(false)
 	m.useServicesLayout(false)
 	m.useArtifactsLayout(false)
+	m.useTokensLayout(false)
 	if feature.Key == "overview" {
 		m.emitTelemetry("overview_opened", map[string]string{"path": filepath.Clean(m.currentProject.Path)})
 		m.itemsCol.SetTitle("Overview")
@@ -3939,6 +4041,8 @@ func (m *model) applyLayout() {
 		widths = []int{44, 52, 48, 44}
 	} else if m.usingArtifactsLayout {
 		widths = []int{44, 52, 52, 36}
+	} else if m.usingTokensLayout {
+		widths = []int{44, 52, 60, 40}
 	} else if m.usingEnvLayout {
 		widths = []int{44, 52, 56, 42}
 	}
@@ -4030,6 +4134,41 @@ func (m *model) useServicesLayout(enable bool) {
 			m.previewCol,
 		}
 		m.usingServicesLayout = false
+		if m.focus >= len(m.columns) {
+			m.focus = len(m.columns) - 1
+		}
+	}
+	m.applyLayout()
+}
+
+func (m *model) useTokensLayout(enable bool) {
+	if enable {
+		if m.usingTokensLayout {
+			return
+		}
+		m.columns = []column{
+			m.workspaceCol,
+			m.projectsCol,
+			m.featureCol,
+			m.tokensCol,
+			m.previewCol,
+		}
+		m.usingTokensLayout = true
+		if m.focus >= len(m.columns) {
+			m.focus = len(m.columns) - 1
+		}
+	} else {
+		if !m.usingTokensLayout {
+			return
+		}
+		m.columns = []column{
+			m.workspaceCol,
+			m.projectsCol,
+			m.featureCol,
+			m.itemsCol,
+			m.previewCol,
+		}
+		m.usingTokensLayout = false
 		if m.focus >= len(m.columns) {
 			m.focus = len(m.columns) - 1
 		}
@@ -4973,6 +5112,239 @@ func trimMultiline(input string, limit int) string {
 		lines = append(lines[:limit], "…")
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m *model) loadTokensUsageCmd() tea.Cmd {
+	if m.currentProject == nil {
+		return nil
+	}
+	projectPath := filepath.Clean(m.currentProject.Path)
+	return func() tea.Msg {
+		logPath := filepath.Join(projectPath, ".gpt-creator", "logs", "codex-usage.ndjson")
+		usage, err := readTokensUsage(logPath)
+		return tokensLoadedMsg{usage: usage, err: err}
+	}
+}
+
+func (m *model) handleTokensLoaded(msg tokensLoadedMsg) tea.Cmd {
+	m.tokensLoading = false
+	m.tokensError = msg.err
+	m.tokensUsage = msg.usage
+	if msg.err != nil {
+		m.tokensViewData = tokensViewData{}
+		m.tokensCurrentRow = ""
+		if os.IsNotExist(msg.err) {
+			m.tokensCol.SetPlaceholder("No usage log found under .gpt-creator/logs/codex-usage.ndjson.")
+			m.previewCol.SetContent("No token usage log found.\nRun codex-enabled commands to capture usage data.\n")
+		} else {
+			m.tokensCol.SetPlaceholder("Failed to read token usage log.")
+			m.previewCol.SetContent(fmt.Sprintf("Failed to read token usage log:\n%v\n", msg.err))
+		}
+		return nil
+	}
+	cmd := m.refreshTokensView(true)
+	if !m.tokensTelemetrySent && m.currentProject != nil {
+		fields := map[string]string{
+			"path":    filepath.Clean(m.currentProject.Path),
+			"group":   string(m.tokensGroup),
+			"records": strconv.Itoa(len(m.tokensViewData.Records)),
+		}
+		if idx := m.tokensRangeIndex; idx >= 0 && idx < len(tokensRangeOptions) {
+			fields["range"] = tokensRangeOptions[idx].Key
+		}
+		if m.tokensViewData.Summary.TotalCalls > 0 {
+			fields["calls"] = strconv.Itoa(m.tokensViewData.Summary.TotalCalls)
+		}
+		if m.tokensViewData.Summary.TotalTokens > 0 {
+			fields["tokens"] = strconv.Itoa(m.tokensViewData.Summary.TotalTokens)
+		}
+		m.emitTelemetry("tokens_viewed", fields)
+		m.tokensTelemetrySent = true
+	}
+	return cmd
+}
+
+func (m *model) refreshTokensView(resetSelection bool) tea.Cmd {
+	option := tokensRangeOption{Key: "all", Label: "All time"}
+	if len(tokensRangeOptions) > 0 {
+		if m.tokensRangeIndex < 0 {
+			m.tokensRangeIndex = 0
+		}
+		if m.tokensRangeIndex >= len(tokensRangeOptions) {
+			m.tokensRangeIndex = len(tokensRangeOptions) - 1
+		}
+		option = tokensRangeOptions[m.tokensRangeIndex]
+	}
+	data, err := buildTokensView(m.tokensUsage, option, m.tokensGroup)
+	if err != nil {
+		m.tokensViewData = tokensViewData{}
+		m.tokensCurrentRow = ""
+		m.tokensCol.SetPlaceholder("Unable to summarise token usage.")
+		m.previewCol.SetContent(fmt.Sprintf("Failed to summarise token usage: %v\n", err))
+		return nil
+	}
+	m.tokensViewData = data
+	context := tokensContextString(data)
+	emptyMessage := tokensEmptyMessage(data)
+	m.tokensCol.SetData(data.Rows, data.Group, context, emptyMessage)
+	if len(data.Rows) == 0 {
+		m.tokensCurrentRow = ""
+		if len(data.Records) == 0 {
+			m.previewCol.SetContent("No usage entries found in this range.\nRun codex-enabled commands to capture usage data.\n")
+		} else {
+			m.previewCol.SetContent("No rollups available for this range.\nPress '-' or '=' to adjust the range, or 'g' to toggle grouping.\n")
+		}
+		return nil
+	}
+	if !resetSelection && m.tokensCurrentRow != "" && m.tokensCol.SelectKey(m.tokensCurrentRow) {
+		if row, ok := m.tokensCol.SelectedRow(); ok {
+			return func() tea.Msg { return tokensRowSelectedMsg{row: row} }
+		}
+	}
+	row := data.Rows[0]
+	m.tokensCurrentRow = row.Key
+	m.tokensCol.SelectKey(row.Key)
+	return func() tea.Msg { return tokensRowSelectedMsg{row: row} }
+}
+
+func tokensContextString(data tokensViewData) string {
+	if data.Summary.RangeLabel == "" {
+		return ""
+	}
+	parts := []string{data.Summary.RangeLabel}
+	if label := strings.TrimSpace(data.Summary.GroupLabel); label != "" {
+		parts = append(parts, label)
+	}
+	if data.Summary.TotalCalls > 0 {
+		parts = append(parts, fmt.Sprintf("%d calls", data.Summary.TotalCalls))
+	}
+	if data.Summary.TotalTokens > 0 {
+		parts = append(parts, fmt.Sprintf("%s tokens", formatIntComma(data.Summary.TotalTokens)))
+	}
+	if data.Summary.TotalCost > 0 {
+		parts = append(parts, formatCost(data.Summary.TotalCost))
+	}
+	return strings.Join(parts, " • ")
+}
+
+func tokensEmptyMessage(data tokensViewData) string {
+	if len(data.Records) == 0 {
+		return "No usage entries recorded yet."
+	}
+	return "No rollups found for this range."
+}
+
+func (m *model) handleTokensRowSelected(row tokensTableRow) {
+	m.tokensCurrentRow = row.Key
+	if len(m.tokensViewData.Records) == 0 {
+		m.previewCol.SetContent("No usage entries available.\n")
+		return
+	}
+	m.previewCol.SetContent(renderTokensPreview(m.tokensViewData, row))
+}
+
+func (m *model) adjustTokensRange(delta int) tea.Cmd {
+	if len(tokensRangeOptions) == 0 {
+		return nil
+	}
+	newIndex := m.tokensRangeIndex + delta
+	if newIndex < 0 {
+		newIndex = 0
+	}
+	if newIndex >= len(tokensRangeOptions) {
+		newIndex = len(tokensRangeOptions) - 1
+	}
+	if newIndex == m.tokensRangeIndex {
+		return nil
+	}
+	m.tokensRangeIndex = newIndex
+	m.tokensCurrentRow = ""
+	return m.refreshTokensView(false)
+}
+
+func (m *model) toggleTokensGroup() tea.Cmd {
+	if m.tokensGroup == tokensGroupByCommand {
+		m.tokensGroup = tokensGroupByDay
+	} else {
+		m.tokensGroup = tokensGroupByCommand
+	}
+	m.tokensCurrentRow = ""
+	return m.refreshTokensView(false)
+}
+
+func (m *model) exportTokensCSV() tea.Cmd {
+	if m.currentProject == nil {
+		return nil
+	}
+	records := append([]tokenLogRecord(nil), m.tokensViewData.Records...)
+	if len(records) == 0 {
+		m.setToast("No usage entries to export", 4*time.Second)
+		return nil
+	}
+	projectPath := filepath.Clean(m.currentProject.Path)
+	rangeKey := ""
+	if idx := m.tokensRangeIndex; idx >= 0 && idx < len(tokensRangeOptions) {
+		rangeKey = tokensRangeOptions[idx].Key
+	}
+	group := m.tokensGroup
+	total := totalTokens(records)
+	return func() tea.Msg {
+		path, err := writeTokensCSV(projectPath, records)
+		if err != nil {
+			return tokensExportedMsg{err: err, rangeKey: rangeKey, group: group, records: len(records), tokens: total}
+		}
+		return tokensExportedMsg{path: path, rangeKey: rangeKey, group: group, records: len(records), tokens: total}
+	}
+}
+
+func totalTokens(records []tokenLogRecord) int {
+	total := 0
+	for _, rec := range records {
+		total += rec.TotalTokens
+	}
+	return total
+}
+
+func (m *model) handleTokensExported(msg tokensExportedMsg) {
+	if msg.err != nil {
+		m.appendLog(fmt.Sprintf("Tokens export failed: %v", msg.err))
+		m.setToast("Tokens export failed", 6*time.Second)
+		return
+	}
+	if strings.TrimSpace(msg.path) == "" {
+		m.appendLog("Tokens export failed: empty path")
+		m.setToast("Tokens export failed", 6*time.Second)
+		return
+	}
+	m.appendLog(fmt.Sprintf("Tokens usage exported → %s", abbreviatePath(msg.path)))
+	m.setToast("Tokens CSV exported", 5*time.Second)
+	if m.currentProject != nil {
+		fields := map[string]string{
+			"path":    filepath.Clean(m.currentProject.Path),
+			"file":    msg.path,
+			"group":   string(msg.group),
+			"records": strconv.Itoa(msg.records),
+			"tokens":  strconv.Itoa(msg.tokens),
+		}
+		if msg.rangeKey != "" {
+			fields["range"] = msg.rangeKey
+		}
+		m.emitTelemetry("tokens_exported", fields)
+	}
+}
+
+func (m *model) exitTokensView() {
+	if !m.usingTokensLayout {
+		return
+	}
+	m.useTokensLayout(false)
+	m.tokensUsage = nil
+	m.tokensViewData = tokensViewData{}
+	m.tokensCurrentRow = ""
+	m.tokensLoading = false
+	m.tokensError = nil
+	m.tokensTelemetrySent = false
+	m.tokensCol.SetPlaceholder("")
 }
 
 func (m *model) queueTasksCommand(command []string) tea.Cmd {

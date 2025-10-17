@@ -29,14 +29,18 @@ type column interface {
 }
 
 type selectableColumn struct {
-	title       string
-	model       list.Model
-	delegate    *list.DefaultDelegate
-	width       int
-	height      int
-	scrollX     int
-	onSelect    func(entry listEntry) tea.Cmd
-	onHighlight func(entry listEntry) tea.Cmd
+	title             string
+	model             list.Model
+	delegate          *list.DefaultDelegate
+	width             int
+	height            int
+	scrollX           int
+	onSelect          func(entry listEntry) tea.Cmd
+	onHighlight       func(entry listEntry) tea.Cmd
+	panelFrameWidth   int
+	selectedTitleBase lipgloss.Style
+	selectedDescBase  lipgloss.Style
+	hasSelectedStyles bool
 }
 
 type listEntry struct {
@@ -95,6 +99,34 @@ func (c *selectableColumn) applyModelSize() {
 		contentHeight = 1
 	}
 	c.model.SetSize(effectiveWidth, contentHeight)
+	c.updateSelectedWidths()
+}
+
+func (c *selectableColumn) contentWidth() int {
+	width := c.width
+	if width < 1 {
+		width = 1
+	}
+	inner := width - c.panelFrameWidth
+	if inner < 1 {
+		inner = 1
+	}
+	return inner
+}
+
+func (c *selectableColumn) updateSelectedWidths() {
+	if c.delegate == nil || !c.hasSelectedStyles {
+		return
+	}
+	inner := c.contentWidth()
+	selected := c.selectedTitleBase
+	desc := c.selectedDescBase
+	if inner > 0 {
+		selected = selected.Width(inner)
+		desc = desc.Width(inner)
+	}
+	c.delegate.Styles.SelectedTitle = selected
+	c.delegate.Styles.SelectedDesc = desc
 }
 
 func (c *selectableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
@@ -180,16 +212,20 @@ func (c *selectableColumn) ApplyStyles(s styles) {
 	if c.delegate != nil {
 		normal := s.listItem.Copy()
 		desc := s.statusHint.Copy().Padding(0, 1)
-		selected := s.listSel.Copy()
+		c.panelFrameWidth = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+		c.selectedTitleBase = s.listSel.Copy().ColorWhitespace(true)
+		c.selectedDescBase = c.selectedTitleBase.Copy().Foreground(crushPrimaryBright)
+		c.hasSelectedStyles = true
 
 		c.delegate.Styles.NormalTitle = normal
 		c.delegate.Styles.DimmedTitle = normal.Copy().Faint(true)
 		c.delegate.Styles.NormalDesc = desc
 		c.delegate.Styles.DimmedDesc = desc.Copy().Faint(true)
-		c.delegate.Styles.SelectedTitle = selected
-		c.delegate.Styles.SelectedDesc = selected.Copy().Foreground(crushPrimaryBright)
+		c.delegate.Styles.SelectedTitle = c.selectedTitleBase
+		c.delegate.Styles.SelectedDesc = c.selectedDescBase
 		c.delegate.Styles.FilterMatch = s.cmdPrompt.Copy().Underline(true)
 		c.model.SetDelegate(c.delegate)
+		c.updateSelectedWidths()
 	}
 
 	c.model.Styles.Title = s.columnTitle.Copy()
@@ -248,14 +284,18 @@ func (e backlogTreeEntry) FilterValue() string {
 }
 
 type backlogTreeColumn struct {
-	title       string
-	model       list.Model
-	delegate    *list.DefaultDelegate
-	width       int
-	height      int
-	onHighlight func(backlogNode) tea.Cmd
-	onToggle    func(backlogNode) tea.Cmd
-	onActivate  func(backlogNode) tea.Cmd
+	title             string
+	model             list.Model
+	delegate          *list.DefaultDelegate
+	width             int
+	height            int
+	onHighlight       func(backlogNode) tea.Cmd
+	onToggle          func(backlogNode) tea.Cmd
+	onActivate        func(backlogNode) tea.Cmd
+	panelFrameWidth   int
+	selectedTitleBase lipgloss.Style
+	selectedDescBase  lipgloss.Style
+	hasSelectedStyles bool
 }
 
 func newBacklogTreeColumn(title string) *backlogTreeColumn {
@@ -263,6 +303,7 @@ func newBacklogTreeColumn(title string) *backlogTreeColumn {
 
 	column := &backlogTreeColumn{
 		title:    title,
+		width:    28,
 		delegate: &delegate,
 	}
 
@@ -287,17 +328,21 @@ func (c *backlogTreeColumn) ApplyStyles(s styles) {
 	if c.delegate != nil {
 		normal := s.listItem.Copy()
 		desc := s.statusHint.Copy().Padding(0, 0, 0, 2)
-		selected := s.listSel.Copy()
+		c.panelFrameWidth = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+		c.selectedTitleBase = s.listSel.Copy().ColorWhitespace(true)
+		c.selectedDescBase = c.selectedTitleBase.Copy().Foreground(crushPrimaryBright)
+		c.hasSelectedStyles = true
 
 		c.delegate.SetSpacing(0)
 		c.delegate.Styles.NormalTitle = normal
 		c.delegate.Styles.DimmedTitle = normal.Copy().Faint(true)
 		c.delegate.Styles.NormalDesc = desc
 		c.delegate.Styles.DimmedDesc = desc.Copy().Faint(true)
-		c.delegate.Styles.SelectedTitle = selected
-		c.delegate.Styles.SelectedDesc = selected.Copy().Foreground(crushPrimaryBright)
+		c.delegate.Styles.SelectedTitle = c.selectedTitleBase
+		c.delegate.Styles.SelectedDesc = c.selectedDescBase
 		c.delegate.Styles.FilterMatch = s.cmdPrompt.Copy().Underline(true)
 		c.model.SetDelegate(c.delegate)
+		c.updateSelectedWidths()
 	}
 
 	c.model.Styles.Title = s.columnTitle.Copy()
@@ -334,6 +379,34 @@ func (c *backlogTreeColumn) SetSize(width, height int) {
 	}
 	c.height = height
 	c.model.SetSize(width, height-2)
+	c.updateSelectedWidths()
+}
+
+func (c *backlogTreeColumn) contentWidth() int {
+	width := c.width
+	if width < 1 {
+		width = 1
+	}
+	inner := width - c.panelFrameWidth
+	if inner < 1 {
+		inner = 1
+	}
+	return inner
+}
+
+func (c *backlogTreeColumn) updateSelectedWidths() {
+	if c.delegate == nil || !c.hasSelectedStyles {
+		return
+	}
+	inner := c.contentWidth()
+	selected := c.selectedTitleBase
+	desc := c.selectedDescBase
+	if inner > 0 {
+		selected = selected.Width(inner)
+		desc = desc.Width(inner)
+	}
+	c.delegate.Styles.SelectedTitle = selected
+	c.delegate.Styles.SelectedDesc = desc
 }
 
 func (c *backlogTreeColumn) Update(msg tea.Msg) (column, tea.Cmd) {
@@ -642,14 +715,18 @@ func (e artifactTreeEntry) FilterValue() string {
 }
 
 type artifactTreeColumn struct {
-	title       string
-	model       list.Model
-	delegate    *list.DefaultDelegate
-	width       int
-	height      int
-	onHighlight func(artifactNode) tea.Cmd
-	onToggle    func(artifactNode) tea.Cmd
-	onActivate  func(artifactNode) tea.Cmd
+	title             string
+	model             list.Model
+	delegate          *list.DefaultDelegate
+	width             int
+	height            int
+	onHighlight       func(artifactNode) tea.Cmd
+	onToggle          func(artifactNode) tea.Cmd
+	onActivate        func(artifactNode) tea.Cmd
+	panelFrameWidth   int
+	selectedTitleBase lipgloss.Style
+	selectedDescBase  lipgloss.Style
+	hasSelectedStyles bool
 }
 
 func newArtifactTreeColumn(title string) *artifactTreeColumn {
@@ -657,6 +734,7 @@ func newArtifactTreeColumn(title string) *artifactTreeColumn {
 
 	column := &artifactTreeColumn{
 		title:    title,
+		width:    36,
 		delegate: &delegate,
 	}
 
@@ -681,17 +759,21 @@ func (c *artifactTreeColumn) ApplyStyles(s styles) {
 	if c.delegate != nil {
 		normal := s.listItem.Copy()
 		desc := s.statusHint.Copy().Padding(0, 0, 0, 2)
-		selected := s.listSel.Copy()
+		c.panelFrameWidth = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+		c.selectedTitleBase = s.listSel.Copy().ColorWhitespace(true)
+		c.selectedDescBase = c.selectedTitleBase.Copy().Foreground(crushPrimaryBright)
+		c.hasSelectedStyles = true
 
 		c.delegate.SetSpacing(0)
 		c.delegate.Styles.NormalTitle = normal
 		c.delegate.Styles.DimmedTitle = normal.Copy().Faint(true)
 		c.delegate.Styles.NormalDesc = desc
 		c.delegate.Styles.DimmedDesc = desc.Copy().Faint(true)
-		c.delegate.Styles.SelectedTitle = selected
-		c.delegate.Styles.SelectedDesc = selected.Copy().Foreground(crushPrimaryBright)
+		c.delegate.Styles.SelectedTitle = c.selectedTitleBase
+		c.delegate.Styles.SelectedDesc = c.selectedDescBase
 		c.delegate.Styles.FilterMatch = s.cmdPrompt.Copy().Underline(true)
 		c.model.SetDelegate(c.delegate)
+		c.updateSelectedWidths()
 	}
 
 	c.model.Styles.Title = s.columnTitle.Copy()
@@ -754,6 +836,34 @@ func (c *artifactTreeColumn) SetSize(width, height int) {
 	}
 	c.height = height
 	c.model.SetSize(c.width, height-2)
+	c.updateSelectedWidths()
+}
+
+func (c *artifactTreeColumn) contentWidth() int {
+	width := c.width
+	if width < 1 {
+		width = 1
+	}
+	inner := width - c.panelFrameWidth
+	if inner < 1 {
+		inner = 1
+	}
+	return inner
+}
+
+func (c *artifactTreeColumn) updateSelectedWidths() {
+	if c.delegate == nil || !c.hasSelectedStyles {
+		return
+	}
+	inner := c.contentWidth()
+	selected := c.selectedTitleBase
+	desc := c.selectedDescBase
+	if inner > 0 {
+		selected = selected.Width(inner)
+		desc = desc.Width(inner)
+	}
+	c.delegate.Styles.SelectedTitle = selected
+	c.delegate.Styles.SelectedDesc = desc
 }
 
 func (c *artifactTreeColumn) Update(msg tea.Msg) (column, tea.Cmd) {
@@ -1475,6 +1585,206 @@ func (c *servicesTableColumn) ApplyStyles(s styles) {
 		Cell:     s.tableCell,
 		Selected: s.tableActive,
 	})
+}
+
+type tokensTableColumn struct {
+	title       string
+	table       table.Model
+	width       int
+	height      int
+	group       tokensGroupMode
+	rows        []tokensTableRow
+	context     string
+	empty       string
+	onHighlight func(tokensTableRow) tea.Cmd
+}
+
+func newTokensTableColumn(title string) *tokensTableColumn {
+	columns := []table.Column{
+		{Title: "Date", Width: 16},
+		{Title: "Command", Width: 24},
+		{Title: "Calls", Width: 8},
+		{Title: "Tokens", Width: 12},
+		{Title: "Est. $", Width: 10},
+	}
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+	return &tokensTableColumn{
+		title: title,
+		table: t,
+	}
+}
+
+func (c *tokensTableColumn) SetHighlightFunc(fn func(tokensTableRow) tea.Cmd) {
+	c.onHighlight = fn
+}
+
+func (c *tokensTableColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
+}
+
+func (c *tokensTableColumn) SetSize(width, height int) {
+	if width < 32 {
+		width = 32
+	}
+	if height < 6 {
+		height = 6
+	}
+	c.width = width
+	c.height = height
+	c.configureColumns()
+	c.table.SetHeight(height - 3)
+}
+
+func (c *tokensTableColumn) configureColumns() {
+	if c.width == 0 {
+		return
+	}
+	labelWidth := maxInt(16, c.width/3)
+	secondaryWidth := maxInt(18, c.width/3)
+	remaining := c.width - labelWidth - secondaryWidth - 12 - 10 - 6
+	if remaining < 10 {
+		remaining = 10
+	}
+	callsWidth := 8
+	tokensWidth := remaining
+	costWidth := 10
+
+	switch c.group {
+	case tokensGroupByCommand:
+		c.table.SetColumns([]table.Column{
+			{Title: "Command", Width: labelWidth},
+			{Title: "Last", Width: secondaryWidth},
+			{Title: "Calls", Width: callsWidth},
+			{Title: "Tokens", Width: tokensWidth},
+			{Title: "Est. $", Width: costWidth},
+		})
+	default:
+		c.table.SetColumns([]table.Column{
+			{Title: "Date", Width: labelWidth},
+			{Title: "Command", Width: secondaryWidth},
+			{Title: "Calls", Width: callsWidth},
+			{Title: "Tokens", Width: tokensWidth},
+			{Title: "Est. $", Width: costWidth},
+		})
+	}
+}
+
+func (c *tokensTableColumn) SetPlaceholder(message string) {
+	c.rows = nil
+	c.context = ""
+	c.empty = message
+	c.table.SetRows(nil)
+}
+
+func (c *tokensTableColumn) SetData(rows []tokensTableRow, group tokensGroupMode, context, empty string) {
+	c.group = group
+	c.context = context
+	c.empty = empty
+	c.rows = append([]tokensTableRow(nil), rows...)
+	c.configureColumns()
+	tableRows := make([]table.Row, len(c.rows))
+	for i, row := range c.rows {
+		tableRows[i] = table.Row{
+			row.Label,
+			row.Secondary,
+			formatIntComma(row.Calls),
+			formatIntComma(row.Tokens),
+			formatCost(row.Cost),
+		}
+	}
+	c.table.SetRows(tableRows)
+	if len(tableRows) > 0 {
+		c.table.SetCursor(0)
+	}
+}
+
+func (c *tokensTableColumn) SelectKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for idx, row := range c.rows {
+		if row.Key == key {
+			c.table.SetCursor(idx)
+			return true
+		}
+	}
+	return false
+}
+
+func (c *tokensTableColumn) SelectedRow() (tokensTableRow, bool) {
+	if len(c.rows) == 0 {
+		return tokensTableRow{}, false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 || cursor >= len(c.rows) {
+		return tokensTableRow{}, false
+	}
+	return c.rows[cursor], true
+}
+
+func (c *tokensTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	prevCursor := c.table.Cursor()
+	var cmd tea.Cmd
+	c.table, cmd = c.table.Update(msg)
+	if cmd != nil {
+		return c, cmd
+	}
+	if c.table.Cursor() != prevCursor && c.onHighlight != nil {
+		if row, ok := c.SelectedRow(); ok {
+			if run := c.onHighlight(row); run != nil {
+				return c, run
+			}
+		}
+	}
+	return c, nil
+}
+
+func (c *tokensTableColumn) View(s styles, focused bool) string {
+	title := s.columnTitle.Render(c.title)
+	var body string
+	if len(c.rows) == 0 {
+		message := strings.TrimSpace(c.empty)
+		if message == "" {
+			message = "No usage data"
+		}
+		body = s.listItem.Copy().Faint(true).Render(message)
+	} else {
+		body = c.table.View()
+	}
+	if context := strings.TrimSpace(c.context); context != "" {
+		body = lipgloss.JoinVertical(lipgloss.Left, s.statusHint.Render(context), body)
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg)
+}
+
+func (c *tokensTableColumn) Title() string {
+	return c.title
+}
+
+func (c *tokensTableColumn) FocusValue() string {
+	if row, ok := c.SelectedRow(); ok {
+		return row.Label
+	}
+	return ""
+}
+
+func (c *tokensTableColumn) ScrollHorizontal(delta int) bool {
+	return false
 }
 
 type previewColumn struct {

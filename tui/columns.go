@@ -1787,6 +1787,245 @@ func (c *tokensTableColumn) ScrollHorizontal(delta int) bool {
 	return false
 }
 
+type reportTableRow struct {
+	entry      reportEntry
+	timeLabel  string
+	typeLabel  string
+	summary    string
+	actionHint string
+}
+
+type reportsTableColumn struct {
+	title        string
+	table        table.Model
+	width        int
+	height       int
+	summaryWidth int
+	rows         []reportTableRow
+	placeholder  string
+	onHighlight  func(reportEntry, bool) tea.Cmd
+}
+
+func newReportsTableColumn(title string) *reportsTableColumn {
+	columns := []table.Column{
+		{Title: "Time", Width: 18},
+		{Title: "Type", Width: 14},
+		{Title: "Summary", Width: 42},
+		{Title: "Open", Width: 8},
+	}
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+	return &reportsTableColumn{
+		title: title,
+		table: t,
+	}
+}
+
+func (c *reportsTableColumn) SetHighlightFunc(fn func(reportEntry, bool) tea.Cmd) {
+	c.onHighlight = fn
+}
+
+func (c *reportsTableColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
+}
+
+func (c *reportsTableColumn) SetSize(width, height int) {
+	if width < 32 {
+		width = 32
+	}
+	if height < 6 {
+		height = 6
+	}
+	c.width = width
+	c.height = height
+	c.configureColumns()
+	c.table.SetHeight(height - 3)
+}
+
+func (c *reportsTableColumn) configureColumns() {
+	if c.width == 0 {
+		return
+	}
+	timeWidth := 18
+	typeWidth := 14
+	actionWidth := 8
+	summaryWidth := c.width - timeWidth - typeWidth - actionWidth - 6
+	if summaryWidth < 18 {
+		summaryWidth = 18
+	}
+	c.summaryWidth = summaryWidth
+	c.table.SetColumns([]table.Column{
+		{Title: "Time", Width: timeWidth},
+		{Title: "Type", Width: typeWidth},
+		{Title: "Summary", Width: summaryWidth},
+		{Title: "Open", Width: actionWidth},
+	})
+}
+
+func (c *reportsTableColumn) SetPlaceholder(message string) {
+	c.rows = nil
+	c.placeholder = strings.TrimSpace(message)
+	c.table.SetRows(nil)
+}
+
+func (c *reportsTableColumn) SetEntries(entries []reportEntry) {
+	c.configureColumns()
+	c.rows = make([]reportTableRow, len(entries))
+	tableRows := make([]table.Row, len(entries))
+	for i, entry := range entries {
+		row := reportTableRow{
+			entry:      entry,
+			timeLabel:  formatReportTableTime(entry.Timestamp),
+			typeLabel:  defaultIfEmpty(entry.Type, titleCase(entry.Format)),
+			summary:    truncateWidth(defaultIfEmpty(entry.Title, entry.RelPath), c.summaryWidth),
+			actionHint: "Open",
+		}
+		c.rows[i] = row
+		tableRows[i] = table.Row{
+			row.timeLabel,
+			row.typeLabel,
+			row.summary,
+			row.actionHint,
+		}
+	}
+	c.table.SetRows(tableRows)
+	if len(tableRows) > 0 {
+		c.table.SetCursor(0)
+	}
+}
+
+func (c *reportsTableColumn) SelectedEntry() (reportEntry, bool) {
+	if len(c.rows) == 0 {
+		return reportEntry{}, false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 || cursor >= len(c.rows) {
+		return reportEntry{}, false
+	}
+	return c.rows[cursor].entry, true
+}
+
+func (c *reportsTableColumn) SelectKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for idx, row := range c.rows {
+		if row.entry.Key == key {
+			c.table.SetCursor(idx)
+			return true
+		}
+	}
+	return false
+}
+
+func (c *reportsTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	prev := c.table.Cursor()
+	var cmds []tea.Cmd
+	var cmd tea.Cmd
+	c.table, cmd = c.table.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "enter" && c.onHighlight != nil {
+			if entry, ok := c.SelectedEntry(); ok {
+				if run := c.onHighlight(entry, true); run != nil {
+					cmds = append(cmds, run)
+				}
+			}
+		}
+	}
+
+	if c.table.Cursor() != prev && c.onHighlight != nil {
+		if entry, ok := c.SelectedEntry(); ok {
+			if run := c.onHighlight(entry, false); run != nil {
+				cmds = append(cmds, run)
+			}
+		}
+	}
+
+	if len(cmds) == 0 {
+		return c, nil
+	}
+	return c, tea.Batch(cmds...)
+}
+
+func (c *reportsTableColumn) View(s styles, focused bool) string {
+	title := s.columnTitle.Render(c.title)
+	var body string
+	if len(c.rows) == 0 {
+		message := c.placeholder
+		if message == "" {
+			message = "No reports captured"
+		}
+		body = s.listItem.Copy().Faint(true).Render(message)
+	} else {
+		body = c.table.View()
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg)
+}
+
+func (c *reportsTableColumn) Title() string {
+	return c.title
+}
+
+func (c *reportsTableColumn) FocusValue() string {
+	if entry, ok := c.SelectedEntry(); ok {
+		return entry.Title
+	}
+	return ""
+}
+
+func (c *reportsTableColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func formatReportTableTime(ts time.Time) string {
+	if ts.IsZero() {
+		return "(unknown)"
+	}
+	return ts.Local().Format("02 Jan 15:04")
+}
+
+func truncateWidth(text string, width int) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return "(no summary)"
+	}
+	if width <= 0 {
+		width = 40
+	}
+	if runewidth.StringWidth(trimmed) <= width {
+		return trimmed
+	}
+	if width <= 1 {
+		return "…"
+	}
+	return runewidth.Truncate(trimmed, width, "…")
+}
+
+func defaultIfEmpty(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
 type previewColumn struct {
 	title       string
 	width       int
@@ -2868,7 +3107,8 @@ func itemPreview(project *discoveredProject, featureKey string, item featureItem
 	case "tokens":
 		b.WriteString("Track Codex/OpenAI token usage and costs over time.\n")
 	case "reports":
-		b.WriteString("Browse generated reports and toggle automation defaults.\n")
+		b.WriteString("Browse automation and verify reports, preview details, then open or export entries.\n")
+		b.WriteString("Shortcuts: enter/o open • e export • y copy path.\n")
 	case "env":
 		b.WriteString("Review and edit .env values across project applications (editing coming soon).\n")
 	default:

@@ -220,6 +220,16 @@ type tokensExportedMsg struct {
 	tokens   int
 }
 
+type reportsLoadedMsg struct {
+	entries []reportEntry
+	err     error
+}
+
+type reportsRowSelectedMsg struct {
+	entry    reportEntry
+	activate bool
+}
+
 type servicesLoadedMsg struct {
 	items []featureItemDefinition
 }
@@ -356,6 +366,7 @@ type model struct {
 	envTableCol             *envTableColumn
 	servicesCol             *servicesTableColumn
 	tokensCol               *tokensTableColumn
+	reportsCol              *reportsTableColumn
 	artifactsCol            *selectableColumn
 	artifactTreeCol         *artifactTreeColumn
 	previewCol              *previewColumn
@@ -368,6 +379,7 @@ type model struct {
 	usingArtifactsLayout    bool
 	usingEnvLayout          bool
 	usingTokensLayout       bool
+	usingReportsLayout      bool
 	backlogCol              *backlogTreeColumn
 	backlogTable            *backlogTableColumn
 
@@ -470,6 +482,12 @@ type model struct {
 	tokensLoading       bool
 	tokensError         error
 	tokensTelemetrySent bool
+
+	reportEntries        []reportEntry
+	currentReportKey     string
+	reportsLoading       bool
+	reportsError         error
+	reportsTelemetrySent bool
 
 	jobStopwatch    stopwatch.Model
 	jobTimingActive bool
@@ -650,6 +668,12 @@ func initialModel() *model {
 		return func() tea.Msg { return tokensRowSelectedMsg{row: row} }
 	})
 	m.tokensCol.ApplyStyles(m.styles)
+
+	m.reportsCol = newReportsTableColumn("Reports")
+	m.reportsCol.SetHighlightFunc(func(entry reportEntry, activate bool) tea.Cmd {
+		return func() tea.Msg { return reportsRowSelectedMsg{entry: entry, activate: activate} }
+	})
+	m.reportsCol.ApplyStyles(m.styles)
 
 	m.backlogCol = newBacklogTreeColumn("Epics/Stories/Tasks")
 	m.backlogCol.SetCallbacks(
@@ -993,6 +1017,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.handleBacklogStatusUpdated(message); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case reportsLoadedMsg:
+		if cmd := m.handleReportsLoaded(message); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case reportsRowSelectedMsg:
+		m.handleReportsRowSelected(message)
 	case tokensLoadedMsg:
 		if cmd := m.handleTokensLoaded(message); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -1175,6 +1205,24 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			return true, nil
 		}
 	}
+	if m.currentFeature == "reports" {
+		switch msg.String() {
+		case "o", "O":
+			m.openSelectedReport()
+			return true, nil
+		case "e", "E":
+			if cmd := m.exportSelectedReport(); cmd != nil {
+				return true, cmd
+			}
+			return true, nil
+		case "y":
+			m.copySelectedReportPath()
+			return true, nil
+		case "Y":
+			m.copySelectedReportSnippet()
+			return true, nil
+		}
+	}
 	switch {
 	case msg.String() == "H":
 		if m.scrollFocusedColumn(-horizontalScrollStep) {
@@ -1281,6 +1329,10 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 				if handled, cmd := m.handleDocsPreviewEnter(); handled {
 					return true, cmd
 				}
+			}
+			if m.currentFeature == "reports" {
+				m.openSelectedReport()
+				return true, nil
 			}
 			return true, nil
 		}
@@ -1498,6 +1550,9 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 	if feature.Key != "tokens" && m.usingTokensLayout {
 		m.exitTokensView()
 	}
+	if feature.Key != "reports" && m.usingReportsLayout {
+		m.exitReportsView()
+	}
 	m.currentFeature = feature.Key
 	m.currentItem = featureItemDefinition{}
 	m.resetDocSelection()
@@ -1572,10 +1627,26 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		m.focus = int(focusItems)
 		return tea.Batch(cmds...)
 	}
+	if feature.Key == "reports" {
+		m.useEnvLayout(false)
+		m.useServicesLayout(false)
+		m.useArtifactsLayout(false)
+		m.useTokensLayout(false)
+		m.useReportsLayout(true)
+		m.reportsLoading = true
+		m.reportsError = nil
+		m.reportEntries = nil
+		m.reportsTelemetrySent = false
+		m.reportsCol.SetPlaceholder("Loading reports…")
+		m.previewCol.SetContent("Loading reports…\n")
+		m.focus = int(focusItems)
+		return m.loadReportsEntriesCmd()
+	}
 	m.useEnvLayout(false)
 	m.useServicesLayout(false)
 	m.useArtifactsLayout(false)
 	m.useTokensLayout(false)
+	m.useReportsLayout(false)
 	if feature.Key == "overview" {
 		m.emitTelemetry("overview_opened", map[string]string{"path": filepath.Clean(m.currentProject.Path)})
 		m.itemsCol.SetTitle("Overview")
@@ -4041,6 +4112,8 @@ func (m *model) applyLayout() {
 		widths = []int{44, 52, 48, 44}
 	} else if m.usingArtifactsLayout {
 		widths = []int{44, 52, 52, 36}
+	} else if m.usingReportsLayout {
+		widths = []int{44, 52, 60, 36}
 	} else if m.usingTokensLayout {
 		widths = []int{44, 52, 60, 40}
 	} else if m.usingEnvLayout {
@@ -4169,6 +4242,45 @@ func (m *model) useTokensLayout(enable bool) {
 			m.previewCol,
 		}
 		m.usingTokensLayout = false
+		if m.focus >= len(m.columns) {
+			m.focus = len(m.columns) - 1
+		}
+	}
+	m.applyLayout()
+}
+
+func (m *model) useReportsLayout(enable bool) {
+	if enable {
+		if m.usingReportsLayout {
+			return
+		}
+		m.columns = []column{
+			m.workspaceCol,
+			m.projectsCol,
+			m.featureCol,
+			m.reportsCol,
+			m.previewCol,
+		}
+		m.usingReportsLayout = true
+		if m.focus >= len(m.columns) {
+			m.focus = len(m.columns) - 1
+		}
+	} else {
+		if !m.usingReportsLayout {
+			return
+		}
+		if len(m.defaultColumns) == len(m.columns) && len(m.defaultColumns) > 0 {
+			m.columns = append([]column(nil), m.defaultColumns...)
+		} else {
+			m.columns = []column{
+				m.workspaceCol,
+				m.projectsCol,
+				m.featureCol,
+				m.itemsCol,
+				m.previewCol,
+			}
+		}
+		m.usingReportsLayout = false
 		if m.focus >= len(m.columns) {
 			m.focus = len(m.columns) - 1
 		}
@@ -4305,6 +4417,13 @@ func (m *model) exitEnvEditor() {
 	m.envEditingEntry = envEntry{}
 	m.pendingEnvKey = ""
 	m.previewCol.SetContent("Select an item to preview details.\n")
+}
+
+func (m *model) exitReportsView() {
+	if !m.usingReportsLayout {
+		return
+	}
+	m.useReportsLayout(false)
 }
 
 func (m *model) loadEnvFilesCmd() tea.Cmd {
@@ -5114,6 +5233,17 @@ func trimMultiline(input string, limit int) string {
 	return strings.Join(lines, "\n")
 }
 
+func (m *model) loadReportsEntriesCmd() tea.Cmd {
+	if m.currentProject == nil {
+		return nil
+	}
+	projectPath := filepath.Clean(m.currentProject.Path)
+	return func() tea.Msg {
+		entries, err := gatherProjectReports(projectPath)
+		return reportsLoadedMsg{entries: entries, err: err}
+	}
+}
+
 func (m *model) loadTokensUsageCmd() tea.Cmd {
 	if m.currentProject == nil {
 		return nil
@@ -5162,6 +5292,61 @@ func (m *model) handleTokensLoaded(msg tokensLoadedMsg) tea.Cmd {
 		m.tokensTelemetrySent = true
 	}
 	return cmd
+}
+
+func (m *model) handleReportsLoaded(msg reportsLoadedMsg) tea.Cmd {
+	m.reportsLoading = false
+	m.reportsError = msg.err
+	if msg.err != nil {
+		m.reportEntries = nil
+		m.reportsCol.SetEntries(nil)
+		m.reportsCol.SetPlaceholder("Failed to load reports.")
+		if msg.err != nil {
+			m.previewCol.SetContent(fmt.Sprintf("Failed to load reports:\n%v\n", msg.err))
+		} else {
+			m.previewCol.SetContent("Failed to load reports.\n")
+		}
+		return nil
+	}
+	m.reportEntries = append([]reportEntry(nil), msg.entries...)
+	if !m.reportsTelemetrySent && m.currentProject != nil {
+		fields := map[string]string{
+			"path":  filepath.Clean(m.currentProject.Path),
+			"count": strconv.Itoa(len(msg.entries)),
+		}
+		if len(msg.entries) > 0 && !msg.entries[0].Timestamp.IsZero() {
+			fields["latest"] = msg.entries[0].Timestamp.UTC().Format(time.RFC3339)
+		}
+		m.emitTelemetry("reports_viewed", fields)
+		m.reportsTelemetrySent = true
+	}
+	if len(msg.entries) == 0 {
+		m.reportsCol.SetEntries(nil)
+		m.reportsCol.SetPlaceholder("No reports captured yet.")
+		m.previewCol.SetContent("No reports available.\nRun commands with --reports-on to capture automation reports.\n")
+		m.currentReportKey = ""
+		return nil
+	}
+	m.reportsCol.SetEntries(msg.entries)
+	if m.currentReportKey != "" && m.reportsCol.SelectKey(m.currentReportKey) {
+		if entry, ok := m.reportsCol.SelectedEntry(); ok {
+			return func() tea.Msg { return reportsRowSelectedMsg{entry: entry} }
+		}
+	}
+	if entry, ok := m.reportsCol.SelectedEntry(); ok {
+		m.currentReportKey = entry.Key
+		return func() tea.Msg { return reportsRowSelectedMsg{entry: entry} }
+	}
+	return nil
+}
+
+func (m *model) handleReportsRowSelected(msg reportsRowSelectedMsg) {
+	entry := msg.entry
+	m.currentReportKey = entry.Key
+	m.previewCol.SetContent(m.renderReportPreview(entry))
+	if msg.activate {
+		m.openReportEntry(entry)
+	}
 }
 
 func (m *model) refreshTokensView(resetSelection bool) tea.Cmd {
@@ -5903,6 +6088,291 @@ func (m *model) openDatabaseDumpInEditor(kind string) {
 		"kind": kind,
 	}
 	m.emitTelemetry("db_dump_opened", fields)
+}
+
+func (m *model) selectedReportEntry() (reportEntry, bool) {
+	if m.reportsCol == nil {
+		return reportEntry{}, false
+	}
+	return m.reportsCol.SelectedEntry()
+}
+
+func (m *model) openSelectedReport() {
+	entry, ok := m.selectedReportEntry()
+	if !ok {
+		m.setToast("Select a report first", 4*time.Second)
+		return
+	}
+	m.openReportEntry(entry)
+}
+
+func (m *model) exportSelectedReport() tea.Cmd {
+	entry, ok := m.selectedReportEntry()
+	if !ok {
+		m.setToast("Select a report first", 4*time.Second)
+		return nil
+	}
+	if m.currentProject == nil {
+		m.setToast("Select a project first", 4*time.Second)
+		return nil
+	}
+	if strings.TrimSpace(entry.AbsPath) == "" {
+		m.setToast("Report path unavailable", 4*time.Second)
+		return nil
+	}
+	info, err := os.Stat(entry.AbsPath)
+	if err != nil {
+		m.appendLog(fmt.Sprintf("Report not found: %s (%v)", entry.AbsPath, err))
+		m.setToast("Report missing", 5*time.Second)
+		return nil
+	}
+	destDir := filepath.Join(m.currentProject.Path, "reports", "exports")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		m.appendLog(fmt.Sprintf("Failed to prepare exports directory: %v", err))
+		m.setToast("Export failed", 5*time.Second)
+		return nil
+	}
+	baseName := filepath.Base(entry.AbsPath)
+	ext := filepath.Ext(baseName)
+	nameRoot := strings.TrimSuffix(baseName, ext)
+	destPath := filepath.Join(destDir, baseName)
+	for i := 1; ; i++ {
+		if _, err := os.Stat(destPath); errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		destPath = filepath.Join(destDir, fmt.Sprintf("%s-%d%s", nameRoot, i, ext))
+	}
+	if err := copyFile(entry.AbsPath, destPath); err != nil {
+		m.appendLog(fmt.Sprintf("Failed to export report: %v", err))
+		m.setToast("Export failed", 5*time.Second)
+		return nil
+	}
+	relDest, err := filepath.Rel(m.currentProject.Path, destPath)
+	if err != nil {
+		relDest = destPath
+	} else {
+		relDest = filepath.ToSlash(relDest)
+	}
+	m.appendLog(fmt.Sprintf("Report exported → %s", abbreviatePath(destPath)))
+	m.setToast("Report exported", 4*time.Second)
+	if m.currentProject != nil {
+		fields := map[string]string{
+			"project": filepath.Clean(m.currentProject.Path),
+			"report":  entry.Key,
+			"format":  strings.ToLower(entry.Format),
+			"source":  entry.Source,
+			"dest":    relDest,
+		}
+		if entry.RelPath != "" {
+			fields["path"] = entry.RelPath
+		}
+		if info != nil {
+			fields["size"] = strconv.FormatInt(info.Size(), 10)
+		}
+		m.emitTelemetry("report_exported", fields)
+	}
+	return m.loadReportsEntriesCmd()
+}
+
+func (m *model) copySelectedReportPath() {
+	entry, ok := m.selectedReportEntry()
+	if !ok {
+		m.setToast("Select a report first", 4*time.Second)
+		return
+	}
+	path := entry.AbsPath
+	if strings.TrimSpace(path) == "" {
+		path = entry.RelPath
+	}
+	if strings.TrimSpace(path) == "" {
+		m.setToast("Report path unavailable", 4*time.Second)
+		return
+	}
+	if err := clipboard.WriteAll(path); err != nil {
+		m.appendLog(fmt.Sprintf("Failed to copy report path: %v", err))
+		m.setToast("Clipboard unavailable", 4*time.Second)
+		return
+	}
+	m.setToast("Report path copied", 3*time.Second)
+}
+
+func (m *model) copySelectedReportSnippet() {
+	entry, ok := m.selectedReportEntry()
+	if !ok {
+		m.setToast("Select a report first", 4*time.Second)
+		return
+	}
+	label, snippet := reportPreviewSnippet(entry)
+	if strings.TrimSpace(snippet) == "" {
+		m.setToast("No content available to copy", 4*time.Second)
+		return
+	}
+	if err := clipboard.WriteAll(snippet); err != nil {
+		m.appendLog(fmt.Sprintf("Failed to copy %s: %v", strings.ToLower(label), err))
+		m.setToast("Clipboard unavailable", 4*time.Second)
+		return
+	}
+	m.setToast(fmt.Sprintf("%s copied", label), 3*time.Second)
+}
+
+func (m *model) renderReportPreview(entry reportEntry) string {
+	title := strings.TrimSpace(entry.Title)
+	if title == "" {
+		title = "Report"
+	}
+	var b strings.Builder
+	b.WriteString(title)
+	b.WriteRune('\n')
+	b.WriteString(strings.Repeat("─", len(title)))
+	b.WriteString("\n\n")
+
+	if entry.Summary != "" {
+		b.WriteString(trimMultiline(entry.Summary, 8))
+		b.WriteString("\n\n")
+	}
+
+	meta := []string{}
+	if entry.Type != "" {
+		meta = append(meta, fmt.Sprintf("Type: %s", entry.Type))
+	}
+	if entry.Priority != "" {
+		meta = append(meta, fmt.Sprintf("Priority: %s", entry.Priority))
+	}
+	if entry.Status != "" {
+		meta = append(meta, fmt.Sprintf("Status: %s", entry.Status))
+	}
+	if entry.Reporter != "" {
+		meta = append(meta, fmt.Sprintf("Reporter: %s", entry.Reporter))
+	}
+	if entry.Slug != "" {
+		meta = append(meta, fmt.Sprintf("Slug: %s", entry.Slug))
+	}
+	if entry.Popularity > 0 {
+		meta = append(meta, fmt.Sprintf("Popularity: %d (likes %d, comments %d)", entry.Popularity, entry.Likes, entry.Comments))
+	}
+	if entry.Source != "" {
+		meta = append(meta, fmt.Sprintf("Source: %s", titleCase(entry.Source)))
+	}
+	if !entry.Timestamp.IsZero() {
+		ts := entry.Timestamp.Local()
+		meta = append(meta, fmt.Sprintf("Captured: %s (%s ago)", ts.Format(time.RFC822), formatRelativeTime(ts)))
+	}
+	if entry.RelPath != "" {
+		meta = append(meta, fmt.Sprintf("Location: %s", entry.RelPath))
+	}
+	meta = append(meta, fmt.Sprintf("Format: %s", defaultIfEmpty(entry.Format, "unknown")))
+	if entry.Size > 0 {
+		meta = append(meta, fmt.Sprintf("Size: %s", formatByteSize(entry.Size)))
+	}
+	if len(meta) > 0 {
+		b.WriteString(strings.Join(meta, "\n"))
+		b.WriteString("\n\n")
+	}
+
+	mode := reportOpenMode(entry.Format)
+	actions := []string{}
+	if mode == "browser" {
+		actions = append(actions, "enter/o open in browser")
+	} else {
+		actions = append(actions, "enter/o open in editor")
+	}
+	actions = append(actions, "e export copy", "y copy path", "Y copy snippet")
+	b.WriteString("Actions: ")
+	b.WriteString(strings.Join(actions, " • "))
+	b.WriteString("\n\n")
+
+	label, snippet := reportPreviewSnippet(entry)
+	snippet = strings.TrimSpace(snippet)
+	if snippet != "" {
+		b.WriteString(label)
+		b.WriteString(":\n")
+		b.WriteString(snippet)
+		b.WriteString("\n")
+	} else {
+		b.WriteString("No inline preview available. Use o to open the report.\n")
+	}
+	return b.String()
+}
+
+func reportPreviewSnippet(entry reportEntry) (string, string) {
+	if entry.Source == "issue" {
+		text := entry.Definition
+		if strings.TrimSpace(text) == "" && entry.AbsPath != "" {
+			text = readFileLimited(entry.AbsPath, maxPreviewBytes, maxPreviewLines)
+		}
+		return "Definition", trimMultiline(text, 24)
+	}
+	if strings.TrimSpace(entry.AbsPath) == "" {
+		return "Content", ""
+	}
+	text := readFileLimited(entry.AbsPath, maxPreviewBytes, maxPreviewLines)
+	if strings.EqualFold(entry.Format, "HTML") {
+		text = stripHTMLTags(text)
+	}
+	return "Content", trimMultiline(text, 24)
+}
+
+func reportOpenMode(format string) string {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "html", "htm":
+		return "browser"
+	default:
+		return "editor"
+	}
+}
+
+func (m *model) openReportEntry(entry reportEntry) {
+	if m.currentProject == nil {
+		m.setToast("Select a project first", 4*time.Second)
+		return
+	}
+	if strings.TrimSpace(entry.AbsPath) == "" {
+		m.setToast("Report path unavailable", 4*time.Second)
+		return
+	}
+	if _, err := os.Stat(entry.AbsPath); err != nil {
+		m.appendLog(fmt.Sprintf("Report not found: %s", entry.AbsPath))
+		m.setToast("Report missing", 5*time.Second)
+		return
+	}
+	mode := reportOpenMode(entry.Format)
+	var (
+		commandLine string
+		err         error
+	)
+	if mode == "browser" {
+		commandLine, err = launchBrowser(entry.AbsPath)
+	} else {
+		commandLine, err = launchEditor(entry.AbsPath)
+	}
+	if err != nil {
+		m.appendLog(fmt.Sprintf("Failed to open report %s: %v", entry.RelPath, err))
+		m.setToast("Failed to open report", 5*time.Second)
+		return
+	}
+	if mode == "browser" {
+		m.appendLog("Opening report in browser: " + commandLine)
+		m.setToast("Opening report in browser", 4*time.Second)
+	} else {
+		m.appendLog("Opening report: " + commandLine)
+		m.setToast("Opening report in editor", 4*time.Second)
+	}
+	if m.currentProject != nil {
+		fields := map[string]string{
+			"project": filepath.Clean(m.currentProject.Path),
+			"report":  entry.Key,
+			"format":  strings.ToLower(entry.Format),
+			"source":  entry.Source,
+			"mode":    mode,
+		}
+		if entry.RelPath != "" {
+			fields["path"] = entry.RelPath
+		}
+		if !entry.Timestamp.IsZero() {
+			fields["timestamp"] = entry.Timestamp.UTC().Format(time.RFC3339)
+		}
+		m.emitTelemetry("report_opened", fields)
+	}
 }
 
 func launchBrowser(target string) (string, error) {

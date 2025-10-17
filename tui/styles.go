@@ -2,48 +2,212 @@ package main
 
 import "github.com/charmbracelet/lipgloss"
 
+var (
+	crushBackground      = lipgloss.Color("#0B0D1E")
+	crushSurface         = lipgloss.Color("#161A31")
+	crushSurfaceElevated = lipgloss.Color("#20263F")
+	crushSurfaceSoft     = lipgloss.Color("#1C2136")
+
+	crushForeground      = lipgloss.Color("#F8F9FF")
+	crushForegroundMuted = lipgloss.Color("#A1A2C3")
+	crushForegroundFaint = lipgloss.Color("#6E6A89")
+
+	crushPrimary       = lipgloss.Color("#9D7DFF")
+	crushPrimaryBright = lipgloss.Color("#C7ADFF")
+	crushAccent        = lipgloss.Color("#5DE4C7")
+
+	crushBorder       = lipgloss.Color("#2F3253")
+	crushBorderSoft   = lipgloss.Color("#24273D")
+	crushBorderActive = lipgloss.Color("#7F5AF0")
+)
+
 type styles struct {
-	app, topBar, topMenu, topStatus    lipgloss.Style
-	sidebar, sidebarTitle, columnTitle lipgloss.Style
-	body                               lipgloss.Style
-	panel, panelFocused                lipgloss.Style
-	tabActive, tabInactive             lipgloss.Style
-	tabsRow                            lipgloss.Style
-	breadcrumbs                        lipgloss.Style
-	statusBar, statusSeg, statusHint   lipgloss.Style
-	listItem, listSel                  lipgloss.Style
-	rightPaneTitle                     lipgloss.Style
-	cmdOverlay, cmdPrompt, cmdHint     lipgloss.Style
+	app, topBar, topMenu, topStatus     lipgloss.Style
+	sidebar, sidebarTitle, columnTitle  lipgloss.Style
+	body                                lipgloss.Style
+	panel, panelFocused                 lipgloss.Style
+	tabActive, tabInactive              lipgloss.Style
+	tabsRow                             lipgloss.Style
+	breadcrumbs                         lipgloss.Style
+	statusBar, statusSeg, statusHint    lipgloss.Style
+	tableHeader, tableCell, tableActive lipgloss.Style
+	listItem, listSel                   lipgloss.Style
+	rightPaneTitle                      lipgloss.Style
+	cmdOverlay, cmdPrompt, cmdHint      lipgloss.Style
 }
 
 func newStyles() styles {
-	base := lipgloss.NewStyle()
-	panelBorder := lipgloss.NormalBorder()
-	focusedBorder := lipgloss.DoubleBorder()
+	base := lipgloss.NewStyle().Foreground(crushForeground)
+
+	topBarBorder := lipgloss.Border{
+		Left:        " ",
+		Right:       " ",
+		Top:         " ",
+		Bottom:      "─",
+		TopLeft:     " ",
+		TopRight:    " ",
+		BottomLeft:  "╰",
+		BottomRight: "╯",
+		MiddleLeft:  " ",
+		MiddleRight: " ",
+		Middle:      " ",
+	}
+
+	panelBorder := lipgloss.RoundedBorder()
+
+	panelStyle := base.Copy().
+		Background(crushSurface).
+		BorderStyle(panelBorder).
+		BorderForeground(crushBorder).
+		Padding(0, 1)
+
+	panelFocusedStyle := panelStyle.Copy().
+		Background(crushSurfaceElevated).
+		BorderForeground(crushBorderActive)
+
+	listHighlight := base.Copy().
+		Bold(true).
+		Foreground(crushForeground).
+		Background(crushSurfaceElevated).
+		BorderStyle(lipgloss.Border{
+			Left:        "┃",
+			Right:       " ",
+			Top:         " ",
+			Bottom:      " ",
+			TopLeft:     "┃",
+			BottomLeft:  "┃",
+			TopRight:    " ",
+			BottomRight: " ",
+		}).
+		BorderLeft(true).
+		BorderForeground(crushAccent).
+		Padding(0, 1)
 
 	return styles{
-		app:            base,
-		topBar:         base.Padding(0, 1),
-		topMenu:        base,
-		topStatus:      base,
-		sidebar:        base.BorderStyle(panelBorder),
-		sidebarTitle:   base.Copy().Bold(true).Padding(0, 1),
-		columnTitle:    base.Copy().Bold(true).Padding(0, 1),
-		body:           base,
-		panel:          base.BorderStyle(panelBorder),
-		panelFocused:   base.BorderStyle(focusedBorder),
-		tabActive:      base.Copy().Bold(true).Padding(0, 1),
-		tabInactive:    base.Padding(0, 1),
-		tabsRow:        base.Padding(0, 1),
-		breadcrumbs:    base.Padding(0, 1),
-		statusBar:      base.Padding(0, 1),
-		statusSeg:      base.Padding(0, 1).MarginRight(1),
-		statusHint:     base,
-		listItem:       base.Padding(0, 1),
-		listSel:        base.Padding(0, 1).Bold(true),
-		rightPaneTitle: base.Copy().Bold(true).Padding(0, 1),
-		cmdOverlay:     base.Border(lipgloss.RoundedBorder()).Padding(1, 2),
-		cmdPrompt:      base.Copy().Bold(true),
-		cmdHint:        base.Copy().Faint(true),
+		app: base.Copy().
+			Background(crushBackground),
+		topBar: base.Copy().
+			Bold(true).
+			Background(crushSurfaceElevated).
+			Padding(0, 2).
+			BorderStyle(topBarBorder).
+			BorderBottom(true).
+			BorderForeground(crushBorder),
+		topMenu: base.Copy().
+			Foreground(crushPrimaryBright),
+		topStatus: base.Copy().
+			Foreground(crushForegroundMuted),
+		sidebar: panelStyle,
+		sidebarTitle: base.Copy().
+			Foreground(crushPrimaryBright).
+			Bold(true).
+			Padding(0, 1),
+		columnTitle: base.Copy().
+			Bold(true).
+			Foreground(crushPrimaryBright).
+			Background(crushSurfaceSoft).
+			Padding(0, 1).
+			BorderStyle(lipgloss.Border{
+				Left:        " ",
+				Right:       " ",
+				Top:         " ",
+				Bottom:      "─",
+				TopLeft:     " ",
+				TopRight:    " ",
+				BottomLeft:  "╶",
+				BottomRight: "╴",
+			}).
+			BorderBottom(true).
+			BorderForeground(crushBorderSoft),
+		body:         base.Copy(),
+		panel:        panelStyle,
+		panelFocused: panelFocusedStyle,
+		tabActive: base.Copy().
+			Bold(true).
+			Foreground(crushForeground).
+			Background(crushSurfaceElevated).
+			Padding(0, 2).
+			BorderStyle(lipgloss.NormalBorder()).
+			BorderBottom(false).
+			BorderForeground(crushBorderActive),
+		tabInactive: base.Copy().
+			Foreground(crushForegroundMuted).
+			Background(crushSurface).
+			Padding(0, 2),
+		tabsRow: base.Copy().
+			Background(crushSurface).
+			Foreground(crushForegroundMuted).
+			Padding(0, 1),
+		breadcrumbs: base.Copy().
+			Foreground(crushForegroundMuted).
+			Padding(0, 1).
+			Margin(0, 0, 1, 0),
+		statusBar: base.Copy().
+			Foreground(crushForegroundMuted).
+			Background(crushSurfaceElevated).
+			Padding(0, 2).
+			BorderStyle(lipgloss.Border{
+				Left:        " ",
+				Right:       " ",
+				Top:         "─",
+				Bottom:      " ",
+				TopLeft:     "╭",
+				TopRight:    "╮",
+				BottomLeft:  " ",
+				BottomRight: " ",
+			}).
+			BorderTop(true).
+			BorderForeground(crushBorder),
+		statusSeg: base.Copy().
+			Foreground(crushForeground).
+			Background(crushSurfaceElevated).
+			Padding(0, 1).
+			MarginRight(1),
+		statusHint: base.Copy().
+			Foreground(crushForegroundFaint),
+		tableHeader: base.Copy().
+			Foreground(crushPrimaryBright).
+			Background(crushSurfaceSoft).
+			Bold(true).
+			Padding(0, 1).
+			BorderStyle(lipgloss.Border{
+				Left:        " ",
+				Right:       " ",
+				Top:         " ",
+				Bottom:      "─",
+				TopLeft:     " ",
+				TopRight:    " ",
+				BottomLeft:  "╶",
+				BottomRight: "╴",
+			}).
+			BorderBottom(true).
+			BorderForeground(crushBorderSoft),
+		tableCell: base.Copy().
+			Foreground(crushForegroundMuted).
+			Padding(0, 1),
+		tableActive: base.Copy().
+			Foreground(crushForeground).
+			Background(crushSurfaceElevated).
+			Bold(true).
+			Padding(0, 1),
+		listItem: base.Copy().
+			Foreground(crushForegroundMuted).
+			Padding(0, 1),
+		listSel: listHighlight,
+		rightPaneTitle: base.Copy().
+			Bold(true).
+			Foreground(crushPrimary).
+			Padding(0, 1),
+		cmdOverlay: base.Copy().
+			Background(crushSurface).
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(crushAccent).
+			Padding(1, 2),
+		cmdPrompt: base.Copy().
+			Bold(true).
+			Foreground(crushAccent),
+		cmdHint: base.Copy().
+			Foreground(crushForegroundMuted).
+			Faint(true),
 	}
 }

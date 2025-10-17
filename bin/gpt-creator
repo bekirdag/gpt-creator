@@ -8223,6 +8223,124 @@ print(f"{task_id}\t{task_title}")
 PY
 }
 
+# Return success (0) when note language implies manual follow-up is required.
+gc_note_requires_followup() {
+  local note_text="${1:-}"
+  local note_lower="${note_text,,}"
+
+  [[ -n "$note_lower" ]] || return 1
+
+  if [[ "$note_lower" == *"parse-error"* ]]; then
+    return 0
+  fi
+
+  if [[ "$note_lower" == *"no manual"* || "$note_lower" == *"no manual steps"* || "$note_lower" == *"no manual verification"* || "$note_lower" == *"no manual review"* || "$note_lower" == *"no review needed"* || "$note_lower" == *"no review required"* || "$note_lower" == *"no action required"* || "$note_lower" == *"no follow-up"* || "$note_lower" == *"no follow up"* ]]; then
+    return 1
+  fi
+
+  if [[ "$note_lower" == *"optional"* || "$note_lower" == *"recommended"* || "$note_lower" == *"informational"* || "$note_lower" == *"for reference"* ]]; then
+    if [[ "$note_lower" != *"requires"* && "$note_lower" != *"required"* && "$note_lower" != *"must"* && "$note_lower" != *"need"* && "$note_lower" != *"needs"* && "$note_lower" != *"needed"* && "$note_lower" != *"blocked"* && "$note_lower" != *"blocker"* && "$note_lower" != *"pending"* ]]; then
+      return 1
+    fi
+  fi
+
+  if [[ "$note_lower" == *"error"* || "$note_lower" == *"failure"* || "$note_lower" == *"failed"* ]]; then
+    if [[ "$note_lower" == *"no error"* || "$note_lower" == *"no errors"* || "$note_lower" == *"without error"* || "$note_lower" == *"error free"* || "$note_lower" == *"error-free"* || "$note_lower" == *"errors resolved"* || "$note_lower" == *"errors addressed"* || "$note_lower" == *"failure resolved"* || "$note_lower" == *"failure addressed"* ]]; then
+      :
+    else
+      return 0
+    fi
+  fi
+
+  local contains_manual=0
+  if [[ "$note_lower" == *"manual"* || "$note_lower" == *"manually"* ]]; then
+    contains_manual=1
+  fi
+
+  if (( contains_manual )); then
+    if [[ "$note_lower" == *"manual steps optional"* || "$note_lower" == *"manual testing optional"* || "$note_lower" == *"manual qa optional"* || "$note_lower" == *"manual testing recommended"* || "$note_lower" == *"manual qa recommended"* || "$note_lower" == *"manual review optional"* || "$note_lower" == *"manual verification optional"* ]]; then
+      contains_manual=0
+    fi
+  fi
+
+  if (( contains_manual )); then
+    local -a manual_triggers=(
+      "requires"
+      "required"
+      "require"
+      "must"
+      "need"
+      "needs"
+      "needed"
+      "manual follow-up"
+      "manual follow up"
+      "manual followup"
+      "manual verification"
+      "manual review"
+      "manual steps"
+      "manual patch"
+      "manual fix"
+      "manual merge"
+      "manual deploy"
+      "manual migration"
+      "manual intervention"
+      "manual action"
+      "apply manually"
+      "manually apply"
+      "manually patch"
+      "manually merge"
+      "manually verify"
+      "could not"
+      "can't"
+      "cannot"
+      "unable"
+      "failed"
+      "failure"
+      "todo"
+      "tbd"
+      "pending"
+      "block"
+      "blocked"
+      "follow-up"
+      "follow up"
+      "followup"
+    )
+    for trigger in "${manual_triggers[@]}"; do
+      if [[ "$note_lower" == *"$trigger"* ]]; then
+        return 0
+      fi
+    done
+  fi
+
+  if [[ "$note_lower" == *"review"* ]]; then
+    if [[ "$note_lower" == *"no review"* || "$note_lower" == *"reviewed"* ]]; then
+      return 1
+    fi
+    local -a review_triggers=(
+      "needs review"
+      "need review"
+      "required review"
+      "requires review"
+      "review required"
+      "pending review"
+      "awaiting review"
+      "please review"
+      "for review"
+      "manual review"
+      "review manually"
+      "review and apply"
+      "review this change"
+    )
+    for trigger in "${review_triggers[@]}"; do
+      if [[ "$note_lower" == *"$trigger"* ]]; then
+        return 0
+      fi
+    done
+  fi
+
+  return 1
+}
+
 cmd_work_on_tasks() {
   local root="" resume=1 story_filter="" start_task_ref="" no_verify=0 keep_artifacts=0 memory_cycle=0 force_reset=0
   local batch_size=0 sleep_between=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=0
@@ -8690,8 +8808,7 @@ EOHELP
                 local note_text="${change_line#NOTE }"
                 warn "    Note: ${note_text}"
                 task_notes+=("$note_text")
-                local note_lower="${note_text,,}"
-                if [[ "$note_lower" == *"manual"* || "$note_lower" == *"review"* || "$note_lower" == *"error"* ]]; then
+                if gc_note_requires_followup "$note_text"; then
                   task_needs_review=1
                 fi
                 ;;

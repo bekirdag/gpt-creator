@@ -517,6 +517,7 @@ func initialModel() *model {
 		}
 		return nil
 	})
+	m.workspaceCol.ApplyStyles(m.styles)
 
 	m.projectsCol = newSelectableColumn("Projects", nil, 26, func(entry listEntry) tea.Cmd {
 		if payload, ok := entry.payload.(projectItem); ok && payload.project != nil {
@@ -539,6 +540,8 @@ func initialModel() *model {
 			return nil
 		}
 	})
+	m.projectsCol.ApplyStyles(m.styles)
+	m.featureCol.ApplyStyles(m.styles)
 	m.featureSelectDefault = m.featureCol.onSelect
 	m.featureHighlightDefault = nil
 
@@ -554,6 +557,7 @@ func initialModel() *model {
 		}
 		return nil
 	})
+	m.artifactsCol.ApplyStyles(m.styles)
 
 	m.envTableCol = newEnvTableColumn("Variables")
 	m.envTableCol.SetOnEdit(func(entry envEntry) tea.Cmd {
@@ -568,6 +572,7 @@ func initialModel() *model {
 		m.copyEnvValue(entry)
 		return nil
 	})
+	m.envTableCol.ApplyStyles(m.styles)
 
 	m.itemsCol = newActionColumn("Actions")
 	m.itemsCol.SetHighlightFunc(func(item featureItemDefinition, activate bool) tea.Cmd {
@@ -584,6 +589,7 @@ func initialModel() *model {
 			}
 		}
 	})
+	m.itemsCol.ApplyStyles(m.styles)
 
 	m.servicesCol = newServicesTableColumn("Services")
 	m.servicesCol.SetHighlightFunc(func(item featureItemDefinition, activate bool) tea.Cmd {
@@ -600,6 +606,7 @@ func initialModel() *model {
 			}
 		}
 	})
+	m.servicesCol.ApplyStyles(m.styles)
 
 	m.backlogCol = newBacklogTreeColumn("Epics/Stories/Tasks")
 	m.backlogCol.SetCallbacks(
@@ -607,11 +614,13 @@ func initialModel() *model {
 		m.backlogToggleCmd,
 		m.backlogActivateCmd,
 	)
+	m.backlogCol.ApplyStyles(m.styles)
 	m.backlogTable = newBacklogTableColumn("Backlog")
 	m.backlogTable.SetCallbacks(
 		m.backlogRowHighlightCmd,
 		m.backlogRowToggleCmd,
 	)
+	m.backlogTable.ApplyStyles(m.styles)
 
 	m.artifactTreeCol = newArtifactTreeColumn("Files")
 	m.artifactTreeCol.SetCallbacks(
@@ -625,9 +634,11 @@ func initialModel() *model {
 			return func() tea.Msg { return artifactNodeActivatedMsg{node: node} }
 		},
 	)
+	m.artifactTreeCol.ApplyStyles(m.styles)
 
 	m.previewCol = newPreviewColumn(32)
 	m.previewCol.SetContent("Select an item to preview details.\n")
+	m.previewCol.ApplyStyles(m.styles)
 
 	m.columns = []column{
 		m.workspaceCol,
@@ -643,6 +654,7 @@ func initialModel() *model {
 	m.envSelection = -1
 
 	m.logs = viewport.New(80, m.logsHeight)
+	m.logs.Style = m.styles.body.Copy().Foreground(crushForegroundMuted)
 	m.refreshLogs()
 
 	m.refreshWorkspaceColumn()

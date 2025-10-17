@@ -26,6 +26,7 @@ type column interface {
 type selectableColumn struct {
 	title       string
 	model       list.Model
+	delegate    *list.DefaultDelegate
 	width       int
 	height      int
 	onSelect    func(entry listEntry) tea.Cmd
@@ -45,19 +46,21 @@ func (e listEntry) FilterValue() string { return e.title }
 func newSelectableColumn(title string, items []list.Item, width int, onSelect func(listEntry) tea.Cmd) *selectableColumn {
 	delegate := list.NewDefaultDelegate()
 
-	m := list.New(items, delegate, width, 20)
+	column := &selectableColumn{
+		title:    title,
+		width:    width,
+		onSelect: onSelect,
+		delegate: &delegate,
+	}
+
+	m := list.New(items, column.delegate, width, 20)
 	m.Title = title
 	m.SetShowStatusBar(false)
 	m.SetFilteringEnabled(false)
 	m.SetShowHelp(false)
 	m.SetShowPagination(false)
-
-	return &selectableColumn{
-		title:    title,
-		model:    m,
-		width:    width,
-		onSelect: onSelect,
-	}
+	column.model = m
+	return column
 }
 
 func (c *selectableColumn) SetItems(items []list.Item) {
@@ -132,6 +135,40 @@ func (c *selectableColumn) SetHighlightFunc(fn func(listEntry) tea.Cmd) {
 	c.onHighlight = fn
 }
 
+func (c *selectableColumn) ApplyStyles(s styles) {
+	if c.delegate != nil {
+		normal := s.listItem.Copy()
+		desc := s.statusHint.Copy().Padding(0, 1)
+		selected := s.listSel.Copy()
+
+		c.delegate.Styles.NormalTitle = normal
+		c.delegate.Styles.DimmedTitle = normal.Copy().Faint(true)
+		c.delegate.Styles.NormalDesc = desc
+		c.delegate.Styles.DimmedDesc = desc.Copy().Faint(true)
+		c.delegate.Styles.SelectedTitle = selected
+		c.delegate.Styles.SelectedDesc = selected.Copy().Foreground(crushPrimaryBright)
+		c.delegate.Styles.FilterMatch = s.cmdPrompt.Copy().Underline(true)
+		c.model.SetDelegate(c.delegate)
+	}
+
+	c.model.Styles.Title = s.columnTitle.Copy()
+	c.model.Styles.TitleBar = lipgloss.NewStyle()
+	c.model.Styles.Spinner = s.statusHint.Copy().Foreground(crushAccent)
+	c.model.Styles.FilterPrompt = s.cmdPrompt.Copy()
+	c.model.Styles.FilterCursor = s.cmdPrompt.Copy()
+	c.model.Styles.StatusBar = s.statusHint.Copy()
+	c.model.Styles.StatusEmpty = s.statusHint.Copy().Faint(true)
+	c.model.Styles.StatusBarActiveFilter = s.cmdPrompt.Copy()
+	c.model.Styles.StatusBarFilterCount = s.statusHint.Copy()
+	c.model.Styles.NoItems = s.statusHint.Copy().Faint(true)
+	c.model.Styles.PaginationStyle = s.statusHint.Copy()
+	c.model.Styles.HelpStyle = s.statusHint.Copy()
+	c.model.Styles.ActivePaginationDot = s.statusSeg.Copy().Foreground(crushAccent).SetString("●")
+	c.model.Styles.InactivePaginationDot = s.statusHint.Copy().SetString("●")
+	c.model.Styles.DividerDot = s.statusHint.Copy().SetString(" • ")
+	c.model.Styles.DefaultFilterCharacterMatch = s.cmdPrompt.Copy().Underline(true)
+}
+
 type backlogTreeEntry struct {
 	title    string
 	desc     string
@@ -172,6 +209,7 @@ func (e backlogTreeEntry) FilterValue() string {
 type backlogTreeColumn struct {
 	title       string
 	model       list.Model
+	delegate    *list.DefaultDelegate
 	width       int
 	height      int
 	onHighlight func(backlogNode) tea.Cmd
@@ -182,23 +220,56 @@ type backlogTreeColumn struct {
 func newBacklogTreeColumn(title string) *backlogTreeColumn {
 	delegate := list.NewDefaultDelegate()
 
-	model := list.New([]list.Item{}, delegate, 28, 20)
+	column := &backlogTreeColumn{
+		title:    title,
+		delegate: &delegate,
+	}
+
+	model := list.New([]list.Item{}, column.delegate, 28, 20)
 	model.Title = title
 	model.SetShowStatusBar(false)
 	model.SetFilteringEnabled(false)
 	model.SetShowHelp(false)
 	model.SetShowPagination(false)
 
-	return &backlogTreeColumn{
-		title: title,
-		model: model,
-	}
+	column.model = model
+	return column
 }
 
 func (c *backlogTreeColumn) SetCallbacks(onHighlight, onToggle, onActivate func(backlogNode) tea.Cmd) {
 	c.onHighlight = onHighlight
 	c.onToggle = onToggle
 	c.onActivate = onActivate
+}
+
+func (c *backlogTreeColumn) ApplyStyles(s styles) {
+	if c.delegate != nil {
+		normal := s.listItem.Copy()
+		desc := s.statusHint.Copy().Padding(0, 0, 0, 2)
+		selected := s.listSel.Copy()
+
+		c.delegate.SetSpacing(0)
+		c.delegate.Styles.NormalTitle = normal
+		c.delegate.Styles.DimmedTitle = normal.Copy().Faint(true)
+		c.delegate.Styles.NormalDesc = desc
+		c.delegate.Styles.DimmedDesc = desc.Copy().Faint(true)
+		c.delegate.Styles.SelectedTitle = selected
+		c.delegate.Styles.SelectedDesc = selected.Copy().Foreground(crushPrimaryBright)
+		c.delegate.Styles.FilterMatch = s.cmdPrompt.Copy().Underline(true)
+		c.model.SetDelegate(c.delegate)
+	}
+
+	c.model.Styles.Title = s.columnTitle.Copy()
+	c.model.Styles.TitleBar = lipgloss.NewStyle()
+	c.model.Styles.Spinner = s.statusHint.Copy().Foreground(crushAccent)
+	c.model.Styles.NoItems = s.statusHint.Copy().Faint(true)
+	c.model.Styles.StatusBar = s.statusHint.Copy()
+	c.model.Styles.StatusEmpty = s.statusHint.Copy().Faint(true)
+	c.model.Styles.PaginationStyle = s.statusHint.Copy()
+	c.model.Styles.HelpStyle = s.statusHint.Copy()
+	c.model.Styles.ActivePaginationDot = s.statusSeg.Copy().Foreground(crushAccent).SetString("●")
+	c.model.Styles.InactivePaginationDot = s.statusHint.Copy().SetString("●")
+	c.model.Styles.DividerDot = s.statusHint.Copy().SetString(" • ")
 }
 
 func (c *backlogTreeColumn) SetItems(items []list.Item) {
@@ -320,6 +391,14 @@ func newBacklogTableColumn(title string) *backlogTableColumn {
 		title: title,
 		table: model,
 	}
+}
+
+func (c *backlogTableColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
 }
 
 func (c *backlogTableColumn) SetCallbacks(onHighlight, onToggle func(backlogRow) tea.Cmd) {
@@ -510,6 +589,7 @@ func (e artifactTreeEntry) FilterValue() string {
 type artifactTreeColumn struct {
 	title       string
 	model       list.Model
+	delegate    *list.DefaultDelegate
 	width       int
 	height      int
 	onHighlight func(artifactNode) tea.Cmd
@@ -520,23 +600,56 @@ type artifactTreeColumn struct {
 func newArtifactTreeColumn(title string) *artifactTreeColumn {
 	delegate := list.NewDefaultDelegate()
 
-	model := list.New([]list.Item{}, delegate, 36, 20)
+	column := &artifactTreeColumn{
+		title:    title,
+		delegate: &delegate,
+	}
+
+	model := list.New([]list.Item{}, column.delegate, 36, 20)
 	model.Title = title
 	model.SetShowStatusBar(false)
 	model.SetFilteringEnabled(false)
 	model.SetShowHelp(false)
 	model.SetShowPagination(false)
 
-	return &artifactTreeColumn{
-		title: title,
-		model: model,
-	}
+	column.model = model
+	return column
 }
 
 func (c *artifactTreeColumn) SetCallbacks(onHighlight, onToggle, onActivate func(artifactNode) tea.Cmd) {
 	c.onHighlight = onHighlight
 	c.onToggle = onToggle
 	c.onActivate = onActivate
+}
+
+func (c *artifactTreeColumn) ApplyStyles(s styles) {
+	if c.delegate != nil {
+		normal := s.listItem.Copy()
+		desc := s.statusHint.Copy().Padding(0, 0, 0, 2)
+		selected := s.listSel.Copy()
+
+		c.delegate.SetSpacing(0)
+		c.delegate.Styles.NormalTitle = normal
+		c.delegate.Styles.DimmedTitle = normal.Copy().Faint(true)
+		c.delegate.Styles.NormalDesc = desc
+		c.delegate.Styles.DimmedDesc = desc.Copy().Faint(true)
+		c.delegate.Styles.SelectedTitle = selected
+		c.delegate.Styles.SelectedDesc = selected.Copy().Foreground(crushPrimaryBright)
+		c.delegate.Styles.FilterMatch = s.cmdPrompt.Copy().Underline(true)
+		c.model.SetDelegate(c.delegate)
+	}
+
+	c.model.Styles.Title = s.columnTitle.Copy()
+	c.model.Styles.TitleBar = lipgloss.NewStyle()
+	c.model.Styles.Spinner = s.statusHint.Copy().Foreground(crushAccent)
+	c.model.Styles.NoItems = s.statusHint.Copy().Faint(true)
+	c.model.Styles.StatusBar = s.statusHint.Copy()
+	c.model.Styles.StatusEmpty = s.statusHint.Copy().Faint(true)
+	c.model.Styles.PaginationStyle = s.statusHint.Copy()
+	c.model.Styles.HelpStyle = s.statusHint.Copy()
+	c.model.Styles.ActivePaginationDot = s.statusSeg.Copy().Foreground(crushAccent).SetString("●")
+	c.model.Styles.InactivePaginationDot = s.statusHint.Copy().SetString("●")
+	c.model.Styles.DividerDot = s.statusHint.Copy().SetString(" • ")
 }
 
 func (c *artifactTreeColumn) SetNodes(nodes []artifactNode) {
@@ -704,6 +817,14 @@ func newActionColumn(title string) *actionColumn {
 
 func (c *actionColumn) SetHighlightFunc(fn func(featureItemDefinition, bool) tea.Cmd) {
 	c.onHighlight = fn
+}
+
+func (c *actionColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
 }
 
 func (c *actionColumn) SetItems(items []featureItemDefinition) {
@@ -881,6 +1002,14 @@ func (c *envTableColumn) SetOnToggle(fn func(envEntry) tea.Cmd) {
 
 func (c *envTableColumn) SetOnCopy(fn func(envEntry) tea.Cmd) {
 	c.onCopy = fn
+}
+
+func (c *envTableColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
 }
 
 func (c *envTableColumn) SelectedEntry() (envEntry, bool) {
@@ -1257,6 +1386,14 @@ func (c *servicesTableColumn) FocusValue() string {
 	return ""
 }
 
+func (c *servicesTableColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
+}
+
 type previewColumn struct {
 	title   string
 	width   int
@@ -1271,6 +1408,10 @@ func newPreviewColumn(width int) *previewColumn {
 		title: "Preview",
 		view:  vp,
 	}
+}
+
+func (p *previewColumn) ApplyStyles(s styles) {
+	p.view.Style = s.body.Copy()
 }
 
 func (p *previewColumn) SetSize(width, height int) {

@@ -1197,6 +1197,7 @@ func (m *model) View() string {
 	status := m.renderStatus()
 	builder.WriteString(status)
 
+	var overlay string
 	if m.inputActive {
 		overlayWidth := min(64, m.width-4)
 		if overlayWidth < 24 {
@@ -1267,12 +1268,68 @@ func (m *model) View() string {
 			contentBuilder.WriteString(m.styles.cmdHint.Render(strings.Join(hintParts, " • ")))
 		}
 		overlayContent := strings.TrimRight(contentBuilder.String(), "\n")
-		overlay := m.styles.cmdOverlay.Width(overlayWidth).Render(overlayContent)
-		builder.WriteString("\n")
-		builder.WriteString(lipgloss.Place(m.width, m.height/2, lipgloss.Center, lipgloss.Center, overlay))
+		overlay = m.styles.cmdOverlay.Width(overlayWidth).Render(overlayContent)
 	}
 
-	return m.styles.app.Render(builder.String())
+	content := builder.String()
+	if overlay != "" {
+		content = m.overlayView(content, overlay)
+	}
+
+	return m.styles.app.Render(content)
+}
+
+func (m *model) overlayView(base, overlay string) string {
+	width := max(1, m.width)
+	trimmedOverlay := strings.TrimRight(overlay, "\n")
+	overlayHeight := lipgloss.Height(trimmedOverlay)
+	if overlayHeight < 1 {
+		overlayHeight = 1
+	}
+
+	centered := lipgloss.Place(
+		width,
+		overlayHeight,
+		lipgloss.Center,
+		lipgloss.Top,
+		trimmedOverlay,
+		lipgloss.WithWhitespaceChars(" "),
+	)
+
+	overlayLines := strings.Split(centered, "\n")
+	if len(overlayLines) == 0 {
+		return base
+	}
+
+	baseEndsWithNewline := strings.HasSuffix(base, "\n")
+	trimmedBase := base
+	if baseEndsWithNewline {
+		trimmedBase = strings.TrimSuffix(base, "\n")
+	}
+	baseLines := strings.Split(trimmedBase, "\n")
+	if len(baseLines) == 0 {
+		baseLines = []string{""}
+	}
+
+	startRow := (m.height - overlayHeight) / 2
+	if startRow < 0 {
+		startRow = 0
+	}
+
+	totalNeeded := startRow + len(overlayLines)
+	if len(baseLines) < totalNeeded {
+		baseLines = append(baseLines, make([]string, totalNeeded-len(baseLines))...)
+	}
+
+	for i := 0; i < len(overlayLines); i++ {
+		baseLines[startRow+i] = overlayLines[i]
+	}
+
+	result := strings.Join(baseLines, "\n")
+	if baseEndsWithNewline {
+		result += "\n"
+	}
+	return result
 }
 
 func (m *model) renderColumnsRow(content string) string {

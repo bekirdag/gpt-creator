@@ -1131,6 +1131,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) View() string {
 	var builder strings.Builder
 
+	builder.WriteString("\n\n")
+	if header := m.renderHeader(); header != "" {
+		builder.WriteString(header)
+		if !strings.HasSuffix(header, "\n") {
+			builder.WriteRune('\n')
+		}
+		builder.WriteRune('\n')
+	}
+
 	helpWidth := m.width - 4
 	if helpWidth < 0 {
 		helpWidth = 0
@@ -1248,6 +1257,48 @@ func (m *model) View() string {
 	}
 
 	return m.styles.app.Render(builder.String())
+}
+
+func (m *model) renderHeader() string {
+	logoLines := []string{
+		"   ____ ____ _____   _____                     ",
+		"  / ___|  _ \\_   _| |_   _|__  _ __   ___  ___ ",
+		" | |  _| |_) || |_____| |/ _ \\| '_ \\ / _ \\/ _ \\",
+		" | |_| |  __/ | |_____| | (_) | | | |  __/  __/",
+		"  \\____|_|    |_|     |_|\\___/|_| |_|\\___|\\___|",
+		"           g p t - c r e a d o t               ",
+	}
+	logo := m.styles.headerLogo.Render(strings.Join(logoLines, "\n"))
+
+	crumbs := []string{"Workspace"}
+	if m.currentRoot != nil {
+		crumbs = append(crumbs, abbreviatePath(m.currentRoot.Path))
+	}
+	if m.currentProject != nil {
+		crumbs = append(crumbs, m.currentProject.Name)
+	}
+	if m.currentFeature != "" {
+		if def := findFeatureDefinition(m.currentFeature); def.Key != "" {
+			crumbs = append(crumbs, def.Title)
+		} else {
+			crumbs = append(crumbs, m.currentFeature)
+		}
+	}
+
+	breadcrumbText := "Location: " + strings.Join(crumbs, " › ")
+	breadcrumb := m.styles.headerBreadcrumb.Render(breadcrumbText)
+
+	searchBar := m.styles.headerSearch.Render("[ ⌕ Search files / folders / tasks ]")
+	searchHint := m.styles.headerSearchHint.Render("Filters available on advanced search")
+	infoContent := lipgloss.JoinVertical(lipgloss.Left, breadcrumb, searchBar, searchHint)
+
+	infoBlock := m.styles.headerInfo.Render(infoContent)
+	header := lipgloss.JoinHorizontal(lipgloss.Top, logo, infoBlock)
+	if m.width > 0 && lipgloss.Width(header) > m.width {
+		header = lipgloss.JoinVertical(lipgloss.Left, logo, infoBlock)
+	}
+
+	return header
 }
 
 func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {

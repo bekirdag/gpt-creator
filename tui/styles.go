@@ -23,6 +23,9 @@ var (
 
 type styles struct {
 	app, topBar, topMenu, topStatus     lipgloss.Style
+	headerLogo, headerInfo              lipgloss.Style
+	headerBreadcrumb, headerSearch      lipgloss.Style
+	headerSearchHint                    lipgloss.Style
 	sidebar, sidebarTitle, columnTitle  lipgloss.Style
 	body                                lipgloss.Style
 	panel, panelFocused                 lipgloss.Style
@@ -95,6 +98,25 @@ func newStyles() styles {
 			Foreground(crushPrimaryBright),
 		topStatus: base.Copy().
 			Foreground(crushForegroundMuted),
+		headerLogo: base.Copy().
+			Foreground(crushPrimaryBright).
+			Bold(true).
+			MarginRight(3),
+		headerInfo: base.Copy().
+			MarginLeft(2),
+		headerBreadcrumb: base.Copy().
+			Bold(true).
+			Foreground(crushForeground).
+			Background(crushSurfaceSoft).
+			Padding(0, 1).
+			MarginBottom(1),
+		headerSearch: base.Copy().
+			Foreground(crushForeground).
+			Background(crushSurfaceElevated).
+			Padding(0, 2),
+		headerSearchHint: base.Copy().
+			Foreground(crushForegroundMuted).
+			MarginTop(1),
 		sidebar: panelStyle,
 		sidebarTitle: base.Copy().
 			Foreground(crushPrimaryBright).

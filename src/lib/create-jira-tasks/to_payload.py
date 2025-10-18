@@ -83,6 +83,37 @@ def join_field(values: Any) -> Optional[str]:
     return "; ".join(items)
 
 
+def normalize_status(value: Any) -> str:
+    """Return a canonical status string or an empty string when unavailable."""
+    status = coerce_str(value).lower()
+    if not status:
+        return ""
+    status = status.replace("_", "-")
+    synonyms = {
+        "completed": "complete",
+        "done": "complete",
+        "finished": "complete",
+        "complete": "complete",
+        "in progress": "in-progress",
+        "progress": "in-progress",
+        "started": "in-progress",
+        "on hold": "on-hold",
+        "hold": "on-hold",
+        "paused": "on-hold",
+        "deferred": "on-hold",
+        "waiting": "on-hold",
+        "blocked": "blocked",
+        "blocker": "blocked",
+        "todo": "pending",
+        "to-do": "pending",
+        "backlog": "pending",
+        "ready": "pending",
+    }
+    normalized = synonyms.get(status, status)
+    allowed = {"pending", "in-progress", "complete", "blocked", "on-hold"}
+    return normalized if normalized in allowed else ""
+
+
 def load_tasks(
     epics_path: Path,
     stories_dir: Path,
@@ -140,6 +171,14 @@ def load_tasks(
             assignees = ensure_list(task.get("assignees"))
             story_points = coerce_str(task.get("story_points") or task.get("estimate"))
             estimate = coerce_str(task.get("estimate")) or story_points
+            status = (
+                normalize_status(
+                    task.get("status")
+                    or task.get("state")
+                    or task.get("progress")
+                    or task.get("task_status")
+                )
+            )
 
             payload = {
                 "epic_id": epic_id,
@@ -172,6 +211,8 @@ def load_tasks(
             payload["tags_text"] = join_field(tags)
             payload["assignee_text"] = join_field(assignees)
             payload["dependencies_text"] = join_field(dependencies)
+            if status:
+                payload["status"] = status
 
             tasks_payload.append(payload)
 

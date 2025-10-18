@@ -56,6 +56,55 @@ def _slugify(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
     return slug or "item"
 
+_STATUS_RANK = {
+    "pending": 0,
+    "on-hold": 1,
+    "in-progress": 2,
+    "blocked": 3,
+    "complete": 4,
+}
+
+
+def _normalize_status(value: Any) -> str:
+    status = _text(value).lower()
+    if not status:
+        return ""
+    status = status.replace("_", "-")
+    synonyms = {
+        "completed": "complete",
+        "done": "complete",
+        "finished": "complete",
+        "complete": "complete",
+        "in progress": "in-progress",
+        "progress": "in-progress",
+        "started": "in-progress",
+        "on hold": "on-hold",
+        "hold": "on-hold",
+        "paused": "on-hold",
+        "deferred": "on-hold",
+        "waiting": "on-hold",
+        "blocked": "blocked",
+        "blocker": "blocked",
+        "todo": "pending",
+        "to-do": "pending",
+        "backlog": "pending",
+        "ready": "pending",
+    }
+    normalized = synonyms.get(status, status)
+    return normalized if normalized in _STATUS_RANK else ""
+
+
+def _merge_status(existing: str, incoming: str) -> str:
+    if incoming and not existing:
+        return incoming
+    if existing and not incoming:
+        return existing
+    if existing and incoming:
+        if _STATUS_RANK[incoming] >= _STATUS_RANK[existing]:
+            return incoming
+        return existing
+    return "pending"
+
 
 def ensure_schema(cur: sqlite3.Cursor) -> None:
     cur.execute(
@@ -262,7 +311,7 @@ def upsert_story(db_path: Path, story_path: Path, story_slug: str) -> None:
     if existing_story:
         sequence, status, completed_tasks, total_tasks, last_run, created_at = existing_story
         sequence = sequence or 0
-        status = status or "pending"
+        status = _normalize_status(status) or "pending"
         completed_tasks = int(completed_tasks or 0)
         total_tasks = int(total_tasks or 0)
         last_run = last_run
@@ -312,10 +361,17 @@ def upsert_story(db_path: Path, story_path: Path, story_slug: str) -> None:
         state = fetch_task_state(cur, task_id=task_id_value, story_slug=story_slug, position=position)
         delete_conflicts(cur, task_id=task_id_value, story_slug=story_slug, position=position)
 
-        status_value = (state[0] if state and state[0] else task.get("status")) or "pending"
-        started_at = state[1] if state else task.get("started_at")
-        completed_at = state[2] if state else task.get("completed_at")
-        last_run_value = state[3] if state else task.get("last_run")
+        existing_status = _normalize_status(state[0] if state else "")
+        incoming_status = _normalize_status(
+            task.get("status")
+            or task.get("state")
+            or task.get("progress")
+            or task.get("task_status")
+        )
+        status_value = _merge_status(existing_status, incoming_status)
+        started_at = state[1] if state and state[1] else (_text(task.get("started_at")) or None)
+        completed_at = state[2] if state and state[2] else (_text(task.get("completed_at")) or None)
+        last_run_value = state[3] if state and state[3] else (_text(task.get("last_run")) or None)
         refined_flag = int(state[4] or 0) if state else int(task.get("refined") or 0)
         refined_at = state[5] if state else task.get("refined_at")
         if int(task.get("refined") or 0):
@@ -390,7 +446,7 @@ def upsert_story(db_path: Path, story_path: Path, story_slug: str) -> None:
 
     if existing_story:
         # Preserve manual overrides where applicable
-        preserved_status = existing_story[1]
+        preserved_status = _normalize_status(existing_story[1])
         if preserved_status:
             story_status = preserved_status
         preserved_completed = int(existing_story[2] or 0)

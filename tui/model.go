@@ -1351,10 +1351,10 @@ func (m *model) renderColumnsRow(content string) string {
 
 func (m *model) renderHeader() string {
 	logoArt := `
-┏┳┓┏━┓┏━┓╺┳╸┏━╸┏━┓┏━╸┏━┓╺┳┓┏━┓
-┃┃┃┣━┫┗━┓ ┃ ┣╸ ┣┳┛┃  ┃ ┃ ┃┃┣━┫
-╹ ╹╹ ╹┗━┛ ╹ ┗━╸╹┗╸┗━╸┗━┛╺┻┛╹ ╹
-████████████████████░ᵥ․₀․₂․₀░█
+┌┬┐┌─┐┌─┐┌┬┐┌─┐┬─┐┌─┐┌─┐┌┬┐┌─┐
+│││├─┤└─┐ │ ├┤ ├┬┘│  │ │ ││├─┤
+┴ ┴┴ ┴└─┘ ┴ └─┘┴└─└─┘└─┘─┴┘┴ ┴
+███████▓▓▓▓▓▒▒▒░ v․₀․₂․₀ ░▒▒▓█
 `
 	logo := m.styles.headerLogo.Render(strings.TrimPrefix(logoArt, "\n"))
 

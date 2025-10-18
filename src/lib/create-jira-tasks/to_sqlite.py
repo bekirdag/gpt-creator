@@ -36,6 +36,56 @@ def as_text(value: object) -> str:
     return str(value).strip()
 
 
+STATUS_RANK = {
+    "pending": 0,
+    "on-hold": 1,
+    "in-progress": 2,
+    "blocked": 3,
+    "complete": 4,
+}
+
+
+def normalize_status(value: object) -> str:
+    status = as_text(value).lower()
+    if not status:
+        return ""
+    status = status.replace("_", "-")
+    synonyms = {
+        "completed": "complete",
+        "done": "complete",
+        "finished": "complete",
+        "complete": "complete",
+        "in progress": "in-progress",
+        "progress": "in-progress",
+        "started": "in-progress",
+        "on hold": "on-hold",
+        "hold": "on-hold",
+        "paused": "on-hold",
+        "deferred": "on-hold",
+        "waiting": "on-hold",
+        "blocked": "blocked",
+        "blocker": "blocked",
+        "todo": "pending",
+        "to-do": "pending",
+        "backlog": "pending",
+        "ready": "pending",
+    }
+    normalized = synonyms.get(status, status)
+    return normalized if normalized in STATUS_RANK else ""
+
+
+def merge_status(existing: str, incoming: str) -> str:
+    if incoming and not existing:
+        return incoming
+    if existing and not incoming:
+        return existing
+    if existing and incoming:
+        if STATUS_RANK[incoming] >= STATUS_RANK[existing]:
+            return incoming
+        return existing
+    return "pending"
+
+
 def ensure_table(cur: sqlite3.Cursor) -> None:
     cur.execute(
         """
@@ -191,7 +241,7 @@ def load_prior_state(cur: sqlite3.Cursor, force: bool) -> Tuple[Dict[str, str], 
             if story_key:
                 prior_story_slugs[story_key] = story_slug
             prior_story_state[story_slug] = {
-                "status": row[2] or "pending",
+                "status": normalize_status(row[2]) or "pending",
                 "completed_tasks": int(row[3] or 0),
                 "total_tasks": int(row[4] or 0),
                 "last_run": row[5],
@@ -207,7 +257,7 @@ def load_prior_state(cur: sqlite3.Cursor, force: bool) -> Tuple[Dict[str, str], 
         ):
             story_slug, position, task_id, status, started_at, completed_at, last_run, refined, refined_at = row
             base = {
-                "status": status or "pending",
+                "status": normalize_status(status) or "pending",
                 "started_at": started_at,
                 "completed_at": completed_at,
                 "last_run": last_run,
@@ -310,7 +360,9 @@ def build_database(tasks: List[Dict[str, object]], db_path: Path, force: bool, s
         completed_tasks = 0
         story_total = len(tasks_list)
 
-        initial_status = restored_state.get("status") if restored else "pending"
+        initial_status = normalize_status(restored_state.get("status")) if restored else "pending"
+        if not initial_status:
+            initial_status = "pending"
         initial_completed = int(restored_state.get("completed_tasks") or 0) if restored else 0
         initial_total = restored_state.get("total_tasks") or story_total
         initial_last_run = restored_state.get("last_run") if restored else None
@@ -353,10 +405,12 @@ def build_database(tasks: List[Dict[str, object]], db_path: Path, force: bool, s
                 elif key_pos in prior_task_state:
                     restore = prior_task_state[key_pos]
 
-            status = (restore or {}).get("status") or "pending"
-            started_at = (restore or {}).get("started_at")
-            completed_at = (restore or {}).get("completed_at")
-            last_run = (restore or {}).get("last_run")
+            existing_status = normalize_status((restore or {}).get("status"))
+            incoming_status = normalize_status(task.get("status"))
+            status = merge_status(existing_status, incoming_status)
+            started_at = (restore or {}).get("started_at") or as_text(task.get("started_at")) or None
+            completed_at = (restore or {}).get("completed_at") or as_text(task.get("completed_at")) or None
+            last_run = (restore or {}).get("last_run") or as_text(task.get("last_run")) or None
             refined_flag = int((restore or {}).get("refined") or 0)
             refined_at = (restore or {}).get("refined_at")
             if status == "complete":
@@ -429,7 +483,9 @@ def build_database(tasks: List[Dict[str, object]], db_path: Path, force: bool, s
 
         if restored and not force:
             state = prior_story_state.get(story_slug, {})
-            story_status = state.get("status") or story_status
+            existing_story_status = normalize_status(state.get("status"))
+            if existing_story_status:
+                story_status = existing_story_status
             restored_completed = int(state.get("completed_tasks") or completed_tasks)
             completed_tasks = max(completed_tasks, restored_completed)
             story_total = state.get("total_tasks") or story_total

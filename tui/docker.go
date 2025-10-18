@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -520,4 +521,18 @@ func fallback(values ...string) string {
 func dockerCLIAvailable() bool {
 	_, err := exec.LookPath("docker")
 	return err == nil
+}
+
+func dockerCLIAvailableWithPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path != "" {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return true
+		}
+		if _, err := exec.LookPath(path); err == nil {
+			return true
+		}
+		return false
+	}
+	return dockerCLIAvailable()
 }

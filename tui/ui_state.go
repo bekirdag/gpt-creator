@@ -8,7 +8,11 @@ import (
 )
 
 type uiConfig struct {
-	Pinned []string `yaml:"pinned,omitempty"`
+	Pinned         []string `yaml:"pinned,omitempty"`
+	Theme          string   `yaml:"theme,omitempty"`
+	Concurrency    int      `yaml:"concurrency,omitempty"`
+	DockerPath     string   `yaml:"docker_path,omitempty"`
+	WorkspaceRoots []string `yaml:"workspace_roots,omitempty"`
 }
 
 func loadUIConfig() (*uiConfig, string) {

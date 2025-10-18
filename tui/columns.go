@@ -2179,6 +2179,7 @@ var featureDefinitions = []featureDefinition{
 	{Key: "tokens", Title: "Tokens", Desc: "Usage summaries"},
 	{Key: "reports", Title: "Reports", Desc: "Automation reports"},
 	{Key: "env", Title: "Env Editor", Desc: "Environment variables"},
+	{Key: "settings", Title: "Settings", Desc: "Workspace defaults & updates"},
 }
 
 var featureItemsByKey = map[string][]featureItemDefinition{
@@ -2229,6 +2230,13 @@ var featureItemsByKey = map[string][]featureItemDefinition{
 	"reports": {
 		{Key: "reports-list", Title: "reports list", Desc: "List generated automation reports", Command: []string{"reports", "list"}, ProjectRequired: true, PreviewKey: "path:reports"},
 		{Key: "reports-backlog", Title: "reports backlog", Desc: "Show pending issue backlog", Command: []string{"reports", "backlog"}, ProjectRequired: true},
+	},
+	"settings": {
+		{Key: "settings-workspaces", Title: "Workspace roots", Desc: "Configure workspace search paths"},
+		{Key: "settings-theme", Title: "Theme", Desc: "Switch between auto, light, or dark modes"},
+		{Key: "settings-concurrency", Title: "Concurrency", Desc: "Set max background jobs"},
+		{Key: "settings-docker", Title: "Docker path", Desc: "Choose docker CLI binary"},
+		{Key: "settings-update", Title: "Update", Desc: "Run gpt-creator update / --force"},
 	},
 	"env": {
 		{Key: "project-env", Title: "Project .env", Desc: "Review project .env contents", PreviewKey: "env:project"},
@@ -3060,6 +3068,18 @@ func capitalizeWord(s string) string {
 	return strings.ToUpper(lower[:1]) + lower[1:]
 }
 
+func renderSettingsPreview(item featureItemDefinition) string {
+	if item.Meta != nil {
+		if preview := strings.TrimSpace(item.Meta["settingsPreview"]); preview != "" {
+			if strings.HasSuffix(preview, "\n") {
+				return preview
+			}
+			return preview + "\n"
+		}
+	}
+	return "Configure workspace defaults and run updates.\n"
+}
+
 func itemPreview(project *discoveredProject, featureKey string, item featureItemDefinition) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n", item.Title)
@@ -3109,6 +3129,8 @@ func itemPreview(project *discoveredProject, featureKey string, item featureItem
 	case "reports":
 		b.WriteString("Browse automation and verify reports, preview details, then open or export entries.\n")
 		b.WriteString("Shortcuts: enter/o open • e export • y copy path.\n")
+	case "settings":
+		b.WriteString(renderSettingsPreview(item))
 	case "env":
 		b.WriteString("Review and edit .env values across project applications (editing coming soon).\n")
 	default:

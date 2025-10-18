@@ -64,6 +64,10 @@ const (
 	inputEnvEditValue
 	inputEnvNewKey
 	inputEnvNewValue
+	inputSettingsWorkspaceAdd
+	inputSettingsWorkspaceRemove
+	inputSettingsDockerPath
+	inputSettingsConcurrency
 )
 
 type workspaceRoot struct {
@@ -107,31 +111,59 @@ type envFileSelectedMsg struct {
 
 type jobMsg interface {
 	isJob()
+	jobID() int
 }
 
 type jobStartedMsg struct {
 	Title string
+	ID    int
 }
 
-func (jobStartedMsg) isJob() {}
+func (jobStartedMsg) isJob()         {}
+func (msg jobStartedMsg) jobID() int { return msg.ID }
 
 type jobLogMsg struct {
 	Title string
 	Line  string
+	ID    int
 }
 
-func (jobLogMsg) isJob() {}
+func (jobLogMsg) isJob()         {}
+func (msg jobLogMsg) jobID() int { return msg.ID }
 
 type jobFinishedMsg struct {
 	Title string
 	Err   error
+	ID    int
 }
 
-func (jobFinishedMsg) isJob() {}
+func (jobFinishedMsg) isJob()         {}
+func (msg jobFinishedMsg) jobID() int { return msg.ID }
 
-type jobChannelClosedMsg struct{}
+type jobChannelClosedMsg struct {
+	ID int
+}
 
-func (jobChannelClosedMsg) isJob() {}
+func (jobChannelClosedMsg) isJob()         {}
+func (msg jobChannelClosedMsg) jobID() int { return msg.ID }
+
+type jobCancelledMsg struct {
+	ID    int
+	Title string
+}
+
+func (jobCancelledMsg) isJob()         {}
+func (msg jobCancelledMsg) jobID() int { return msg.ID }
+
+type jobStatus struct {
+	ID              int
+	Title           string
+	Status          string
+	Started         time.Time
+	Ended           time.Time
+	Err             string
+	CancelRequested bool
+}
 
 type workspaceSelectedMsg struct {
 	item workspaceItem
@@ -251,6 +283,7 @@ type keyMap struct {
 	copyPath    key.Binding
 	copySnippet key.Binding
 	toggleSplit key.Binding
+	cancelJob   key.Binding
 	toggleHelp  key.Binding
 }
 
@@ -312,6 +345,10 @@ func newKeyMap() keyMap {
 			key.WithKeys("s"),
 			key.WithHelp("s", "toggle split"),
 		),
+		cancelJob: key.NewBinding(
+			key.WithKeys("ctrl+k"),
+			key.WithHelp("ctrl+k", "cancel job"),
+		),
 		toggleHelp: key.NewBinding(
 			key.WithKeys("?"),
 			key.WithHelp("?", "toggle help"),
@@ -338,7 +375,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.openPalette, k.runPal, k.closePal},
 		{k.openEditor, k.togglePin, k.toggleSplit},
 		{k.copyPath, k.copySnippet},
-		{k.toggleLogs, k.toggleHelp, k.quit},
+		{k.cancelJob, k.toggleLogs, k.toggleHelp, k.quit},
 	}
 }
 
@@ -405,7 +442,10 @@ type model struct {
 	filePickerAllowDirs  bool
 	filePickerAllowFiles bool
 
-	jobRunner *jobManager
+	jobRunner       *jobManager
+	jobStatuses     map[int]*jobStatus
+	jobOrder        []int
+	jobRunningCount int
 
 	commandEntries   []paletteEntry
 	paletteMatches   []paletteEntry
@@ -488,6 +528,12 @@ type model struct {
 	reportsLoading       bool
 	reportsError         error
 	reportsTelemetrySent bool
+	settingsConcurrency  int
+	settingsDockerPath   string
+	customWorkspaceRoots []string
+	updateStatus         string
+	updateLastError      string
+	updateLastRun        time.Time
 
 	jobStopwatch    stopwatch.Model
 	jobTimingActive bool
@@ -539,6 +585,8 @@ func initialModel() *model {
 	m.palettePaginator.PerPage = 6
 	m.palettePaginator.TotalPages = 1
 	m.jobRunner = newJobManager()
+	m.jobStatuses = make(map[int]*jobStatus)
+	m.jobOrder = nil
 	m.seenProjects = make(map[string]bool)
 	m.pinnedPaths = make(map[string]bool)
 	m.createProjectJobs = make(map[string]string)
@@ -548,6 +596,7 @@ func initialModel() *model {
 	m.artifactExplorers = make(map[string]*artifactExplorer)
 	m.backlogFilterType = backlogTypeFilterAll
 	m.backlogStatusFilter = backlogStatusFilterAll
+	customRoots := []string{}
 	if cfg, cfgPath := loadUIConfig(); cfg != nil {
 		for _, path := range cfg.Pinned {
 			clean := filepath.Clean(path)
@@ -557,13 +606,55 @@ func initialModel() *model {
 		}
 		m.uiConfig = cfg
 		m.uiConfigPath = cfgPath
+		if theme := strings.TrimSpace(cfg.Theme); theme != "" {
+			selected := markdownThemeFromString(theme)
+			m.markdownTheme = selected
+			setMarkdownTheme(selected)
+		}
+		if cfg.Concurrency > 0 {
+			m.settingsConcurrency = cfg.Concurrency
+		}
+		m.settingsDockerPath = strings.TrimSpace(cfg.DockerPath)
+		rootSeen := make(map[string]struct{})
+		for _, path := range cfg.WorkspaceRoots {
+			clean := filepath.Clean(strings.TrimSpace(path))
+			if clean == "" {
+				continue
+			}
+			if _, ok := rootSeen[clean]; ok {
+				continue
+			}
+			rootSeen[clean] = struct{}{}
+			customRoots = append(customRoots, clean)
+		}
 	}
-	m.dockerAvailable = dockerCLIAvailable()
+	if m.settingsConcurrency < 1 {
+		m.settingsConcurrency = 1
+	}
+	if m.jobRunner != nil {
+		m.jobRunner.maxParallel = m.settingsConcurrency
+	}
+	if m.updateStatus == "" {
+		m.updateStatus = "Idle"
+	}
+	m.dockerAvailable = dockerCLIAvailableWithPath(m.settingsDockerPath)
 	m.telemetry = newTelemetryLogger(filepath.Join(resolveConfigDir(), "ui-events.ndjson"))
 	m.serviceHealth = make(map[string]string)
 	m.jobStopwatch = stopwatch.NewWithInterval(500 * time.Millisecond)
 
 	m.workspaceRoots = defaultWorkspaceRoots()
+	if len(customRoots) > 0 {
+		sort.Strings(customRoots)
+		for _, path := range customRoots {
+			if !m.hasWorkspaceRoot(path) {
+				m.workspaceRoots = append(m.workspaceRoots, workspaceRoot{
+					Label: labelForPath(path),
+					Path:  filepath.Clean(path),
+				})
+			}
+		}
+		m.customWorkspaceRoots = append([]string{}, customRoots...)
+	}
 	m.ensurePinnedRoots()
 
 	m.workspaceCol = newSelectableColumn("Workspace", nil, 22, func(entry listEntry) tea.Cmd {
@@ -1160,6 +1251,11 @@ func (m *model) View() string {
 }
 
 func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
+	if m.currentFeature == "settings" {
+		if handled, cmd := m.handleSettingsKey(msg); handled {
+			return true, cmd
+		}
+	}
 	if m.currentFeature == "services" {
 		switch focusArea(m.focus) {
 		case focusItems, focusPreview:
@@ -1254,6 +1350,9 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.showLogs = !m.showLogs
 		m.applyLayout()
 		return true, nil
+	case key.Matches(msg, m.keys.cancelJob):
+		cmd := m.cancelActiveJob()
+		return true, cmd
 	case key.Matches(msg, m.keys.toggleHelp):
 		m.help.ShowAll = !m.help.ShowAll
 		m.applyLayout()
@@ -1411,8 +1510,7 @@ func (m *model) applyMarkdownTheme(theme markdownTheme, announce bool) {
 }
 
 func (m *model) toggleMarkdownTheme() {
-	next := nextMarkdownTheme(m.markdownTheme)
-	m.applyMarkdownTheme(next, true)
+	m.cycleThemeSetting(1)
 }
 
 func (m *model) stepBack() {
@@ -1642,6 +1740,16 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		m.focus = int(focusItems)
 		return m.loadReportsEntriesCmd()
 	}
+	if feature.Key == "settings" {
+		m.useEnvLayout(false)
+		m.useServicesLayout(false)
+		m.useArtifactsLayout(false)
+		m.useTokensLayout(false)
+		m.useReportsLayout(false)
+		m.refreshSettingsItems()
+		m.focus = int(focusItems)
+		return nil
+	}
 	m.useEnvLayout(false)
 	m.useServicesLayout(false)
 	m.useArtifactsLayout(false)
@@ -1714,12 +1822,15 @@ func (m *model) handleItemSelected(msg itemSelectedMsg) tea.Cmd {
 	if targetProject == nil {
 		targetProject = m.currentProject
 	}
-	if targetProject == nil {
-		return nil
-	}
 	featureKey := msg.feature.Key
 	if featureKey == "" {
 		featureKey = m.currentFeature
+	}
+	if featureKey == "settings" {
+		return m.handleSettingsSelection(msg.item, msg.activate)
+	}
+	if targetProject == nil {
+		return nil
 	}
 	cmd := m.applyItemSelection(targetProject, featureKey, msg.item, msg.activate)
 	if msg.activate {
@@ -2215,13 +2326,29 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 	var cmds []tea.Cmd
 	var followCmd tea.Cmd
 	var reason string
+
 	switch message := msg.(type) {
 	case jobStartedMsg:
-		if timingCmd := m.beginJobTiming(message.Title); timingCmd != nil {
-			cmds = append(cmds, timingCmd)
+		status := m.ensureJobStatus(message.ID, message.Title)
+		status.Status = "Running"
+		status.Started = time.Now()
+		status.Ended = time.Time{}
+		status.Err = ""
+		status.CancelRequested = false
+		m.jobRunningCount++
+		if m.jobRunningCount == 1 {
+			if timingCmd := m.beginJobTiming(message.Title); timingCmd != nil {
+				cmds = append(cmds, timingCmd)
+			}
 		}
 		m.appendLog(fmt.Sprintf("[job] %s started", message.Title))
+		m.emitTelemetry("job_started", map[string]string{
+			"job_id": strconv.Itoa(message.ID),
+			"title":  message.Title,
+		})
+		m.refreshLogs()
 		m.refreshCreateProjectProgress(message.Title)
+
 	case jobLogMsg:
 		if strings.HasPrefix(message.Line, "::verify::") {
 			payload, err := parseVerifyEventMessage(strings.TrimPrefix(message.Line, "::verify::"))
@@ -2231,21 +2358,81 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 		}
 		m.appendLog(message.Line)
 		m.refreshCreateProjectProgress(message.Title)
+
+	case jobCancelledMsg:
+		status := m.ensureJobStatus(message.ID, message.Title)
+		status.Status = "Cancelled"
+		status.CancelRequested = true
+		status.Ended = time.Now()
+		status.Err = "cancelled"
+		m.appendLog(fmt.Sprintf("[job] %s cancelled", status.Title))
+		m.setToast(fmt.Sprintf("%s cancelled", status.Title), 5*time.Second)
+		m.emitTelemetry("job_stopped", map[string]string{
+			"job_id": strconv.Itoa(message.ID),
+			"title":  status.Title,
+			"status": "cancelled",
+		})
+		m.refreshLogs()
+		delete(m.jobProjectPaths, message.Title)
+		m.refreshCreateProjectProgress(message.Title)
+
 	case jobFinishedMsg:
-		if timingCmd := m.stopJobTiming(); timingCmd != nil {
-			cmds = append(cmds, timingCmd)
+		status := m.ensureJobStatus(message.ID, message.Title)
+		if m.jobRunningCount > 0 {
+			m.jobRunningCount--
+		}
+		if m.jobRunningCount == 0 {
+			if timingCmd := m.stopJobTiming(); timingCmd != nil {
+				cmds = append(cmds, timingCmd)
+			}
+		}
+		status.Ended = time.Now()
+		duration := time.Duration(0)
+		if !status.Started.IsZero() {
+			duration = status.Ended.Sub(status.Started)
+		}
+		fields := map[string]string{
+			"job_id": strconv.Itoa(message.ID),
+			"title":  status.Title,
+		}
+		if duration > 0 {
+			fields["duration_ms"] = strconv.FormatInt(duration.Milliseconds(), 10)
 		}
 		elapsed := m.jobLastDuration
 		if message.Err != nil {
-			m.appendLog(fmt.Sprintf("[job] %s failed: %v", message.Title, message.Err))
-			if elapsed > 0 {
-				m.setToast(fmt.Sprintf("%s failed after %s", message.Title, formatElapsed(elapsed)), 6*time.Second)
+			errText := message.Err.Error()
+			status.Err = errText
+			cancelled := status.CancelRequested || isInterruptError(message.Err)
+			if cancelled {
+				status.Status = "Cancelled"
+				fields["status"] = "cancelled"
+				m.appendLog(fmt.Sprintf("[job] %s cancelled", message.Title))
+				m.setToast(fmt.Sprintf("%s cancelled", message.Title), 5*time.Second)
+				m.emitTelemetry("job_stopped", fields)
+			} else {
+				status.Status = "Failed"
+				fields["status"] = "failed"
+				fields["error"] = errText
+				m.appendLog(fmt.Sprintf("[job] %s failed: %v", message.Title, message.Err))
+				if elapsed > 0 {
+					m.setToast(fmt.Sprintf("%s failed after %s", message.Title, formatElapsed(elapsed)), 6*time.Second)
+				} else {
+					m.setToast(fmt.Sprintf("%s failed", message.Title), 6*time.Second)
+				}
+				m.emitTelemetry("job_failed", fields)
 			}
 		} else {
+			status.Status = "Succeeded"
+			status.Err = ""
+			fields["status"] = "succeeded"
 			m.appendLog(fmt.Sprintf("[job] %s completed successfully", message.Title))
 			if elapsed > 0 {
 				m.setToast(fmt.Sprintf("%s completed in %s", message.Title, formatElapsed(elapsed)), 6*time.Second)
+			} else {
+				m.setToast(fmt.Sprintf("%s completed", message.Title), 6*time.Second)
 			}
+			m.emitTelemetry("job_stopped", fields)
+
 			lower := strings.ToLower(message.Title)
 			switch {
 			case strings.Contains(lower, "create-jira-tasks"):
@@ -2258,6 +2445,12 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 				reason = "create-tasks"
 			case strings.Contains(lower, "work-on-tasks"):
 				reason = "work-on-tasks"
+			case strings.Contains(lower, "run up"):
+				reason = "run-up"
+			case strings.Contains(lower, "run open"):
+				reason = "run-open"
+			case strings.Contains(lower, "verify acceptance"), strings.Contains(lower, "verify all"):
+				reason = "verify"
 			}
 			if reason != "" && m.currentFeature == "tasks" {
 				if reason == "create-jira-tasks" && len(m.selectedEpics) > 0 && m.currentProject != nil {
@@ -2293,11 +2486,11 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 		}
 		delete(m.jobProjectPaths, message.Title)
 		m.refreshCreateProjectProgress(message.Title)
+
 	case jobChannelClosedMsg:
-		if timingCmd := m.stopJobTiming(); timingCmd != nil {
-			cmds = append(cmds, timingCmd)
-		}
+		// handled via other cases
 	}
+
 	var runnerCmd tea.Cmd
 	if m.jobRunner != nil {
 		runnerCmd = m.jobRunner.Handle(msg)
@@ -2308,6 +2501,19 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 	if runnerCmd != nil {
 		cmds = append(cmds, runnerCmd)
 	}
+
+	switch reason {
+	case "create-jira-tasks", "migrate-tasks", "refine-tasks", "create-tasks", "work-on-tasks":
+		m.refreshBacklog()
+	case "run-up", "run-open":
+		m.refreshServices()
+	case "verify":
+		m.refreshVerifySummary()
+	}
+
+	m.pruneJobHistory()
+	m.refreshLogs()
+
 	switch len(cmds) {
 	case 0:
 		return nil
@@ -2475,6 +2681,64 @@ func (m *model) handleInputSubmit(value string) (tea.Cmd, bool) {
 			return nil, false
 		}
 		return nil, true
+	case inputSettingsWorkspaceAdd:
+		path := m.resolvePath(value)
+		if m.addCustomWorkspaceRoot(path) {
+			return nil, false
+		}
+		return nil, true
+	case inputSettingsWorkspaceRemove:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			return nil, true
+		}
+		candidate := trimmed
+		if idx, err := strconv.Atoi(trimmed); err == nil {
+			idx = idx - 1
+			if idx >= 0 && idx < len(m.customWorkspaceRoots) {
+				candidate = m.customWorkspaceRoots[idx]
+			}
+		}
+		cleanCandidate := filepath.Clean(strings.TrimSpace(candidate))
+		resolved := ""
+		for _, root := range m.customWorkspaceRoots {
+			if filepath.Clean(root) == cleanCandidate {
+				resolved = root
+				break
+			}
+		}
+		if resolved == "" {
+			resolved = m.resolvePath(candidate)
+		}
+		if m.removeCustomWorkspaceRoot(resolved) {
+			return nil, false
+		}
+		m.setToast("Workspace root not found", 4*time.Second)
+		return nil, true
+	case inputSettingsDockerPath:
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			m.clearDockerPath()
+			return nil, false
+		}
+		resolved := trimmed
+		if !filepath.IsAbs(resolved) {
+			resolved = m.resolvePath(resolved)
+		}
+		m.setDockerPath(resolved)
+		return nil, false
+	case inputSettingsConcurrency:
+		trimmed := strings.TrimSpace(value)
+		n, err := strconv.Atoi(trimmed)
+		if err != nil || n < 1 {
+			m.setToast("Enter a positive number", 4*time.Second)
+			return nil, true
+		}
+		if n > 32 {
+			n = 32
+		}
+		cmd := m.setConcurrency(n)
+		return cmd, false
 	}
 	return nil, false
 }
@@ -2734,6 +2998,7 @@ func (m *model) openCommandPalette() {
 	m.inputField.Focus()
 	m.paletteIndex = 0
 	m.updatePaletteMatches("")
+	m.emitTelemetry("palette_opened", map[string]string{})
 }
 
 func (m *model) startNewProjectFlow(defaultPath string) {
@@ -2812,10 +3077,202 @@ func (m *model) launchCreateProject(path string, template string) tea.Cmd {
 }
 
 func (m *model) enqueueJob(req jobRequest) tea.Cmd {
+	if strings.TrimSpace(m.settingsDockerPath) != "" {
+		req.env = append(req.env, "GC_DOCKER_BIN="+strings.TrimSpace(m.settingsDockerPath))
+	}
+	if m.settingsConcurrency > 0 {
+		req.env = append(req.env, fmt.Sprintf("GC_MAX_CONCURRENCY=%d", m.settingsConcurrency))
+	}
 	if m.jobRunner == nil {
 		m.jobRunner = newJobManager()
 	}
-	return m.jobRunner.Enqueue(req)
+	var concurrencyCmd tea.Cmd
+	if m.settingsConcurrency > 0 {
+		concurrencyCmd = m.jobRunner.SetMaxParallel(m.settingsConcurrency)
+	}
+	id, cmd := m.jobRunner.Enqueue(req)
+	if concurrencyCmd != nil {
+		if cmd != nil {
+			cmd = tea.Batch(concurrencyCmd, cmd)
+		} else {
+			cmd = concurrencyCmd
+		}
+	}
+	status := m.ensureJobStatus(id, req.title)
+	status.Status = "Queued"
+	status.Started = time.Time{}
+	status.Ended = time.Time{}
+	status.Err = ""
+	status.CancelRequested = false
+	m.refreshLogs()
+	return cmd
+}
+
+func (m *model) ensureJobStatus(id int, title string) *jobStatus {
+	if m.jobStatuses == nil {
+		m.jobStatuses = make(map[int]*jobStatus)
+	}
+	status, ok := m.jobStatuses[id]
+	if !ok {
+		status = &jobStatus{ID: id, Title: title, Status: "Queued"}
+		m.jobStatuses[id] = status
+		m.jobOrder = append(m.jobOrder, id)
+		m.pruneJobHistory()
+	} else if title != "" && status.Title == "" {
+		status.Title = title
+	}
+	return status
+}
+
+func (m *model) pruneJobHistory() {
+	const maxJobs = 12
+	if len(m.jobOrder) <= maxJobs {
+		return
+	}
+	for len(m.jobOrder) > maxJobs {
+		removable := -1
+		for idx, id := range m.jobOrder {
+			status := m.jobStatuses[id]
+			if status == nil {
+				removable = idx
+				break
+			}
+			switch status.Status {
+			case "Running", "Queued", "Cancelling":
+				continue
+			default:
+				removable = idx
+				break
+			}
+		}
+		if removable == -1 {
+			break
+		}
+		id := m.jobOrder[removable]
+		m.jobOrder = append(m.jobOrder[:removable], m.jobOrder[removable+1:]...)
+		delete(m.jobStatuses, id)
+	}
+}
+
+func jobStatusIcon(status string) string {
+	switch strings.ToLower(status) {
+	case "running", "cancelling":
+		return "▶"
+	case "queued":
+		return "…"
+	case "succeeded":
+		return "✓"
+	case "failed":
+		return "✗"
+	case "cancelled":
+		return "⚑"
+	default:
+		return "•"
+	}
+}
+
+func (m *model) renderJobQueue() string {
+	header := fmt.Sprintf("Jobs (Ctrl+K cancel running) — %d slot(s)", max(1, m.settingsConcurrency))
+	if len(m.jobOrder) == 0 {
+		return header + "\n  (no jobs)"
+	}
+	var lines []string
+	lines = append(lines, header)
+	for _, id := range m.jobOrder {
+		status := m.jobStatuses[id]
+		if status == nil {
+			continue
+		}
+		label := status.Title
+		if strings.TrimSpace(label) == "" {
+			label = fmt.Sprintf("job-%d", id)
+		}
+		detail := status.Status
+		switch status.Status {
+		case "Running", "Cancelling":
+			if !status.Started.IsZero() {
+				detail = fmt.Sprintf("%s for %s", status.Status, formatElapsed(time.Since(status.Started)))
+			}
+		case "Queued":
+			if status.CancelRequested {
+				detail = "Queued (cancel pending)"
+			}
+		case "Succeeded", "Failed", "Cancelled":
+			if !status.Ended.IsZero() {
+				detail = fmt.Sprintf("%s %s ago", status.Status, formatRelativeTime(status.Ended))
+			}
+		}
+		lines = append(lines, fmt.Sprintf("%s %s — %s", jobStatusIcon(status.Status), label, detail))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *model) cancelActiveJob() tea.Cmd {
+	if m.jobRunner == nil {
+		m.setToast("No jobs to cancel", 4*time.Second)
+		return nil
+	}
+	var target *jobStatus
+	for _, id := range m.jobOrder {
+		status := m.jobStatuses[id]
+		if status == nil {
+			continue
+		}
+		if status.Status == "Running" || status.Status == "Cancelling" {
+			target = status
+			break
+		}
+	}
+	if target == nil {
+		for _, id := range m.jobOrder {
+			status := m.jobStatuses[id]
+			if status == nil {
+				continue
+			}
+			if status.Status == "Queued" {
+				target = status
+				break
+			}
+		}
+	}
+	if target == nil {
+		m.setToast("No jobs to cancel", 4*time.Second)
+		return nil
+	}
+	target.CancelRequested = true
+	if target.Status == "Running" {
+		target.Status = "Cancelling"
+	}
+	m.refreshLogs()
+	ok, cmd := m.jobRunner.Cancel(target.ID)
+	if !ok {
+		target.CancelRequested = false
+		if target.Status == "Cancelling" {
+			target.Status = "Running"
+		}
+		m.refreshLogs()
+		m.setToast("Unable to cancel job", 4*time.Second)
+		return nil
+	}
+	if target.Status == "Queued" {
+		target.Status = "Cancelled"
+		target.Ended = time.Now()
+		m.refreshLogs()
+	}
+	toast := fmt.Sprintf("Cancelling %s", target.Title)
+	if target.Status == "Cancelled" {
+		toast = fmt.Sprintf("Cancelled %s", target.Title)
+	}
+	m.setToast(toast, 4*time.Second)
+	return cmd
+}
+
+func isInterruptError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "signal: interrupt") || strings.Contains(text, "interrupted") || strings.Contains(text, "canceled") || strings.Contains(text, "cancelled")
 }
 
 func (m *model) refreshCommandCatalog() {
@@ -3076,9 +3533,9 @@ func (m *model) runPaletteEntry(entry paletteEntry) tea.Cmd {
 		if entry.meta != nil {
 			switch entry.meta["action"] {
 			case "toggle-markdown-theme":
-				m.toggleMarkdownTheme()
+				m.cycleThemeSetting(1)
 			case "set-markdown-theme":
-				m.applyMarkdownTheme(markdownThemeFromString(entry.meta["theme"]), true)
+				m.setThemeSetting(markdownThemeFromString(entry.meta["theme"]))
 			}
 		}
 		return nil
@@ -3964,15 +4421,24 @@ func (m *model) togglePinState(path string, pinned bool) {
 }
 
 func (m *model) persistPins() {
+	m.writeUIConfig()
+}
+
+func (m *model) writeUIConfig() {
 	if m.uiConfig == nil {
 		m.uiConfig = &uiConfig{}
 	}
-	sorted := sortedPaths(m.pinnedPaths)
-	m.uiConfig.Pinned = sorted
+	m.uiConfig.Pinned = sortedPaths(m.pinnedPaths)
+	m.uiConfig.Theme = m.markdownTheme.String()
+	m.uiConfig.Concurrency = m.settingsConcurrency
+	m.uiConfig.DockerPath = strings.TrimSpace(m.settingsDockerPath)
+	m.uiConfig.WorkspaceRoots = append([]string{}, m.customWorkspaceRoots...)
 	if m.uiConfigPath == "" {
 		_, m.uiConfigPath = loadUIConfig()
 	}
-	_ = saveUIConfig(m.uiConfig, m.uiConfigPath)
+	if err := saveUIConfig(m.uiConfig, m.uiConfigPath); err != nil {
+		m.appendLog(fmt.Sprintf("Failed to persist settings: %v", err))
+	}
 }
 
 func (m *model) handleNewProjectPathSubmit(raw string) tea.Cmd {
@@ -4053,7 +4519,15 @@ func (m *model) appendLog(line string) {
 }
 
 func (m *model) refreshLogs() {
-	m.logs.SetContent(strings.Join(m.logLines, "\n"))
+	var parts []string
+	if queue := strings.TrimSpace(m.renderJobQueue()); queue != "" {
+		parts = append(parts, queue)
+	}
+	if len(m.logLines) > 0 {
+		parts = append(parts, strings.Join(m.logLines, "\n"))
+	}
+	content := strings.Join(parts, "\n\n")
+	m.logs.SetContent(content)
 }
 
 func (m *model) showSpinner(message string) {
@@ -5347,6 +5821,552 @@ func (m *model) handleReportsRowSelected(msg reportsRowSelectedMsg) {
 	if msg.activate {
 		m.openReportEntry(entry)
 	}
+}
+
+func (m *model) refreshSettingsItems() {
+	if m.currentFeature != "settings" {
+		return
+	}
+	if m.itemsCol == nil {
+		return
+	}
+	items := m.buildSettingsItems()
+	m.itemsCol.SetTitle("Sections")
+	m.itemsCol.SetItems(items)
+	if len(items) == 0 {
+		m.currentItem = featureItemDefinition{}
+		if m.previewCol != nil {
+			m.previewCol.SetContent("No settings available.\n")
+		}
+		return
+	}
+	currentKey := m.currentItem.Key
+	selected := items[0]
+	for _, item := range items {
+		if item.Key == currentKey && currentKey != "" {
+			selected = item
+			break
+		}
+	}
+	m.itemsCol.SelectKey(selected.Key)
+	m.showSettingsItem(selected)
+}
+
+func (m *model) buildSettingsItems() []featureItemDefinition {
+	items := make([]featureItemDefinition, 0, 5)
+
+	desc, preview := m.settingsWorkspaceInfo()
+	items = append(items, featureItemDefinition{
+		Key:   "settings-workspaces",
+		Title: "Workspace roots",
+		Desc:  desc,
+		Meta: map[string]string{
+			"settings":        "workspace",
+			"settingsPreview": preview,
+		},
+	})
+
+	desc, preview = m.settingsThemeInfo()
+	items = append(items, featureItemDefinition{
+		Key:   "settings-theme",
+		Title: "Theme",
+		Desc:  desc,
+		Meta: map[string]string{
+			"settings":        "theme",
+			"settingsPreview": preview,
+		},
+	})
+
+	desc, preview = m.settingsConcurrencyInfo()
+	items = append(items, featureItemDefinition{
+		Key:   "settings-concurrency",
+		Title: "Concurrency",
+		Desc:  desc,
+		Meta: map[string]string{
+			"settings":        "concurrency",
+			"settingsPreview": preview,
+		},
+	})
+
+	desc, preview = m.settingsDockerInfo()
+	items = append(items, featureItemDefinition{
+		Key:   "settings-docker",
+		Title: "Docker path",
+		Desc:  desc,
+		Meta: map[string]string{
+			"settings":        "docker",
+			"settingsPreview": preview,
+		},
+	})
+
+	desc, preview = m.settingsUpdateInfo()
+	items = append(items, featureItemDefinition{
+		Key:   "settings-update",
+		Title: "Update",
+		Desc:  desc,
+		Meta: map[string]string{
+			"settings":        "update",
+			"settingsPreview": preview,
+		},
+	})
+
+	return items
+}
+
+func (m *model) showSettingsItem(item featureItemDefinition) {
+	m.currentItem = item
+	if m.previewCol == nil {
+		return
+	}
+	preview := ""
+	if item.Meta != nil {
+		preview = strings.TrimSpace(item.Meta["settingsPreview"])
+	}
+	if preview == "" {
+		preview = "Settings preview unavailable.\n"
+	} else if !strings.HasSuffix(preview, "\n") {
+		preview += "\n"
+	}
+	m.previewCol.SetContent(preview)
+}
+
+func (m *model) handleSettingsSelection(item featureItemDefinition, activate bool) tea.Cmd {
+	m.itemsCol.SelectKey(item.Key)
+	m.showSettingsItem(item)
+	if activate {
+		return m.activateSettingsItem(item)
+	}
+	return nil
+}
+
+func (m *model) activateSettingsItem(item featureItemDefinition) tea.Cmd {
+	switch item.Key {
+	case "settings-workspaces":
+		return m.promptAddWorkspaceRoot()
+	case "settings-theme":
+		m.cycleThemeSetting(1)
+		return nil
+	case "settings-concurrency":
+		return m.promptSettingsConcurrency()
+	case "settings-docker":
+		return m.promptDockerPath()
+	case "settings-update":
+		return m.runUpdate(false)
+	default:
+		return nil
+	}
+}
+
+func (m *model) handleSettingsKey(msg tea.KeyMsg) (bool, tea.Cmd) {
+	if m.currentItem.Key == "" {
+		return false, nil
+	}
+	switch m.currentItem.Key {
+	case "settings-workspaces":
+		switch msg.String() {
+		case "enter":
+			return true, m.promptAddWorkspaceRoot()
+		case "x", "X", "delete":
+			return true, m.promptRemoveWorkspaceRoot()
+		case "r", "R":
+			if len(m.customWorkspaceRoots) == 0 {
+				m.setToast("No custom roots to reset", 4*time.Second)
+				return true, nil
+			}
+			m.resetCustomWorkspaceRoots()
+			return true, nil
+		}
+	case "settings-theme":
+		switch msg.String() {
+		case "enter", " ":
+			m.cycleThemeSetting(1)
+			return true, nil
+		case "1", "a", "A":
+			m.setThemeSetting(markdownThemeAuto)
+			return true, nil
+		case "2", "d", "D":
+			m.setThemeSetting(markdownThemeDark)
+			return true, nil
+		case "3":
+			m.setThemeSetting(markdownThemeLight)
+			return true, nil
+		}
+	case "settings-concurrency":
+		switch msg.String() {
+		case "enter":
+			return true, m.promptSettingsConcurrency()
+		case "+", "=":
+			return true, m.adjustConcurrency(1)
+		case "-", "_":
+			return true, m.adjustConcurrency(-1)
+		}
+	case "settings-docker":
+		switch msg.String() {
+		case "enter":
+			return true, m.promptDockerPath()
+		case "c", "C":
+			m.clearDockerPath()
+			return true, nil
+		}
+	case "settings-update":
+		switch msg.String() {
+		case "enter":
+			return true, m.runUpdate(false)
+		case "f", "F":
+			return true, m.runUpdate(true)
+		}
+	}
+	return false, nil
+}
+
+func (m *model) settingsWorkspaceInfo() (string, string) {
+	customTotal := len(m.customWorkspaceRoots)
+	desc := "No custom roots"
+	if customTotal == 1 {
+		desc = "1 custom root"
+	} else if customTotal > 1 {
+		desc = fmt.Sprintf("%d custom roots", customTotal)
+	}
+	var b strings.Builder
+	b.WriteString("Workspace Roots\n────────────────\n")
+	if customTotal == 0 {
+		b.WriteString("Using defaults only.\n")
+	} else {
+		for _, path := range m.customWorkspaceRoots {
+			status := "✓"
+			if !dirExists(path) {
+				status = "⚠"
+			}
+			b.WriteString(fmt.Sprintf("%s %s\n", status, abbreviatePath(path)))
+		}
+	}
+	b.WriteString("\nEnter add • X remove (path/index) • R reset custom roots\n")
+	return desc, b.String()
+}
+
+func (m *model) settingsThemeInfo() (string, string) {
+	label := markdownThemeLabel(m.markdownTheme)
+	desc := "Theme: " + label
+	var b strings.Builder
+	b.WriteString("Theme\n────────\n")
+	b.WriteString(fmt.Sprintf("Current: %s\n", label))
+	b.WriteString("\nEnter cycle • 1 auto • 2 dark • 3 light\n")
+	return desc, b.String()
+}
+
+func (m *model) settingsConcurrencyInfo() (string, string) {
+	desc := fmt.Sprintf("Max jobs: %d", m.settingsConcurrency)
+	var b strings.Builder
+	b.WriteString("Concurrency\n────────────\n")
+	b.WriteString(fmt.Sprintf("Current limit: %d job(s) in parallel\n", m.settingsConcurrency))
+	b.WriteString("\n+ increase • - decrease • Enter set value (1–32)\n")
+	return desc, b.String()
+}
+
+func (m *model) settingsDockerInfo() (string, string) {
+	path := strings.TrimSpace(m.settingsDockerPath)
+	desc := "Docker: Auto"
+	if path != "" {
+		desc = "Docker: " + abbreviatePath(path)
+	}
+	var b strings.Builder
+	b.WriteString("Docker CLI\n───────────\n")
+	if path == "" {
+		status := "available"
+		if !m.dockerAvailable {
+			status = "not detected"
+		}
+		b.WriteString(fmt.Sprintf("Using system default (docker) — %s.\n", status))
+	} else {
+		status := "Available"
+		if !pathExists(path) {
+			status = "Not found"
+		}
+		b.WriteString(fmt.Sprintf("Path: %s\nStatus: %s\n", path, status))
+	}
+	b.WriteString("\nEnter choose path • C clear override\n")
+	return desc, b.String()
+}
+
+func (m *model) settingsUpdateInfo() (string, string) {
+	status := m.updateStatus
+	if status == "" {
+		status = "Idle"
+	}
+	desc := "Status: " + status
+	var b strings.Builder
+	b.WriteString("Updates\n───────\n")
+	b.WriteString(fmt.Sprintf("Status: %s\n", status))
+	if !m.updateLastRun.IsZero() {
+		b.WriteString(fmt.Sprintf("Last run: %s (%s ago)\n", m.updateLastRun.Format(time.RFC822), formatRelativeTime(m.updateLastRun)))
+	}
+	if strings.TrimSpace(m.updateLastError) != "" {
+		b.WriteString("Last error:\n")
+		b.WriteString(m.updateLastError)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nEnter update • F force update --force\n")
+	return desc, b.String()
+}
+
+func (m *model) cycleThemeSetting(step int) {
+	next := nextMarkdownTheme(m.markdownTheme)
+	if step < 0 {
+		switch m.markdownTheme {
+		case markdownThemeAuto:
+			next = markdownThemeLight
+		case markdownThemeDark:
+			next = markdownThemeAuto
+		default:
+			next = markdownThemeDark
+		}
+	}
+	m.setThemeSetting(next)
+}
+
+func (m *model) setThemeSetting(theme markdownTheme) {
+	if theme == m.markdownTheme {
+		return
+	}
+	m.applyMarkdownTheme(theme, true)
+	m.writeUIConfig()
+	m.emitSettingsChanged("theme", theme.String())
+	m.refreshSettingsItems()
+}
+
+func (m *model) promptAddWorkspaceRoot() tea.Cmd {
+	return m.openPathPicker("Add workspace root", "", inputSettingsWorkspaceAdd, true, false)
+}
+
+func (m *model) promptRemoveWorkspaceRoot() tea.Cmd {
+	if len(m.customWorkspaceRoots) == 0 {
+		m.setToast("No custom roots to remove", 4*time.Second)
+		return nil
+	}
+	return m.openInput("Remove workspace root (path or index)", "", inputSettingsWorkspaceRemove)
+}
+
+func (m *model) promptDockerPath() tea.Cmd {
+	return m.openPathPicker("Docker CLI path", m.settingsDockerPath, inputSettingsDockerPath, false, true)
+}
+
+func (m *model) promptSettingsConcurrency() tea.Cmd {
+	return m.openInput("Set max concurrent jobs", strconv.Itoa(m.settingsConcurrency), inputSettingsConcurrency)
+}
+
+func (m *model) adjustConcurrency(delta int) tea.Cmd {
+	value := m.settingsConcurrency + delta
+	if value < 1 {
+		value = 1
+	}
+	if value > 8 {
+		value = 8
+	}
+	return m.setConcurrency(value)
+}
+
+func (m *model) setConcurrency(value int) tea.Cmd {
+	if value < 1 {
+		value = 1
+	}
+	if value == m.settingsConcurrency {
+		return nil
+	}
+	m.settingsConcurrency = value
+	var cmd tea.Cmd
+	if m.jobRunner != nil {
+		cmd = m.jobRunner.SetMaxParallel(value)
+	}
+	m.writeUIConfig()
+	m.emitSettingsChanged("concurrency", strconv.Itoa(value))
+	m.setToast(fmt.Sprintf("Max background jobs: %d", value), 4*time.Second)
+	m.refreshSettingsItems()
+	return cmd
+}
+
+func (m *model) addCustomWorkspaceRoot(path string) bool {
+	clean := filepath.Clean(path)
+	if clean == "" {
+		return false
+	}
+	if !dirExists(clean) {
+		m.setToast("Directory not found", 4*time.Second)
+		return false
+	}
+	for _, existing := range m.customWorkspaceRoots {
+		if filepath.Clean(existing) == clean {
+			m.setToast("Root already configured", 4*time.Second)
+			return false
+		}
+	}
+	m.customWorkspaceRoots = append(m.customWorkspaceRoots, clean)
+	sort.Strings(m.customWorkspaceRoots)
+	if !m.hasWorkspaceRoot(clean) {
+		m.workspaceRoots = append(m.workspaceRoots, workspaceRoot{Label: labelForPath(clean), Path: clean})
+	}
+	m.refreshWorkspaceColumn()
+	m.writeUIConfig()
+	m.emitSettingsChanged("workspace_root_added", clean)
+	m.setToast("Workspace root added", 4*time.Second)
+	m.refreshSettingsItems()
+	return true
+}
+
+func (m *model) removeCustomWorkspaceRoot(path string) bool {
+	clean := filepath.Clean(path)
+	index := -1
+	for i, existing := range m.customWorkspaceRoots {
+		if filepath.Clean(existing) == clean {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		return false
+	}
+	m.customWorkspaceRoots = append(m.customWorkspaceRoots[:index], m.customWorkspaceRoots[index+1:]...)
+	delete(m.pinnedPaths, clean)
+	filtered := make([]workspaceRoot, 0, len(m.workspaceRoots))
+	for _, root := range m.workspaceRoots {
+		if filepath.Clean(root.Path) == clean {
+			continue
+		}
+		filtered = append(filtered, root)
+	}
+	m.workspaceRoots = filtered
+	m.refreshWorkspaceColumn()
+	m.writeUIConfig()
+	m.emitSettingsChanged("workspace_root_removed", clean)
+	m.setToast("Workspace root removed", 4*time.Second)
+	m.refreshSettingsItems()
+	return true
+}
+
+func (m *model) resetCustomWorkspaceRoots() {
+	if len(m.customWorkspaceRoots) == 0 {
+		m.setToast("No custom roots to reset", 4*time.Second)
+		return
+	}
+	old := append([]string{}, m.customWorkspaceRoots...)
+	for _, path := range old {
+		delete(m.pinnedPaths, filepath.Clean(path))
+	}
+	m.customWorkspaceRoots = nil
+	filtered := make([]workspaceRoot, 0, len(m.workspaceRoots))
+	for _, root := range m.workspaceRoots {
+		remove := false
+		for _, custom := range old {
+			if filepath.Clean(root.Path) == filepath.Clean(custom) {
+				remove = true
+				break
+			}
+		}
+		if !remove {
+			filtered = append(filtered, root)
+		}
+	}
+	m.workspaceRoots = filtered
+	m.refreshWorkspaceColumn()
+	m.writeUIConfig()
+	m.emitSettingsChanged("workspace_roots_reset", "")
+	m.setToast("Custom workspace roots cleared", 4*time.Second)
+	m.refreshSettingsItems()
+}
+
+func (m *model) setDockerPath(path string) {
+	trimmed := strings.TrimSpace(path)
+	if trimmed != "" {
+		if info, err := os.Stat(trimmed); err == nil {
+			if info.IsDir() {
+				m.setToast("Invalid docker binary", 4*time.Second)
+				return
+			}
+		} else {
+			if resolved, err := exec.LookPath(trimmed); err == nil {
+				trimmed = resolved
+			} else {
+				m.setToast("Docker binary not found", 4*time.Second)
+				return
+			}
+		}
+	}
+	if trimmed == m.settingsDockerPath {
+		return
+	}
+	m.settingsDockerPath = trimmed
+	m.dockerAvailable = dockerCLIAvailableWithPath(trimmed)
+	m.writeUIConfig()
+	m.emitSettingsChanged("docker_path", trimmed)
+	if trimmed == "" {
+		m.setToast("Docker path cleared", 4*time.Second)
+	} else {
+		m.setToast("Docker path updated", 4*time.Second)
+	}
+	m.refreshSettingsItems()
+}
+
+func (m *model) clearDockerPath() {
+	if m.settingsDockerPath == "" {
+		return
+	}
+	m.settingsDockerPath = ""
+	m.dockerAvailable = dockerCLIAvailableWithPath("")
+	m.writeUIConfig()
+	m.emitSettingsChanged("docker_path", "")
+	m.setToast("Docker path cleared", 4*time.Second)
+	m.refreshSettingsItems()
+}
+
+func (m *model) emitSettingsChanged(setting, value string) {
+	fields := map[string]string{"setting": setting}
+	if strings.TrimSpace(value) != "" {
+		fields["value"] = strings.TrimSpace(value)
+	}
+	m.emitTelemetry("settings_changed", fields)
+}
+
+func (m *model) runUpdate(force bool) tea.Cmd {
+	title := "Update gpt-creator"
+	args := []string{"update"}
+	if force {
+		title = "Force update"
+		args = append(args, "--force")
+	}
+	m.updateStatus = "Queued"
+	m.refreshSettingsItems()
+	m.appendLog(fmt.Sprintf("[job] %s queued", title))
+	queuedToast := "Update queued"
+	if force {
+		queuedToast = "Force update queued"
+	}
+	m.setToast(queuedToast, 4*time.Second)
+	return m.enqueueJob(jobRequest{
+		title:   title,
+		command: "gpt-creator",
+		args:    args,
+		onStart: func() {
+			m.updateStatus = "Running"
+			m.updateLastError = ""
+			m.updateLastRun = time.Now()
+			m.emitTelemetry("update_started", map[string]string{"force": strconv.FormatBool(force)})
+			m.refreshSettingsItems()
+		},
+		onFinish: func(err error) {
+			if err != nil {
+				m.updateStatus = "Failed"
+				m.updateLastError = err.Error()
+				m.emitTelemetry("update_failed", map[string]string{"force": strconv.FormatBool(force), "error": err.Error()})
+				m.setToast("Update failed", 5*time.Second)
+			} else {
+				m.updateStatus = "Succeeded"
+				m.updateLastError = ""
+				m.emitTelemetry("update_succeeded", map[string]string{"force": strconv.FormatBool(force)})
+				m.setToast("Update completed", 5*time.Second)
+			}
+			m.updateLastRun = time.Now()
+			m.refreshSettingsItems()
+		},
+	})
 }
 
 func (m *model) refreshTokensView(resetSelection bool) tea.Cmd {

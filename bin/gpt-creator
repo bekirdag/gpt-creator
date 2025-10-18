@@ -2397,15 +2397,17 @@ gc_build_context_file() {
             ;;
         esac
       fi
-      python3 - "$f" "$max_lines" <<'PY'
+      GC_DUMP_FILE="$f" GC_MAX_LINES="$max_lines" python3 <<'PY'
 import json
+import os
 import pathlib
 import re
-import sys
 
-path = pathlib.Path(sys.argv[1])
+path = pathlib.Path(os.environ.get("GC_DUMP_FILE", ""))
+if not path:
+    raise SystemExit(0)
 try:
-    limit = int(sys.argv[2])
+    limit = int(os.environ.get("GC_MAX_LINES", "200"))
 except Exception:
     limit = 200
 

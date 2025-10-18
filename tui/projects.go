@@ -386,13 +386,6 @@ func collectDirArtifacts(root, dir string, dirInfo os.FileInfo) []pipelineArtifa
 	return artifacts
 }
 
-func relativePath(root, full string) string {
-	if rel, err := filepath.Rel(root, full); err == nil {
-		return filepath.ToSlash(rel)
-	}
-	return filepath.ToSlash(full)
-}
-
 func detectStepTimestamp(root string, relative []string) time.Time {
 	var latest time.Time
 	for _, rel := range relative {

@@ -2326,6 +2326,7 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 	var cmds []tea.Cmd
 	var followCmd tea.Cmd
 	var reason string
+	var jobPath string
 
 	switch message := msg.(type) {
 	case jobStartedMsg:
@@ -2484,6 +2485,9 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 				followCmd = m.loadBacklogCmd()
 			}
 		}
+		if jobPath == "" && m.jobProjectPaths != nil {
+			jobPath = m.jobProjectPaths[message.Title]
+		}
 		delete(m.jobProjectPaths, message.Title)
 		m.refreshCreateProjectProgress(message.Title)
 
@@ -2504,11 +2508,17 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 
 	switch reason {
 	case "create-jira-tasks", "migrate-tasks", "refine-tasks", "create-tasks", "work-on-tasks":
-		m.refreshBacklog()
+		if cmd := m.refreshBacklog(jobPath); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case "run-up", "run-open":
-		m.refreshServices()
+		if cmd := m.refreshServices(jobPath); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case "verify":
-		m.refreshVerifySummary()
+		if cmd := m.refreshVerifySummary(jobPath); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	m.pruneJobHistory()
@@ -2601,6 +2611,50 @@ func (m *model) updateProjectStats(path string) {
 		m.refreshProjectsColumn()
 		return
 	}
+}
+
+func cleanJobPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	return filepath.Clean(trimmed)
+}
+
+func (m *model) refreshBacklog(path string) tea.Cmd {
+	clean := cleanJobPath(path)
+	if clean != "" {
+		m.updateProjectStats(clean)
+	} else if m.currentRoot != nil {
+		m.refreshProjectsForCurrentRoot()
+	}
+	return nil
+}
+
+func (m *model) refreshServices(path string) tea.Cmd {
+	clean := cleanJobPath(path)
+	if clean != "" {
+		m.updateProjectStats(clean)
+	} else if m.currentRoot != nil {
+		m.refreshProjectsForCurrentRoot()
+	}
+	if m.currentFeature == "services" && m.currentProject != nil && clean != "" && filepath.Clean(m.currentProject.Path) == clean {
+		return m.loadServicesCmd()
+	}
+	return nil
+}
+
+func (m *model) refreshVerifySummary(path string) tea.Cmd {
+	clean := cleanJobPath(path)
+	if clean != "" {
+		m.updateProjectStats(clean)
+		if m.currentFeature == "verify" && m.currentProject != nil && filepath.Clean(m.currentProject.Path) == clean {
+			m.refreshCurrentFeatureItemsFor(clean)
+		}
+	} else if m.currentRoot != nil {
+		m.refreshProjectsForCurrentRoot()
+	}
+	return nil
 }
 
 func (m *model) handleInputSubmit(value string) (tea.Cmd, bool) {
@@ -6143,7 +6197,8 @@ func (m *model) promptRemoveWorkspaceRoot() tea.Cmd {
 		m.setToast("No custom roots to remove", 4*time.Second)
 		return nil
 	}
-	return m.openInput("Remove workspace root (path or index)", "", inputSettingsWorkspaceRemove)
+	m.openInput("Remove workspace root (path or index)", "", inputSettingsWorkspaceRemove)
+	return nil
 }
 
 func (m *model) promptDockerPath() tea.Cmd {
@@ -6151,7 +6206,8 @@ func (m *model) promptDockerPath() tea.Cmd {
 }
 
 func (m *model) promptSettingsConcurrency() tea.Cmd {
-	return m.openInput("Set max concurrent jobs", strconv.Itoa(m.settingsConcurrency), inputSettingsConcurrency)
+	m.openInput("Set max concurrent jobs", strconv.Itoa(m.settingsConcurrency), inputSettingsConcurrency)
+	return nil
 }
 
 func (m *model) adjustConcurrency(delta int) tea.Cmd {

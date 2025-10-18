@@ -409,6 +409,11 @@ type model struct {
 	previewCol              *previewColumn
 	columns                 []column
 	defaultColumns          []column
+	columnsScrollX          int
+	columnsViewportWidth    int
+	columnWidths            []int
+	columnOffsets           []int
+	columnsTotalWidth       int
 	featureSelectDefault    func(listEntry) tea.Cmd
 	featureHighlightDefault func(listEntry) tea.Cmd
 	usingTasksLayout        bool
@@ -452,19 +457,25 @@ type model struct {
 	paletteIndex     int
 	palettePaginator paginator.Model
 
-	pinnedPaths         map[string]bool
-	uiConfig            *uiConfig
-	uiConfigPath        string
-	telemetry           *telemetryLogger
-	serviceHealth       map[string]string
-	servicesPolling     bool
-	servicesTimer       timer.Model
-	servicesTimerActive bool
-	dockerAvailable     bool
-	seenProjects        map[string]bool
-	createProjectJobs   map[string]string
-	lastProjectRefresh  map[string]time.Time
-	jobProjectPaths     map[string]string
+	pinnedPaths             map[string]bool
+	uiConfig                *uiConfig
+	uiConfigPath            string
+	telemetry               *telemetryLogger
+	telemetrySessionID      string
+	telemetryUserID         string
+	telemetrySessionStarted time.Time
+	pipelineStepMarks       map[string]map[string]time.Time
+	verifyCheckStatus       map[string]map[string]string
+	serviceHealth           map[string]string
+	serviceAllHealthy       map[string]bool
+	servicesPolling         bool
+	servicesTimer           timer.Model
+	servicesTimerActive     bool
+	dockerAvailable         bool
+	seenProjects            map[string]bool
+	createProjectJobs       map[string]string
+	lastProjectRefresh      map[string]time.Time
+	jobProjectPaths         map[string]string
 
 	toastMessage string
 	toastExpires time.Time
@@ -638,8 +649,17 @@ func initialModel() *model {
 		m.updateStatus = "Idle"
 	}
 	m.dockerAvailable = dockerCLIAvailableWithPath(m.settingsDockerPath)
-	m.telemetry = newTelemetryLogger(filepath.Join(resolveConfigDir(), "ui-events.ndjson"))
+	sessionStart := time.Now().UTC()
+	sessionID := newTelemetrySessionID()
+	userID := resolveTelemetryUserID()
+	m.telemetrySessionID = sessionID
+	m.telemetryUserID = userID
+	m.telemetrySessionStarted = sessionStart
+	m.telemetry = newTelemetryLogger(filepath.Join(resolveConfigDir(), "ui-events.ndjson"), sessionID, userID)
+	m.pipelineStepMarks = make(map[string]map[string]time.Time)
+	m.verifyCheckStatus = make(map[string]map[string]string)
 	m.serviceHealth = make(map[string]string)
+	m.serviceAllHealthy = make(map[string]bool)
 	m.jobStopwatch = stopwatch.NewWithInterval(500 * time.Millisecond)
 
 	m.workspaceRoots = defaultWorkspaceRoots()
@@ -1131,22 +1151,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) View() string {
 	var builder strings.Builder
 
-	builder.WriteString("\n\n")
-	if header := m.renderHeader(); header != "" {
-		builder.WriteString(header)
-		if !strings.HasSuffix(header, "\n") {
-			builder.WriteRune('\n')
-		}
+	headerPanel, _ := m.renderHeaderPanel()
+	if headerPanel != "" {
+		builder.WriteString(headerPanel)
+		builder.WriteRune('\n')
+	} else {
 		builder.WriteRune('\n')
 	}
 
-	helpWidth := m.width - 4
-	if helpWidth < 0 {
-		helpWidth = 0
-	}
+	helpWidth := max(0, m.width-2)
 	m.help.Width = helpWidth
 
-	title := "gpt-creator • Miller Columns TUI"
+	title := "Start by selecting a workspace"
 	if m.currentRoot != nil {
 		title += " • " + abbreviatePath(m.currentRoot.Path)
 	}
@@ -1161,7 +1177,7 @@ func (m *model) View() string {
 		colViews = append(colViews, col.View(m.styles, i == m.focus))
 	}
 	row := lipgloss.JoinHorizontal(lipgloss.Top, colViews...)
-	builder.WriteString(row)
+	builder.WriteString(m.renderColumnsRow(row))
 	builder.WriteRune('\n')
 
 	if m.showLogs {
@@ -1259,14 +1275,29 @@ func (m *model) View() string {
 	return m.styles.app.Render(builder.String())
 }
 
+func (m *model) renderColumnsRow(content string) string {
+	width := m.columnsViewportWidth
+	if width <= 0 {
+		width = m.width
+	}
+	if width <= 0 {
+		return content
+	}
+	scrollX := m.columnsScrollX
+	lines := strings.Split(content, "\n")
+	bgSeq := ansiBackgroundSequence(crushBackground)
+	for i := range lines {
+		lines[i] = sliceLineANSI(lines[i], scrollX, width, bgSeq)
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m *model) renderHeader() string {
 	logoArt := `
-   ____ ____ _____   _____                     
-  / ___|  _ \_   _| |_   _|__  _ __   ___  ___ 
- | |  _| |_) || |_____| |/ _ \| '_ \ / _ \ / _ \
- | |_| |  __/ | |_____| | (_) | | | |  __/  __/
-  \____|_|    |_|     |_|\___/|_| |_|\___|\___|
-           g p t - c r e a d o t               
+┏┳┓┏━┓┏━┓╺┳╸┏━╸┏━┓┏━╸┏━┓╺┳┓┏━┓
+┃┃┃┣━┫┗━┓ ┃ ┣╸ ┣┳┛┃  ┃ ┃ ┃┃┣━┫
+╹ ╹╹ ╹┗━┛ ╹ ┗━╸╹┗╸┗━╸┗━┛╺┻┛╹ ╹
+████████████████████░ᵥ․₀․₂․₀░█
 `
 	logo := m.styles.headerLogo.Render(strings.TrimPrefix(logoArt, "\n"))
 
@@ -1288,8 +1319,8 @@ func (m *model) renderHeader() string {
 	breadcrumbText := "Location: " + strings.Join(crumbs, " › ")
 	breadcrumb := m.styles.headerBreadcrumb.Render(breadcrumbText)
 
-	searchBar := m.styles.headerSearch.Render("[ ⌕ Search files / folders / tasks ]")
-	searchHint := m.styles.headerSearchHint.Render("Filters available on advanced search")
+	searchBar := m.styles.headerSearch.Render("[ ⌕ Search workspace ]")
+	searchHint := m.styles.headerSearchHint.Render("Press / for search filters")
 	infoContent := lipgloss.JoinVertical(lipgloss.Left, breadcrumb, searchBar, searchHint)
 
 	infoBlock := m.styles.headerInfo.Render(infoContent)
@@ -1297,8 +1328,17 @@ func (m *model) renderHeader() string {
 	if m.width > 0 && lipgloss.Width(header) > m.width {
 		header = lipgloss.JoinVertical(lipgloss.Left, logo, infoBlock)
 	}
-
 	return header
+}
+
+func (m *model) renderHeaderPanel() (string, int) {
+	header := m.renderHeader()
+	if strings.TrimSpace(header) == "" || m.width <= 0 {
+		return "", 0
+	}
+	header = strings.TrimRight(header, "\n")
+	panel := m.styles.panel.Width(m.width).Render(header)
+	return panel, lipgloss.Height(panel)
 }
 
 func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
@@ -2449,6 +2489,8 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 	var followCmd tea.Cmd
 	var reason string
 	var jobPath string
+	var projectPath string
+	var taskEvent string
 
 	switch message := msg.(type) {
 	case jobStartedMsg:
@@ -2518,6 +2560,7 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 			"job_id": strconv.Itoa(message.ID),
 			"title":  status.Title,
 		}
+		taskEvent = ""
 		if duration > 0 {
 			fields["duration_ms"] = strconv.FormatInt(duration.Milliseconds(), 10)
 		}
@@ -2575,27 +2618,24 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 			case strings.Contains(lower, "verify acceptance"), strings.Contains(lower, "verify all"):
 				reason = "verify"
 			}
+			taskEvent = ""
+			switch reason {
+			case "create-jira-tasks":
+				taskEvent = "tasks_generated"
+			case "migrate-tasks":
+				taskEvent = "tasks_migrated"
+			case "refine-tasks":
+				taskEvent = "tasks_refined"
+			case "create-tasks":
+				taskEvent = "tasks_created"
+			case "work-on-tasks":
+				taskEvent = "tasks_done"
+			}
 			if reason != "" && m.currentFeature == "tasks" {
 				if reason == "create-jira-tasks" && len(m.selectedEpics) > 0 && m.currentProject != nil {
 					if err := pruneBacklogEpics(backlogDBPath(m.currentProject.Path), sortedEpicKeys(m.selectedEpics)); err != nil {
 						m.appendLog(fmt.Sprintf("Failed to prune backlog epics: %v", err))
 					}
-				}
-				event := ""
-				switch reason {
-				case "create-jira-tasks":
-					event = "tasks_generated"
-				case "migrate-tasks":
-					event = "tasks_migrated"
-				case "refine-tasks":
-					event = "tasks_refined"
-				case "create-tasks":
-					event = "tasks_imported"
-				case "work-on-tasks":
-					event = "tasks_worked"
-				}
-				if event != "" && m.currentProject != nil {
-					m.emitTelemetry(event, map[string]string{"project": filepath.Clean(m.currentProject.Path)})
 				}
 				m.pendingBacklogReason = reason
 				m.backlogLoading = true
@@ -2611,7 +2651,27 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 			jobPath = m.jobProjectPaths[message.Title]
 		}
 		delete(m.jobProjectPaths, message.Title)
+		projectPath = ""
+		if jobPath != "" {
+			projectPath = filepath.Clean(jobPath)
+			if projectPath == "." {
+				projectPath = ""
+			}
+		}
+		if projectPath == "" && m.currentProject != nil {
+			projectPath = filepath.Clean(m.currentProject.Path)
+		}
 		m.refreshCreateProjectProgress(message.Title)
+		if taskEvent != "" {
+			fields := map[string]string{
+				"feature": "tasks",
+				"item_id": reason,
+			}
+			if projectPath != "" {
+				fields["project"] = projectPath
+			}
+			m.emitTelemetry(taskEvent, fields)
+		}
 
 	case jobChannelClosedMsg:
 		// handled via other cases
@@ -2705,14 +2765,58 @@ func (m *model) handleVerifyJobEvent(title string, payload verifyEventMessage) {
 		path = m.jobProjectPaths[title]
 	}
 	if path == "" && m.currentProject != nil {
-		path = filepath.Clean(m.currentProject.Path)
+		path = m.currentProject.Path
 	}
 	if path == "" {
 		return
 	}
-	m.updateProjectStats(path)
-	m.refreshCurrentFeatureItemsFor(path)
-	if m.currentFeature == "verify" && m.currentProject != nil && filepath.Clean(m.currentProject.Path) == filepath.Clean(path) {
+	cleanPath := filepath.Clean(path)
+	m.updateProjectStats(cleanPath)
+	m.refreshCurrentFeatureItemsFor(cleanPath)
+
+	if m.verifyCheckStatus == nil {
+		m.verifyCheckStatus = make(map[string]map[string]string)
+	}
+	checkStates := m.verifyCheckStatus[cleanPath]
+	if checkStates == nil {
+		checkStates = make(map[string]string)
+		m.verifyCheckStatus[cleanPath] = checkStates
+	}
+	name := strings.TrimSpace(strings.ToLower(payload.Name))
+	if name != "" {
+		status := normalizeVerifyStatus(payload.Status)
+		prev := checkStates[name]
+		checkStates[name] = status
+		if status == "pass" && prev != "pass" {
+			safeName := strings.ReplaceAll(strings.ReplaceAll(name, " ", "_"), "-", "_")
+			fields := map[string]string{
+				"feature": "verify",
+				"item_id": name,
+			}
+			if cleanPath != "" && cleanPath != "." {
+				fields["project"] = cleanPath
+			}
+			if runKind := strings.TrimSpace(payload.RunKind); runKind != "" {
+				fields["run_kind"] = runKind
+			}
+			if label := strings.TrimSpace(payload.Label); label != "" {
+				fields["label"] = label
+			}
+			if payload.DurationSeconds > 0 {
+				fields["duration_seconds"] = fmt.Sprintf("%.2f", payload.DurationSeconds)
+			}
+			if payload.Score != nil {
+				fields["score"] = fmt.Sprintf("%.2f", *payload.Score)
+			}
+			eventName := "check_passed_" + safeName
+			m.emitTelemetry(eventName, fields)
+			if name == "acceptance" {
+				m.emitTelemetry("verify_acceptance_passed", fields)
+			}
+		}
+	}
+
+	if m.currentFeature == "verify" && m.currentProject != nil && filepath.Clean(m.currentProject.Path) == cleanPath {
 		if item, ok := m.itemsCol.SelectedItem(); ok {
 			m.applyItemSelection(m.currentProject, "verify", item, false)
 		}
@@ -2727,6 +2831,7 @@ func (m *model) updateProjectStats(path string) {
 		}
 		stats := collectProjectStats(m.projects[i].Path)
 		m.projects[i].Stats = stats
+		m.recordPipelineTelemetry(m.projects[i].Path, stats)
 		if m.currentProject != nil && filepath.Clean(m.currentProject.Path) == clean {
 			m.currentProject.Stats = stats
 		}
@@ -2938,7 +3043,6 @@ func (m *model) refreshWorkspaceColumn() {
 			})
 		}
 	}
-	items = append(items, listEntry{title: "Workspace", desc: "", payload: nil})
 	for _, root := range m.workspaceRoots {
 		clean := filepath.Clean(root.Path)
 		if m.pinnedPaths[clean] {
@@ -2957,8 +3061,10 @@ func (m *model) refreshWorkspaceColumn() {
 		payload: workspaceItem{kind: workspaceKindNewProject},
 	})
 	items = append(items, listEntry{
-		title:   "Add Workspace Path…",
-		desc:    "Manually add a folder to scan for projects",
+		title: "Add Workspace Path…",
+		desc:  "Manually add a folder to scan for projects",
+		// title:   m.styles.renderText(m.workspaceCol.contentWidth(), "Add Workspace Path…"),
+		// desc:    m.styles.renderText(m.workspaceCol.contentWidth(), "Manually add a folder to scan for projects"),
 		payload: workspaceItem{kind: workspaceKindAddRoot},
 	})
 	m.workspaceCol.SetItems(items)
@@ -2992,6 +3098,9 @@ func (m *model) refreshProjectsForCurrentRoot() {
 				m.seenProjects[clean] = true
 				m.emitTelemetry("project_discovered", map[string]string{"path": clean})
 			}
+		}
+		for _, proj := range m.projects {
+			m.recordPipelineTelemetry(proj.Path, proj.Stats)
 		}
 	}
 	m.refreshProjectsColumn()
@@ -3182,9 +3291,12 @@ func (m *model) startNewProjectFlow(defaultPath string) {
 	m.pendingNewProjectTemplate = ""
 	m.openInput("New project path", defaultPath, inputNewProjectPath)
 	if defaultPath != "" {
-		m.emitTelemetry("create_project_wizard_opened", map[string]string{"default_path": filepath.Clean(defaultPath)})
+		m.emitTelemetry("create_project_wizard_opened", map[string]string{
+			"default_path": filepath.Clean(defaultPath),
+			"feature":      "projects",
+		})
 	} else {
-		m.emitTelemetry("create_project_wizard_opened", nil)
+		m.emitTelemetry("create_project_wizard_opened", map[string]string{"feature": "projects"})
 	}
 }
 
@@ -3212,7 +3324,12 @@ func (m *model) launchCreateProject(path string, template string) tea.Cmd {
 	m.appendLog(fmt.Sprintf("Queued %s", title))
 	m.appendLog(fmt.Sprintf("Command: gpt-creator %s", strings.Join(args, " ")))
 	m.showLogs = true
-	m.emitTelemetry("create_project_started", map[string]string{"path": resolved, "template": trimmedTpl})
+	m.emitTelemetry("create_project_started", map[string]string{
+		"path":     resolved,
+		"project":  filepath.Clean(resolved),
+		"template": trimmedTpl,
+		"feature":  "projects",
+	})
 	if m.createProjectJobs == nil {
 		m.createProjectJobs = make(map[string]string)
 	}
@@ -3231,12 +3348,20 @@ func (m *model) launchCreateProject(path string, template string) tea.Cmd {
 			delete(m.createProjectJobs, title)
 			delete(m.lastProjectRefresh, filepath.Clean(resolved))
 			if err != nil {
-				m.emitTelemetry("create_project_failed", map[string]string{"path": resolved})
+				m.emitTelemetry("create_project_failed", map[string]string{
+					"path":    resolved,
+					"project": filepath.Clean(resolved),
+					"feature": "projects",
+				})
 				m.appendLog(fmt.Sprintf("create-project failed: %v", err))
 				m.setToast("Create project failed", 6*time.Second)
 				return
 			}
-			m.emitTelemetry("create_project_succeeded", map[string]string{"path": resolved})
+			m.emitTelemetry("create_project_succeeded", map[string]string{
+				"path":    resolved,
+				"project": filepath.Clean(resolved),
+				"feature": "projects",
+			})
 			m.refreshCreateProjectProgress(title)
 			m.refreshProjectsForCurrentRoot()
 			if project := m.projectByPath(resolved); project != nil {
@@ -4005,7 +4130,12 @@ func (m *model) runItemCommand(item featureItemDefinition) tea.Cmd {
 	m.jobProjectPaths[title] = path
 	if isVerifyAll {
 		req.onStart = func() {
-			m.emitTelemetry("verify_all_started", map[string]string{"path": path})
+			m.emitTelemetry("verify_all_started", map[string]string{
+				"path":    path,
+				"project": path,
+				"feature": "verify",
+				"item_id": "all",
+			})
 		}
 	}
 	prevFinish := req.onFinish
@@ -4015,7 +4145,12 @@ func (m *model) runItemCommand(item featureItemDefinition) tea.Cmd {
 		}
 		if isVerifyAll {
 			event := "verify_all_succeeded"
-			fields := map[string]string{"path": path}
+			fields := map[string]string{
+				"path":    path,
+				"project": path,
+				"feature": "verify",
+				"item_id": "all",
+			}
 			if err != nil {
 				event = "verify_all_failed"
 				fields["error"] = err.Error()
@@ -4024,7 +4159,13 @@ func (m *model) runItemCommand(item featureItemDefinition) tea.Cmd {
 		}
 		if verifyKind != "" {
 			event := "verify_succeeded"
-			fields := map[string]string{"path": path, "kind": verifyKind}
+			fields := map[string]string{
+				"path":    path,
+				"project": path,
+				"feature": "verify",
+				"kind":    verifyKind,
+				"item_id": verifyKind,
+			}
 			if err != nil {
 				event = "verify_failed"
 				fields["error"] = err.Error()
@@ -4033,7 +4174,12 @@ func (m *model) runItemCommand(item featureItemDefinition) tea.Cmd {
 		}
 		if isCreateDBDump {
 			event := "db_dump_succeeded"
-			fields := map[string]string{"path": path}
+			fields := map[string]string{
+				"path":    path,
+				"project": path,
+				"feature": "database",
+				"item_id": "db_dump",
+			}
 			if err != nil {
 				event = "db_dump_failed"
 				fields["error"] = err.Error()
@@ -4049,9 +4195,16 @@ func (m *model) runItemCommand(item featureItemDefinition) tea.Cmd {
 				m.refreshCurrentFeatureItemsFor(path)
 			}
 			if docEvent != "" {
-				fields := map[string]string{"path": path}
+				fields := map[string]string{
+					"path":    path,
+					"project": path,
+					"feature": "docs",
+				}
 				if docType != "" {
 					fields["doc_type"] = docType
+					fields["item_id"] = docType
+				} else {
+					fields["item_id"] = docEvent
 				}
 				m.emitTelemetry(docEvent, fields)
 			}
@@ -4060,7 +4213,13 @@ func (m *model) runItemCommand(item featureItemDefinition) tea.Cmd {
 			m.refreshCurrentFeatureItemsFor(path)
 		}
 		if isGenerate {
-			fields := map[string]string{"path": path, "target": targetLabel}
+			fields := map[string]string{
+				"path":    path,
+				"project": path,
+				"target":  targetLabel,
+				"feature": "generate",
+				"item_id": targetLabel,
+			}
 			event := "generate_succeeded"
 			if err != nil {
 				event = "generate_failed"
@@ -4078,14 +4237,30 @@ func (m *model) runItemCommand(item featureItemDefinition) tea.Cmd {
 			prevStart()
 		}
 		if verifyKind != "" {
-			fields := map[string]string{"path": path, "kind": verifyKind}
+			fields := map[string]string{
+				"path":    path,
+				"project": path,
+				"feature": "verify",
+				"kind":    verifyKind,
+				"item_id": verifyKind,
+			}
 			m.emitTelemetry("verify_started", fields)
 		}
 		if isCreateDBDump {
-			m.emitTelemetry("db_dump_started", map[string]string{"path": path})
+			m.emitTelemetry("db_dump_started", map[string]string{
+				"path":    path,
+				"project": path,
+				"feature": "database",
+			})
 		}
 		if isGenerate {
-			fields := map[string]string{"path": path, "target": targetLabel}
+			fields := map[string]string{
+				"path":    path,
+				"project": path,
+				"target":  targetLabel,
+				"feature": "generate",
+				"item_id": targetLabel,
+			}
 			m.emitTelemetry("generate_started", fields)
 			if len(snapshotTargets) > 0 && !projectHasGitRepo(path) {
 				if _, err := prepareGenerateSnapshots(path, snapshotTargets); err != nil {
@@ -4098,9 +4273,15 @@ func (m *model) runItemCommand(item featureItemDefinition) tea.Cmd {
 		if runEvent != "" {
 			fields := map[string]string{
 				"path":    path,
+				"project": path,
 				"command": strings.Join(args, " "),
+				"feature": "services",
+				"item_id": itemKey,
 			}
 			m.emitTelemetry(runEvent, fields)
+			if runEvent == "stack_up" {
+				m.emitTelemetry("run_up", fields)
+			}
 		}
 	}
 	return m.enqueueJob(req)
@@ -4376,10 +4557,15 @@ func (m *model) openSelectedServiceEndpoint(index int) {
 	m.appendLog("Browser command: " + commandLine)
 	fields := map[string]string{
 		"project": filepath.Clean(m.currentProject.Path),
+		"feature": "services",
 		"url":     url,
 	}
 	if m.currentItem.Meta != nil {
-		fields["service"] = strings.TrimSpace(m.currentItem.Meta["service"])
+		serviceName := strings.TrimSpace(m.currentItem.Meta["service"])
+		if serviceName != "" {
+			fields["service"] = serviceName
+			fields["item_id"] = serviceName
+		}
 	}
 	m.emitTelemetry("endpoint_opened", fields)
 	m.setToast("Opening endpoint", 3*time.Second)
@@ -4444,7 +4630,12 @@ func (m *model) recordServiceHealth(items []featureItemDefinition) {
 	if m.serviceHealth == nil {
 		m.serviceHealth = make(map[string]string)
 	}
+	if m.serviceAllHealthy == nil {
+		m.serviceAllHealthy = make(map[string]bool)
+	}
 	projectPath := filepath.Clean(m.currentProject.Path)
+	serviceCount := 0
+	allHealthy := true
 	for _, item := range items {
 		if item.Meta == nil || item.Meta["serviceRow"] != "1" {
 			continue
@@ -4457,19 +4648,40 @@ func (m *model) recordServiceHealth(items []featureItemDefinition) {
 		if health == "" {
 			health = "n/a"
 		}
+		serviceCount++
+		if !strings.EqualFold(health, "healthy") {
+			allHealthy = false
+		}
 		key := projectPath + "|" + container
 		prev, ok := m.serviceHealth[key]
 		if !ok || prev != health {
 			fields := map[string]string{
 				"project":   projectPath,
+				"feature":   "services",
 				"service":   strings.TrimSpace(item.Meta["service"]),
 				"container": container,
+				"item_id":   container,
 				"health":    health,
 				"state":     strings.TrimSpace(item.Meta["state"]),
 			}
 			m.emitTelemetry("service_health_changed", fields)
 		}
 		m.serviceHealth[key] = health
+	}
+	if serviceCount == 0 {
+		m.serviceAllHealthy[projectPath] = false
+		return
+	}
+	prevAll := m.serviceAllHealthy[projectPath]
+	m.serviceAllHealthy[projectPath] = allHealthy
+	if allHealthy && !prevAll {
+		fields := map[string]string{
+			"project":       projectPath,
+			"feature":       "services",
+			"item_id":       "all",
+			"service_count": strconv.Itoa(serviceCount),
+		}
+		m.emitTelemetry("service_healthy", fields)
 	}
 }
 
@@ -4777,14 +4989,14 @@ func (m *model) applyLayout() {
 		return
 	}
 
-	topChrome := 1
+	headerPanelHeight := 0
+	if _, height := m.renderHeaderPanel(); height > 0 {
+		headerPanelHeight = height + 1
+	}
+	topChrome := headerPanelHeight + 3
 	bottomChrome := 1
 
-	helpWidth := m.width - 4
-	if helpWidth < 0 {
-		helpWidth = 0
-	}
-	m.help.Width = helpWidth
+	m.help.Width = max(0, m.width-2)
 	helpView := ""
 	if m.width > 0 {
 		helpView = m.help.View(m.keys)
@@ -4797,7 +5009,25 @@ func (m *model) applyLayout() {
 	if bodyHeight < 6 {
 		bodyHeight = 6
 	}
+	if bodyHeight > 6 {
+		reduction := 4
+		if bodyHeight-reduction < 3 {
+			reduction = bodyHeight - 3
+		}
+		if reduction > 0 {
+			bodyHeight -= reduction
+		}
+	}
 	availableWidth := m.width
+	m.columnsViewportWidth = availableWidth
+
+	if len(m.columns) == 0 {
+		m.columnWidths = m.columnWidths[:0]
+		m.columnOffsets = m.columnOffsets[:0]
+		m.columnsTotalWidth = 0
+		m.columnsScrollX = 0
+		return
+	}
 
 	if m.showLogs {
 		bodyHeight -= m.logsHeight
@@ -4837,9 +5067,91 @@ func (m *model) applyLayout() {
 	}
 	widths = append(widths, remaining)
 
+	for len(widths) < len(m.columns) {
+		widths = append(widths, 24)
+	}
+	if len(widths) > len(m.columns) {
+		widths = widths[:len(m.columns)]
+	}
+
+	if cap(m.columnWidths) < len(m.columns) {
+		m.columnWidths = make([]int, len(m.columns))
+	} else {
+		m.columnWidths = m.columnWidths[:len(m.columns)]
+	}
+	if cap(m.columnOffsets) < len(m.columns) {
+		m.columnOffsets = make([]int, len(m.columns))
+	} else {
+		m.columnOffsets = m.columnOffsets[:len(m.columns)]
+	}
+
+	total := 0
 	for i, col := range m.columns {
-		col.SetSize(widths[i], bodyHeight)
+		width := widths[i]
+		col.SetSize(width, bodyHeight)
 		m.columns[i] = col
+		m.columnOffsets[i] = total
+		m.columnWidths[i] = width
+		total += width
+	}
+	m.columnsTotalWidth = total
+	m.adjustColumnsScroll()
+}
+
+func (m *model) adjustColumnsScroll() {
+	width := m.columnsViewportWidth
+	if width <= 0 {
+		m.columnsScrollX = 0
+		return
+	}
+	if len(m.columnOffsets) == 0 {
+		m.columnsScrollX = 0
+		return
+	}
+
+	maxOffset := m.columnsTotalWidth - width
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+
+	if m.columnsScrollX > maxOffset {
+		m.columnsScrollX = maxOffset
+	}
+	if m.columnsScrollX < 0 {
+		m.columnsScrollX = 0
+	}
+
+	if m.columnsTotalWidth <= width {
+		m.columnsScrollX = 0
+		return
+	}
+
+	if m.focus < 0 || m.focus >= len(m.columnOffsets) {
+		return
+	}
+
+	if m.focus == len(m.columnOffsets)-1 {
+		m.columnsScrollX = maxOffset
+		return
+	}
+
+	start := m.columnOffsets[m.focus]
+	columnWidth := 1
+	if m.focus < len(m.columnWidths) && m.columnWidths[m.focus] > 0 {
+		columnWidth = m.columnWidths[m.focus]
+	}
+	end := start + columnWidth
+
+	if start < m.columnsScrollX {
+		m.columnsScrollX = start
+	} else if end > m.columnsScrollX+width {
+		m.columnsScrollX = end - width
+	}
+
+	if m.columnsScrollX < 0 {
+		m.columnsScrollX = 0
+	} else if m.columnsScrollX > maxOffset {
+		m.columnsScrollX = maxOffset
 	}
 }
 
@@ -7729,7 +8041,145 @@ func (m *model) emitTelemetry(event string, fields map[string]string) {
 	if m.telemetry == nil {
 		return
 	}
-	m.telemetry.Emit(event, fields)
+	eventName := strings.TrimSpace(event)
+	if eventName == "" {
+		return
+	}
+
+	cleanPath := func(val string) string {
+		trimmed := strings.TrimSpace(val)
+		if trimmed == "" {
+			return ""
+		}
+		cleaned := filepath.Clean(trimmed)
+		if cleaned == "." {
+			return ""
+		}
+		return cleaned
+	}
+
+	cleanFields := map[string]string{}
+	if fields != nil {
+		for k, v := range fields {
+			if trimmed := strings.TrimSpace(v); trimmed != "" {
+				cleanFields[k] = trimmed
+			}
+		}
+	}
+
+	project := ""
+	if value, ok := cleanFields["project"]; ok {
+		project = cleanPath(value)
+		delete(cleanFields, "project")
+	} else if value, ok := cleanFields["path"]; ok {
+		project = cleanPath(value)
+		delete(cleanFields, "path")
+	} else if m.currentProject != nil {
+		project = cleanPath(m.currentProject.Path)
+	}
+
+	feature := ""
+	if value, ok := cleanFields["feature"]; ok {
+		feature = value
+		delete(cleanFields, "feature")
+	} else if m.currentFeature != "" {
+		feature = strings.TrimSpace(m.currentFeature)
+	}
+
+	itemID := ""
+	if value, ok := cleanFields["item_id"]; ok {
+		itemID = value
+		delete(cleanFields, "item_id")
+	} else if value, ok := cleanFields["item"]; ok {
+		itemID = value
+		delete(cleanFields, "item")
+	} else if value, ok := cleanFields["target"]; ok {
+		itemID = value
+		delete(cleanFields, "target")
+	} else if m.currentItem.Key != "" {
+		itemID = strings.TrimSpace(m.currentItem.Key)
+	}
+
+	var extra map[string]string
+	if len(cleanFields) > 0 {
+		extra = make(map[string]string, len(cleanFields))
+		for k, v := range cleanFields {
+			extra[k] = v
+		}
+	}
+
+	record := telemetryEvent{
+		SessionID: m.telemetrySessionID,
+		UserID:    m.telemetryUserID,
+		Event:     eventName,
+		Project:   project,
+		Feature:   feature,
+		ItemID:    itemID,
+		ExtraJSON: extra,
+	}
+	m.telemetry.Emit(record)
+}
+
+func (m *model) recordPipelineTelemetry(projectPath string, stats projectStats) {
+	if m.telemetry == nil {
+		return
+	}
+	clean := strings.TrimSpace(projectPath)
+	if clean == "" {
+		return
+	}
+	clean = filepath.Clean(clean)
+	if clean == "." {
+		return
+	}
+	if m.pipelineStepMarks == nil {
+		m.pipelineStepMarks = make(map[string]map[string]time.Time)
+	}
+	marks, ok := m.pipelineStepMarks[clean]
+	if !ok {
+		marks = make(map[string]time.Time)
+		m.pipelineStepMarks[clean] = marks
+	}
+	for _, step := range stats.Pipeline {
+		label := strings.TrimSpace(strings.ToLower(step.Label))
+		if label == "" {
+			continue
+		}
+		if step.State != pipelineStateDone {
+			continue
+		}
+		updated := step.LastUpdated.UTC()
+		if updated.IsZero() {
+			continue
+		}
+		last := marks[label]
+		if !updated.After(last) {
+			continue
+		}
+		if last.IsZero() && !m.telemetrySessionStarted.IsZero() && !updated.After(m.telemetrySessionStarted) {
+			marks[label] = updated
+			continue
+		}
+		event := ""
+		switch label {
+		case "plan":
+			event = "plan_generated"
+		case "generate":
+			event = "code_generated"
+		case "db":
+			event = "db_ready"
+		default:
+			marks[label] = updated
+			continue
+		}
+		fields := map[string]string{
+			"project": clean,
+			"feature": "overview",
+			"item_id": label,
+		}
+		m.emitTelemetry(event, fields)
+		marks[label] = updated
+	}
 }
 
 func (m *model) setToast(msg string, duration time.Duration) {

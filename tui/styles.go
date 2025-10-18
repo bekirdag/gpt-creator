@@ -7,6 +7,7 @@ var (
 	crushSurface         = lipgloss.Color("#161A31")
 	crushSurfaceElevated = lipgloss.Color("#20263F")
 	crushSurfaceSoft     = lipgloss.Color("#1C2136")
+	crushSurfacePassive  = crushSurfaceElevated
 	crushDanger          = lipgloss.Color("#B42323")
 
 	crushForeground      = lipgloss.Color("#F8F9FF")
@@ -35,7 +36,7 @@ type styles struct {
 	breadcrumbs                         lipgloss.Style
 	statusBar, statusSeg, statusHint    lipgloss.Style
 	tableHeader, tableCell, tableActive lipgloss.Style
-	listItem, listSel                   lipgloss.Style
+	listItem, listSel, textBlock        lipgloss.Style
 	rightPaneTitle                      lipgloss.Style
 	cmdOverlay, cmdPrompt, cmdHint      lipgloss.Style
 }
@@ -122,24 +123,24 @@ func newStyles() styles {
 		sidebarTitle: base.Copy().
 			Foreground(crushPrimaryBright).
 			Bold(true).
-			Padding(0, 1),
+			Padding(0, 0),
 		columnTitle: base.Copy().
 			Bold(true).
-			Foreground(crushPrimaryBright).
-			Background(crushSurfaceSoft).
-			Padding(0, 1).
+			Foreground(crushForeground).
+			Background(crushSurfaceElevated).
+			Padding(0, 0, 0, 0).
 			BorderStyle(lipgloss.Border{
 				Left:        " ",
 				Right:       " ",
 				Top:         " ",
-				Bottom:      "─",
+				Bottom:      "═",
 				TopLeft:     " ",
 				TopRight:    " ",
-				BottomLeft:  "╶",
-				BottomRight: "╴",
+				BottomLeft:  "╞",
+				BottomRight: "╡",
 			}).
 			BorderBottom(true).
-			BorderForeground(crushBorderSoft),
+			BorderForeground(crushBorderActive),
 		body:         base.Copy(),
 		panel:        panelStyle,
 		panelFocused: panelFocusedStyle,
@@ -205,14 +206,24 @@ func newStyles() styles {
 			BorderForeground(crushBorderSoft),
 		tableCell: base.Copy().
 			Foreground(crushForegroundMuted).
+			Background(crushSurface).
+			ColorWhitespace(true).
 			Padding(0, 1),
 		tableActive: base.Copy().
 			Foreground(crushForeground).
 			Background(crushSurfaceElevated).
 			Bold(true).
+			ColorWhitespace(true).
 			Padding(0, 1),
 		listItem: base.Copy().
 			Foreground(crushForegroundMuted).
+			Background(crushSurface).
+			ColorWhitespace(true).
+			Padding(0, 1),
+		textBlock: base.Copy().
+			Foreground(crushForeground).
+			Background(crushSurface).
+			ColorWhitespace(true).
 			Padding(0, 1),
 		listSel: listHighlight,
 		rightPaneTitle: base.Copy().
@@ -231,4 +242,11 @@ func newStyles() styles {
 			Foreground(crushForegroundMuted).
 			Faint(true),
 	}
+}
+
+func (s styles) renderText(width int, content string) string {
+	if width < 1 {
+		width = 1
+	}
+	return s.textBlock.Copy().Width(width).Render(content)
 }

@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -49,6 +52,7 @@ type serviceEndpoint struct {
 	StatusCode int    `json:"statusCode,omitempty"`
 	LatencyMS  int    `json:"latencyMs,omitempty"`
 	Error      string `json:"error,omitempty"`
+	TimedOut   bool   `json:"timedOut,omitempty"`
 }
 
 type probeResult struct {
@@ -56,6 +60,7 @@ type probeResult struct {
 	Status    int
 	Err       error
 	IsHealthy bool
+	TimedOut  bool
 }
 
 type containerDetails struct {
@@ -124,7 +129,7 @@ func gatherServiceItems(project *discoveredProject, dockerAvailable bool) ([]fea
 			parts = append(parts, fmt.Sprintf("Restarts: %d", svc.Restarts))
 		}
 		if svc.Endpoint != "" {
-			latency := svc.Latency
+			latency := strings.TrimSpace(svc.Latency)
 			if latency == "" {
 				latency = "n/a"
 			}
@@ -136,6 +141,44 @@ func gatherServiceItems(project *discoveredProject, dockerAvailable bool) ([]fea
 			desc = "Service information unavailable"
 		}
 
+		latencyValue := strings.TrimSpace(svc.Latency)
+		if latencyValue == "" {
+			latencyValue = "n/a"
+		}
+		latencyStatus := "ok"
+		switch strings.ToLower(latencyValue) {
+		case "timeout":
+			latencyStatus = "timeout"
+		case "n/a":
+			latencyStatus = "unknown"
+		}
+		latencyTooltip := ""
+		if len(svc.Endpoints) > 0 {
+			primaryURL := strings.TrimSpace(svc.Endpoint)
+			for _, ep := range svc.Endpoints {
+				if primaryURL != "" && strings.TrimSpace(ep.URL) != primaryURL {
+					continue
+				}
+				if ep.TimedOut && strings.TrimSpace(ep.Error) != "" {
+					latencyTooltip = ep.Error
+					break
+				}
+				if !ep.Healthy {
+					if strings.TrimSpace(ep.Error) != "" {
+						latencyTooltip = ep.Error
+					} else if ep.StatusCode >= 400 {
+						latencyTooltip = fmt.Sprintf("HTTP %d", ep.StatusCode)
+					}
+					if latencyTooltip != "" {
+						break
+					}
+				}
+				if primaryURL != "" {
+					break
+				}
+			}
+		}
+
 		meta := map[string]string{
 			"serviceRow": "1",
 			"service":    svc.Service,
@@ -145,7 +188,7 @@ func gatherServiceItems(project *discoveredProject, dockerAvailable bool) ([]fea
 			"health":     healthLabel,
 			"ports":      svc.Ports,
 			"endpoint":   svc.Endpoint,
-			"latency":    svc.Latency,
+			"latency":    latencyValue,
 			"restarts":   fmt.Sprintf("%d", svc.Restarts),
 			"healthJSON": svc.HealthJSON,
 			"hasHealthcheck": func() string {
@@ -155,6 +198,15 @@ func gatherServiceItems(project *discoveredProject, dockerAvailable bool) ([]fea
 				return "0"
 			}(),
 			"requiresDocker": "1",
+		}
+		if latencyStatus == "timeout" && strings.TrimSpace(latencyTooltip) == "" {
+			latencyTooltip = "HTTP probe timed out"
+		}
+		if latencyStatus != "" {
+			meta["latencyStatus"] = latencyStatus
+		}
+		if strings.TrimSpace(latencyTooltip) != "" {
+			meta["latencyTooltip"] = latencyTooltip
 		}
 		if len(svc.LogTail) > 0 {
 			meta["logTail"] = strings.Join(svc.LogTail, "\n")
@@ -212,27 +264,31 @@ func composeServices(projectDir string) ([]composeServiceInfo, error) {
 			info.LogTail = logs
 		}
 		info.Endpoints = discoverEndpoints(projectDir, row)
+		var primaryEndpoint *serviceEndpoint
 		if len(info.Endpoints) > 0 {
-			for _, ep := range info.Endpoints {
-				if ep.Healthy && ep.URL != "" {
-					info.Endpoint = ep.URL
-					if ep.LatencyMS > 0 {
-						info.Latency = fmt.Sprintf("%dms", ep.LatencyMS)
-					}
+			for idx := range info.Endpoints {
+				ep := &info.Endpoints[idx]
+				if ep == nil {
+					continue
+				}
+				if ep.Healthy && strings.TrimSpace(ep.URL) != "" {
+					primaryEndpoint = ep
 					break
 				}
 			}
+			if primaryEndpoint == nil {
+				primaryEndpoint = &info.Endpoints[0]
+			}
 		}
 
-		if info.Endpoint == "" && len(info.Endpoints) > 0 {
-			first := info.Endpoints[0]
-			info.Endpoint = first.URL
-			if first.LatencyMS > 0 {
-				info.Latency = fmt.Sprintf("%dms", first.LatencyMS)
-			}
-			if !first.Healthy && first.Error != "" && info.Health == "" {
+		if primaryEndpoint != nil {
+			info.Endpoint = primaryEndpoint.URL
+			info.Latency = formatEndpointLatency(*primaryEndpoint)
+			if !primaryEndpoint.Healthy && strings.TrimSpace(primaryEndpoint.Error) != "" && info.Health == "" && !primaryEndpoint.TimedOut {
 				info.Health = "unreachable"
 			}
+		} else {
+			info.Latency = "n/a"
 		}
 
 		services = append(services, info)
@@ -418,6 +474,7 @@ func discoverEndpoints(projectDir string, row composeRow) []serviceEndpoint {
 			Healthy:    result.IsHealthy,
 			StatusCode: result.Status,
 			LatencyMS:  int(result.Latency / time.Millisecond),
+			TimedOut:   result.TimedOut,
 		}
 		if result.Err != nil {
 			entry.Error = result.Err.Error()
@@ -440,6 +497,7 @@ func discoverEndpoints(projectDir string, row composeRow) []serviceEndpoint {
 			Healthy:    result.IsHealthy,
 			StatusCode: result.Status,
 			LatencyMS:  int(result.Latency / time.Millisecond),
+			TimedOut:   result.TimedOut,
 		}
 		if result.Err != nil {
 			entry.Error = result.Err.Error()
@@ -492,12 +550,31 @@ func parsePublishedPorts(raw string) []hostPort {
 	return results
 }
 
+func formatEndpointLatency(ep serviceEndpoint) string {
+	if ep.TimedOut {
+		return "timeout"
+	}
+	if ep.LatencyMS > 0 {
+		return fmt.Sprintf("%dms", ep.LatencyMS)
+	}
+	return "n/a"
+}
+
 func probeHTTP(target string) probeResult {
 	client := http.Client{Timeout: 1500 * time.Millisecond}
 	start := time.Now()
 	resp, err := client.Get(target)
 	if err != nil {
-		return probeResult{Latency: time.Since(start), Err: err}
+		elapsed := time.Since(start)
+		timedOut := false
+		if errors.Is(err, context.DeadlineExceeded) {
+			timedOut = true
+		} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			timedOut = true
+		} else if strings.Contains(err.Error(), "Client.Timeout") {
+			timedOut = true
+		}
+		return probeResult{Latency: elapsed, Err: err, TimedOut: timedOut}
 	}
 	defer resp.Body.Close()
 	duration := time.Since(start)

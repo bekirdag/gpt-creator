@@ -1510,6 +1510,9 @@ type servicesTableColumn struct {
 	height      int
 	items       []featureItemDefinition
 	onHighlight func(featureItemDefinition, bool) tea.Cmd
+	latencyOK   lipgloss.Style
+	latencySlow lipgloss.Style
+	latencyFail lipgloss.Style
 }
 
 func newServicesTableColumn(title string) *servicesTableColumn {
@@ -1518,6 +1521,7 @@ func newServicesTableColumn(title string) *servicesTableColumn {
 		{Title: "Container", Width: 28},
 		{Title: "State", Width: 10},
 		{Title: "Health", Width: 12},
+		{Title: "Latency", Width: 10},
 		{Title: "Ports", Width: 24},
 		{Title: "Restarts", Width: 9},
 	}
@@ -1546,6 +1550,7 @@ func (c *servicesTableColumn) SetItems(items []featureItemDefinition) {
 				item.Meta["container"],
 				item.Meta["state"],
 				item.Meta["health"],
+				c.renderLatencyCell(item.Meta),
 				item.Meta["ports"],
 				item.Meta["restarts"],
 			}
@@ -1554,9 +1559,13 @@ func (c *servicesTableColumn) SetItems(items []featureItemDefinition) {
 			if strings.TrimSpace(label) == "" {
 				label = item.Desc
 			}
+			if item.Disabled {
+				label = "! " + label
+			}
 			rows[i] = table.Row{
 				label,
 				item.Desc,
+				"",
 				"",
 				"",
 				"",
@@ -1567,6 +1576,25 @@ func (c *servicesTableColumn) SetItems(items []featureItemDefinition) {
 	c.table.SetRows(rows)
 	if len(rows) > 0 {
 		c.table.SetCursor(0)
+	}
+}
+
+func (c *servicesTableColumn) renderLatencyCell(meta map[string]string) string {
+	if meta == nil {
+		return ""
+	}
+	value := strings.TrimSpace(meta["latency"])
+	if value == "" {
+		value = "n/a"
+	}
+	status := strings.ToLower(strings.TrimSpace(meta["latencyStatus"]))
+	switch status {
+	case "timeout":
+		return c.latencyFail.Render(value)
+	case "unknown":
+		return c.latencySlow.Render(value)
+	default:
+		return c.latencyOK.Render(value)
 	}
 }
 
@@ -1603,12 +1631,13 @@ func (c *servicesTableColumn) SetSize(width, height int) {
 	c.width = width
 	c.height = height
 
-	serviceWidth := maxInt(14, width/6+6)
+	serviceWidth := maxInt(14, width/7+6)
 	containerWidth := maxInt(24, width/3)
 	stateWidth := 10
 	healthWidth := 12
+	latencyWidth := 10
 	restartsWidth := 9
-	portsWidth := width - serviceWidth - containerWidth - stateWidth - healthWidth - restartsWidth - 6
+	portsWidth := width - serviceWidth - containerWidth - stateWidth - healthWidth - latencyWidth - restartsWidth - 7
 	if portsWidth < 16 {
 		portsWidth = 16
 	}
@@ -1618,6 +1647,7 @@ func (c *servicesTableColumn) SetSize(width, height int) {
 		{Title: "Container", Width: containerWidth},
 		{Title: "State", Width: stateWidth},
 		{Title: "Health", Width: healthWidth},
+		{Title: "Latency", Width: latencyWidth},
 		{Title: "Ports", Width: portsWidth},
 		{Title: "Restarts", Width: restartsWidth},
 	})
@@ -1697,6 +1727,10 @@ func (c *servicesTableColumn) ApplyStyles(s styles) {
 		Cell:     s.tableCell,
 		Selected: s.tableActive,
 	})
+	badgeBase := lipgloss.NewStyle().Padding(0, 1)
+	c.latencyOK = badgeBase.Copy().Foreground(crushForeground).Background(crushSurfaceSoft)
+	c.latencySlow = badgeBase.Copy().Foreground(crushForegroundMuted).Background(crushSurfaceSoft)
+	c.latencyFail = badgeBase.Copy().Foreground(crushForeground).Background(crushDanger).Bold(true)
 }
 
 type tokensTableColumn struct {
@@ -2433,22 +2467,32 @@ func featureItemEntries(project *discoveredProject, featureKey string, dockerAva
 				Desc:       "Install Docker Desktop / CLI to inspect services.",
 				PreviewKey: "",
 			})
+			appendDefaults = true
 			break
 		}
 		if svcItems, err := gatherServiceItems(project, dockerAvailable); err == nil && len(svcItems) > 0 {
 			items = append(items, svcItems...)
-		} else if err != nil {
-			items = append(items, featureItemDefinition{
-				Key:   "services-error",
-				Title: "Docker status unavailable",
-				Desc:  err.Error(),
-			})
-		} else if summary := servicesSummary(project); summary != "" {
-			items = append(items, featureItemDefinition{
-				Key:   "services-summary",
-				Title: "Service snapshot",
-				Desc:  summary,
-			})
+		} else {
+			if err != nil {
+				items = append(items, featureItemDefinition{
+					Key:   "services-error",
+					Title: "Docker status unavailable",
+					Desc:  err.Error(),
+				})
+			} else if summary := servicesSummary(project); summary != "" {
+				items = append(items, featureItemDefinition{
+					Key:   "services-summary",
+					Title: "Service snapshot",
+					Desc:  summary,
+				})
+			} else {
+				items = append(items, featureItemDefinition{
+					Key:   "services-empty",
+					Title: "No services detected",
+					Desc:  "Run `gpt-creator run up` to start the compose stack.",
+				})
+			}
+			appendDefaults = true
 		}
 	case "verify":
 		appendDefaults = false

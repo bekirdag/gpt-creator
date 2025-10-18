@@ -61,6 +61,20 @@ func buildArtifactCategories(projectPath string) []artifactCategory {
 	return categories
 }
 
+func artifactCategoryHasContent(projectPath string, cat artifactCategory) bool {
+	for _, rel := range cat.Paths {
+		abs := filepath.Join(projectPath, filepath.FromSlash(rel))
+		entries, err := os.ReadDir(abs)
+		if err != nil {
+			continue
+		}
+		if len(entries) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func summarizeCategory(projectPath string, relPaths []string) string {
 	var (
 		totalItems int

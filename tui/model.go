@@ -1260,15 +1260,15 @@ func (m *model) View() string {
 }
 
 func (m *model) renderHeader() string {
-	logoLines := []string{
-		"   ____ ____ _____   _____                     ",
-		"  / ___|  _ \\_   _| |_   _|__  _ __   ___  ___ ",
-		" | |  _| |_) || |_____| |/ _ \\| '_ \\ / _ \\/ _ \\",
-		" | |_| |  __/ | |_____| | (_) | | | |  __/  __/",
-		"  \\____|_|    |_|     |_|\\___/|_| |_|\\___|\\___|",
-		"           g p t - c r e a d o t               ",
-	}
-	logo := m.styles.headerLogo.Render(strings.Join(logoLines, "\n"))
+	logoArt := `
+   ____ ____ _____   _____                     
+  / ___|  _ \_   _| |_   _|__  _ __   ___  ___ 
+ | |  _| |_) || |_____| |/ _ \| '_ \ / _ \ / _ \
+ | |_| |  __/ | |_____| | (_) | | | |  __/  __/
+  \____|_|    |_|     |_|\___/|_| |_|\___|\___|
+           g p t - c r e a d o t               
+`
+	logo := m.styles.headerLogo.Render(strings.TrimPrefix(logoArt, "\n"))
 
 	crumbs := []string{"Workspace"}
 	if m.currentRoot != nil {
@@ -1779,9 +1779,22 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 	if feature.Key == "artifacts" {
 		m.useServicesLayout(false)
 		m.useEnvLayout(false)
-		m.useArtifactsLayout(true)
-		cmd := m.prepareArtifactsView()
-		m.focus = int(focusFeatures)
+		cmd, hasArtifacts := m.prepareArtifactsView()
+		if hasArtifacts {
+			m.useArtifactsLayout(true)
+			m.focus = int(focusFeatures)
+			return cmd
+		}
+		m.useArtifactsLayout(false)
+		m.itemsCol.SetTitle("Actions")
+		actions := artifactEmptyActions(m.currentProject)
+		m.itemsCol.SetItems(actions)
+		if m.currentProject == nil {
+			m.previewCol.SetContent("Select a project to browse artifacts.\n")
+		} else {
+			m.previewCol.SetContent("No artifacts detected. Run `gpt-creator generate all` or `create-project` to populate staging outputs.\n")
+		}
+		m.focus = int(focusItems)
 		return cmd
 	}
 	if feature.Key == "services" {
@@ -1973,14 +1986,14 @@ func (m *model) applyItemSelection(project *discoveredProject, featureKey string
 	return nil
 }
 
-func (m *model) prepareArtifactsView() tea.Cmd {
+func (m *model) prepareArtifactsView() (tea.Cmd, bool) {
 	if m.currentProject == nil {
 		m.artifactCategories = nil
 		m.artifactExplorers = make(map[string]*artifactExplorer)
 		m.artifactsCol.SetItems(nil)
 		m.artifactTreeCol.SetNodes(nil)
 		m.previewCol.SetContent("Select a project to browse artifacts.\n")
-		return nil
+		return nil, false
 	}
 	m.artifactCategories = buildArtifactCategories(m.currentProject.Path)
 	m.artifactExplorers = make(map[string]*artifactExplorer)
@@ -1998,9 +2011,18 @@ func (m *model) prepareArtifactsView() tea.Cmd {
 	m.currentArtifactKey = ""
 	m.currentArtifactRel = ""
 	m.clearArtifactSplit()
+	hasArtifacts := false
+	if len(m.artifactCategories) > 0 {
+		for _, cat := range m.artifactCategories {
+			if artifactCategoryHasContent(m.currentProject.Path, cat) {
+				hasArtifacts = true
+				break
+			}
+		}
+	}
 	if len(m.artifactCategories) == 0 {
 		m.previewCol.SetContent("No artifact directories detected.\n")
-		return nil
+		return nil, false
 	}
 	selected := m.artifactCategories[0]
 	if entry, ok := m.artifactsCol.SelectedEntry(); ok {
@@ -2008,7 +2030,33 @@ func (m *model) prepareArtifactsView() tea.Cmd {
 			selected = cat
 		}
 	}
-	return func() tea.Msg { return artifactCategorySelectedMsg{category: selected} }
+	if !hasArtifacts {
+		return nil, false
+	}
+	return func() tea.Msg { return artifactCategorySelectedMsg{category: selected} }, true
+}
+
+func artifactEmptyActions(project *discoveredProject) []featureItemDefinition {
+	if project == nil {
+		return nil
+	}
+	actions := []featureItemDefinition{}
+	for _, def := range featureItemsForKey("generate") {
+		if def.Key != "generate-all" {
+			continue
+		}
+		def.Title = "generate all"
+		def.Desc = "Run full generation to populate staging artifacts."
+		actions = append(actions, def)
+		break
+	}
+	actions = append(actions, featureItemDefinition{
+		Key:     "artifacts-create-project",
+		Title:   "create-project",
+		Desc:    "Re-run the pipeline to bootstrap artifacts and tasks.",
+		Command: []string{"create-project", project.Path},
+	})
+	return actions
 }
 
 func (m *model) handleArtifactCategorySelected(cat artifactCategory) tea.Cmd {
@@ -5635,18 +5683,35 @@ func (m *model) handleBacklogLoaded(msg backlogLoadedMsg) {
 		if m.backlogTable != nil {
 			m.backlogTable.SetRows(nil)
 		}
+		m.useTasksLayout(false)
+		m.itemsCol.SetTitle("Actions")
+		m.itemsCol.SetItems(featureItemEntries(m.currentProject, "tasks", m.dockerAvailable))
+		m.focus = int(focusItems)
 		return
 	}
 	m.backlog = msg.data
 	m.backlogError = nil
 	m.updateCredentialHint()
+	if m.backlog == nil || len(m.backlog.Rows) == 0 {
+		if m.backlogCol != nil {
+			m.backlogCol.SetItems(nil)
+		}
+		if m.backlogTable != nil {
+			m.backlogTable.SetRows(nil)
+		}
+		m.useTasksLayout(false)
+		m.previewCol.SetContent("No tasks recorded. Run `gpt-creator migrate-tasks` to build the backlog.\n")
+		m.itemsCol.SetTitle("Actions")
+		m.itemsCol.SetItems(featureItemEntries(m.currentProject, "tasks", m.dockerAvailable))
+		m.focus = int(focusItems)
+		return
+	}
+	m.useTasksLayout(true)
 	m.refreshBacklogViews()
 	if !m.backlogActive.IsZero() {
 		m.backlogTable.SelectNode(m.backlogActive)
 	}
-	if m.backlog != nil {
-		m.previewCol.SetContent(m.renderBacklogSummary())
-	}
+	m.previewCol.SetContent(m.renderBacklogSummary())
 	if reason := strings.TrimSpace(m.pendingBacklogReason); reason != "" && m.backlog != nil {
 		s := m.backlog.Summary
 		m.appendLog(fmt.Sprintf("Backlog refreshed (%s): %d tasks (done %d, doing %d, todo %d, blocked %d).",

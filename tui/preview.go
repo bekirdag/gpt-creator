@@ -554,6 +554,18 @@ func renderServicePreview(meta map[string]string) string {
 		}
 		fmt.Fprintf(&b, "Primary endpoint: %s (%s)\n", endpoint, latency)
 	}
+	latencyStatus := strings.TrimSpace(meta["latencyStatus"])
+	latencyTooltip := strings.TrimSpace(meta["latencyTooltip"])
+	if latencyStatus == "timeout" {
+		if latencyTooltip == "" {
+			latencyTooltip = "HTTP probe timed out."
+		}
+		fmt.Fprintf(&b, "Probe error: %s\n", latencyTooltip)
+	} else if latencyStatus == "unknown" && endpoint != "" {
+		b.WriteString("Probe status: n/a (relying on docker-compose state).\n")
+	} else if latencyTooltip != "" {
+		fmt.Fprintf(&b, "Probe note: %s\n", latencyTooltip)
+	}
 
 	endpoints := decodeServiceEndpoints(meta["endpoints"])
 	if len(endpoints) > 0 {
@@ -563,7 +575,9 @@ func renderServicePreview(meta map[string]string) string {
 		for idx, ep := range endpoints {
 			label := fmt.Sprintf("[%d]", idx+1)
 			statusLabel := "ok"
-			if !ep.Healthy {
+			if ep.TimedOut {
+				statusLabel = "timeout"
+			} else if !ep.Healthy {
 				if strings.TrimSpace(ep.Error) != "" {
 					statusLabel = strings.TrimSpace(ep.Error)
 				} else if ep.StatusCode > 0 {
@@ -576,11 +590,19 @@ func renderServicePreview(meta map[string]string) string {
 			if ep.LatencyMS > 0 {
 				lat = fmt.Sprintf("%dms", ep.LatencyMS)
 			}
+			if ep.TimedOut {
+				lat = "timeout"
+			}
 			url := ep.URL
 			if url == "" {
 				url = fmt.Sprintf("http://%s:%s%s", ep.Host, ep.Port, ep.Path)
 			}
 			fmt.Fprintf(&b, "  %s %s — %s • %s\n", label, url, statusLabel, lat)
+			if ep.TimedOut && strings.TrimSpace(ep.Error) != "" {
+				fmt.Fprintf(&b, "      ↳ %s\n", strings.TrimSpace(ep.Error))
+			} else if !ep.Healthy && strings.TrimSpace(ep.Error) != "" && !ep.TimedOut {
+				fmt.Fprintf(&b, "      ↳ %s\n", strings.TrimSpace(ep.Error))
+			}
 		}
 		b.WriteString("\nPress `o` to open the preferred endpoint, or press 1–9 to open a specific URL in your browser.\n")
 	}

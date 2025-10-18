@@ -1419,6 +1419,29 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			m.openDatabaseDumpInEditor("seed")
 			return true, nil
 		}
+	case "/":
+		if col, ok := m.columns[m.focus].(*selectableColumn); ok {
+			fields := map[string]string{
+				"column": strings.ToLower(strings.TrimSpace(col.Title())),
+			}
+			switch focusArea(m.focus) {
+			case focusWorkspace:
+				fields["focus"] = "workspace"
+			case focusProjects:
+				fields["focus"] = "projects"
+			case focusFeatures:
+				fields["focus"] = "feature"
+			case focusItems:
+				fields["focus"] = "items"
+			case focusPreview:
+				fields["focus"] = "preview"
+			}
+			if m.currentProject != nil {
+				fields["path"] = filepath.Clean(m.currentProject.Path)
+			}
+			m.emitTelemetry("search_used", fields)
+		}
+		return false, nil
 	case "enter":
 		if focusArea(m.focus) == focusPreview {
 			if len(m.currentItem.Command) > 0 {
@@ -3713,8 +3736,64 @@ func (m *model) renderPaletteMatches(width int) string {
 }
 
 func (m *model) runCurrentItemCommand() tea.Cmd {
-	if m.currentItem.Disabled {
-		reason := strings.TrimSpace(m.currentItem.DisabledReason)
+	if m.currentProject == nil {
+		m.appendLog("Select a project before running commands.")
+		return nil
+	}
+
+	var items []featureItemDefinition
+	selectionUsed := false
+	if m.itemsCol != nil {
+		if selected := m.itemsCol.SelectedItems(); len(selected) > 0 {
+			items = selected
+			selectionUsed = true
+		}
+	}
+	if len(items) == 0 {
+		if m.currentItem.Key == "" {
+			return nil
+		}
+		items = []featureItemDefinition{m.currentItem}
+	}
+
+	var cmds []tea.Cmd
+	for _, item := range items {
+		if cmd := m.runItemCommand(item); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	if selectionUsed {
+		fields := map[string]string{
+			"column": "items",
+			"count":  strconv.Itoa(len(items)),
+		}
+		if m.currentProject != nil {
+			fields["path"] = filepath.Clean(m.currentProject.Path)
+		}
+		if m.currentFeature != "" {
+			fields["feature"] = m.currentFeature
+		}
+		m.emitTelemetry("multiselect_used", fields)
+		if m.itemsCol != nil {
+			m.itemsCol.ClearSelection()
+		}
+	}
+
+	switch len(cmds) {
+	case 0:
+		return nil
+	case 1:
+		return cmds[0]
+	default:
+		return tea.Batch(cmds...)
+	}
+}
+
+func (m *model) runItemCommand(item featureItemDefinition) tea.Cmd {
+	m.currentItem = item
+	if item.Disabled {
+		reason := strings.TrimSpace(item.DisabledReason)
 		if reason == "" {
 			reason = "This action is currently disabled."
 		}
@@ -3722,16 +3801,16 @@ func (m *model) runCurrentItemCommand() tea.Cmd {
 		m.setToast(reason, 5*time.Second)
 		return nil
 	}
-	if len(m.currentItem.Command) == 0 {
+	if len(item.Command) == 0 {
 		return nil
 	}
 	if m.currentProject == nil {
 		m.appendLog("Select a project before running commands.")
 		return nil
 	}
-	requiresDocker := m.currentItem.Meta != nil && m.currentItem.Meta["requiresDocker"] == "1"
+	requiresDocker := item.Meta != nil && item.Meta["requiresDocker"] == "1"
 	if !requiresDocker {
-		if strings.HasPrefix(m.currentItem.Key, "run-") || strings.HasPrefix(m.currentItem.Key, "verify-") {
+		if strings.HasPrefix(item.Key, "run-") || strings.HasPrefix(item.Key, "verify-") {
 			requiresDocker = true
 		}
 	}
@@ -3741,20 +3820,20 @@ func (m *model) runCurrentItemCommand() tea.Cmd {
 		return nil
 	}
 
-	args := append([]string{}, m.currentItem.Command...)
-	flag := m.currentItem.ProjectFlag
-	if flag == "" && m.currentItem.ProjectRequired {
+	args := append([]string{}, item.Command...)
+	flag := item.ProjectFlag
+	if flag == "" && item.ProjectRequired {
 		flag = "--project"
 	}
 	if flag != "" {
 		args = append(args, flag, m.currentProject.Path)
 	}
 
-	title := fmt.Sprintf("%s • %s", m.currentItem.Title, m.currentProject.Name)
+	title := fmt.Sprintf("%s • %s", item.Title, m.currentProject.Name)
 	m.appendLog(fmt.Sprintf("Queued %s", title))
 	m.appendLog(fmt.Sprintf("Command: gpt-creator %s", strings.Join(args, " ")))
 	m.showLogs = true
-	itemKey := m.currentItem.Key
+	itemKey := item.Key
 	isVerifyAll := itemKey == "overview-run-verify-all" || itemKey == "verify-all"
 	isGenerate := strings.HasPrefix(itemKey, "generate-") || itemKey == "generate-all"
 	isCreateDBDump := itemKey == "create-db-dump"

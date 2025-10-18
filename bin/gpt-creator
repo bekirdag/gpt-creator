@@ -1281,8 +1281,13 @@ gc_record_codex_usage() {
   timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
   local py_output=""
-  if py_output="$(
-    python3 - <<'PY' "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code"
+  local tmp_output
+  tmp_output="$(mktemp "${TMPDIR:-/tmp}/gc-usage-XXXXXX")" || {
+    warn "Failed to record Codex usage for task=${task} model=${model}."
+    return 1
+  }
+
+  if python3 - <<'PY' "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" >"$tmp_output"
 import hashlib
 import json
 import pathlib
@@ -1417,7 +1422,9 @@ with usage_path.open("a", encoding="utf-8") as fh:
 if limit_message:
     print(f"LIMIT_DETECTED\t{limit_message}")
 PY
-  )"; then
+  then
+    py_output="$(<"$tmp_output")"
+    rm -f "$tmp_output" || true
     if [[ "$py_output" == LIMIT_DETECTED$'\t'* ]]; then
       GC_CODEX_USAGE_LIMIT_REACHED=1
       GC_CODEX_USAGE_LIMIT_MESSAGE="${py_output#LIMIT_DETECTED$'\t'}"
@@ -1428,6 +1435,7 @@ PY
     rm -f "$log_file" || true
     return 0
   else
+    rm -f "$tmp_output" || true
     warn "Failed to record Codex usage for task=${task} model=${model}."
     return 1
   fi

@@ -66,7 +66,7 @@ func newSelectableColumn(title string, items []list.Item, width int, onSelect fu
 	m := list.New(items, column.delegate, width, 20)
 	m.Title = title
 	m.SetShowStatusBar(false)
-	m.SetFilteringEnabled(false)
+	m.SetFilteringEnabled(true)
 	m.SetShowHelp(false)
 	m.SetShowPagination(false)
 	column.model = m
@@ -133,25 +133,50 @@ func (c *selectableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 	prev := c.model.Index()
 	switch m := msg.(type) {
 	case tea.KeyMsg:
-		if m.String() == "enter" && c.onSelect != nil {
-			if item, ok := c.model.SelectedItem().(listEntry); ok {
-				return c, c.onSelect(item)
+		switch m.String() {
+		case "enter":
+			if c.onSelect != nil {
+				if item, ok := c.model.SelectedItem().(listEntry); ok {
+					return c, c.onSelect(item)
+				}
+			}
+		case "n":
+			if c.model.FilterState() != list.Unfiltered && !c.model.SettingFilter() {
+				c.model.CursorDown()
+				if cmd := c.highlightSelection(prev); cmd != nil {
+					return c, cmd
+				}
+				return c, nil
+			}
+		case "N":
+			if c.model.FilterState() != list.Unfiltered && !c.model.SettingFilter() {
+				c.model.CursorUp()
+				if cmd := c.highlightSelection(prev); cmd != nil {
+					return c, cmd
+				}
+				return c, nil
 			}
 		}
 	}
 	var cmd tea.Cmd
 	c.model, cmd = c.model.Update(msg)
-	if c.model.Index() != prev && c.onHighlight != nil {
-		if item, ok := c.model.SelectedItem().(listEntry); ok {
-			if run := c.onHighlight(item); run != nil {
-				if cmd != nil {
-					return c, tea.Batch(cmd, run)
-				}
-				return c, run
-			}
+	if extra := c.highlightSelection(prev); extra != nil {
+		if cmd != nil {
+			return c, tea.Batch(cmd, extra)
 		}
+		return c, extra
 	}
 	return c, cmd
+}
+
+func (c *selectableColumn) highlightSelection(prev int) tea.Cmd {
+	if c.onHighlight == nil || c.model.Index() == prev {
+		return nil
+	}
+	if item, ok := c.model.SelectedItem().(listEntry); ok {
+		return c.onHighlight(item)
+	}
+	return nil
 }
 
 func (c *selectableColumn) View(s styles, focused bool) string {
@@ -967,6 +992,7 @@ type actionColumn struct {
 	width       int
 	height      int
 	items       []featureItemDefinition
+	selected    map[int]bool
 	onHighlight func(featureItemDefinition, bool) tea.Cmd
 }
 
@@ -982,8 +1008,9 @@ func newActionColumn(title string) *actionColumn {
 	)
 
 	return &actionColumn{
-		title: title,
-		table: t,
+		title:    title,
+		table:    t,
+		selected: make(map[int]bool),
 	}
 }
 
@@ -1001,22 +1028,9 @@ func (c *actionColumn) ApplyStyles(s styles) {
 
 func (c *actionColumn) SetItems(items []featureItemDefinition) {
 	c.items = items
-	rows := make([]table.Row, len(items))
-	for i, item := range items {
-		label := item.Title
-		desc := item.Desc
-		if item.Disabled {
-			label = "! " + label
-			if strings.TrimSpace(item.DisabledReason) != "" {
-				desc = item.DisabledReason
-			} else if strings.TrimSpace(desc) == "" {
-				desc = "Temporarily unavailable"
-			}
-		}
-		rows[i] = table.Row{label, desc}
-	}
-	c.table.SetRows(rows)
-	if len(rows) > 0 {
+	c.selected = make(map[int]bool)
+	c.refreshRows()
+	if len(items) > 0 {
 		c.table.SetCursor(0)
 	}
 }
@@ -1052,6 +1066,27 @@ func (c *actionColumn) SelectedItem() (featureItemDefinition, bool) {
 	return c.items[cursor], true
 }
 
+func (c *actionColumn) SelectedItems() []featureItemDefinition {
+	if len(c.selected) == 0 {
+		return nil
+	}
+	entries := make([]featureItemDefinition, 0, len(c.selected))
+	for i, item := range c.items {
+		if c.selected[i] {
+			entries = append(entries, item)
+		}
+	}
+	return entries
+}
+
+func (c *actionColumn) ClearSelection() {
+	if len(c.selected) == 0 {
+		return
+	}
+	c.selected = make(map[int]bool)
+	c.refreshRows()
+}
+
 func (c *actionColumn) SetSize(width, height int) {
 	if width < 20 {
 		width = 20
@@ -1074,6 +1109,28 @@ func (c *actionColumn) SetSize(width, height int) {
 func (c *actionColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 	prev := c.table.Cursor()
 	var cmds []tea.Cmd
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case " ":
+			if c.toggleSelection(c.table.Cursor()) && c.onHighlight != nil {
+				if item, ok := c.SelectedItem(); ok {
+					if run := c.onHighlight(item, false); run != nil {
+						cmds = append(cmds, run)
+					}
+				}
+			}
+			if len(cmds) == 0 {
+				return c, nil
+			}
+			return c, tea.Batch(cmds...)
+		case "esc":
+			if len(c.selected) > 0 {
+				c.ClearSelection()
+				return c, nil
+			}
+		}
+	}
 
 	var cmd tea.Cmd
 	c.table, cmd = c.table.Update(msg)
@@ -1341,6 +1398,61 @@ func (c *envTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 		return c, nil
 	}
 	return c, tea.Batch(cmds...)
+}
+
+func (c *actionColumn) refreshRows() {
+	rows := make([]table.Row, len(c.items))
+	for i, item := range c.items {
+		rows[i] = c.renderRow(i, item)
+	}
+	c.table.SetRows(rows)
+}
+
+func (c *actionColumn) refreshRow(index int) {
+	if index < 0 || index >= len(c.items) {
+		return
+	}
+	rows := c.table.Rows()
+	if index < 0 || index >= len(rows) {
+		return
+	}
+	rows[index] = c.renderRow(index, c.items[index])
+	c.table.SetRows(rows)
+}
+
+func (c *actionColumn) renderRow(index int, item featureItemDefinition) table.Row {
+	label := item.Title
+	desc := item.Desc
+	if item.Disabled {
+		label = "! " + label
+		if strings.TrimSpace(item.DisabledReason) != "" {
+			desc = item.DisabledReason
+		} else if strings.TrimSpace(desc) == "" {
+			desc = "Temporarily unavailable"
+		}
+	}
+	marker := "[ ]"
+	if c.selected != nil && c.selected[index] {
+		marker = "[x]"
+	}
+	label = fmt.Sprintf("%s %s", marker, label)
+	return table.Row{label, desc}
+}
+
+func (c *actionColumn) toggleSelection(index int) bool {
+	if index < 0 || index >= len(c.items) {
+		return false
+	}
+	if c.selected == nil {
+		c.selected = make(map[int]bool)
+	}
+	if c.selected[index] {
+		delete(c.selected, index)
+	} else {
+		c.selected[index] = true
+	}
+	c.refreshRow(index)
+	return true
 }
 
 func (c *envTableColumn) View(s styles, focused bool) string {

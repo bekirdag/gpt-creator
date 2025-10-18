@@ -106,6 +106,7 @@ install_files() {
     --include '/templates/***'
     --include '/src/***'
     --include '/scripts/***'
+    --include '/tui/***'
     --include '/docs/***'
     --include '/verify/***'
     --include '/README*'

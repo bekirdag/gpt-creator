@@ -16,7 +16,7 @@ func main() {
 	if _, err := tea.NewProgram(
 		initialModel(),
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
+		tea.WithMouseAllMotion(),
 	).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)

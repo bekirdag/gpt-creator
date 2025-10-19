@@ -443,7 +443,8 @@ type model struct {
 	backlogCol              *backlogTreeColumn
 	backlogTable            *backlogTableColumn
 
-	focus int
+	focus       int
+	hoverColumn int
 
 	showLogs   bool
 	logsHeight int
@@ -577,6 +578,7 @@ func initialModel() *model {
 		keys:          newKeyMap(),
 		help:          help.New(),
 		markdownTheme: currentMarkdownTheme(),
+		hoverColumn:   -1,
 		showLogs:      true,
 		logsHeight:    8,
 		logLines: []string{
@@ -1394,9 +1396,85 @@ func (m *model) View() string {
 		overlayContent := strings.TrimRight(contentBuilder.String(), "\n")
 		overlayRendered := overlayStyle.Render(overlayContent)
 		m.overlayWidth = overlayWidth
-		m.overlayContentOffsetX = overlayStyle.GetBorderLeftSize() + overlayStyle.GetPaddingLeft()
-		m.overlayContentOffsetY = overlayStyle.GetBorderTopSize() + overlayStyle.GetPaddingTop()
-		m.overlayContentRight = overlayStyle.GetBorderRightSize() + overlayStyle.GetPaddingRight()
+
+		frameWidth := overlayStyle.GetHorizontalFrameSize()
+		paddingLeft := overlayStyle.GetPaddingLeft()
+		paddingRight := overlayStyle.GetPaddingRight()
+		marginLeft := overlayStyle.GetMarginLeft()
+		marginRight := overlayStyle.GetMarginRight()
+		borderStyle := overlayStyle.GetBorderStyle()
+
+		borderLeftWidth := 0
+		if overlayStyle.GetBorderLeft() {
+			borderLeftWidth = lipgloss.Width(borderStyle.Left)
+		}
+		borderRightWidth := 0
+		if overlayStyle.GetBorderRight() {
+			borderRightWidth = lipgloss.Width(borderStyle.Right)
+		}
+
+		leftFrame := borderLeftWidth + paddingLeft + marginLeft
+		rightFrame := borderRightWidth + paddingRight + marginRight
+		if total := leftFrame + rightFrame; total > frameWidth {
+			overflow := total - frameWidth
+			if overflow > 0 {
+				reduce := min(overflow, rightFrame)
+				rightFrame -= reduce
+				overflow -= reduce
+			}
+			if overflow > 0 {
+				reduce := min(overflow, leftFrame)
+				leftFrame -= reduce
+				overflow -= reduce
+			}
+		}
+		if extra := frameWidth - (leftFrame + rightFrame); extra > 0 {
+			leftAdjust := extra / 2
+			rightAdjust := extra - leftAdjust
+			leftFrame += leftAdjust
+			rightFrame += rightAdjust
+		}
+
+		frameHeight := overlayStyle.GetVerticalFrameSize()
+		paddingTop := overlayStyle.GetPaddingTop()
+		paddingBottom := overlayStyle.GetPaddingBottom()
+		marginTop := overlayStyle.GetMarginTop()
+		marginBottom := overlayStyle.GetMarginBottom()
+
+		borderTopHeight := 0
+		if overlayStyle.GetBorderTop() {
+			borderTopHeight = 1
+		}
+		borderBottomHeight := 0
+		if overlayStyle.GetBorderBottom() {
+			borderBottomHeight = 1
+		}
+
+		topFrame := borderTopHeight + paddingTop + marginTop
+		bottomFrame := borderBottomHeight + paddingBottom + marginBottom
+		if total := topFrame + bottomFrame; total > frameHeight {
+			overflow := total - frameHeight
+			if overflow > 0 {
+				reduce := min(overflow, bottomFrame)
+				bottomFrame -= reduce
+				overflow -= reduce
+			}
+			if overflow > 0 {
+				reduce := min(overflow, topFrame)
+				topFrame -= reduce
+				overflow -= reduce
+			}
+		}
+		if extra := frameHeight - (topFrame + bottomFrame); extra > 0 {
+			topAdjust := extra / 2
+			bottomAdjust := extra - topAdjust
+			topFrame += topAdjust
+			bottomFrame += bottomAdjust
+		}
+
+		m.overlayContentOffsetX = leftFrame
+		m.overlayContentOffsetY = topFrame
+		m.overlayContentRight = rightFrame
 		overlay = overlayRendered
 		m.overlayHeight = lipgloss.Height(overlayRendered)
 	}
@@ -1455,18 +1533,10 @@ func (m *model) overlayView(base, overlay string) string {
 	m.overlayHeight = overlayHeight
 	m.overlayX = left
 	m.overlayY = startRow
-	if m.overlayCloseActive && m.overlayCloseLabel != "" {
-		relRow := m.overlayContentOffsetY + m.overlayCloseLocalY
-		m.overlayCloseRow = startRow + relRow
-		if relRow >= 0 && relRow < len(overlayLines) {
-			line := overlayLines[relRow]
-			if idx := strings.Index(line, m.overlayCloseLabel); idx >= 0 {
-				prefix := line[:idx]
-				start := left + visibleCellWidth(prefix)
-				m.overlayCloseStart = start
-				m.overlayCloseEnd = start + m.overlayCloseWidth
-			}
-		}
+	if m.overlayCloseActive {
+		m.overlayCloseRow = startRow + m.overlayContentOffsetY + m.overlayCloseLocalY
+		m.overlayCloseStart = left + m.overlayContentOffsetX + m.overlayCloseLocalX
+		m.overlayCloseEnd = m.overlayCloseStart + m.overlayCloseWidth
 	}
 
 	fillerSeq := ansiBackgroundSequence(crushBackground)
@@ -1863,6 +1933,7 @@ func (m *model) hitTestColumn(x, y int) (int, int, int, bool) {
 
 func (m *model) prepareMouseMessage(msg tea.MouseMsg) (int, int, int, tea.Cmd) {
 	if len(m.columns) == 0 {
+		m.hoverColumn = -1
 		return -1, -1, -1, nil
 	}
 	target := -1
@@ -1871,10 +1942,12 @@ func (m *model) prepareMouseMessage(msg tea.MouseMsg) (int, int, int, tea.Cmd) {
 	}
 	localX := -1
 	localY := -1
+	m.hoverColumn = -1
 	if idx, x, y, hit := m.hitTestColumn(msg.X, msg.Y); hit {
 		target = idx
 		localX = x
 		localY = y
+		m.hoverColumn = idx
 		switch msg.Type {
 		case tea.MouseLeft, tea.MouseRight, tea.MouseWheelUp, tea.MouseWheelDown:
 			if m.focus != idx {
@@ -7490,6 +7563,21 @@ func (m *model) renderStatus() string {
 
 	segments := []string{
 		m.styles.statusSeg.Render(fmt.Sprintf("%s: %s", focusTitle, focusValue)),
+	}
+	var hoverHint string
+	if hintColumn := m.hoverColumn; hintColumn >= 0 && hintColumn < len(m.columns) {
+		if provider, ok := m.columns[hintColumn].(interface{ ActivationHint() string }); ok {
+			hoverHint = strings.TrimSpace(provider.ActivationHint())
+		}
+	}
+	var focusHint string
+	if provider, ok := m.columns[m.focus].(interface{ ActivationHint() string }); ok {
+		focusHint = strings.TrimSpace(provider.ActivationHint())
+	}
+	if hoverHint != "" {
+		segments = append(segments, m.styles.statusHint.Render(hoverHint))
+	} else if focusHint != "" {
+		segments = append(segments, m.styles.statusHint.Render(focusHint))
 	}
 	if m.currentRoot != nil {
 		segments = append(segments, m.styles.statusSeg.Render("Root: "+abbreviatePath(m.currentRoot.Path)))

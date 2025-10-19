@@ -7,7 +7,7 @@ var (
 	crushSurface         = lipgloss.Color("#161A31")
 	crushSurfaceElevated = lipgloss.Color("#20263F")
 	crushSurfaceSoft     = lipgloss.Color("#1C2136")
-	crushSurfacePassive  = crushSurfaceElevated
+	crushSurfacePassive  = crushSurface
 	crushDanger          = lipgloss.Color("#B42323")
 
 	crushForeground      = lipgloss.Color("#F8F9FF")

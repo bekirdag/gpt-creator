@@ -59,6 +59,7 @@ type selectableColumn struct {
 	scrollX           int
 	onSelect          func(entry listEntry) tea.Cmd
 	onHighlight       func(entry listEntry) tea.Cmd
+	activationHint    string
 	panelFrameWidth   int
 	normalTitleBase   lipgloss.Style
 	normalDescBase    lipgloss.Style
@@ -87,10 +88,11 @@ func newSelectableColumn(title string, items []list.Item, width int, onSelect fu
 	delegate := list.NewDefaultDelegate()
 
 	column := &selectableColumn{
-		title:    title,
-		width:    width,
-		onSelect: onSelect,
-		delegate: &delegate,
+		title:          title,
+		width:          width,
+		onSelect:       onSelect,
+		delegate:       &delegate,
+		activationHint: "Click or Enter to open",
 	}
 
 	m := list.New(items, column.delegate, width, 20)
@@ -381,6 +383,24 @@ func (c *selectableColumn) SetHighlightFunc(fn func(listEntry) tea.Cmd) {
 	c.onHighlight = fn
 }
 
+func (c *selectableColumn) SetActivationHint(hint string) {
+	trimmed := strings.TrimSpace(hint)
+	c.activationHint = trimmed
+}
+
+func (c *selectableColumn) ActivationHint() string {
+	if c.onSelect == nil {
+		return ""
+	}
+	if c.activationHint == "" {
+		return ""
+	}
+	if items := c.model.VisibleItems(); len(items) == 0 {
+		return ""
+	}
+	return c.activationHint
+}
+
 func (c *selectableColumn) ApplyStyles(s styles) {
 	if c.delegate != nil {
 		normal := s.textBlock.Copy().
@@ -394,13 +414,15 @@ func (c *selectableColumn) ApplyStyles(s styles) {
 		c.normalTitleBase = normal
 		c.normalDescBase = desc
 		c.hasNormalStyles = true
-		c.selectedTitleBase = s.listSel.Copy().
-			ColorWhitespace(true).
-			Padding(0, 2)
-		c.selectedDescBase = s.listSel.Copy().
+		highlight := s.listSel.Copy().
 			ColorWhitespace(true).
 			Foreground(crushPrimaryBright).
+			Underline(true).
 			Padding(0, 2)
+		c.selectedTitleBase = highlight
+		c.selectedDescBase = highlight.Copy().
+			Underline(false).
+			Foreground(crushAccent)
 		c.hasSelectedStyles = true
 
 		c.delegate.Styles.NormalTitle = normal
@@ -512,15 +534,17 @@ type backlogTreeColumn struct {
 	selectedTitleBase lipgloss.Style
 	selectedDescBase  lipgloss.Style
 	hasSelectedStyles bool
+	activationHint    string
 }
 
 func newBacklogTreeColumn(title string) *backlogTreeColumn {
 	delegate := list.NewDefaultDelegate()
 
 	column := &backlogTreeColumn{
-		title:    title,
-		width:    28,
-		delegate: &delegate,
+		title:          title,
+		width:          28,
+		delegate:       &delegate,
+		activationHint: "Click or Enter to open, Space to toggle",
 	}
 
 	model := list.New([]list.Item{}, column.delegate, 28, 20)
@@ -540,6 +564,20 @@ func (c *backlogTreeColumn) SetCallbacks(onHighlight, onToggle, onActivate func(
 	c.onActivate = onActivate
 }
 
+func (c *backlogTreeColumn) SetActivationHint(hint string) {
+	c.activationHint = strings.TrimSpace(hint)
+}
+
+func (c *backlogTreeColumn) ActivationHint() string {
+	if c.activationHint == "" {
+		return ""
+	}
+	if len(c.model.Items()) == 0 {
+		return ""
+	}
+	return c.activationHint
+}
+
 func (c *backlogTreeColumn) ApplyStyles(s styles) {
 	if c.delegate != nil {
 		normal := s.listItem.Copy().ColorWhitespace(true)
@@ -548,8 +586,14 @@ func (c *backlogTreeColumn) ApplyStyles(s styles) {
 			ColorWhitespace(true).
 			Padding(0, 0, 0, 2)
 		c.panelFrameWidth = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
-		c.selectedTitleBase = s.listSel.Copy().ColorWhitespace(true)
-		c.selectedDescBase = c.selectedTitleBase.Copy().Foreground(crushPrimaryBright)
+		highlight := s.listSel.Copy().
+			ColorWhitespace(true).
+			Foreground(crushPrimaryBright).
+			Underline(true)
+		c.selectedTitleBase = highlight
+		c.selectedDescBase = highlight.Copy().
+			Underline(false).
+			Foreground(crushAccent)
 		c.hasSelectedStyles = true
 
 		c.delegate.SetSpacing(0)
@@ -961,15 +1005,17 @@ type artifactTreeColumn struct {
 	selectedTitleBase lipgloss.Style
 	selectedDescBase  lipgloss.Style
 	hasSelectedStyles bool
+	activationHint    string
 }
 
 func newArtifactTreeColumn(title string) *artifactTreeColumn {
 	delegate := list.NewDefaultDelegate()
 
 	column := &artifactTreeColumn{
-		title:    title,
-		width:    36,
-		delegate: &delegate,
+		title:          title,
+		width:          36,
+		delegate:       &delegate,
+		activationHint: "Click or Enter to open, Space to toggle",
 	}
 
 	model := list.New([]list.Item{}, column.delegate, 36, 20)
@@ -989,6 +1035,20 @@ func (c *artifactTreeColumn) SetCallbacks(onHighlight, onToggle, onActivate func
 	c.onActivate = onActivate
 }
 
+func (c *artifactTreeColumn) SetActivationHint(hint string) {
+	c.activationHint = strings.TrimSpace(hint)
+}
+
+func (c *artifactTreeColumn) ActivationHint() string {
+	if c.activationHint == "" {
+		return ""
+	}
+	if len(c.model.Items()) == 0 {
+		return ""
+	}
+	return c.activationHint
+}
+
 func (c *artifactTreeColumn) ApplyStyles(s styles) {
 	if c.delegate != nil {
 		normal := s.listItem.Copy().ColorWhitespace(true)
@@ -997,8 +1057,14 @@ func (c *artifactTreeColumn) ApplyStyles(s styles) {
 			ColorWhitespace(true).
 			Padding(0, 0, 0, 2)
 		c.panelFrameWidth = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
-		c.selectedTitleBase = s.listSel.Copy().ColorWhitespace(true)
-		c.selectedDescBase = c.selectedTitleBase.Copy().Foreground(crushPrimaryBright)
+		highlight := s.listSel.Copy().
+			ColorWhitespace(true).
+			Foreground(crushPrimaryBright).
+			Underline(true)
+		c.selectedTitleBase = highlight
+		c.selectedDescBase = highlight.Copy().
+			Underline(false).
+			Foreground(crushAccent)
 		c.hasSelectedStyles = true
 
 		c.delegate.SetSpacing(0)

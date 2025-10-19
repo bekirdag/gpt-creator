@@ -414,6 +414,24 @@ type model struct {
 	columnWidths            []int
 	columnOffsets           []int
 	columnsTotalWidth       int
+	columnsTop              int
+	columnsHeight           int
+	overlayActive           bool
+	overlayWidth            int
+	overlayHeight           int
+	overlayX                int
+	overlayY                int
+	overlayContentOffsetX   int
+	overlayContentOffsetY   int
+	overlayContentRight     int
+	overlayCloseActive      bool
+	overlayCloseLabel       string
+	overlayCloseRow         int
+	overlayCloseStart       int
+	overlayCloseEnd         int
+	overlayCloseLocalX      int
+	overlayCloseLocalY      int
+	overlayCloseWidth       int
 	featureSelectDefault    func(listEntry) tea.Cmd
 	featureHighlightDefault func(listEntry) tea.Cmd
 	usingTasksLayout        bool
@@ -892,6 +910,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if mouseMsg, ok := msg.(tea.MouseMsg); ok {
+		if m.handleOverlayCloseMouse(mouseMsg) {
+			return m, tea.Batch(cmds...)
+		}
+	}
+
 	if tickMsg, ok := msg.(timer.TickMsg); ok && m.servicesTimerActive {
 		var cmd tea.Cmd
 		m.servicesTimer, cmd = m.servicesTimer.Update(tickMsg)
@@ -1060,10 +1084,39 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.focus >= 0 && m.focus < len(m.columns) {
-		col := m.columns[m.focus]
+	targetColumn := -1
+	if len(m.columns) > 0 && m.focus >= 0 && m.focus < len(m.columns) {
+		targetColumn = m.focus
+	}
+	var mouseMsg tea.MouseMsg
+	var haveMouse bool
+	localX, localY := -1, -1
+	if mm, ok := msg.(tea.MouseMsg); ok && !m.inputActive {
+		haveMouse = true
+		mouseMsg = mm
+		mouseTarget, mx, my, mouseCmd := m.prepareMouseMessage(mm)
+		if mouseCmd != nil {
+			cmds = append(cmds, mouseCmd)
+		}
+		if mouseTarget >= 0 {
+			targetColumn = mouseTarget
+			localX = mx
+			localY = my
+		}
+	}
+	if targetColumn >= 0 && targetColumn < len(m.columns) {
+		if haveMouse && localX >= 0 && localY >= 0 {
+			if handler, ok := m.columns[targetColumn].(mouseAwareColumn); ok {
+				var mouseCmd tea.Cmd
+				m.columns[targetColumn], mouseCmd = handler.HandleMouse(localX, localY, mouseMsg)
+				if mouseCmd != nil {
+					cmds = append(cmds, mouseCmd)
+				}
+			}
+		}
+		col := m.columns[targetColumn]
 		var cmd tea.Cmd
-		m.columns[m.focus], cmd = col.Update(msg)
+		m.columns[targetColumn], cmd = col.Update(msg)
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -1197,17 +1250,88 @@ func (m *model) View() string {
 	status := m.renderStatus()
 	builder.WriteString(status)
 
+	m.overlayActive = false
+	m.overlayCloseActive = false
+	m.overlayCloseLocalX = 0
+	m.overlayCloseLocalY = 0
+	m.overlayCloseWidth = 0
+	m.overlayWidth = 0
+	m.overlayHeight = 0
+	m.overlayX = 0
+	m.overlayY = 0
+	m.overlayContentOffsetX = 0
+	m.overlayContentOffsetY = 0
+	m.overlayContentRight = 0
+	m.overlayCloseLabel = ""
+	m.overlayCloseRow = -1
+	m.overlayCloseStart = -1
+	m.overlayCloseEnd = -1
+
 	var overlay string
 	if m.inputActive {
 		overlayWidth := min(64, m.width-4)
 		if overlayWidth < 24 {
-			overlayWidth = m.width - 4
-		}
-		if overlayWidth < 24 {
 			overlayWidth = 24
 		}
+		maxOverlayWidth := max(1, m.width-2)
+		if overlayWidth > maxOverlayWidth {
+			overlayWidth = maxOverlayWidth
+		}
+		if overlayWidth < 1 {
+			overlayWidth = 1
+		}
+
+		overlayStyleBase := m.styles.cmdOverlay.Copy()
+		headerLine := m.styles.cmdPrompt.Render(m.inputPrompt)
+		closeLabel := m.styles.cmdCloseButton.Render("X")
+		closeWidth := lipgloss.Width(closeLabel)
+		if closeWidth < 1 {
+			closeWidth = 1
+		}
+
+		required := closeWidth + 1 // ensure at least 1 char for header
+		overlayStyle := overlayStyleBase.Width(overlayWidth)
+		contentLeft := overlayStyle.GetBorderLeftSize() + overlayStyle.GetPaddingLeft()
+		contentRight := overlayStyle.GetBorderRightSize() + overlayStyle.GetPaddingRight()
+		innerWidth := overlayWidth - (contentLeft + contentRight)
+		if innerWidth < required {
+			innerWidth = required
+		}
+		if overlayWidth < innerWidth+contentLeft+contentRight {
+			overlayWidth = innerWidth + contentLeft + contentRight
+			if overlayWidth > maxOverlayWidth {
+				overlayWidth = maxOverlayWidth
+			}
+			overlayStyle = overlayStyleBase.Width(overlayWidth)
+			contentLeft = overlayStyle.GetBorderLeftSize() + overlayStyle.GetPaddingLeft()
+			contentRight = overlayStyle.GetBorderRightSize() + overlayStyle.GetPaddingRight()
+			innerWidth = overlayWidth - (contentLeft + contentRight)
+			if innerWidth < required {
+				innerWidth = required
+			}
+		}
+		if innerWidth < closeWidth {
+			innerWidth = closeWidth
+		}
+
+		headerAvailable := innerWidth - closeWidth
+		if headerAvailable < 0 {
+			headerAvailable = 0
+		}
+		headerSegment := lipgloss.NewStyle().
+			Width(headerAvailable).
+			MaxWidth(headerAvailable).
+			Render(headerLine)
+
 		var contentBuilder strings.Builder
-		contentBuilder.WriteString(m.styles.cmdPrompt.Render(m.inputPrompt))
+		contentBuilder.WriteString(headerSegment)
+		contentBuilder.WriteString(closeLabel)
+		m.overlayCloseActive = true
+		m.overlayCloseLocalX = headerAvailable
+		m.overlayCloseLocalY = 0
+		m.overlayCloseWidth = closeWidth
+		m.overlayCloseLabel = closeLabel
+
 		contentBuilder.WriteRune('\n')
 		if m.filePickerEnabled {
 			pickerView := m.filePicker.View()
@@ -1268,7 +1392,13 @@ func (m *model) View() string {
 			contentBuilder.WriteString(m.styles.cmdHint.Render(strings.Join(hintParts, " • ")))
 		}
 		overlayContent := strings.TrimRight(contentBuilder.String(), "\n")
-		overlay = m.styles.cmdOverlay.Width(overlayWidth).Render(overlayContent)
+		overlayRendered := overlayStyle.Render(overlayContent)
+		m.overlayWidth = overlayWidth
+		m.overlayContentOffsetX = overlayStyle.GetBorderLeftSize() + overlayStyle.GetPaddingLeft()
+		m.overlayContentOffsetY = overlayStyle.GetBorderTopSize() + overlayStyle.GetPaddingTop()
+		m.overlayContentRight = overlayStyle.GetBorderRightSize() + overlayStyle.GetPaddingRight()
+		overlay = overlayRendered
+		m.overlayHeight = lipgloss.Height(overlayRendered)
 	}
 
 	content := builder.String()
@@ -1286,17 +1416,16 @@ func (m *model) overlayView(base, overlay string) string {
 	if overlayHeight < 1 {
 		overlayHeight = 1
 	}
+	overlayWidth := lipgloss.Width(trimmedOverlay)
+	if overlayWidth < 1 {
+		overlayWidth = 1
+	}
+	left := 0
+	if width > overlayWidth {
+		left = (width - overlayWidth) / 2
+	}
 
-	centered := lipgloss.Place(
-		width,
-		overlayHeight,
-		lipgloss.Center,
-		lipgloss.Top,
-		trimmedOverlay,
-		lipgloss.WithWhitespaceChars(" "),
-	)
-
-	overlayLines := strings.Split(centered, "\n")
+	overlayLines := strings.Split(trimmedOverlay, "\n")
 	if len(overlayLines) == 0 {
 		return base
 	}
@@ -1321,8 +1450,30 @@ func (m *model) overlayView(base, overlay string) string {
 		baseLines = append(baseLines, make([]string, totalNeeded-len(baseLines))...)
 	}
 
+	m.overlayActive = true
+	m.overlayWidth = overlayWidth
+	m.overlayHeight = overlayHeight
+	m.overlayX = left
+	m.overlayY = startRow
+	if m.overlayCloseActive && m.overlayCloseLabel != "" {
+		relRow := m.overlayContentOffsetY + m.overlayCloseLocalY
+		m.overlayCloseRow = startRow + relRow
+		if relRow >= 0 && relRow < len(overlayLines) {
+			line := overlayLines[relRow]
+			if idx := strings.Index(line, m.overlayCloseLabel); idx >= 0 {
+				prefix := line[:idx]
+				start := left + visibleCellWidth(prefix)
+				m.overlayCloseStart = start
+				m.overlayCloseEnd = start + m.overlayCloseWidth
+			}
+		}
+	}
+
+	fillerSeq := ansiBackgroundSequence(crushBackground)
 	for i := 0; i < len(overlayLines); i++ {
-		baseLines[startRow+i] = overlayLines[i]
+		row := startRow + i
+		baseLine := baseLines[row]
+		baseLines[row] = mergeOverlayLine(baseLine, left, overlayLines[i], fillerSeq)
 	}
 
 	result := strings.Join(baseLines, "\n")
@@ -1330,6 +1481,48 @@ func (m *model) overlayView(base, overlay string) string {
 		result += "\n"
 	}
 	return result
+}
+
+func visibleCellWidth(s string) int {
+	return lipgloss.Width(s)
+}
+
+func mergeOverlayLine(baseLine string, start int, overlayLine string, fillerSeq string) string {
+	if overlayLine == "" {
+		return baseLine
+	}
+	if start < 0 {
+		start = 0
+	}
+
+	overlayWidth := lipgloss.Width(overlayLine)
+	if overlayWidth <= 0 {
+		return baseLine
+	}
+
+	prefix := ""
+	if start > 0 {
+		prefix = sliceLineANSI(baseLine, 0, start, fillerSeq)
+	}
+
+	baseWidth := lipgloss.Width(baseLine)
+	suffixStart := start + overlayWidth
+	targetWidth := baseWidth
+	if suffixStart > targetWidth {
+		targetWidth = suffixStart
+	}
+
+	suffixWidth := targetWidth - suffixStart
+	if suffixWidth < 0 {
+		suffixWidth = 0
+	}
+
+	suffix := ""
+	if suffixWidth > 0 {
+		suffix = sliceLineANSI(baseLine, suffixStart, suffixWidth, fillerSeq)
+	}
+
+	return prefix + overlayLine + suffix
 }
 
 func (m *model) renderColumnsRow(content string) string {
@@ -1357,35 +1550,7 @@ func (m *model) renderHeader() string {
 ███████▓▓▓▓▓▒▒▒░ v․₀․₂․₀ ░▒▒▓█
 `
 	logo := m.styles.headerLogo.Render(strings.TrimPrefix(logoArt, "\n"))
-
-	crumbs := []string{"Workspace"}
-	if m.currentRoot != nil {
-		crumbs = append(crumbs, abbreviatePath(m.currentRoot.Path))
-	}
-	if m.currentProject != nil {
-		crumbs = append(crumbs, m.currentProject.Name)
-	}
-	if m.currentFeature != "" {
-		if def := findFeatureDefinition(m.currentFeature); def.Key != "" {
-			crumbs = append(crumbs, def.Title)
-		} else {
-			crumbs = append(crumbs, m.currentFeature)
-		}
-	}
-
-	breadcrumbText := "Location: " + strings.Join(crumbs, " › ")
-	breadcrumb := m.styles.headerBreadcrumb.Render(breadcrumbText)
-
-	searchBar := m.styles.headerSearch.Render("[ ⌕ Search workspace ]")
-	searchHint := m.styles.headerSearchHint.Render("Press / for search filters")
-	infoContent := lipgloss.JoinVertical(lipgloss.Left, breadcrumb, searchBar, searchHint)
-
-	infoBlock := m.styles.headerInfo.Render(infoContent)
-	header := lipgloss.JoinHorizontal(lipgloss.Top, logo, infoBlock)
-	if m.width > 0 && lipgloss.Width(header) > m.width {
-		header = lipgloss.JoinVertical(lipgloss.Left, logo, infoBlock)
-	}
-	return header
+	return strings.TrimRight(logo, "\n")
 }
 
 func (m *model) renderHeaderPanel() (string, int) {
@@ -1664,6 +1829,83 @@ func (m *model) scrollFocusedColumn(delta int) bool {
 		return true
 	}
 	return false
+}
+
+func (m *model) hitTestColumn(x, y int) (int, int, int, bool) {
+	if len(m.columns) == 0 {
+		return -1, 0, 0, false
+	}
+	if y < 0 || x < 0 {
+		return -1, 0, 0, false
+	}
+	if m.columnsHeight <= 0 {
+		return -1, 0, 0, false
+	}
+	if y < m.columnsTop || y >= m.columnsTop+m.columnsHeight {
+		return -1, 0, 0, false
+	}
+	if len(m.columnOffsets) == 0 || len(m.columnWidths) == 0 {
+		return -1, 0, 0, false
+	}
+	globalX := x + m.columnsScrollX
+	for i := 0; i < len(m.columnOffsets) && i < len(m.columnWidths); i++ {
+		start := m.columnOffsets[i]
+		width := m.columnWidths[i]
+		if width <= 0 {
+			continue
+		}
+		if globalX >= start && globalX < start+width {
+			return i, globalX - start, y - m.columnsTop, true
+		}
+	}
+	return -1, 0, 0, false
+}
+
+func (m *model) prepareMouseMessage(msg tea.MouseMsg) (int, int, int, tea.Cmd) {
+	if len(m.columns) == 0 {
+		return -1, -1, -1, nil
+	}
+	target := -1
+	if m.focus >= 0 && m.focus < len(m.columns) {
+		target = m.focus
+	}
+	localX := -1
+	localY := -1
+	if idx, x, y, hit := m.hitTestColumn(msg.X, msg.Y); hit {
+		target = idx
+		localX = x
+		localY = y
+		switch msg.Type {
+		case tea.MouseLeft, tea.MouseRight, tea.MouseWheelUp, tea.MouseWheelDown:
+			if m.focus != idx {
+				m.focus = idx
+				m.adjustColumnsScroll()
+			}
+		}
+	}
+	return target, localX, localY, nil
+}
+
+func (m *model) handleOverlayCloseMouse(msg tea.MouseMsg) bool {
+	if !m.overlayActive || !m.overlayCloseActive {
+		return false
+	}
+	if msg.Type != tea.MouseLeft && msg.Type != tea.MouseRelease {
+		return false
+	}
+	if m.overlayCloseRow < 0 || msg.Y != m.overlayCloseRow {
+		return false
+	}
+	start := m.overlayCloseStart
+	end := m.overlayCloseEnd
+	if start < 0 || end <= start {
+		return false
+	}
+	if msg.X < start || msg.X >= end {
+		return false
+	}
+	m.closeInput()
+	return true
 }
 
 func (m *model) applyMarkdownTheme(theme markdownTheme, announce bool) {
@@ -5077,6 +5319,15 @@ func (m *model) applyLayout() {
 	}
 	availableWidth := m.width
 	m.columnsViewportWidth = availableWidth
+	columnsTop := headerPanelHeight + 1
+	if headerPanelHeight == 0 {
+		columnsTop = 2
+	}
+	if columnsTop < 0 {
+		columnsTop = 0
+	}
+	m.columnsTop = columnsTop
+	m.columnsHeight = max(bodyHeight, 0)
 
 	if len(m.columns) == 0 {
 		m.columnWidths = m.columnWidths[:0]
@@ -5097,6 +5348,7 @@ func (m *model) applyLayout() {
 		}
 		m.logs.Height = m.logsHeight - 2
 	}
+	m.columnsHeight = max(bodyHeight, 0)
 
 	widths := []int{44, 52, 52, 28}
 	if m.usingTasksLayout {

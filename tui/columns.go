@@ -46,6 +46,10 @@ type column interface {
 	ScrollHorizontal(delta int) bool
 }
 
+type mouseAwareColumn interface {
+	HandleMouse(localX, localY int, msg tea.MouseMsg) (column, tea.Cmd)
+}
+
 type selectableColumn struct {
 	title             string
 	model             list.Model
@@ -62,6 +66,11 @@ type selectableColumn struct {
 	selectedTitleBase lipgloss.Style
 	selectedDescBase  lipgloss.Style
 	hasSelectedStyles bool
+	panelStyle        lipgloss.Style
+	panelFocusedStyle lipgloss.Style
+	columnTitleStyle  lipgloss.Style
+	contentOffsetX    int
+	contentOffsetY    int
 }
 
 type listEntry struct {
@@ -122,6 +131,7 @@ func (c *selectableColumn) applyModelSize() {
 	c.model.SetSize(effectiveWidth, contentHeight)
 	c.updateSelectedWidths()
 	c.updateNormalWidths()
+	c.recalcContentOffsets()
 }
 
 func (c *selectableColumn) contentWidth() int {
@@ -167,6 +177,28 @@ func (c *selectableColumn) updateNormalWidths() {
 		c.delegate.Styles.NormalDesc = desc
 		c.delegate.Styles.DimmedDesc = desc.Copy().Faint(true)
 	}
+}
+
+func (c *selectableColumn) recalcContentOffsets() {
+	panelLeft := c.panelStyle.GetBorderLeftSize() + c.panelStyle.GetPaddingLeft()
+	focusedLeft := c.panelFocusedStyle.GetBorderLeftSize() + c.panelFocusedStyle.GetPaddingLeft()
+	left := maxInt(panelLeft, focusedLeft)
+
+	panelTop := c.panelStyle.GetBorderTopSize() + c.panelStyle.GetPaddingTop()
+	focusedTop := c.panelFocusedStyle.GetBorderTopSize() + c.panelFocusedStyle.GetPaddingTop()
+	top := maxInt(panelTop, focusedTop)
+
+	titleHeight := 1
+	if strings.TrimSpace(c.title) != "" {
+		titleWidth := columnHeaderWidth(c.width, c.panelFrameWidth)
+		rendered := c.columnTitleStyle.Width(titleWidth).Render(c.title)
+		if h := lipgloss.Height(rendered); h > 0 {
+			titleHeight = h
+		}
+	}
+
+	c.contentOffsetX = left
+	c.contentOffsetY = top + titleHeight
 }
 
 func (c *selectableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
@@ -215,6 +247,82 @@ func (c *selectableColumn) highlightSelection(prev int) tea.Cmd {
 	}
 	if item, ok := c.model.SelectedItem().(listEntry); ok {
 		return c.onHighlight(item)
+	}
+	return nil
+}
+
+func (c *selectableColumn) HandleMouse(localX, localY int, msg tea.MouseMsg) (column, tea.Cmd) {
+	if msg.Type == tea.MouseWheelUp {
+		return c, c.handleMouseWheel(-1)
+	}
+	if msg.Type == tea.MouseWheelDown {
+		return c, c.handleMouseWheel(1)
+	}
+
+	if localX < c.contentOffsetX || localY < c.contentOffsetY {
+		return c, nil
+	}
+	contentY := localY - c.contentOffsetY
+	if contentY < 0 {
+		return c, nil
+	}
+
+	items := c.model.VisibleItems()
+	if len(items) == 0 {
+		return c, nil
+	}
+
+	slotHeight := c.delegate.Height() + c.delegate.Spacing() + 1
+	if slotHeight <= 0 {
+		slotHeight = 1
+	}
+
+	indexOnPage := contentY / slotHeight
+
+	start, end := c.model.Paginator.GetSliceBounds(len(items))
+	itemsOnPage := end - start
+	if itemsOnPage <= 0 {
+		return c, nil
+	}
+	if indexOnPage >= itemsOnPage {
+		return c, nil
+	}
+
+	target := start + indexOnPage
+	if target < 0 || target >= len(items) {
+		return c, nil
+	}
+
+	prev := c.model.Index()
+	c.model.Select(target)
+
+	var cmds []tea.Cmd
+	if target != prev {
+		if cmd := c.highlightSelection(prev); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	if msg.Type == tea.MouseLeft && c.onSelect != nil {
+		if item, ok := c.model.SelectedItem().(listEntry); ok {
+			if cmd := c.onSelect(item); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+	}
+
+	return c, tea.Batch(cmds...)
+}
+
+func (c *selectableColumn) handleMouseWheel(delta int) tea.Cmd {
+	prev := c.model.Index()
+	if delta < 0 {
+		c.model.CursorUp()
+	} else if delta > 0 {
+		c.model.CursorDown()
+	}
+	if cmd := c.highlightSelection(prev); cmd != nil {
+		return cmd
 	}
 	return nil
 }
@@ -309,6 +417,10 @@ func (c *selectableColumn) ApplyStyles(s styles) {
 		c.updateNormalWidths()
 	}
 
+	c.panelStyle = s.panel
+	c.panelFocusedStyle = s.panelFocused
+	c.columnTitleStyle = s.columnTitle
+
 	c.model.Styles.Title = s.columnTitle.Copy()
 	c.model.Styles.TitleBar = lipgloss.NewStyle()
 	c.model.Styles.Spinner = s.statusHint.Copy().Foreground(crushAccent)
@@ -347,6 +459,7 @@ func (c *selectableColumn) ApplyStyles(s styles) {
 	c.model.Styles.DefaultFilterCharacterMatch = s.cmdPrompt.Copy().Underline(true).
 		Background(crushSurface).
 		ColorWhitespace(true)
+	c.recalcContentOffsets()
 }
 
 type backlogTreeEntry struct {

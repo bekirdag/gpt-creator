@@ -13,7 +13,11 @@ func main() {
 	flag.Parse()
 	setMarkdownTheme(markdownThemeFromString(*theme))
 
-	if _, err := tea.NewProgram(initialModel(), tea.WithAltScreen()).Run(); err != nil {
+	if _, err := tea.NewProgram(
+		initialModel(),
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+	).Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}

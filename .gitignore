@@ -31,6 +31,7 @@ logs/
 temp/
 .cache/
 .gomodcache/
+.gocache/
 
 # Docker (local volumes/artifacts)
 docker/.data/

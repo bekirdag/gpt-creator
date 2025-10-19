@@ -24,21 +24,21 @@ var (
 )
 
 type styles struct {
-	app, topBar, topMenu, topStatus     lipgloss.Style
-	headerLogo, headerInfo              lipgloss.Style
-	headerBreadcrumb, headerSearch      lipgloss.Style
-	headerSearchHint                    lipgloss.Style
-	sidebar, sidebarTitle, columnTitle  lipgloss.Style
-	body                                lipgloss.Style
-	panel, panelFocused                 lipgloss.Style
-	tabActive, tabInactive              lipgloss.Style
-	tabsRow                             lipgloss.Style
-	breadcrumbs                         lipgloss.Style
-	statusBar, statusSeg, statusHint    lipgloss.Style
-	tableHeader, tableCell, tableActive lipgloss.Style
-	listItem, listSel, textBlock        lipgloss.Style
-	rightPaneTitle                      lipgloss.Style
-	cmdOverlay, cmdPrompt, cmdHint      lipgloss.Style
+	app, topBar, topMenu, topStatus                lipgloss.Style
+	headerLogo, headerInfo                         lipgloss.Style
+	headerBreadcrumb, headerSearch                 lipgloss.Style
+	headerSearchHint                               lipgloss.Style
+	sidebar, sidebarTitle, columnTitle             lipgloss.Style
+	body                                           lipgloss.Style
+	panel, panelFocused                            lipgloss.Style
+	tabActive, tabInactive                         lipgloss.Style
+	tabsRow                                        lipgloss.Style
+	breadcrumbs                                    lipgloss.Style
+	statusBar, statusSeg, statusHint               lipgloss.Style
+	tableHeader, tableCell, tableActive            lipgloss.Style
+	listItem, listSel, textBlock                   lipgloss.Style
+	rightPaneTitle                                 lipgloss.Style
+	cmdOverlay, cmdPrompt, cmdHint, cmdCloseButton lipgloss.Style
 }
 
 func newStyles() styles {
@@ -241,6 +241,11 @@ func newStyles() styles {
 		cmdHint: base.Copy().
 			Foreground(crushForegroundMuted).
 			Faint(true),
+		cmdCloseButton: base.Copy().
+			Bold(true).
+			Foreground(crushBackground).
+			Background(crushAccent).
+			Padding(0, 1),
 	}
 }
 

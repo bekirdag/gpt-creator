@@ -82,36 +82,8 @@ func discoverProjects(root string) ([]discoveredProject, error) {
 		return nil, nil
 	}
 
-	var projects []discoveredProject
-	seen := make(map[string]struct{})
-
-	if isProjectDir(root) {
-		projects = append(projects, buildProject(root))
-		seen[root] = struct{}{}
-	}
-
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return projects, err
-	}
-
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		path := filepath.Join(root, entry.Name())
-		if _, ok := seen[path]; ok {
-			continue
-		}
-		if isProjectDir(path) {
-			projects = append(projects, buildProject(path))
-		}
-	}
-
-	sort.Slice(projects, func(i, j int) bool {
-		return projects[i].Name < projects[j].Name
-	})
-	return projects, nil
+	project := buildProject(root)
+	return []discoveredProject{project}, nil
 }
 
 func buildProject(path string) discoveredProject {

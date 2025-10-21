@@ -24,21 +24,28 @@ var (
 )
 
 type styles struct {
-	app, topBar, topMenu, topStatus                lipgloss.Style
-	headerLogo, headerInfo                         lipgloss.Style
-	headerBreadcrumb, headerSearch                 lipgloss.Style
-	headerSearchHint                               lipgloss.Style
-	sidebar, sidebarTitle, columnTitle             lipgloss.Style
-	body                                           lipgloss.Style
-	panel, panelFocused                            lipgloss.Style
-	tabActive, tabInactive                         lipgloss.Style
-	tabsRow                                        lipgloss.Style
-	breadcrumbs                                    lipgloss.Style
-	statusBar, statusSeg, statusHint               lipgloss.Style
-	tableHeader, tableCell, tableActive            lipgloss.Style
-	listItem, listSel, textBlock                   lipgloss.Style
-	rightPaneTitle                                 lipgloss.Style
-	cmdOverlay, cmdPrompt, cmdHint, cmdCloseButton lipgloss.Style
+	app, topBar, topMenu, topStatus                    lipgloss.Style
+	headerLogo, headerInfo                             lipgloss.Style
+	headerBreadcrumb, headerSearch                     lipgloss.Style
+	headerSearchHint                                   lipgloss.Style
+	sidebar, sidebarTitle, columnTitle                 lipgloss.Style
+	body                                               lipgloss.Style
+	panel, panelFocused                                lipgloss.Style
+	tabActive, tabInactive                             lipgloss.Style
+	tabsRow                                            lipgloss.Style
+	breadcrumbs                                        lipgloss.Style
+	statusBar, statusSeg, statusHint                   lipgloss.Style
+	tableHeader, tableCell, tableActive                lipgloss.Style
+	listItem, listSel, textBlock                       lipgloss.Style
+	rightPaneTitle                                     lipgloss.Style
+	cmdOverlay, cmdPrompt, cmdHint, cmdCloseButton     lipgloss.Style
+	confirmMessage, confirmButton, confirmButtonActive lipgloss.Style
+	chatHeader                                         lipgloss.Style
+	chatUserLabel, chatAssistantLabel, chatSystemLabel lipgloss.Style
+	chatTimestamp                                      lipgloss.Style
+	chatUserBubble, chatAssistantBubble                lipgloss.Style
+	chatSystemBubble                                   lipgloss.Style
+	chatHint                                           lipgloss.Style
 }
 
 func newStyles() styles {
@@ -246,6 +253,58 @@ func newStyles() styles {
 			Foreground(crushBackground).
 			Background(crushAccent).
 			Padding(0, 1),
+		confirmMessage: base.Copy().
+			Foreground(crushForeground).
+			MarginTop(1).
+			MarginBottom(1),
+		confirmButton: base.Copy().
+			Foreground(crushForeground).
+			Background(crushSurfaceSoft).
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(crushBorder).
+			Padding(0, 3).
+			MarginRight(2),
+		confirmButtonActive: base.Copy().
+			Foreground(crushBackground).
+			Background(crushAccent).
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(crushAccent).
+			Padding(0, 3).
+			MarginRight(2).
+			Bold(true),
+		chatHeader: base.Copy().
+			Bold(true).
+			Foreground(crushPrimaryBright),
+		chatUserLabel: base.Copy().
+			Bold(true).
+			Foreground(crushPrimaryBright),
+		chatAssistantLabel: base.Copy().
+			Bold(true).
+			Foreground(crushAccent),
+		chatSystemLabel: base.Copy().
+			Bold(true).
+			Foreground(crushForegroundMuted),
+		chatTimestamp: base.Copy().
+			Foreground(crushForegroundMuted).
+			Faint(true),
+		chatUserBubble: base.Copy().
+			Foreground(crushForeground).
+			Background(crushSurfaceElevated).
+			Padding(0, 1).
+			MarginBottom(1),
+		chatAssistantBubble: base.Copy().
+			Foreground(crushForeground).
+			Background(crushSurfaceSoft).
+			Padding(0, 1).
+			MarginBottom(1),
+		chatSystemBubble: base.Copy().
+			Foreground(crushForegroundMuted).
+			Background(crushSurface).
+			Padding(0, 1).
+			MarginBottom(1),
+		chatHint: base.Copy().
+			Foreground(crushForegroundMuted).
+			Faint(true),
 	}
 }
 

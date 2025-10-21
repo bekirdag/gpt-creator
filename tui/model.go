@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/filepicker"
@@ -35,7 +36,6 @@ type focusArea int
 
 const (
 	focusWorkspace focusArea = iota
-	focusProjects
 	focusFeatures
 	focusItems
 	focusPreview
@@ -82,14 +82,12 @@ type workspaceItem struct {
 	pinned bool
 }
 
-type projectItem struct {
-	project *discoveredProject
-}
-
 type envFileItem struct {
 	index int
 	state *envFileState
 }
+
+type removeWorkspaceAction struct{}
 
 type paletteEntry struct {
 	label           string
@@ -169,10 +167,6 @@ type workspaceSelectedMsg struct {
 	item workspaceItem
 }
 
-type projectSelectedMsg struct {
-	project *discoveredProject
-}
-
 type featureSelectedMsg struct {
 	project *discoveredProject
 	feature featureDefinition
@@ -200,6 +194,8 @@ type artifactNodeToggleMsg struct {
 type artifactNodeActivatedMsg struct {
 	node artifactNode
 }
+
+type removeWorkspaceRequestedMsg struct{}
 
 type backlogLoadedMsg struct {
 	data *backlogData
@@ -266,6 +262,29 @@ type servicesLoadedMsg struct {
 	items []featureItemDefinition
 }
 
+type chatRole string
+
+const (
+	chatRoleSystem    chatRole = "system"
+	chatRoleUser      chatRole = "user"
+	chatRoleAssistant chatRole = "assistant"
+)
+
+type chatMessage struct {
+	role    chatRole
+	content string
+	time    time.Time
+	pending bool
+}
+
+const (
+	defaultChatHistoryHeight = 8
+	minChatHistoryHeight     = 4
+	chatPanelChrome          = 7
+	maxChatMessages          = 60
+	maxChatPromptMessages    = 20
+)
+
 const servicesPollInterval = 2 * time.Second
 
 type keyMap struct {
@@ -285,6 +304,7 @@ type keyMap struct {
 	toggleSplit key.Binding
 	cancelJob   key.Binding
 	toggleHelp  key.Binding
+	focusChat   key.Binding
 }
 
 func newKeyMap() keyMap {
@@ -312,6 +332,10 @@ func newKeyMap() keyMap {
 		toggleLogs: key.NewBinding(
 			key.WithKeys("f6"),
 			key.WithHelp("F6", "toggle logs"),
+		),
+		focusChat: key.NewBinding(
+			key.WithKeys("f7"),
+			key.WithHelp("F7", "focus chat"),
 		),
 		openPalette: key.NewBinding(
 			key.WithKeys(":"),
@@ -350,8 +374,8 @@ func newKeyMap() keyMap {
 			key.WithHelp("ctrl+k", "cancel job"),
 		),
 		toggleHelp: key.NewBinding(
-			key.WithKeys("?"),
-			key.WithHelp("?", "toggle help"),
+			key.WithKeys("h"),
+			key.WithHelp("h", "toggle help"),
 		),
 	}
 }
@@ -363,6 +387,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 		k.nextFeature,
 		k.prevFeature,
 		k.openPalette,
+		k.focusChat,
 		k.toggleLogs,
 		k.toggleHelp,
 		k.quit,
@@ -375,7 +400,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.openPalette, k.runPal, k.closePal},
 		{k.openEditor, k.togglePin, k.toggleSplit},
 		{k.copyPath, k.copySnippet},
-		{k.cancelJob, k.toggleLogs, k.toggleHelp, k.quit},
+		{k.cancelJob, k.focusChat, k.toggleLogs, k.toggleHelp, k.quit},
 	}
 }
 
@@ -383,12 +408,14 @@ type model struct {
 	width  int
 	height int
 
-	styles styles
-	keys   keyMap
-	help   help.Model
+	styles     styles
+	keys       keyMap
+	help       help.Model
+	helpActive bool
 
 	markdownTheme markdownTheme
 
+	workspaceStore *workspaceStore
 	workspaceRoots []workspaceRoot
 	currentRoot    *workspaceRoot
 	projects       []discoveredProject
@@ -397,7 +424,6 @@ type model struct {
 	currentItem    featureItemDefinition
 
 	workspaceCol            *selectableColumn
-	projectsCol             *selectableColumn
 	featureCol              *selectableColumn
 	itemsCol                *actionColumn
 	envTableCol             *envTableColumn
@@ -451,15 +477,31 @@ type model struct {
 	logs       viewport.Model
 	logLines   []string
 
-	inputActive     bool
-	inputMode       inputMode
-	inputPrompt     string
-	inputField      textinput.Model
-	inputArea       textarea.Model
-	textAreaEnabled bool
-	spinner         spinner.Model
-	spinnerActive   bool
-	spinnerMessage  string
+	inputActive                  bool
+	inputMode                    inputMode
+	inputPrompt                  string
+	inputField                   textinput.Model
+	inputArea                    textarea.Model
+	textAreaEnabled              bool
+	spinner                      spinner.Model
+	spinnerActive                bool
+	spinnerMessage               string
+	chatVisible                  bool
+	chatFocused                  bool
+	chatHistoryDesired           int
+	chatReservedHeight           int
+	chatViewport                 viewport.Model
+	chatInput                    textinput.Model
+	chatMessages                 []chatMessage
+	chatInFlight                 int
+	chatSequence                 int
+	codexCommand                 string
+	codexModel                   string
+	quitConfirmActive            bool
+	quitConfirmIndex             int
+	removeWorkspaceConfirmActive bool
+	removeWorkspaceConfirmIndex  int
+	pendingWorkspaceRemoval      string
 
 	filePicker           filepicker.Model
 	filePickerEnabled    bool
@@ -611,6 +653,23 @@ func initialModel() *model {
 	m.inputArea.Blur()
 	m.spinner = spinner.New(spinner.WithSpinner(spinner.Dot))
 	m.spinner.Style = m.styles.statusHint.Copy().Bold(true)
+	m.codexCommand = resolveCodexCommand()
+	m.codexModel = resolveCodexModel()
+	m.chatVisible = true
+	m.chatHistoryDesired = defaultChatHistoryHeight
+	m.chatViewport = viewport.New(0, defaultChatHistoryHeight)
+	m.chatInput = textinput.New()
+	m.chatInput.CharLimit = 4096
+	m.chatInput.Placeholder = "Ask Codex to help with your project…"
+	m.chatInput.Prompt = "> "
+	m.chatInput.Width = 48
+	m.chatMessages = []chatMessage{
+		{
+			role:    chatRoleSystem,
+			content: "Press F7 to focus the chat input. Enter sends your request to Codex.",
+			time:    time.Now(),
+		},
+	}
 	m.palettePaginator = paginator.New()
 	m.palettePaginator.Type = paginator.Dots
 	m.palettePaginator.PerPage = 6
@@ -627,6 +686,14 @@ func initialModel() *model {
 	m.artifactExplorers = make(map[string]*artifactExplorer)
 	m.backlogFilterType = backlogTypeFilterAll
 	m.backlogStatusFilter = backlogStatusFilterAll
+	store, err := openWorkspaceStore()
+	if err != nil {
+		m.appendLog(fmt.Sprintf("Workspace store unavailable: %v", err))
+	} else {
+		m.workspaceStore = store
+	}
+
+	customRootSet := make(map[string]struct{})
 	customRoots := []string{}
 	if cfg, cfgPath := loadUIConfig(); cfg != nil {
 		for _, path := range cfg.Pinned {
@@ -646,17 +713,36 @@ func initialModel() *model {
 			m.settingsConcurrency = cfg.Concurrency
 		}
 		m.settingsDockerPath = strings.TrimSpace(cfg.DockerPath)
-		rootSeen := make(map[string]struct{})
 		for _, path := range cfg.WorkspaceRoots {
 			clean := filepath.Clean(strings.TrimSpace(path))
 			if clean == "" {
 				continue
 			}
-			if _, ok := rootSeen[clean]; ok {
-				continue
+			if _, ok := customRootSet[clean]; !ok {
+				customRootSet[clean] = struct{}{}
+				customRoots = append(customRoots, clean)
 			}
-			rootSeen[clean] = struct{}{}
-			customRoots = append(customRoots, clean)
+			if m.workspaceStore != nil {
+				if err := m.workspaceStore.Add(clean); err != nil {
+					m.appendLog(fmt.Sprintf("Failed to sync workspace root: %v", err))
+				}
+			}
+		}
+	}
+	if m.workspaceStore != nil {
+		if stored, err := m.workspaceStore.List(); err != nil {
+			m.appendLog(fmt.Sprintf("Failed to load workspace database: %v", err))
+		} else {
+			for _, root := range stored {
+				clean := filepath.Clean(root.Path)
+				if clean == "" {
+					continue
+				}
+				if _, ok := customRootSet[clean]; !ok {
+					customRootSet[clean] = struct{}{}
+					customRoots = append(customRoots, clean)
+				}
+			}
 		}
 	}
 	if m.settingsConcurrency < 1 {
@@ -705,14 +791,7 @@ func initialModel() *model {
 	})
 	m.workspaceCol.ApplyStyles(m.styles)
 
-	m.projectsCol = newSelectableColumn("Projects", nil, 26, func(entry listEntry) tea.Cmd {
-		if payload, ok := entry.payload.(projectItem); ok && payload.project != nil {
-			return func() tea.Msg { return projectSelectedMsg{project: payload.project} }
-		}
-		return nil
-	})
-
-	m.featureCol = newSelectableColumn("Feature", nil, 26, func(entry listEntry) tea.Cmd {
+	m.featureCol = newSelectableColumn("Feature", nil, 22, func(entry listEntry) tea.Cmd {
 		switch payload := entry.payload.(type) {
 		case featureDefinition:
 			return func() tea.Msg {
@@ -722,11 +801,12 @@ func initialModel() *model {
 			return func() tea.Msg {
 				return envFileSelectedMsg{index: payload.index, activate: true}
 			}
+		case removeWorkspaceAction:
+			return func() tea.Msg { return removeWorkspaceRequestedMsg{} }
 		default:
 			return nil
 		}
 	})
-	m.projectsCol.ApplyStyles(m.styles)
 	m.featureCol.ApplyStyles(m.styles)
 	m.featureSelectDefault = m.featureCol.onSelect
 	m.featureHighlightDefault = nil
@@ -841,7 +921,6 @@ func initialModel() *model {
 
 	m.columns = []column{
 		m.workspaceCol,
-		m.projectsCol,
 		m.featureCol,
 		m.itemsCol,
 		m.previewCol,
@@ -868,9 +947,13 @@ func initialModel() *model {
 		m.currentRoot = &m.workspaceRoots[0]
 		m.focus = int(focusWorkspace)
 		m.refreshProjectsForCurrentRoot()
+		if project := m.projectByPath(m.currentRoot.Path); project != nil {
+			m.handleProjectSelected(project)
+		}
 	}
 
 	m.refreshCommandCatalog()
+	m.refreshChatView()
 
 	return m
 }
@@ -918,6 +1001,64 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	if m.removeWorkspaceConfirmActive {
+		switch message := msg.(type) {
+		case tea.KeyMsg:
+			switch message.String() {
+			case "tab", "right", "l", "shift+tab", "left", "h":
+				m.removeWorkspaceConfirmIndex = 1 - m.removeWorkspaceConfirmIndex
+				return m, tea.Batch(cmds...)
+			case "enter":
+				selectedRemove := m.removeWorkspaceConfirmIndex == 1
+				path := m.pendingWorkspaceRemoval
+				m.closeRemoveWorkspaceConfirm()
+				if selectedRemove && path != "" {
+					if cmd := m.removeWorkspacePath(path); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
+				}
+				return m, tea.Batch(cmds...)
+			case "esc":
+				m.closeRemoveWorkspaceConfirm()
+				return m, tea.Batch(cmds...)
+			}
+		case tea.MouseMsg:
+			return m, tea.Batch(cmds...)
+		default:
+			return m, tea.Batch(cmds...)
+		}
+	}
+
+	if m.quitConfirmActive {
+		switch message := msg.(type) {
+		case tea.KeyMsg:
+			switch message.String() {
+			case "tab", "right", "l", "shift+tab", "left", "h":
+				m.quitConfirmIndex = 1 - m.quitConfirmIndex
+				return m, tea.Batch(cmds...)
+			case "enter":
+				if m.quitConfirmIndex == 1 {
+					m.closeQuitConfirm()
+					cmds = append(cmds, tea.Quit)
+					return m, tea.Batch(cmds...)
+				}
+				m.closeQuitConfirm()
+				return m, tea.Batch(cmds...)
+			case "esc":
+				m.closeQuitConfirm()
+				return m, tea.Batch(cmds...)
+			case "q", "ctrl+c":
+				m.closeQuitConfirm()
+				cmds = append(cmds, tea.Quit)
+				return m, tea.Batch(cmds...)
+			}
+		case tea.MouseMsg:
+			return m, tea.Batch(cmds...)
+		default:
+			return m, tea.Batch(cmds...)
+		}
+	}
+
 	if tickMsg, ok := msg.(timer.TickMsg); ok && m.servicesTimerActive {
 		var cmd tea.Cmd
 		m.servicesTimer, cmd = m.servicesTimer.Update(tickMsg)
@@ -944,6 +1085,54 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, cmd)
 			}
 		}
+	}
+
+	if (m.chatFocused || m.chatInput.Focused()) && !m.inputActive {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			switch keyMsg.String() {
+			case "esc", "ctrl+[":
+				m.blurChatInput()
+				return m, tea.Batch(cmds...)
+			case "tab", "right":
+				m.moveFocus(1)
+				return m, tea.Batch(cmds...)
+			case "shift+tab", "left":
+				m.moveFocus(-1)
+				return m, tea.Batch(cmds...)
+			case "up":
+				if len(m.columns) > 0 {
+					m.applyFocus(len(m.columns) - 1)
+				} else {
+					m.applyFocus(0)
+				}
+				return m, tea.Batch(cmds...)
+			case "ctrl+c":
+				return m, tea.Quit
+			case "enter":
+				if cmd := m.submitChatMessage(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+				return m, tea.Batch(cmds...)
+			}
+			var cmd tea.Cmd
+			m.chatInput, cmd = m.chatInput.Update(keyMsg)
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			if m.chatInput.Focused() {
+				m.chatFocused = true
+			}
+			return m, tea.Batch(cmds...)
+		}
+		var cmd tea.Cmd
+		m.chatInput, cmd = m.chatInput.Update(msg)
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		if m.chatInput.Focused() {
+			m.chatFocused = true
+		}
+		return m, tea.Batch(cmds...)
 	}
 
 	if m.inputActive {
@@ -1071,6 +1260,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 
+	if m.helpActive {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			switch keyMsg.String() {
+			case "esc", "h", "H":
+				m.closeHelpOverlay()
+				return m, tea.Batch(cmds...)
+			default:
+				return m, tea.Batch(cmds...)
+			}
+		}
+		return m, tea.Batch(cmds...)
+	}
+
 	switch message := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = message.Width, message.Height
@@ -1078,6 +1280,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if (m.chatFocused || m.chatInput.Focused()) && !m.inputActive {
+			break
+		}
+		if m.shouldSuppressGlobalShortcut(message) {
+			break
+		}
 		if handled, cmd := m.handleGlobalKey(message); handled {
 			if cmd != nil {
 				cmds = append(cmds, cmd)
@@ -1129,10 +1337,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := m.handleWorkspaceSelected(message.item); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-	case projectSelectedMsg:
-		if cmd := m.handleProjectSelected(message.project); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
+	case removeWorkspaceRequestedMsg:
+		m.promptRemoveWorkspaceConfirm()
 	case featureSelectedMsg:
 		if cmd := m.handleFeatureSelected(message.feature); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -1214,9 +1420,6 @@ func (m *model) View() string {
 		builder.WriteRune('\n')
 	}
 
-	helpWidth := max(0, m.width-2)
-	m.help.Width = helpWidth
-
 	title := "Start by selecting a workspace"
 	if m.currentRoot != nil {
 		title += " • " + abbreviatePath(m.currentRoot.Path)
@@ -1242,11 +1445,9 @@ func (m *model) View() string {
 		builder.WriteRune('\n')
 	}
 
-	if helpView := m.help.View(m.keys); helpView != "" {
-		builder.WriteString(helpView)
-		if !strings.HasSuffix(helpView, "\n") {
-			builder.WriteRune('\n')
-		}
+	if chat := m.renderChat(); chat != "" {
+		builder.WriteString(chat)
+		builder.WriteRune('\n')
 	}
 
 	status := m.renderStatus()
@@ -1393,6 +1594,496 @@ func (m *model) View() string {
 			contentBuilder.WriteRune('\n')
 			contentBuilder.WriteString(m.styles.cmdHint.Render(strings.Join(hintParts, " • ")))
 		}
+		overlayContent := strings.TrimRight(contentBuilder.String(), "\n")
+		overlayRendered := overlayStyle.Render(overlayContent)
+		m.overlayWidth = overlayWidth
+
+		frameWidth := overlayStyle.GetHorizontalFrameSize()
+		paddingLeft := overlayStyle.GetPaddingLeft()
+		paddingRight := overlayStyle.GetPaddingRight()
+		marginLeft := overlayStyle.GetMarginLeft()
+		marginRight := overlayStyle.GetMarginRight()
+		borderStyle := overlayStyle.GetBorderStyle()
+
+		borderLeftWidth := 0
+		if overlayStyle.GetBorderLeft() {
+			borderLeftWidth = lipgloss.Width(borderStyle.Left)
+		}
+		borderRightWidth := 0
+		if overlayStyle.GetBorderRight() {
+			borderRightWidth = lipgloss.Width(borderStyle.Right)
+		}
+
+		leftFrame := borderLeftWidth + paddingLeft + marginLeft
+		rightFrame := borderRightWidth + paddingRight + marginRight
+		if total := leftFrame + rightFrame; total > frameWidth {
+			overflow := total - frameWidth
+			if overflow > 0 {
+				reduce := min(overflow, rightFrame)
+				rightFrame -= reduce
+				overflow -= reduce
+			}
+			if overflow > 0 {
+				reduce := min(overflow, leftFrame)
+				leftFrame -= reduce
+				overflow -= reduce
+			}
+		}
+		if extra := frameWidth - (leftFrame + rightFrame); extra > 0 {
+			leftAdjust := extra / 2
+			rightAdjust := extra - leftAdjust
+			leftFrame += leftAdjust
+			rightFrame += rightAdjust
+		}
+
+		frameHeight := overlayStyle.GetVerticalFrameSize()
+		paddingTop := overlayStyle.GetPaddingTop()
+		paddingBottom := overlayStyle.GetPaddingBottom()
+		marginTop := overlayStyle.GetMarginTop()
+		marginBottom := overlayStyle.GetMarginBottom()
+
+		borderTopHeight := 0
+		if overlayStyle.GetBorderTop() {
+			borderTopHeight = 1
+		}
+		borderBottomHeight := 0
+		if overlayStyle.GetBorderBottom() {
+			borderBottomHeight = 1
+		}
+
+		topFrame := borderTopHeight + paddingTop + marginTop
+		bottomFrame := borderBottomHeight + paddingBottom + marginBottom
+		if total := topFrame + bottomFrame; total > frameHeight {
+			overflow := total - frameHeight
+			if overflow > 0 {
+				reduce := min(overflow, bottomFrame)
+				bottomFrame -= reduce
+				overflow -= reduce
+			}
+			if overflow > 0 {
+				reduce := min(overflow, topFrame)
+				topFrame -= reduce
+				overflow -= reduce
+			}
+		}
+		if extra := frameHeight - (topFrame + bottomFrame); extra > 0 {
+			topAdjust := extra / 2
+			bottomAdjust := extra - topAdjust
+			topFrame += topAdjust
+			bottomFrame += bottomAdjust
+		}
+
+		m.overlayContentOffsetX = leftFrame
+		m.overlayContentOffsetY = topFrame
+		m.overlayContentRight = rightFrame
+		overlay = overlayRendered
+		m.overlayHeight = lipgloss.Height(overlayRendered)
+	} else if m.helpActive {
+		overlayWidth := min(64, m.width-4)
+		if overlayWidth < 24 {
+			overlayWidth = 24
+		}
+		maxOverlayWidth := max(1, m.width-2)
+		if overlayWidth > maxOverlayWidth {
+			overlayWidth = maxOverlayWidth
+		}
+		if overlayWidth < 1 {
+			overlayWidth = 1
+		}
+
+		overlayStyleBase := m.styles.cmdOverlay.Copy()
+		headerLine := m.styles.cmdPrompt.Render("Keyboard Shortcuts")
+		closeLabel := m.styles.cmdCloseButton.Render("X")
+		closeWidth := lipgloss.Width(closeLabel)
+		if closeWidth < 1 {
+			closeWidth = 1
+		}
+
+		required := closeWidth + 1
+		overlayStyle := overlayStyleBase.Width(overlayWidth)
+		contentLeft := overlayStyle.GetBorderLeftSize() + overlayStyle.GetPaddingLeft()
+		contentRight := overlayStyle.GetBorderRightSize() + overlayStyle.GetPaddingRight()
+		innerWidth := overlayWidth - (contentLeft + contentRight)
+		if innerWidth < required {
+			innerWidth = required
+		}
+		if overlayWidth < innerWidth+contentLeft+contentRight {
+			overlayWidth = innerWidth + contentLeft + contentRight
+			if overlayWidth > maxOverlayWidth {
+				overlayWidth = maxOverlayWidth
+			}
+			overlayStyle = overlayStyleBase.Width(overlayWidth)
+			contentLeft = overlayStyle.GetBorderLeftSize() + overlayStyle.GetPaddingLeft()
+			contentRight = overlayStyle.GetBorderRightSize() + overlayStyle.GetPaddingRight()
+			innerWidth = overlayWidth - (contentLeft + contentRight)
+			if innerWidth < required {
+				innerWidth = required
+			}
+		}
+		if innerWidth < closeWidth {
+			innerWidth = closeWidth
+		}
+
+		headerAvailable := innerWidth - closeWidth
+		if headerAvailable < 0 {
+			headerAvailable = 0
+		}
+		headerSegment := lipgloss.NewStyle().
+			Width(headerAvailable).
+			MaxWidth(headerAvailable).
+			Render(headerLine)
+
+		var contentBuilder strings.Builder
+		contentBuilder.WriteString(headerSegment)
+		contentBuilder.WriteString(closeLabel)
+		m.overlayCloseActive = true
+		m.overlayCloseLocalX = headerAvailable
+		m.overlayCloseLocalY = 0
+		m.overlayCloseWidth = closeWidth
+		m.overlayCloseLabel = closeLabel
+
+		contentBuilder.WriteRune('\n')
+		m.help.Width = innerWidth
+		helpView := strings.TrimRight(m.help.View(m.keys), "\n")
+		if helpView == "" {
+			helpView = m.styles.cmdHint.Render("No shortcuts available.")
+		}
+		contentBuilder.WriteString(helpView)
+
+		overlayContent := strings.TrimRight(contentBuilder.String(), "\n")
+		overlayRendered := overlayStyle.Render(overlayContent)
+		m.overlayWidth = overlayWidth
+
+		frameWidth := overlayStyle.GetHorizontalFrameSize()
+		paddingLeft := overlayStyle.GetPaddingLeft()
+		paddingRight := overlayStyle.GetPaddingRight()
+		marginLeft := overlayStyle.GetMarginLeft()
+		marginRight := overlayStyle.GetMarginRight()
+		borderStyle := overlayStyle.GetBorderStyle()
+
+		borderLeftWidth := 0
+		if overlayStyle.GetBorderLeft() {
+			borderLeftWidth = lipgloss.Width(borderStyle.Left)
+		}
+		borderRightWidth := 0
+		if overlayStyle.GetBorderRight() {
+			borderRightWidth = lipgloss.Width(borderStyle.Right)
+		}
+
+		leftFrame := borderLeftWidth + paddingLeft + marginLeft
+		rightFrame := borderRightWidth + paddingRight + marginRight
+		if total := leftFrame + rightFrame; total > frameWidth {
+			overflow := total - frameWidth
+			if overflow > 0 {
+				reduce := min(overflow, rightFrame)
+				rightFrame -= reduce
+				overflow -= reduce
+			}
+			if overflow > 0 {
+				reduce := min(overflow, leftFrame)
+				leftFrame -= reduce
+				overflow -= reduce
+			}
+		}
+		if extra := frameWidth - (leftFrame + rightFrame); extra > 0 {
+			leftAdjust := extra / 2
+			rightAdjust := extra - leftAdjust
+			leftFrame += leftAdjust
+			rightFrame += rightAdjust
+		}
+
+		frameHeight := overlayStyle.GetVerticalFrameSize()
+		paddingTop := overlayStyle.GetPaddingTop()
+		paddingBottom := overlayStyle.GetPaddingBottom()
+		marginTop := overlayStyle.GetMarginTop()
+		marginBottom := overlayStyle.GetMarginBottom()
+
+		borderTopHeight := 0
+		if overlayStyle.GetBorderTop() {
+			borderTopHeight = 1
+		}
+		borderBottomHeight := 0
+		if overlayStyle.GetBorderBottom() {
+			borderBottomHeight = 1
+		}
+
+		topFrame := borderTopHeight + paddingTop + marginTop
+		bottomFrame := borderBottomHeight + paddingBottom + marginBottom
+		if total := topFrame + bottomFrame; total > frameHeight {
+			overflow := total - frameHeight
+			if overflow > 0 {
+				reduce := min(overflow, bottomFrame)
+				bottomFrame -= reduce
+				overflow -= reduce
+			}
+			if overflow > 0 {
+				reduce := min(overflow, topFrame)
+				topFrame -= reduce
+				overflow -= reduce
+			}
+		}
+		if extra := frameHeight - (topFrame + bottomFrame); extra > 0 {
+			topAdjust := extra / 2
+			bottomAdjust := extra - topAdjust
+			topFrame += topAdjust
+			bottomFrame += bottomAdjust
+		}
+
+		m.overlayContentOffsetX = leftFrame
+		m.overlayContentOffsetY = topFrame
+		m.overlayContentRight = rightFrame
+		overlay = overlayRendered
+		m.overlayHeight = lipgloss.Height(overlayRendered)
+	} else if m.removeWorkspaceConfirmActive {
+		overlayWidth := min(48, m.width-4)
+		if overlayWidth < 28 {
+			overlayWidth = 28
+		}
+		maxOverlayWidth := max(1, m.width-2)
+		if overlayWidth > maxOverlayWidth {
+			overlayWidth = maxOverlayWidth
+		}
+		if overlayWidth < 1 {
+			overlayWidth = 1
+		}
+
+		overlayStyleBase := m.styles.cmdOverlay.Copy()
+		headerLine := m.styles.cmdPrompt.Render("Remove Workspace")
+		closeLabel := m.styles.cmdCloseButton.Render("X")
+		closeWidth := lipgloss.Width(closeLabel)
+		if closeWidth < 1 {
+			closeWidth = 1
+		}
+
+		required := closeWidth + 1
+		overlayStyle := overlayStyleBase.Width(overlayWidth)
+		contentLeft := overlayStyle.GetBorderLeftSize() + overlayStyle.GetPaddingLeft()
+		contentRight := overlayStyle.GetBorderRightSize() + overlayStyle.GetPaddingRight()
+		innerWidth := overlayWidth - (contentLeft + contentRight)
+		if innerWidth < required {
+			innerWidth = required
+		}
+		if overlayWidth < innerWidth+contentLeft+contentRight {
+			overlayWidth = innerWidth + contentLeft + contentRight
+			if overlayWidth > maxOverlayWidth {
+				overlayWidth = maxOverlayWidth
+			}
+			overlayStyle = overlayStyleBase.Width(overlayWidth)
+			contentLeft = overlayStyle.GetBorderLeftSize() + overlayStyle.GetPaddingLeft()
+			contentRight = overlayStyle.GetBorderRightSize() + overlayStyle.GetPaddingRight()
+			innerWidth = overlayWidth - (contentLeft + contentRight)
+			if innerWidth < required {
+				innerWidth = required
+			}
+		}
+		if innerWidth < closeWidth {
+			innerWidth = closeWidth
+		}
+
+		headerAvailable := innerWidth - closeWidth
+		if headerAvailable < 0 {
+			headerAvailable = 0
+		}
+		headerSegment := lipgloss.NewStyle().
+			Width(headerAvailable).
+			MaxWidth(headerAvailable).
+			Render(headerLine)
+
+		var contentBuilder strings.Builder
+		contentBuilder.WriteString(headerSegment)
+		contentBuilder.WriteString(closeLabel)
+		m.overlayCloseActive = true
+		m.overlayCloseLocalX = headerAvailable
+		m.overlayCloseLocalY = 0
+		m.overlayCloseWidth = closeWidth
+		m.overlayCloseLabel = closeLabel
+
+		contentBuilder.WriteRune('\n')
+		pathLabel := abbreviatePath(m.pendingWorkspaceRemoval)
+		if pathLabel == "" {
+			pathLabel = "the selected workspace"
+		}
+		contentBuilder.WriteString(m.styles.confirmMessage.Render(fmt.Sprintf("Remove %s?", pathLabel)))
+		contentBuilder.WriteString("\n\n")
+		cancel := m.styles.confirmButton.Render("Cancel")
+		if m.removeWorkspaceConfirmIndex == 0 {
+			cancel = m.styles.confirmButtonActive.Render("Cancel")
+		}
+		remove := m.styles.confirmButton.Render("Remove")
+		if m.removeWorkspaceConfirmIndex == 1 {
+			remove = m.styles.confirmButtonActive.Render("Remove")
+		}
+		buttons := lipgloss.JoinHorizontal(lipgloss.Left, cancel, "  ", remove)
+		contentBuilder.WriteString(buttons)
+		contentBuilder.WriteRune('\n')
+		hint := m.styles.cmdHint.Render("←/→ choose • enter confirm • esc cancel")
+		contentBuilder.WriteString(hint)
+
+		overlayContent := strings.TrimRight(contentBuilder.String(), "\n")
+		overlayRendered := overlayStyle.Render(overlayContent)
+		m.overlayWidth = overlayWidth
+
+		frameWidth := overlayStyle.GetHorizontalFrameSize()
+		paddingLeft := overlayStyle.GetPaddingLeft()
+		paddingRight := overlayStyle.GetPaddingRight()
+		marginLeft := overlayStyle.GetMarginLeft()
+		marginRight := overlayStyle.GetMarginRight()
+		borderStyle := overlayStyle.GetBorderStyle()
+
+		borderLeftWidth := 0
+		if overlayStyle.GetBorderLeft() {
+			borderLeftWidth = lipgloss.Width(borderStyle.Left)
+		}
+		borderRightWidth := 0
+		if overlayStyle.GetBorderRight() {
+			borderRightWidth = lipgloss.Width(borderStyle.Right)
+		}
+
+		leftFrame := borderLeftWidth + paddingLeft + marginLeft
+		rightFrame := borderRightWidth + paddingRight + marginRight
+		if total := leftFrame + rightFrame; total > frameWidth {
+			overflow := total - frameWidth
+			if overflow > 0 {
+				reduce := min(overflow, rightFrame)
+				rightFrame -= reduce
+				overflow -= reduce
+			}
+			if overflow > 0 {
+				reduce := min(overflow, leftFrame)
+				leftFrame -= reduce
+				overflow -= reduce
+			}
+		}
+		if extra := frameWidth - (leftFrame + rightFrame); extra > 0 {
+			leftAdjust := extra / 2
+			rightAdjust := extra - leftAdjust
+			leftFrame += leftAdjust
+			rightFrame += rightAdjust
+		}
+
+		frameHeight := overlayStyle.GetVerticalFrameSize()
+		paddingTop := overlayStyle.GetPaddingTop()
+		paddingBottom := overlayStyle.GetPaddingBottom()
+		marginTop := overlayStyle.GetMarginTop()
+		marginBottom := overlayStyle.GetMarginBottom()
+
+		borderTopHeight := 0
+		if overlayStyle.GetBorderTop() {
+			borderTopHeight = 1
+		}
+		borderBottomHeight := 0
+		if overlayStyle.GetBorderBottom() {
+			borderBottomHeight = 1
+		}
+
+		topFrame := borderTopHeight + paddingTop + marginTop
+		bottomFrame := borderBottomHeight + paddingBottom + marginBottom
+		if total := topFrame + bottomFrame; total > frameHeight {
+			overflow := total - frameHeight
+			if overflow > 0 {
+				reduce := min(overflow, bottomFrame)
+				bottomFrame -= reduce
+				overflow -= reduce
+			}
+			if overflow > 0 {
+				reduce := min(overflow, topFrame)
+				topFrame -= reduce
+				overflow -= reduce
+			}
+		}
+		if extra := frameHeight - (topFrame + bottomFrame); extra > 0 {
+			topAdjust := extra / 2
+			bottomAdjust := extra - topAdjust
+			topFrame += topAdjust
+			bottomFrame += bottomAdjust
+		}
+
+		m.overlayContentOffsetX = leftFrame
+		m.overlayContentOffsetY = topFrame
+		m.overlayContentRight = rightFrame
+		overlay = overlayRendered
+		m.overlayHeight = lipgloss.Height(overlayRendered)
+	} else if m.quitConfirmActive {
+		overlayWidth := min(48, m.width-4)
+		if overlayWidth < 28 {
+			overlayWidth = 28
+		}
+		maxOverlayWidth := max(1, m.width-2)
+		if overlayWidth > maxOverlayWidth {
+			overlayWidth = maxOverlayWidth
+		}
+		if overlayWidth < 1 {
+			overlayWidth = 1
+		}
+
+		overlayStyleBase := m.styles.cmdOverlay.Copy()
+		headerLine := m.styles.cmdPrompt.Render("Confirm Exit")
+		closeLabel := m.styles.cmdCloseButton.Render("X")
+		closeWidth := lipgloss.Width(closeLabel)
+		if closeWidth < 1 {
+			closeWidth = 1
+		}
+
+		required := closeWidth + 1
+		overlayStyle := overlayStyleBase.Width(overlayWidth)
+		contentLeft := overlayStyle.GetBorderLeftSize() + overlayStyle.GetPaddingLeft()
+		contentRight := overlayStyle.GetBorderRightSize() + overlayStyle.GetPaddingRight()
+		innerWidth := overlayWidth - (contentLeft + contentRight)
+		if innerWidth < required {
+			innerWidth = required
+		}
+		if overlayWidth < innerWidth+contentLeft+contentRight {
+			overlayWidth = innerWidth + contentLeft + contentRight
+			if overlayWidth > maxOverlayWidth {
+				overlayWidth = maxOverlayWidth
+			}
+			overlayStyle = overlayStyleBase.Width(overlayWidth)
+			contentLeft = overlayStyle.GetBorderLeftSize() + overlayStyle.GetPaddingLeft()
+			contentRight = overlayStyle.GetBorderRightSize() + overlayStyle.GetPaddingRight()
+			innerWidth = overlayWidth - (contentLeft + contentRight)
+			if innerWidth < required {
+				innerWidth = required
+			}
+		}
+		if innerWidth < closeWidth {
+			innerWidth = closeWidth
+		}
+
+		headerAvailable := innerWidth - closeWidth
+		if headerAvailable < 0 {
+			headerAvailable = 0
+		}
+		headerSegment := lipgloss.NewStyle().
+			Width(headerAvailable).
+			MaxWidth(headerAvailable).
+			Render(headerLine)
+
+		var contentBuilder strings.Builder
+		contentBuilder.WriteString(headerSegment)
+		contentBuilder.WriteString(closeLabel)
+		m.overlayCloseActive = true
+		m.overlayCloseLocalX = headerAvailable
+		m.overlayCloseLocalY = 0
+		m.overlayCloseWidth = closeWidth
+		m.overlayCloseLabel = closeLabel
+
+		contentBuilder.WriteRune('\n')
+		contentBuilder.WriteString(m.styles.confirmMessage.Render("Quit gpt-creator?"))
+		contentBuilder.WriteString("\n\n")
+		cancel := m.styles.confirmButton.Render("Cancel")
+		if m.quitConfirmIndex == 0 {
+			cancel = m.styles.confirmButtonActive.Render("Cancel")
+		}
+		confirm := m.styles.confirmButton.Render("Quit")
+		if m.quitConfirmIndex == 1 {
+			confirm = m.styles.confirmButtonActive.Render("Quit")
+		}
+		buttons := lipgloss.JoinHorizontal(lipgloss.Left, cancel, "  ", confirm)
+		contentBuilder.WriteString(buttons)
+		contentBuilder.WriteRune('\n')
+		hint := m.styles.cmdHint.Render("←/→ choose • enter confirm • esc cancel • q quit")
+		contentBuilder.WriteString(hint)
+
 		overlayContent := strings.TrimRight(contentBuilder.String(), "\n")
 		overlayRendered := overlayStyle.Render(overlayContent)
 		m.overlayWidth = overlayWidth
@@ -1640,22 +2331,24 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		}
 	}
 	if m.currentFeature == "services" {
-		switch focusArea(m.focus) {
-		case focusItems, focusPreview:
-			switch msg.String() {
-			case "u":
-				return true, m.runServiceCommand("run-up")
-			case "d":
-				return true, m.runServiceCommand("run-down")
-			case "l":
-				return true, m.runServiceCommand("run-logs")
-			case "o", "O":
-				m.openSelectedServiceEndpoint(-1)
-				return true, nil
-			default:
-				if idx := parseServiceEndpointIndex(msg.String()); idx >= 0 {
-					m.openSelectedServiceEndpoint(idx)
+		if area, ok := m.focusedArea(); ok {
+			switch area {
+			case focusItems, focusPreview:
+				switch msg.String() {
+				case "u":
+					return true, m.runServiceCommand("run-up")
+				case "d":
+					return true, m.runServiceCommand("run-down")
+				case "l":
+					return true, m.runServiceCommand("run-logs")
+				case "o", "O":
+					m.openSelectedServiceEndpoint(-1)
 					return true, nil
+				default:
+					if idx := parseServiceEndpointIndex(msg.String()); idx >= 0 {
+						m.openSelectedServiceEndpoint(idx)
+						return true, nil
+					}
 				}
 			}
 		}
@@ -1712,12 +2405,17 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 			return true, nil
 		}
 	case key.Matches(msg, m.keys.quit):
-		return true, tea.Quit
+		if m.quitConfirmActive {
+			m.closeQuitConfirm()
+			return true, tea.Quit
+		}
+		m.openQuitConfirm()
+		return true, nil
 	case key.Matches(msg, m.keys.nextFocus):
-		m.focus = (m.focus + 1) % len(m.columns)
+		m.moveFocus(1)
 		return true, nil
 	case key.Matches(msg, m.keys.prevFocus):
-		m.focus = (m.focus - 1 + len(m.columns)) % len(m.columns)
+		m.moveFocus(-1)
 		return true, nil
 	case key.Matches(msg, m.keys.nextFeature):
 		if cmd := m.cycleFeature(1); cmd != nil {
@@ -1733,12 +2431,18 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.showLogs = !m.showLogs
 		m.applyLayout()
 		return true, nil
+	case key.Matches(msg, m.keys.focusChat):
+		m.focusChatInput()
+		return true, nil
 	case key.Matches(msg, m.keys.cancelJob):
 		cmd := m.cancelActiveJob()
 		return true, cmd
 	case key.Matches(msg, m.keys.toggleHelp):
-		m.help.ShowAll = !m.help.ShowAll
-		m.applyLayout()
+		if m.helpActive {
+			m.closeHelpOverlay()
+		} else {
+			m.openHelpOverlay()
+		}
 		return true, nil
 	case key.Matches(msg, m.keys.openPalette):
 		if !m.inputActive {
@@ -1747,24 +2451,26 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.openEditor):
-		switch focusArea(m.focus) {
-		case focusProjects:
-			m.openProjectInEditor()
-		case focusItems, focusPreview:
-			switch m.currentFeature {
-			case "docs":
-				m.openCurrentDocInEditor()
-			case "generate":
-				m.openCurrentGenerateFileInEditor()
-			case "database":
-				m.openDatabaseDumpInEditor("schema")
-			case "artifacts":
-				m.openCurrentArtifactInEditor()
+		if area, ok := m.focusedArea(); ok {
+			switch area {
+			case focusWorkspace:
+				m.openProjectInEditor()
+			case focusItems, focusPreview:
+				switch m.currentFeature {
+				case "docs":
+					m.openCurrentDocInEditor()
+				case "generate":
+					m.openCurrentGenerateFileInEditor()
+				case "database":
+					m.openDatabaseDumpInEditor("schema")
+				case "artifacts":
+					m.openCurrentArtifactInEditor()
+				}
 			}
 		}
 		return true, nil
 	case key.Matches(msg, m.keys.togglePin):
-		if focusArea(m.focus) == focusWorkspace {
+		if area, ok := m.focusedArea(); ok && area == focusWorkspace {
 			m.toggleSelectedWorkspacePin()
 		}
 		return true, nil
@@ -1798,35 +2504,37 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 
 	switch msg.String() {
 	case "O":
-		if (focusArea(m.focus) == focusPreview || focusArea(m.focus) == focusItems) && m.currentFeature == "database" {
+		if area, ok := m.focusedArea(); ok && (area == focusPreview || area == focusItems) && m.currentFeature == "database" {
 			m.openDatabaseDumpInEditor("seed")
 			return true, nil
 		}
 	case "/":
-		if col, ok := m.columns[m.focus].(*selectableColumn); ok {
-			fields := map[string]string{
-				"column": strings.ToLower(strings.TrimSpace(col.Title())),
+		if colAny, ok := m.focusedColumn(); ok {
+			if col, ok := colAny.(*selectableColumn); ok {
+				fields := map[string]string{
+					"column": strings.ToLower(strings.TrimSpace(col.Title())),
+				}
+				if area, ok := m.focusedArea(); ok {
+					switch area {
+					case focusWorkspace:
+						fields["focus"] = "workspace"
+					case focusFeatures:
+						fields["focus"] = "feature"
+					case focusItems:
+						fields["focus"] = "items"
+					case focusPreview:
+						fields["focus"] = "preview"
+					}
+				}
+				if m.currentProject != nil {
+					fields["path"] = filepath.Clean(m.currentProject.Path)
+				}
+				m.emitTelemetry("search_used", fields)
 			}
-			switch focusArea(m.focus) {
-			case focusWorkspace:
-				fields["focus"] = "workspace"
-			case focusProjects:
-				fields["focus"] = "projects"
-			case focusFeatures:
-				fields["focus"] = "feature"
-			case focusItems:
-				fields["focus"] = "items"
-			case focusPreview:
-				fields["focus"] = "preview"
-			}
-			if m.currentProject != nil {
-				fields["path"] = filepath.Clean(m.currentProject.Path)
-			}
-			m.emitTelemetry("search_used", fields)
 		}
 		return false, nil
 	case "enter":
-		if focusArea(m.focus) == focusPreview {
+		if area, ok := m.focusedArea(); ok && area == focusPreview {
 			if len(m.currentItem.Command) > 0 {
 				return true, m.runCurrentItemCommand()
 			}
@@ -1843,14 +2551,31 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		}
 		return false, nil
 	case "h", "left":
-		if m.focus > 0 {
-			m.focus--
-		}
+		m.moveFocus(-1)
 		return true, nil
 	case "l", "right":
-		if m.focus < len(m.columns)-1 {
-			m.focus++
+		m.moveFocus(1)
+		return true, nil
+	case "down":
+		if m.chatVisible {
+			if m.focus == len(m.columns) {
+				return true, nil
+			}
+			if m.activeColumnCanMoveDown() {
+				return false, nil
+			}
+			m.applyFocus(len(m.columns))
+			return true, nil
 		}
+		return false, nil
+	case "up":
+		if m.chatVisible && m.focus == len(m.columns) {
+			m.applyFocus(len(m.columns) - 1)
+			return true, nil
+		}
+		return false, nil
+	case "esc":
+		m.stepBack()
 		return true, nil
 	case "backspace":
 		m.stepBack()
@@ -1884,6 +2609,44 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 	}
 
 	return false, nil
+}
+
+func (m *model) shouldSuppressGlobalShortcut(msg tea.KeyMsg) bool {
+	if !m.textEntryActive() {
+		return false
+	}
+	return isTextEntryKey(msg)
+}
+
+func (m *model) textEntryActive() bool {
+	if m.inputActive {
+		return true
+	}
+	for _, col := range m.columns {
+		if sc, ok := col.(*selectableColumn); ok && sc != nil && sc.model.SettingFilter() {
+			return true
+		}
+	}
+	return false
+}
+
+func isTextEntryKey(msg tea.KeyMsg) bool {
+	s := msg.String()
+	if len(s) == 0 {
+		return false
+	}
+	runes := []rune(s)
+	if len(runes) != 1 {
+		return false
+	}
+	r := runes[0]
+	if r == '\n' || r == '\r' {
+		return false
+	}
+	if unicode.IsControl(r) {
+		return false
+	}
+	return true
 }
 
 func (m *model) scrollFocusedColumn(delta int) bool {
@@ -1951,7 +2714,7 @@ func (m *model) prepareMouseMessage(msg tea.MouseMsg) (int, int, int, tea.Cmd) {
 		switch msg.Type {
 		case tea.MouseLeft, tea.MouseRight, tea.MouseWheelUp, tea.MouseWheelDown:
 			if m.focus != idx {
-				m.focus = idx
+				m.setFocusIndex(idx)
 				m.adjustColumnsScroll()
 			}
 		}
@@ -1977,7 +2740,15 @@ func (m *model) handleOverlayCloseMouse(msg tea.MouseMsg) bool {
 	if msg.X < start || msg.X >= end {
 		return false
 	}
-	m.closeInput()
+	if m.inputActive {
+		m.closeInput()
+	} else if m.helpActive {
+		m.closeHelpOverlay()
+	} else if m.removeWorkspaceConfirmActive {
+		m.closeRemoveWorkspaceConfirm()
+	} else if m.quitConfirmActive {
+		m.closeQuitConfirm()
+	}
 	return true
 }
 
@@ -2001,51 +2772,53 @@ func (m *model) toggleMarkdownTheme() {
 
 func (m *model) stepBack() {
 	if m.currentFeature == "env" && m.usingEnvLayout {
-		switch focusArea(m.focus) {
+		if area, ok := m.focusedArea(); ok {
+			switch area {
+			case focusPreview:
+				m.setFocusArea(focusItems)
+				return
+			case focusItems:
+				m.setFocusArea(focusFeatures)
+				return
+			case focusFeatures:
+				m.exitEnvEditor()
+				m.currentFeature = ""
+				m.itemsCol.SetItems(nil)
+				m.previewCol.SetContent("Select an item to preview details.\n")
+				m.setFocusArea(focusFeatures)
+				return
+			}
+		}
+	}
+	if area, ok := m.focusedArea(); ok {
+		switch area {
 		case focusPreview:
-			m.focus = int(focusItems)
-			return
+			m.setFocusArea(focusItems)
+			m.currentItem = featureItemDefinition{}
+			if m.currentFeature == "docs" {
+				m.resetDocSelection()
+			}
 		case focusItems:
-			m.focus = int(focusFeatures)
-			return
-		case focusFeatures:
-			m.exitEnvEditor()
+			if m.currentFeature == "docs" {
+				m.resetDocSelection()
+			}
 			m.currentFeature = ""
 			m.itemsCol.SetItems(nil)
 			m.previewCol.SetContent("Select an item to preview details.\n")
-			m.focus = int(focusFeatures)
-			return
+			m.currentItem = featureItemDefinition{}
+			m.setFocusArea(focusFeatures)
+		case focusFeatures:
+			if m.currentFeature == "docs" {
+				m.resetDocSelection()
+			}
+			m.currentProject = nil
+			m.featureCol.SetItems(nil)
+			m.itemsCol.SetItems(nil)
+			m.itemsCol.SetTitle("Actions")
+			m.previewCol.SetContent("Select an item to preview details.\n")
+			m.currentItem = featureItemDefinition{}
+			m.setFocusArea(focusWorkspace)
 		}
-	}
-	switch focusArea(m.focus) {
-	case focusPreview:
-		m.focus = int(focusItems)
-		m.currentItem = featureItemDefinition{}
-		if m.currentFeature == "docs" {
-			m.resetDocSelection()
-		}
-	case focusItems:
-		if m.currentFeature == "docs" {
-			m.resetDocSelection()
-		}
-		m.currentFeature = ""
-		m.itemsCol.SetItems(nil)
-		m.previewCol.SetContent("Select an item to preview details.\n")
-		m.currentItem = featureItemDefinition{}
-		m.focus = int(focusFeatures)
-	case focusFeatures:
-		if m.currentFeature == "docs" {
-			m.resetDocSelection()
-		}
-		m.currentProject = nil
-		m.featureCol.SetItems(nil)
-		m.itemsCol.SetItems(nil)
-		m.itemsCol.SetTitle("Actions")
-		m.previewCol.SetContent("Select an item to preview details.\n")
-		m.currentItem = featureItemDefinition{}
-		m.focus = int(focusProjects)
-	case focusProjects:
-		m.focus = int(focusWorkspace)
 	}
 }
 
@@ -2062,7 +2835,6 @@ func (m *model) handleWorkspaceSelected(item workspaceItem) tea.Cmd {
 		}
 		m.currentRoot = root
 		m.refreshProjectsForCurrentRoot()
-		m.focus = int(focusProjects)
 		cleanPath := filepath.Clean(root.Path)
 		m.appendLog(fmt.Sprintf("Workspace selected: %s", abbreviatePath(root.Path)))
 		fields := map[string]string{"path": cleanPath}
@@ -2071,6 +2843,17 @@ func (m *model) handleWorkspaceSelected(item workspaceItem) tea.Cmd {
 		}
 		m.emitTelemetry("workspace_opened", fields)
 		m.previewCol.SetContent(previewPath(&discoveredProject{Path: root.Path}, "."))
+		var cmds []tea.Cmd
+		if project := m.projectByPath(cleanPath); project != nil {
+			if cmd := m.handleProjectSelected(project); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		} else {
+			m.setFocusArea(focusWorkspace)
+		}
+		if len(cmds) > 0 {
+			return tea.Batch(cmds...)
+		}
 	case workspaceKindNewProject:
 		defaultPath := ""
 		if m.currentRoot != nil {
@@ -2100,11 +2883,11 @@ func (m *model) handleProjectSelected(project *discoveredProject) tea.Cmd {
 	m.currentGenerateTarget = ""
 	m.currentGenerateFile = ""
 	m.lastGenerateDiffKey = ""
-	m.featureCol.SetItems(featureListEntries())
+	m.populateFeatureList()
 	m.itemsCol.SetTitle("Actions")
 	m.itemsCol.SetItems(nil)
 	m.previewCol.SetContent(previewPath(project, "."))
-	m.focus = int(focusFeatures)
+	m.setFocusArea(focusFeatures)
 	m.appendLog(fmt.Sprintf("Project loaded: %s", project.Name))
 	m.emitTelemetry("project_opened", map[string]string{"path": filepath.Clean(project.Path)})
 	m.envOpenTelemetrySent = false
@@ -2122,6 +2905,48 @@ func (m *model) handleProjectSelected(project *discoveredProject) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+func (m *model) populateFeatureList() {
+	if m.featureCol == nil {
+		return
+	}
+	selectedKey := ""
+	removeSelected := false
+	if entry, ok := m.featureCol.SelectedEntry(); ok {
+		switch payload := entry.payload.(type) {
+		case featureDefinition:
+			selectedKey = payload.Key
+		case removeWorkspaceAction:
+			removeSelected = true
+		}
+	}
+	items := featureListEntries()
+	if m.currentRoot != nil {
+		items = append(items, listEntry{
+			title:   "Remove Workspace…",
+			desc:    "Remove current workspace from list",
+			payload: removeWorkspaceAction{},
+		})
+	}
+	m.featureCol.SetItems(items)
+	if removeSelected && m.currentRoot != nil {
+		m.featureCol.model.Select(len(items) - 1)
+		return
+	}
+	if selectedKey == "" {
+		return
+	}
+	for i, item := range items {
+		entry, ok := item.(listEntry)
+		if !ok {
+			continue
+		}
+		if def, ok := entry.payload.(featureDefinition); ok && def.Key == selectedKey {
+			m.featureCol.model.Select(i)
+			return
+		}
+	}
 }
 
 func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
@@ -2158,7 +2983,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		m.backlogScope = backlogNode{}
 		m.previewCol.SetContent("Loading backlog…\n")
 		m.updateCredentialHint()
-		m.focus = int(focusFeatures)
+		m.setFocusArea(focusFeatures)
 		m.backlogLoading = true
 		m.showSpinner("Loading backlog…")
 		return m.loadBacklogCmd()
@@ -2185,7 +3010,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		m.tokensTelemetrySent = false
 		m.tokensCol.SetPlaceholder("Loading token usage…")
 		m.previewCol.SetContent("Loading token usage…\n")
-		m.focus = int(focusItems)
+		m.setFocusArea(focusItems)
 		return m.loadTokensUsageCmd()
 	}
 	if feature.Key == "artifacts" {
@@ -2194,7 +3019,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		cmd, hasArtifacts := m.prepareArtifactsView()
 		if hasArtifacts {
 			m.useArtifactsLayout(true)
-			m.focus = int(focusFeatures)
+			m.setFocusArea(focusFeatures)
 			return cmd
 		}
 		m.useArtifactsLayout(false)
@@ -2206,7 +3031,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		} else {
 			m.previewCol.SetContent("No artifacts detected. Run `gpt-creator generate all` or `create-project` to populate staging outputs.\n")
 		}
-		m.focus = int(focusItems)
+		m.setFocusArea(focusItems)
 		return cmd
 	}
 	if feature.Key == "services" {
@@ -2221,7 +3046,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		if cmd := m.startServicePolling(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
-		m.focus = int(focusItems)
+		m.setFocusArea(focusItems)
 		return tea.Batch(cmds...)
 	}
 	if feature.Key == "reports" {
@@ -2236,7 +3061,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		m.reportsTelemetrySent = false
 		m.reportsCol.SetPlaceholder("Loading reports…")
 		m.previewCol.SetContent("Loading reports…\n")
-		m.focus = int(focusItems)
+		m.setFocusArea(focusItems)
 		return m.loadReportsEntriesCmd()
 	}
 	if feature.Key == "settings" {
@@ -2246,7 +3071,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 		m.useTokensLayout(false)
 		m.useReportsLayout(false)
 		m.refreshSettingsItems()
-		m.focus = int(focusItems)
+		m.setFocusArea(focusItems)
 		return nil
 	}
 	m.useEnvLayout(false)
@@ -2276,7 +3101,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 	} else {
 		m.previewCol.SetContent("Select an item to preview details.\n")
 	}
-	m.focus = int(focusItems)
+	m.setFocusArea(focusItems)
 	if len(followCmds) > 0 {
 		return tea.Batch(followCmds...)
 	}
@@ -2333,7 +3158,7 @@ func (m *model) handleItemSelected(msg itemSelectedMsg) tea.Cmd {
 	}
 	cmd := m.applyItemSelection(targetProject, featureKey, msg.item, msg.activate)
 	if msg.activate {
-		m.focus = int(focusPreview)
+		m.setFocusArea(focusPreview)
 	}
 	return cmd
 }
@@ -3207,7 +4032,6 @@ func (m *model) updateProjectStats(path string) {
 		if m.currentProject != nil && filepath.Clean(m.currentProject.Path) == clean {
 			m.currentProject.Stats = stats
 		}
-		m.refreshProjectsColumn()
 		return
 	}
 }
@@ -3269,14 +4093,13 @@ func (m *model) handleInputSubmit(value string) (tea.Cmd, bool) {
 			m.appendLog(fmt.Sprintf("Path not found: %s", path))
 			return nil, false
 		}
-		if !m.hasWorkspaceRoot(path) {
-			label := labelForPath(path)
-			m.workspaceRoots = append(m.workspaceRoots, workspaceRoot{Label: label, Path: filepath.Clean(path)})
-			m.ensurePinnedRoots()
-			m.refreshWorkspaceColumn()
-			m.appendLog(fmt.Sprintf("Added workspace root: %s", abbreviatePath(path)))
+		if m.addCustomWorkspaceRoot(path) {
+			clean := filepath.Clean(path)
+			m.selectWorkspacePath(clean)
+			cmd := m.handleWorkspaceSelected(workspaceItem{kind: workspaceKindRoot, path: clean})
+			return cmd, false
 		}
-		return nil, false
+		return nil, true
 	case inputNewProjectPath:
 		cmd := m.handleNewProjectPathSubmit(value)
 		keep := false
@@ -3434,9 +4257,9 @@ func (m *model) refreshWorkspaceColumn() {
 	})
 	items = append(items, listEntry{
 		title: "Add Workspace Path…",
-		desc:  "Manually add a folder to scan for projects",
+		desc:  "Manually add a project folder",
 		// title:   m.styles.renderText(m.workspaceCol.contentWidth(), "Add Workspace Path…"),
-		// desc:    m.styles.renderText(m.workspaceCol.contentWidth(), "Manually add a folder to scan for projects"),
+		// desc:    m.styles.renderText(m.workspaceCol.contentWidth(), "Manually add a project folder"),
 		payload: workspaceItem{kind: workspaceKindAddRoot},
 	})
 	m.workspaceCol.SetItems(items)
@@ -3445,7 +4268,6 @@ func (m *model) refreshWorkspaceColumn() {
 func (m *model) refreshProjectsForCurrentRoot() {
 	if m.currentRoot == nil {
 		m.projects = nil
-		m.projectsCol.SetItems(nil)
 		m.featureCol.SetItems(nil)
 		m.itemsCol.SetItems(nil)
 		m.previewCol.SetContent("Select an item to preview details.\n")
@@ -3475,40 +4297,19 @@ func (m *model) refreshProjectsForCurrentRoot() {
 			m.recordPipelineTelemetry(proj.Path, proj.Stats)
 		}
 	}
-	m.refreshProjectsColumn()
-	m.featureCol.SetItems(nil)
-	m.itemsCol.SetItems(nil)
-	m.itemsCol.SetTitle("Actions")
-	m.previewCol.SetContent("Select an item to preview details.\n")
-}
 
-func (m *model) refreshProjectsColumn() {
-	if m.projectsCol == nil {
-		return
-	}
-	selectedPath := ""
-	if entry, ok := m.projectsCol.SelectedEntry(); ok {
-		if payload, ok := entry.payload.(projectItem); ok && payload.project != nil {
-			selectedPath = filepath.Clean(payload.project.Path)
-		}
-	}
-	var items []list.Item
-	for i := range m.projects {
-		proj := &m.projects[i]
-		desc := formatProjectDescription(proj.Stats)
-		items = append(items, listEntry{
-			title:   proj.Name,
-			desc:    desc,
-			payload: projectItem{project: proj},
-		})
-	}
-	m.projectsCol.SetItems(items)
-	if selectedPath != "" {
-		m.selectProjectPath(selectedPath)
+	if m.currentProject == nil {
+		m.featureCol.SetItems(nil)
+		m.itemsCol.SetItems(nil)
+		m.itemsCol.SetTitle("Actions")
+		m.previewCol.SetContent("Select an item to preview details.\n")
+	} else if updated := m.projectByPath(m.currentProject.Path); updated != nil {
+		m.currentProject = updated
 	}
 }
 
 func (m *model) openInput(prompt, placeholder string, mode inputMode) {
+	m.helpActive = false
 	m.inputMode = mode
 	m.inputPrompt = prompt
 	m.inputActive = true
@@ -3520,6 +4321,7 @@ func (m *model) openInput(prompt, placeholder string, mode inputMode) {
 }
 
 func (m *model) openTextarea(prompt, initial string, mode inputMode) {
+	m.helpActive = false
 	m.inputMode = mode
 	m.inputPrompt = prompt
 	m.inputActive = true
@@ -3532,6 +4334,7 @@ func (m *model) openTextarea(prompt, initial string, mode inputMode) {
 }
 
 func (m *model) openPathPicker(prompt, initial string, mode inputMode, allowDirs, allowFiles bool) tea.Cmd {
+	m.helpActive = false
 	m.inputMode = mode
 	m.inputPrompt = prompt
 	m.inputActive = true
@@ -3641,6 +4444,17 @@ func (m *model) closeInput() {
 	if prevMode == inputEnvNewKey || prevMode == inputEnvNewValue {
 		m.pendingEnvKey = ""
 	}
+}
+
+func (m *model) openHelpOverlay() {
+	if m.inputActive {
+		return
+	}
+	m.helpActive = true
+}
+
+func (m *model) closeHelpOverlay() {
+	m.helpActive = false
 }
 
 func (m *model) openCommandPalette() {
@@ -5201,6 +6015,150 @@ func (m *model) selectedWorkspaceItem() (workspaceItem, bool) {
 	return item, ok
 }
 
+func (m *model) selectWorkspacePath(path string) {
+	if m.workspaceCol == nil {
+		return
+	}
+	clean := filepath.Clean(path)
+	items := m.workspaceCol.model.Items()
+	for i, item := range items {
+		entry, ok := item.(listEntry)
+		if !ok {
+			continue
+		}
+		payload, ok := entry.payload.(workspaceItem)
+		if !ok {
+			continue
+		}
+		if filepath.Clean(payload.path) == clean {
+			m.workspaceCol.model.Select(i)
+			return
+		}
+	}
+}
+
+func (m *model) removeCurrentWorkspace() tea.Cmd {
+	item, ok := m.selectedWorkspaceItem()
+	if !ok || item.kind != workspaceKindRoot || strings.TrimSpace(item.path) == "" {
+		m.setToast("Select a workspace to remove", 4*time.Second)
+		return nil
+	}
+	clean := filepath.Clean(item.path)
+	if clean == "" {
+		return nil
+	}
+	return m.removeWorkspacePath(clean)
+}
+
+func (m *model) removeWorkspacePath(clean string) tea.Cmd {
+	filteredRoots := make([]workspaceRoot, 0, len(m.workspaceRoots))
+	found := false
+	for _, root := range m.workspaceRoots {
+		if filepath.Clean(root.Path) == clean {
+			found = true
+			continue
+		}
+		filteredRoots = append(filteredRoots, root)
+	}
+	if !found {
+		m.setToast("Workspace not found", 4*time.Second)
+		return nil
+	}
+
+	if len(m.customWorkspaceRoots) > 0 {
+		filteredCustom := make([]string, 0, len(m.customWorkspaceRoots))
+		for _, root := range m.customWorkspaceRoots {
+			if filepath.Clean(root) == clean {
+				continue
+			}
+			filteredCustom = append(filteredCustom, root)
+		}
+		m.customWorkspaceRoots = filteredCustom
+	}
+
+	if m.pinnedPaths != nil {
+		delete(m.pinnedPaths, clean)
+	}
+
+	m.workspaceRoots = filteredRoots
+	m.ensurePinnedRoots()
+	m.refreshWorkspaceColumn()
+
+	if m.workspaceStore != nil {
+		if err := m.workspaceStore.Remove(clean); err != nil {
+			m.appendLog(fmt.Sprintf("Failed to remove workspace root: %v", err))
+		}
+	}
+
+	m.writeUIConfig()
+	m.emitTelemetry("workspace_removed", map[string]string{"path": clean})
+	m.appendLog(fmt.Sprintf("Workspace removed: %s", abbreviatePath(clean)))
+	m.setToast("Workspace removed", 4*time.Second)
+
+	if m.currentRoot != nil && filepath.Clean(m.currentRoot.Path) == clean {
+		m.currentRoot = nil
+		m.currentProject = nil
+		m.currentFeature = ""
+		m.currentItem = featureItemDefinition{}
+		m.previewCol.SetContent("Select an item to preview details.\n")
+		m.itemsCol.SetItems(nil)
+		if len(m.workspaceRoots) > 0 {
+			next := m.workspaceRoots[0]
+			m.selectWorkspacePath(next.Path)
+			return m.handleWorkspaceSelected(workspaceItem{kind: workspaceKindRoot, path: next.Path})
+		}
+		m.featureCol.SetItems(nil)
+		m.refreshProjectsForCurrentRoot()
+		return nil
+	}
+
+	if len(m.workspaceRoots) > 0 {
+		m.populateFeatureList()
+	} else {
+		m.featureCol.SetItems(nil)
+	}
+	return nil
+}
+
+func (m *model) promptRemoveWorkspaceConfirm() {
+	item, ok := m.selectedWorkspaceItem()
+	if !ok || item.kind != workspaceKindRoot || strings.TrimSpace(item.path) == "" {
+		m.setToast("Select a workspace to remove", 4*time.Second)
+		return
+	}
+	clean := filepath.Clean(item.path)
+	if clean == "" {
+		m.setToast("Select a workspace to remove", 4*time.Second)
+		return
+	}
+	m.openRemoveWorkspaceConfirm(clean)
+}
+
+func (m *model) openRemoveWorkspaceConfirm(path string) {
+	clean := filepath.Clean(path)
+	if clean == "" {
+		return
+	}
+	if m.inputActive {
+		m.closeInput()
+	}
+	if m.helpActive {
+		m.closeHelpOverlay()
+	}
+	if m.chatFocused {
+		m.blurChatInput()
+	}
+	m.removeWorkspaceConfirmActive = true
+	m.removeWorkspaceConfirmIndex = 0
+	m.pendingWorkspaceRemoval = clean
+}
+
+func (m *model) closeRemoveWorkspaceConfirm() {
+	m.removeWorkspaceConfirmActive = false
+	m.removeWorkspaceConfirmIndex = 0
+	m.pendingWorkspaceRemoval = ""
+}
+
 func (m *model) toggleSelectedWorkspacePin() {
 	item, ok := m.selectedWorkspaceItem()
 	if !ok || item.kind != workspaceKindRoot || item.path == "" {
@@ -5368,15 +6326,6 @@ func (m *model) applyLayout() {
 	topChrome := headerPanelHeight + 3
 	bottomChrome := 1
 
-	m.help.Width = max(0, m.width-2)
-	helpView := ""
-	if m.width > 0 {
-		helpView = m.help.View(m.keys)
-	}
-	if helpView != "" {
-		bottomChrome += lipgloss.Height(helpView)
-	}
-
 	bodyHeight := m.height - topChrome - bottomChrome
 	if bodyHeight < 6 {
 		bodyHeight = 6
@@ -5420,6 +6369,11 @@ func (m *model) applyLayout() {
 			m.logs.Width = availableWidth
 		}
 		m.logs.Height = m.logsHeight - 2
+	}
+	if m.chatVisible {
+		bodyHeight = m.applyChatLayout(bodyHeight, availableWidth)
+	} else {
+		m.chatReservedHeight = 0
 	}
 	m.columnsHeight = max(bodyHeight, 0)
 
@@ -5478,6 +6432,9 @@ func (m *model) applyLayout() {
 	}
 	m.columnsTotalWidth = total
 	m.adjustColumnsScroll()
+	if m.chatVisible {
+		m.refreshChatView()
+	}
 }
 
 func (m *model) adjustColumnsScroll() {
@@ -5537,6 +6494,517 @@ func (m *model) adjustColumnsScroll() {
 	}
 }
 
+func (m *model) applyChatLayout(bodyHeight, availableWidth int) int {
+	if bodyHeight <= 0 {
+		return bodyHeight
+	}
+
+	minColumns := 6
+	minHistory := minChatHistoryHeight
+	chrome := chatPanelChrome
+
+	desired := m.chatHistoryDesired
+	if desired <= 0 {
+		desired = defaultChatHistoryHeight
+	}
+	if desired < minHistory {
+		desired = minHistory
+	}
+
+	maxHistory := bodyHeight - chrome
+	if maxHistory < minHistory {
+		maxHistory = minHistory
+	}
+	if desired > maxHistory {
+		desired = maxHistory
+	}
+
+	reserved := desired + chrome
+	if reserved > bodyHeight {
+		reserved = bodyHeight
+	}
+
+	remaining := bodyHeight - reserved
+	if remaining < minColumns {
+		deficit := minColumns - remaining
+		reserved -= deficit
+		if reserved < chrome+1 {
+			reserved = min(bodyHeight, chrome+1)
+		}
+		if reserved < 0 {
+			reserved = 0
+		}
+		remaining = bodyHeight - reserved
+		if remaining < 0 {
+			remaining = 0
+		}
+	}
+
+	if reserved < chrome+1 {
+		reserved = min(bodyHeight, chrome+1)
+	}
+	desired = reserved - chrome
+	if desired < minHistory && reserved >= minHistory+chrome {
+		desired = minHistory
+	}
+	if desired < 1 {
+		if reserved <= chrome {
+			desired = 1
+		} else {
+			desired = reserved - chrome
+			if desired < 1 {
+				desired = 1
+			}
+		}
+	}
+
+	m.chatViewport.Height = desired
+	m.chatReservedHeight = reserved
+
+	frameWidth := m.styles.panel.GetBorderLeftSize() + m.styles.panel.GetBorderRightSize() + m.styles.panel.GetPaddingLeft() + m.styles.panel.GetPaddingRight()
+	innerWidth := availableWidth - frameWidth
+	if innerWidth < 10 {
+		innerWidth = max(availableWidth-2, 10)
+	}
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	m.chatViewport.Width = innerWidth
+	if innerWidth > 0 {
+		m.chatInput.Width = innerWidth
+	}
+
+	if remaining < minColumns {
+		remaining = minColumns
+	}
+	return remaining
+}
+
+func (m *model) focusSlotCount() int {
+	count := len(m.columns)
+	if m.chatVisible {
+		count++
+	}
+	return count
+}
+
+func (m *model) applyFocus(target int) {
+	total := m.focusSlotCount()
+	if total == 0 {
+		m.focus = -1
+		m.blurChatInput()
+		return
+	}
+	if target < 0 {
+		target = 0
+	}
+	if target >= total {
+		target = total - 1
+	}
+
+	chatIndex := len(m.columns)
+	if m.chatVisible && target == chatIndex {
+		m.focus = chatIndex
+		m.focusChatInput()
+		return
+	}
+
+	if m.chatFocused {
+		m.blurChatInput()
+	}
+
+	if len(m.columns) == 0 {
+		m.focus = -1
+		return
+	}
+
+	if target >= len(m.columns) {
+		target = len(m.columns) - 1
+	}
+	m.focus = target
+}
+
+func (m *model) moveFocus(delta int) {
+	total := m.focusSlotCount()
+	if total == 0 {
+		return
+	}
+
+	current := m.focus
+	if current < 0 || current >= total {
+		current = 0
+		if len(m.columns) == 0 && m.chatVisible {
+			current = len(m.columns)
+		}
+	}
+
+	newFocus := current + delta
+	for newFocus < 0 {
+		newFocus += total
+	}
+	for newFocus >= total {
+		newFocus -= total
+	}
+
+	m.applyFocus(newFocus)
+}
+
+func (m *model) setFocusIndex(idx int) {
+	if m.chatFocused {
+		m.blurChatInput()
+	}
+	if len(m.columns) == 0 {
+		m.focus = -1
+		return
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(m.columns) {
+		idx = len(m.columns) - 1
+	}
+	m.focus = idx
+}
+
+func (m *model) setFocusArea(area focusArea) {
+	m.setFocusIndex(int(area))
+}
+
+func (m *model) focusedArea() (focusArea, bool) {
+	if m.focus >= 0 && m.focus < len(m.columns) {
+		return focusArea(m.focus), true
+	}
+	return 0, false
+}
+
+func (m *model) focusedColumn() (column, bool) {
+	if m.focus >= 0 && m.focus < len(m.columns) {
+		return m.columns[m.focus], true
+	}
+	return nil, false
+}
+
+func (m *model) activeColumnCanMoveDown() bool {
+	if m.focus < 0 || m.focus >= len(m.columns) {
+		return false
+	}
+	if nav, ok := m.columns[m.focus].(interface{ CanMoveDown() bool }); ok {
+		return nav.CanMoveDown()
+	}
+	return false
+}
+
+func (m *model) clampFocusAfterLayout() {
+	if len(m.columns) == 0 {
+		if m.chatVisible {
+			m.focusChatInput()
+			return
+		}
+		m.focus = -1
+		return
+	}
+	if m.focus >= len(m.columns) {
+		if m.chatVisible && m.chatFocused {
+			m.focusChatInput()
+		} else {
+			m.setFocusIndex(len(m.columns) - 1)
+		}
+	}
+}
+
+func (m *model) openQuitConfirm() {
+	if m.inputActive {
+		m.closeInput()
+	}
+	if m.helpActive {
+		m.closeHelpOverlay()
+	}
+	if m.chatFocused {
+		m.blurChatInput()
+	}
+	m.quitConfirmActive = true
+	m.quitConfirmIndex = 0
+}
+
+func (m *model) closeQuitConfirm() {
+	m.quitConfirmActive = false
+}
+
+func (m *model) focusChatInput() {
+	if !m.chatVisible {
+		m.chatVisible = true
+	}
+	m.focus = len(m.columns)
+	if m.chatFocused {
+		m.chatInput.Focus()
+		m.chatInput.CursorEnd()
+		return
+	}
+	m.chatFocused = true
+	m.chatInput.Focus()
+	m.chatInput.CursorEnd()
+}
+
+func (m *model) blurChatInput() {
+	if !m.chatFocused {
+		return
+	}
+	m.chatFocused = false
+	m.chatInput.Blur()
+}
+
+func (m *model) chatWorkingDirectory() string {
+	if m.currentProject != nil {
+		if path := strings.TrimSpace(m.currentProject.Path); path != "" {
+			return path
+		}
+	}
+	if m.currentRoot != nil {
+		if path := strings.TrimSpace(m.currentRoot.Path); path != "" {
+			return path
+		}
+	}
+	return ""
+}
+
+func (m *model) submitChatMessage() tea.Cmd {
+	value := strings.TrimSpace(m.chatInput.Value())
+	if value == "" {
+		return nil
+	}
+
+	m.chatSequence++
+	m.chatInput.SetValue("")
+	m.chatInput.SetCursor(0)
+
+	now := time.Now()
+	m.chatMessages = append(m.chatMessages, chatMessage{
+		role:    chatRoleUser,
+		content: value,
+		time:    now,
+	})
+
+	m.chatMessages = append(m.chatMessages, chatMessage{
+		role:    chatRoleAssistant,
+		content: "Queued request for Codex…",
+		time:    now,
+		pending: true,
+	})
+	replyIndex := len(m.chatMessages) - 1
+	m.refreshChatView()
+
+	tmpFile, err := os.CreateTemp("", "gpt-creator-chat-*.txt")
+	if err != nil {
+		m.chatMessages[replyIndex].pending = false
+		m.chatMessages[replyIndex].content = fmt.Sprintf("Unable to prepare Codex request: %v", err)
+		m.chatMessages[replyIndex].time = time.Now()
+		m.refreshChatView()
+		return nil
+	}
+	outputPath := tmpFile.Name()
+	_ = tmpFile.Close()
+
+	cmdName := strings.TrimSpace(m.codexCommand)
+	if cmdName == "" {
+		cmdName = "codex"
+	}
+	if _, lookErr := exec.LookPath(cmdName); lookErr != nil {
+		m.chatMessages[replyIndex].pending = false
+		m.chatMessages[replyIndex].content = fmt.Sprintf("Codex CLI '%s' not found. Install it or set CODEX_BIN.", cmdName)
+		m.chatMessages[replyIndex].time = time.Now()
+		m.refreshChatView()
+		_ = os.Remove(outputPath)
+		return nil
+	}
+
+	prompt := m.composeChatPrompt()
+	args := []string{"chat", "--prompt", prompt, "--output", outputPath}
+	if model := strings.TrimSpace(m.codexModel); model != "" {
+		args = append(args, "--model", model)
+	}
+
+	title := fmt.Sprintf("Codex chat #%d", m.chatSequence)
+
+	req := jobRequest{
+		title:   title,
+		dir:     m.chatWorkingDirectory(),
+		command: cmdName,
+		args:    args,
+		onStart: func() {
+			if replyIndex >= 0 && replyIndex < len(m.chatMessages) {
+				m.chatMessages[replyIndex].content = "Codex is thinking…"
+				m.chatMessages[replyIndex].time = time.Now()
+			}
+			m.chatInFlight++
+			m.refreshChatView()
+		},
+		onFinish: func(err error) {
+			defer os.Remove(outputPath)
+			if m.chatInFlight > 0 {
+				m.chatInFlight--
+			}
+			if replyIndex >= 0 && replyIndex < len(m.chatMessages) {
+				msg := &m.chatMessages[replyIndex]
+				msg.pending = false
+				msg.time = time.Now()
+				if err != nil {
+					msg.content = fmt.Sprintf("Codex task failed: %v", err)
+				} else {
+					data, readErr := os.ReadFile(outputPath)
+					if readErr != nil {
+						msg.content = fmt.Sprintf("Failed to read Codex output: %v", readErr)
+					} else {
+						response := strings.TrimSpace(string(data))
+						if response == "" {
+							msg.content = "(Codex returned no output.)"
+						} else {
+							msg.content = response
+						}
+					}
+				}
+			}
+			m.refreshChatView()
+		},
+	}
+
+	m.showLogs = true
+	return m.enqueueJob(req)
+}
+
+func (m *model) composeChatPrompt() string {
+	var builder strings.Builder
+	builder.WriteString("System: You are Codex assisting from inside the gpt-creator terminal UI. Provide concise, actionable responses.\n")
+	if m.currentProject != nil {
+		builder.WriteString(fmt.Sprintf("System: Active project path: %s\n", filepath.Clean(m.currentProject.Path)))
+	}
+	if feature := strings.TrimSpace(m.currentFeature); feature != "" {
+		builder.WriteString(fmt.Sprintf("System: Focused feature: %s\n", strings.ToLower(feature)))
+	}
+	builder.WriteRune('\n')
+
+	total := len(m.chatMessages)
+	start := 0
+	if total > maxChatPromptMessages {
+		start = total - maxChatPromptMessages
+	}
+	for i := start; i < total; i++ {
+		msg := m.chatMessages[i]
+		if msg.pending {
+			continue
+		}
+		if msg.role == chatRoleSystem {
+			continue
+		}
+		content := strings.TrimSpace(msg.content)
+		if content == "" {
+			continue
+		}
+		label := "User"
+		if msg.role == chatRoleAssistant {
+			label = "Assistant"
+		}
+		builder.WriteString(label)
+		builder.WriteString(": ")
+		builder.WriteString(content)
+		if !strings.HasSuffix(content, "\n") {
+			builder.WriteRune('\n')
+		}
+	}
+	builder.WriteString("Assistant:")
+	return builder.String()
+}
+
+func (m *model) refreshChatView() {
+	if !m.chatVisible {
+		return
+	}
+	width := m.chatViewport.Width
+	if width <= 0 {
+		frame := m.styles.panel.GetBorderLeftSize() + m.styles.panel.GetBorderRightSize() + m.styles.panel.GetPaddingLeft() + m.styles.panel.GetPaddingRight()
+		if m.width > 0 {
+			width = max(m.width-frame, 10)
+		} else if m.chatInput.Width > 0 {
+			width = m.chatInput.Width
+		} else {
+			width = 48
+		}
+		m.chatViewport.Width = width
+	}
+	content := m.renderChatMessages(width)
+	m.chatViewport.SetContent(content)
+	m.chatViewport.GotoBottom()
+}
+
+func (m *model) renderChatMessages(width int) string {
+	if width < 1 {
+		width = 1
+	}
+	var sections []string
+	for _, msg := range m.chatMessages {
+		content := strings.TrimSpace(msg.content)
+		if content == "" {
+			continue
+		}
+		var label string
+		var labelStyle, bubbleStyle lipgloss.Style
+		switch msg.role {
+		case chatRoleUser:
+			label = "You"
+			labelStyle = m.styles.chatUserLabel
+			bubbleStyle = m.styles.chatUserBubble
+		case chatRoleAssistant:
+			label = "Codex"
+			labelStyle = m.styles.chatAssistantLabel
+			bubbleStyle = m.styles.chatAssistantBubble
+		default:
+			label = "System"
+			labelStyle = m.styles.chatSystemLabel
+			bubbleStyle = m.styles.chatSystemBubble
+		}
+		if msg.pending {
+			if !strings.Contains(strings.ToLower(content), "thinking") {
+				content += " (pending)"
+			}
+		}
+		timestamp := ""
+		if !msg.time.IsZero() {
+			timestamp = m.styles.chatTimestamp.Render(msg.time.Local().Format("15:04"))
+		}
+		header := lipgloss.JoinHorizontal(lipgloss.Left, labelStyle.Render(label))
+		if timestamp != "" {
+			header = lipgloss.JoinHorizontal(lipgloss.Left, header, " ", timestamp)
+		}
+		bubble := bubbleStyle.Width(width).Render(content)
+		sections = append(sections, header+"\n"+bubble)
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func (m *model) renderChat() string {
+	if !m.chatVisible || m.width <= 0 {
+		return ""
+	}
+	innerWidth := m.chatViewport.Width
+	if innerWidth <= 0 {
+		frame := m.styles.panel.GetBorderLeftSize() + m.styles.panel.GetBorderRightSize() + m.styles.panel.GetPaddingLeft() + m.styles.panel.GetPaddingRight()
+		innerWidth = max(m.width-frame, 10)
+	}
+	header := m.styles.chatHeader.Width(innerWidth).Render("Codex Chat")
+	history := m.chatViewport.View()
+	historyPanel := m.styles.panel.Width(m.width).Render(header + "\n" + history)
+
+	inputHeader := m.styles.chatHeader.Width(innerWidth).Render("Message")
+	inputField := m.chatInput.View()
+	hintParts := []string{"enter send", "esc cancel", "F7 focus"}
+	if m.chatInFlight > 0 {
+		hintParts = append(hintParts, fmt.Sprintf("%d running", m.chatInFlight))
+	}
+	hint := m.styles.chatHint.Render(strings.Join(hintParts, " • "))
+	inputPanel := m.styles.panel.Width(m.width).Render(inputHeader + "\n" + inputField + "\n" + hint)
+
+	return historyPanel + "\n" + inputPanel
+}
+
 func (m *model) useTasksLayout(enable bool) {
 	if enable {
 		if m.usingTasksLayout {
@@ -5544,18 +7012,15 @@ func (m *model) useTasksLayout(enable bool) {
 		}
 		m.columns = []column{
 			m.workspaceCol,
-			m.projectsCol,
 			m.backlogCol,
 			m.backlogTable,
 			m.previewCol,
 		}
 		m.usingTasksLayout = true
-		if focusArea(m.focus) == focusItems {
-			m.focus = int(focusFeatures)
+		if area, ok := m.focusedArea(); ok && area == focusItems {
+			m.setFocusArea(focusFeatures)
 		}
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	} else {
 		if !m.usingTasksLayout {
 			return
@@ -5565,16 +7030,13 @@ func (m *model) useTasksLayout(enable bool) {
 		} else {
 			m.columns = []column{
 				m.workspaceCol,
-				m.projectsCol,
 				m.featureCol,
 				m.itemsCol,
 				m.previewCol,
 			}
 		}
 		m.usingTasksLayout = false
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	}
 	m.applyLayout()
 }
@@ -5586,30 +7048,24 @@ func (m *model) useServicesLayout(enable bool) {
 		}
 		m.columns = []column{
 			m.workspaceCol,
-			m.projectsCol,
 			m.featureCol,
 			m.servicesCol,
 			m.previewCol,
 		}
 		m.usingServicesLayout = true
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	} else {
 		if !m.usingServicesLayout {
 			return
 		}
 		m.columns = []column{
 			m.workspaceCol,
-			m.projectsCol,
 			m.featureCol,
 			m.itemsCol,
 			m.previewCol,
 		}
 		m.usingServicesLayout = false
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	}
 	m.applyLayout()
 }
@@ -5621,30 +7077,24 @@ func (m *model) useTokensLayout(enable bool) {
 		}
 		m.columns = []column{
 			m.workspaceCol,
-			m.projectsCol,
 			m.featureCol,
 			m.tokensCol,
 			m.previewCol,
 		}
 		m.usingTokensLayout = true
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	} else {
 		if !m.usingTokensLayout {
 			return
 		}
 		m.columns = []column{
 			m.workspaceCol,
-			m.projectsCol,
 			m.featureCol,
 			m.itemsCol,
 			m.previewCol,
 		}
 		m.usingTokensLayout = false
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	}
 	m.applyLayout()
 }
@@ -5656,15 +7106,12 @@ func (m *model) useReportsLayout(enable bool) {
 		}
 		m.columns = []column{
 			m.workspaceCol,
-			m.projectsCol,
 			m.featureCol,
 			m.reportsCol,
 			m.previewCol,
 		}
 		m.usingReportsLayout = true
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	} else {
 		if !m.usingReportsLayout {
 			return
@@ -5674,16 +7121,13 @@ func (m *model) useReportsLayout(enable bool) {
 		} else {
 			m.columns = []column{
 				m.workspaceCol,
-				m.projectsCol,
 				m.featureCol,
 				m.itemsCol,
 				m.previewCol,
 			}
 		}
 		m.usingReportsLayout = false
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	}
 	m.applyLayout()
 }
@@ -5695,15 +7139,12 @@ func (m *model) useArtifactsLayout(enable bool) {
 		}
 		m.columns = []column{
 			m.workspaceCol,
-			m.projectsCol,
 			m.artifactsCol,
 			m.artifactTreeCol,
 			m.previewCol,
 		}
 		m.usingArtifactsLayout = true
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	} else {
 		if !m.usingArtifactsLayout {
 			return
@@ -5713,16 +7154,13 @@ func (m *model) useArtifactsLayout(enable bool) {
 		} else {
 			m.columns = []column{
 				m.workspaceCol,
-				m.projectsCol,
 				m.featureCol,
 				m.itemsCol,
 				m.previewCol,
 			}
 		}
 		m.usingArtifactsLayout = false
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	}
 	m.applyLayout()
 }
@@ -5734,15 +7172,12 @@ func (m *model) useEnvLayout(enable bool) {
 		}
 		m.columns = []column{
 			m.workspaceCol,
-			m.projectsCol,
 			m.featureCol,
 			m.envTableCol,
 			m.previewCol,
 		}
 		m.usingEnvLayout = true
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	} else {
 		if !m.usingEnvLayout {
 			return
@@ -5752,16 +7187,13 @@ func (m *model) useEnvLayout(enable bool) {
 		} else {
 			m.columns = []column{
 				m.workspaceCol,
-				m.projectsCol,
 				m.featureCol,
 				m.itemsCol,
 				m.previewCol,
 			}
 		}
 		m.usingEnvLayout = false
-		if m.focus >= len(m.columns) {
-			m.focus = len(m.columns) - 1
-		}
+		m.clampFocusAfterLayout()
 	}
 	m.applyLayout()
 }
@@ -5797,7 +7229,7 @@ func (m *model) startEnvEditor() tea.Cmd {
 	})
 	m.envTableCol.SetEntries(nil, m.envReveal)
 	m.previewCol.SetContent("Loading environment files…\n")
-	m.focus = int(focusFeatures)
+	m.setFocusArea(focusFeatures)
 	return m.loadEnvFilesCmd()
 }
 
@@ -5808,7 +7240,7 @@ func (m *model) exitEnvEditor() {
 	m.useEnvLayout(false)
 	m.featureCol.title = "Feature"
 	m.featureCol.SetHighlightFunc(m.featureHighlightDefault)
-	m.featureCol.SetItems(featureListEntries())
+	m.populateFeatureList()
 	m.envTableCol.SetEntries(nil, m.envReveal)
 	m.envFiles = nil
 	m.currentEnvFile = nil
@@ -5921,7 +7353,7 @@ func (m *model) handleEnvFileSelected(msg envFileSelectedMsg) {
 	m.refreshEnvTable("")
 	m.updateEnvPreview()
 	if msg.activate {
-		m.focus = int(focusItems)
+		m.setFocusArea(focusItems)
 	}
 }
 
@@ -6380,7 +7812,7 @@ func (m *model) handleBacklogLoaded(msg backlogLoadedMsg) {
 		m.useTasksLayout(false)
 		m.itemsCol.SetTitle("Actions")
 		m.itemsCol.SetItems(featureItemEntries(m.currentProject, "tasks", m.dockerAvailable))
-		m.focus = int(focusItems)
+		m.setFocusArea(focusItems)
 		return
 	}
 	m.backlog = msg.data
@@ -6397,7 +7829,7 @@ func (m *model) handleBacklogLoaded(msg backlogLoadedMsg) {
 		m.previewCol.SetContent("No tasks recorded. Run `gpt-creator migrate-tasks` to build the backlog.\n")
 		m.itemsCol.SetTitle("Actions")
 		m.itemsCol.SetItems(featureItemEntries(m.currentProject, "tasks", m.dockerAvailable))
-		m.focus = int(focusItems)
+		m.setFocusArea(focusItems)
 		return
 	}
 	m.useTasksLayout(true)
@@ -7150,6 +8582,11 @@ func (m *model) addCustomWorkspaceRoot(path string) bool {
 		m.workspaceRoots = append(m.workspaceRoots, workspaceRoot{Label: labelForPath(clean), Path: clean})
 	}
 	m.refreshWorkspaceColumn()
+	if m.workspaceStore != nil {
+		if err := m.workspaceStore.Add(clean); err != nil {
+			m.appendLog(fmt.Sprintf("Failed to persist workspace root: %v", err))
+		}
+	}
 	m.writeUIConfig()
 	m.emitSettingsChanged("workspace_root_added", clean)
 	m.setToast("Workspace root added", 4*time.Second)
@@ -7180,6 +8617,11 @@ func (m *model) removeCustomWorkspaceRoot(path string) bool {
 	}
 	m.workspaceRoots = filtered
 	m.refreshWorkspaceColumn()
+	if m.workspaceStore != nil {
+		if err := m.workspaceStore.Remove(clean); err != nil {
+			m.appendLog(fmt.Sprintf("Failed to remove workspace root: %v", err))
+		}
+	}
 	m.writeUIConfig()
 	m.emitSettingsChanged("workspace_root_removed", clean)
 	m.setToast("Workspace root removed", 4*time.Second)
@@ -7212,6 +8654,11 @@ func (m *model) resetCustomWorkspaceRoots() {
 	}
 	m.workspaceRoots = filtered
 	m.refreshWorkspaceColumn()
+	if m.workspaceStore != nil {
+		if err := m.workspaceStore.RemoveAll(old); err != nil {
+			m.appendLog(fmt.Sprintf("Failed to clear workspace roots: %v", err))
+		}
+	}
 	m.writeUIConfig()
 	m.emitSettingsChanged("workspace_roots_reset", "")
 	m.setToast("Custom workspace roots cleared", 4*time.Second)
@@ -7555,10 +9002,32 @@ func sortedEpicKeys(set map[string]bool) []string {
 }
 
 func (m *model) renderStatus() string {
-	focusTitle := m.columns[m.focus].Title()
-	focusValue := strings.TrimSpace(m.columns[m.focus].FocusValue())
-	if focusValue == "" {
+	var (
+		focusTitle = "Focus"
 		focusValue = "—"
+		focusHint  string
+	)
+
+	if col, ok := m.focusedColumn(); ok {
+		focusTitle = col.Title()
+		if value := strings.TrimSpace(col.FocusValue()); value != "" {
+			focusValue = value
+		}
+		if provider, ok := col.(interface{ ActivationHint() string }); ok {
+			focusHint = strings.TrimSpace(provider.ActivationHint())
+		}
+	} else if m.chatVisible && m.focus == len(m.columns) {
+		focusTitle = "Chat"
+		if m.chatInFlight > 0 {
+			focusValue = fmt.Sprintf("%d running", m.chatInFlight)
+		} else {
+			focusValue = "Ready"
+		}
+		if m.chatFocused {
+			focusHint = "enter send • esc exit"
+		} else {
+			focusHint = "F7 focus chat"
+		}
 	}
 
 	segments := []string{
@@ -7569,10 +9038,6 @@ func (m *model) renderStatus() string {
 		if provider, ok := m.columns[hintColumn].(interface{ ActivationHint() string }); ok {
 			hoverHint = strings.TrimSpace(provider.ActivationHint())
 		}
-	}
-	var focusHint string
-	if provider, ok := m.columns[m.focus].(interface{ ActivationHint() string }); ok {
-		focusHint = strings.TrimSpace(provider.ActivationHint())
 	}
 	if hoverHint != "" {
 		segments = append(segments, m.styles.statusHint.Render(hoverHint))
@@ -7764,43 +9229,6 @@ func (m *model) projectByPath(path string) *discoveredProject {
 	return nil
 }
 
-func (m *model) selectProjectPath(path string) {
-	if m.projectsCol == nil {
-		return
-	}
-	clean := filepath.Clean(path)
-	items := m.projectsCol.model.Items()
-	for i, item := range items {
-		entry, ok := item.(listEntry)
-		if !ok {
-			continue
-		}
-		payload, ok := entry.payload.(projectItem)
-		if !ok || payload.project == nil {
-			continue
-		}
-		if filepath.Clean(payload.project.Path) == clean {
-			m.projectsCol.model.Select(i)
-			return
-		}
-	}
-}
-
-func (m *model) selectedProjectPath() string {
-	if m.projectsCol == nil {
-		return ""
-	}
-	entry, ok := m.projectsCol.SelectedEntry()
-	if !ok {
-		return ""
-	}
-	payload, ok := entry.payload.(projectItem)
-	if !ok || payload.project == nil {
-		return ""
-	}
-	return filepath.Clean(payload.project.Path)
-}
-
 func (m *model) refreshCreateProjectProgress(title string) {
 	if m.createProjectJobs == nil {
 		return
@@ -7845,16 +9273,15 @@ func (m *model) refreshProjectSnapshot(path string) {
 	}
 
 	updated := buildProject(clean)
-	found := false
+	replaced := false
 	for i := range m.projects {
 		if filepath.Clean(m.projects[i].Path) == clean {
-			m.projects[i].Stats = updated.Stats
-			m.projects[i].Name = updated.Name
-			found = true
+			m.projects[i] = updated
+			replaced = true
 			break
 		}
 	}
-	if !found {
+	if !replaced {
 		m.projects = append(m.projects, updated)
 		sort.Slice(m.projects, func(i, j int) bool {
 			return m.projects[i].Name < m.projects[j].Name
@@ -7867,20 +9294,9 @@ func (m *model) refreshProjectSnapshot(path string) {
 			m.emitTelemetry("project_discovered", map[string]string{"path": clean})
 		}
 	}
+	m.recordPipelineTelemetry(updated.Path, updated.Stats)
 
-	currentSelection := m.selectedProjectPath()
-	m.refreshProjectsColumn()
-	if currentSelection != "" {
-		m.selectProjectPath(currentSelection)
-	} else if !found {
-		m.selectProjectPath(clean)
-		if project := m.projectByPath(clean); project != nil {
-			m.handleProjectSelected(project)
-		}
-		return
-	}
-
-	if found && m.currentProject != nil && filepath.Clean(m.currentProject.Path) == clean {
+	if m.currentProject != nil && filepath.Clean(m.currentProject.Path) == clean {
 		if project := m.projectByPath(clean); project != nil {
 			m.currentProject = project
 			if m.currentFeature != "" {
@@ -7903,28 +9319,20 @@ func (m *model) refreshProjectSnapshot(path string) {
 				m.previewCol.SetContent(previewPath(m.currentProject, "."))
 			}
 		}
+		return
 	}
-}
 
-func (m *model) selectedProject() *discoveredProject {
-	if m.projectsCol == nil {
-		return nil
+	if !replaced && m.currentRoot != nil && filepath.Clean(m.currentRoot.Path) == clean {
+		if project := m.projectByPath(clean); project != nil {
+			m.handleProjectSelected(project)
+		}
 	}
-	entry, ok := m.projectsCol.SelectedEntry()
-	if !ok {
-		return nil
-	}
-	payload, ok := entry.payload.(projectItem)
-	if !ok || payload.project == nil {
-		return nil
-	}
-	return payload.project
 }
 
 func (m *model) openProjectInEditor() {
-	project := m.selectedProject()
+	project := m.currentProject
 	if project == nil {
-		m.appendLog("Select a project to open in editor.")
+		m.appendLog("Select a workspace to open in editor.")
 		return
 	}
 	commandLine, err := launchEditor(project.Path)
@@ -8709,6 +10117,33 @@ func renderProgressBar(percent float64, width int) string {
 		progress.WithWidth(width),
 	)
 	return bar.ViewAs(percent)
+}
+
+func resolveCodexCommand() string {
+	candidates := []string{
+		os.Getenv("CODEX_CMD"),
+		os.Getenv("CODEX_BIN"),
+		os.Getenv("GC_CODEX_BIN"),
+	}
+	for _, candidate := range candidates {
+		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+			return trimmed
+		}
+	}
+	return "codex"
+}
+
+func resolveCodexModel() string {
+	candidates := []string{
+		os.Getenv("CODEX_MODEL"),
+		os.Getenv("GC_CODEX_MODEL"),
+	}
+	for _, candidate := range candidates {
+		if trimmed := strings.TrimSpace(candidate); trimmed != "" {
+			return trimmed
+		}
+	}
+	return "gpt-5-codex"
 }
 
 func formatElapsed(d time.Duration) string {

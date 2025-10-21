@@ -379,6 +379,18 @@ func (c *selectableColumn) SelectedEntry() (listEntry, bool) {
 	return listEntry{}, false
 }
 
+func (c *selectableColumn) CanMoveDown() bool {
+	items := c.model.Items()
+	if len(items) <= 1 {
+		return false
+	}
+	idx := c.model.Index()
+	if idx < 0 {
+		return true
+	}
+	return idx < len(items)-1
+}
+
 func (c *selectableColumn) SetHighlightFunc(fn func(listEntry) tea.Cmd) {
 	c.onHighlight = fn
 }
@@ -745,6 +757,18 @@ func (c *backlogTreeColumn) ScrollHorizontal(delta int) bool {
 	return false
 }
 
+func (c *backlogTreeColumn) CanMoveDown() bool {
+	items := c.model.Items()
+	if len(items) <= 1 {
+		return false
+	}
+	idx := c.model.Index()
+	if idx < 0 {
+		return true
+	}
+	return idx < len(items)-1
+}
+
 func (c *backlogTreeColumn) SelectNode(node backlogNode) {
 	if len(c.model.Items()) == 0 {
 		return
@@ -937,6 +961,17 @@ func (c *backlogTableColumn) FocusValue() string {
 
 func (c *backlogTableColumn) ScrollHorizontal(delta int) bool {
 	return false
+}
+
+func (c *backlogTableColumn) CanMoveDown() bool {
+	if len(c.rows) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.rows)-1
 }
 
 func (c *backlogTableColumn) SelectNode(node backlogNode) {
@@ -1279,6 +1314,18 @@ func (c *artifactTreeColumn) ScrollHorizontal(delta int) bool {
 	return false
 }
 
+func (c *artifactTreeColumn) CanMoveDown() bool {
+	items := c.model.Items()
+	if len(items) <= 1 {
+		return false
+	}
+	idx := c.model.Index()
+	if idx < 0 {
+		return true
+	}
+	return idx < len(items)-1
+}
+
 type actionColumn struct {
 	title       string
 	table       table.Model
@@ -1372,6 +1419,17 @@ func (c *actionColumn) SelectedItems() []featureItemDefinition {
 		}
 	}
 	return entries
+}
+
+func (c *actionColumn) CanMoveDown() bool {
+	if len(c.items) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.items)-1
 }
 
 func (c *actionColumn) ClearSelection() {
@@ -1786,6 +1844,17 @@ func (c *envTableColumn) ScrollHorizontal(delta int) bool {
 	return false
 }
 
+func (c *envTableColumn) CanMoveDown() bool {
+	if len(c.entries) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.entries)-1
+}
+
 func envEntryIdentifier(entry envEntry) string {
 	return fmt.Sprintf("%s::%s::%d", entry.Source, entry.Key, entry.LineIndex)
 }
@@ -2020,6 +2089,17 @@ func (c *servicesTableColumn) ScrollHorizontal(delta int) bool {
 	return false
 }
 
+func (c *servicesTableColumn) CanMoveDown() bool {
+	if len(c.items) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.items)-1
+}
+
 func (c *servicesTableColumn) ApplyStyles(s styles) {
 	c.table.SetStyles(table.Styles{
 		Header:   s.tableHeader,
@@ -2235,6 +2315,17 @@ func (c *tokensTableColumn) ScrollHorizontal(delta int) bool {
 	return false
 }
 
+func (c *tokensTableColumn) CanMoveDown() bool {
+	if len(c.rows) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.rows)-1
+}
+
 type reportTableRow struct {
 	entry      reportEntry
 	timeLabel  string
@@ -2443,6 +2534,17 @@ func (c *reportsTableColumn) FocusValue() string {
 
 func (c *reportsTableColumn) ScrollHorizontal(delta int) bool {
 	return false
+}
+
+func (c *reportsTableColumn) CanMoveDown() bool {
+	if len(c.rows) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.rows)-1
 }
 
 func formatReportTableTime(ts time.Time) string {

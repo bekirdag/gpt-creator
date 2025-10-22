@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,6 +89,20 @@ type envFileItem struct {
 }
 
 type removeWorkspaceAction struct{}
+
+type emptyWorkspaceAction struct {
+	key string
+}
+
+type rfpSavedMsg struct {
+	path    string
+	content string
+	err     error
+}
+
+type focusAreaMsg struct {
+	area focusArea
+}
 
 type paletteEntry struct {
 	label           string
@@ -288,23 +303,31 @@ const (
 const servicesPollInterval = 2 * time.Second
 
 type keyMap struct {
-	quit        key.Binding
-	nextFocus   key.Binding
-	prevFocus   key.Binding
-	nextFeature key.Binding
-	prevFeature key.Binding
-	toggleLogs  key.Binding
-	openPalette key.Binding
-	closePal    key.Binding
-	runPal      key.Binding
-	openEditor  key.Binding
-	togglePin   key.Binding
-	copyPath    key.Binding
-	copySnippet key.Binding
-	toggleSplit key.Binding
-	cancelJob   key.Binding
-	toggleHelp  key.Binding
-	focusChat   key.Binding
+	quit         key.Binding
+	nextFocus    key.Binding
+	prevFocus    key.Binding
+	nextFeature  key.Binding
+	prevFeature  key.Binding
+	toggleLogs   key.Binding
+	logsLineUp   key.Binding
+	logsLineDown key.Binding
+	logsPageUp   key.Binding
+	logsPageDown key.Binding
+	logsTop      key.Binding
+	logsBottom   key.Binding
+	logsSelect   key.Binding
+	logsCopy     key.Binding
+	openPalette  key.Binding
+	closePal     key.Binding
+	runPal       key.Binding
+	openEditor   key.Binding
+	togglePin    key.Binding
+	copyPath     key.Binding
+	copySnippet  key.Binding
+	toggleSplit  key.Binding
+	cancelJob    key.Binding
+	toggleHelp   key.Binding
+	focusChat    key.Binding
 }
 
 func newKeyMap() keyMap {
@@ -332,6 +355,38 @@ func newKeyMap() keyMap {
 		toggleLogs: key.NewBinding(
 			key.WithKeys("f6"),
 			key.WithHelp("F6", "toggle logs"),
+		),
+		logsLineUp: key.NewBinding(
+			key.WithKeys("shift+up", "ctrl+up"),
+			key.WithHelp("shift+↑", "logs up"),
+		),
+		logsLineDown: key.NewBinding(
+			key.WithKeys("shift+down", "ctrl+down"),
+			key.WithHelp("shift+↓", "logs down"),
+		),
+		logsPageUp: key.NewBinding(
+			key.WithKeys("pgup", "ctrl+pgup"),
+			key.WithHelp("PgUp", "logs page up"),
+		),
+		logsPageDown: key.NewBinding(
+			key.WithKeys("pgdown", "ctrl+pgdown"),
+			key.WithHelp("PgDn", "logs page down"),
+		),
+		logsTop: key.NewBinding(
+			key.WithKeys("home", "ctrl+home"),
+			key.WithHelp("Home", "logs top"),
+		),
+		logsBottom: key.NewBinding(
+			key.WithKeys("end", "ctrl+end"),
+			key.WithHelp("End", "logs bottom"),
+		),
+		logsSelect: key.NewBinding(
+			key.WithKeys("ctrl+shift+s"),
+			key.WithHelp("ctrl+shift+s", "toggle log selection"),
+		),
+		logsCopy: key.NewBinding(
+			key.WithKeys("ctrl+c", "cmd+c", "ctrl+shift+c"),
+			key.WithHelp("ctrl/cmd+c", "copy log selection"),
 		),
 		focusChat: key.NewBinding(
 			key.WithKeys("f7"),
@@ -398,6 +453,8 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.nextFocus, k.prevFocus, k.nextFeature, k.prevFeature},
 		{k.openPalette, k.runPal, k.closePal},
+		{k.logsLineUp, k.logsLineDown, k.logsPageUp, k.logsPageDown, k.logsTop, k.logsBottom},
+		{k.logsSelect, k.logsCopy},
 		{k.openEditor, k.togglePin, k.toggleSplit},
 		{k.copyPath, k.copySnippet},
 		{k.cancelJob, k.focusChat, k.toggleLogs, k.toggleHelp, k.quit},
@@ -422,10 +479,12 @@ type model struct {
 	currentProject *discoveredProject
 	currentFeature string
 	currentItem    featureItemDefinition
+	itemsActivated bool
 
 	workspaceCol            *selectableColumn
 	featureCol              *selectableColumn
 	itemsCol                *actionColumn
+	rfpEditorCol            *textEditorColumn
 	envTableCol             *envTableColumn
 	servicesCol             *servicesTableColumn
 	tokensCol               *tokensTableColumn
@@ -433,6 +492,7 @@ type model struct {
 	artifactsCol            *selectableColumn
 	artifactTreeCol         *artifactTreeColumn
 	previewCol              *previewColumn
+	logsCol                 *logsColumn
 	columns                 []column
 	defaultColumns          []column
 	columnsScrollX          int
@@ -466,16 +526,23 @@ type model struct {
 	usingEnvLayout          bool
 	usingTokensLayout       bool
 	usingReportsLayout      bool
+	usingRfpEditor          bool
 	backlogCol              *backlogTreeColumn
 	backlogTable            *backlogTableColumn
+	rfpEditorPath           string
 
 	focus       int
 	hoverColumn int
 
-	showLogs   bool
-	logsHeight int
-	logs       viewport.Model
-	logLines   []string
+	showLogs            bool
+	logsFocused         bool
+	logs                viewport.Model
+	logLines            []string
+	logsSelectionActive bool
+	logsSelectionAnchor int
+	logsSelectionCursor int
+	logsPanelTop        int
+	logsPanelHeight     int
 
 	inputActive                  bool
 	inputMode                    inputMode
@@ -622,13 +689,17 @@ func initialModel() *model {
 		markdownTheme: currentMarkdownTheme(),
 		hoverColumn:   -1,
 		showLogs:      true,
-		logsHeight:    8,
-		logLines: []string{
-			"[INFO] Select a workspace root or add a project path to begin.",
-			"[TIP] Use Tab/Shift+Tab or h/l to move focus across columns.",
-			"[TIP] Press Enter to drill into a column; Backspace to step back.",
-		},
 	}
+
+	m.logLines = []string{
+		m.decorateLogLine("[INFO] Select a workspace root or add a project path to begin."),
+		m.decorateLogLine("[TIP] Use Tab/Shift+Tab or h/l to move focus across columns."),
+		m.decorateLogLine("[TIP] Press Enter to drill into a column; Backspace to step back."),
+	}
+	m.logsSelectionAnchor = -1
+	m.logsSelectionCursor = -1
+	m.logsPanelTop = -1
+	m.logsPanelHeight = 0
 
 	m.help.ShortSeparator = " │ "
 	m.help.Styles.ShortKey = m.styles.statusHint.Copy()
@@ -783,15 +854,16 @@ func initialModel() *model {
 	}
 	m.ensurePinnedRoots()
 
-	m.workspaceCol = newSelectableColumn("Workspace", nil, 22, func(entry listEntry) tea.Cmd {
+	m.workspaceCol = newSelectableColumn("Workspace", nil, 44, func(entry listEntry) tea.Cmd {
 		if item, ok := entry.payload.(workspaceItem); ok {
 			return func() tea.Msg { return workspaceSelectedMsg{item: item} }
 		}
 		return nil
 	})
+	m.workspaceCol.SetDebugLogger(m.appendDebugLog)
 	m.workspaceCol.ApplyStyles(m.styles)
 
-	m.featureCol = newSelectableColumn("Feature", nil, 22, func(entry listEntry) tea.Cmd {
+	m.featureCol = newSelectableColumn("Feature", nil, 41, func(entry listEntry) tea.Cmd {
 		switch payload := entry.payload.(type) {
 		case featureDefinition:
 			return func() tea.Msg {
@@ -803,10 +875,13 @@ func initialModel() *model {
 			}
 		case removeWorkspaceAction:
 			return func() tea.Msg { return removeWorkspaceRequestedMsg{} }
+		case emptyWorkspaceAction:
+			return m.handleEmptyWorkspaceAction(payload)
 		default:
 			return nil
 		}
 	})
+	m.featureCol.SetDebugLogger(m.appendDebugLog)
 	m.featureCol.ApplyStyles(m.styles)
 	m.featureSelectDefault = m.featureCol.onSelect
 	m.featureHighlightDefault = nil
@@ -823,6 +898,7 @@ func initialModel() *model {
 		}
 		return nil
 	})
+	m.artifactsCol.SetDebugLogger(m.appendDebugLog)
 	m.artifactsCol.ApplyStyles(m.styles)
 
 	m.envTableCol = newEnvTableColumn("Variables")
@@ -919,6 +995,10 @@ func initialModel() *model {
 	m.previewCol.ApplyStyles(m.styles)
 	m.applyMarkdownTheme(m.markdownTheme, false)
 
+	m.rfpEditorCol = newTextEditorColumn("Draft RFP")
+	m.rfpEditorCol.ApplyStyles(m.styles)
+	m.rfpEditorCol.SetHint("ctrl+s save • click Save")
+
 	m.columns = []column{
 		m.workspaceCol,
 		m.featureCol,
@@ -938,19 +1018,27 @@ func initialModel() *model {
 		m.tokensRangeIndex = 0
 	}
 
-	m.logs = viewport.New(80, m.logsHeight)
+	m.logs = viewport.New(80, 8)
 	m.logs.Style = m.styles.body.Copy().Foreground(crushForegroundMuted)
+	m.logsCol = newLogsColumn(m)
+	m.logsCol.ApplyStyles(m.styles)
 	m.refreshLogs()
 
 	m.refreshWorkspaceColumn()
-	if len(m.workspaceRoots) > 0 {
+	workspaceCount := len(m.workspaceRoots)
+	m.focus = int(focusWorkspace)
+	if workspaceCount == 1 {
 		m.currentRoot = &m.workspaceRoots[0]
-		m.focus = int(focusWorkspace)
+		m.selectWorkspacePath(m.currentRoot.Path)
 		m.refreshProjectsForCurrentRoot()
 		if project := m.projectByPath(m.currentRoot.Path); project != nil {
 			m.handleProjectSelected(project)
 		}
+	} else {
+		m.currentRoot = nil
+		m.refreshProjectsForCurrentRoot()
 	}
+	m.updateVisibleColumns()
 
 	m.refreshCommandCatalog()
 	m.refreshChatView()
@@ -1313,6 +1401,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			localX = mx
 			localY = my
 		}
+		if handled, mouseCmd := m.handleLogsMouse(mm); handled {
+			if mouseCmd != nil {
+				cmds = append(cmds, mouseCmd)
+			}
+		}
 	}
 	if targetColumn >= 0 && targetColumn < len(m.columns) {
 		if haveMouse && localX >= 0 && localY >= 0 {
@@ -1351,6 +1444,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleEnvFileSelected(message)
 	case itemSelectedMsg:
 		if cmd := m.handleItemSelected(message); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case focusAreaMsg:
+		m.setFocusArea(message.area)
+	case rfpSavedMsg:
+		if cmd := m.handleRfpSaved(message); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
 	case artifactCategorySelectedMsg:
@@ -1438,15 +1537,49 @@ func (m *model) View() string {
 	builder.WriteString(m.renderColumnsRow(row))
 	builder.WriteRune('\n')
 
-	if m.showLogs {
-		logTitle := m.styles.columnTitle.Render("Job / Logs / Status")
-		logBody := m.styles.panel.Width(m.width).Render(logTitle + "\n" + m.logs.View())
-		builder.WriteString(logBody)
-		builder.WriteRune('\n')
+	var (
+		logView  string
+		chatView string
+	)
+
+	if m.showLogs && m.logsCol != nil {
+		logView = m.logsCol.View(m.styles, m.logsFocused)
 	}
 
-	if chat := m.renderChat(); chat != "" {
-		builder.WriteString(chat)
+	chatWidth := 0
+	if m.chatVisible {
+		width := m.chatAreaWidth()
+		if logView == "" {
+			width = m.width
+		}
+		if width > 0 {
+			chatWidth = width
+		}
+	}
+
+	if chatWidth > 0 {
+		chatView = m.renderChat(chatWidth)
+	}
+
+	switch {
+	case chatView != "" && logView != "":
+		combined := lipgloss.JoinHorizontal(lipgloss.Top, chatView, logView)
+		builder.WriteString(combined)
+		builder.WriteRune('\n')
+	case chatView != "":
+		builder.WriteString(chatView)
+		builder.WriteRune('\n')
+	case logView != "":
+		fillerWidth := max(m.width-logsColumnWidth, 0)
+		if fillerWidth > 0 {
+			filler := lipgloss.NewStyle().
+				Width(fillerWidth).
+				Height(logsColumnHeight).
+				Background(crushBackground).
+				Render("")
+			logView = lipgloss.JoinHorizontal(lipgloss.Top, filler, logView)
+		}
+		builder.WriteString(logView)
 		builder.WriteRune('\n')
 	}
 
@@ -2325,6 +2458,14 @@ func (m *model) renderHeaderPanel() (string, int) {
 }
 
 func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
+	if m.usingRfpEditor {
+		if area, ok := m.focusedArea(); ok && area == focusItems {
+			return false, nil
+		}
+	}
+	if handled, cmd := m.handleLogsKey(msg); handled {
+		return true, cmd
+	}
 	if m.currentFeature == "settings" {
 		if handled, cmd := m.handleSettingsKey(msg); handled {
 			return true, cmd
@@ -2412,9 +2553,20 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		m.openQuitConfirm()
 		return true, nil
 	case key.Matches(msg, m.keys.nextFocus):
+		if m.logsFocused {
+			m.focusNextColumn()
+			return true, nil
+		}
 		m.moveFocus(1)
 		return true, nil
 	case key.Matches(msg, m.keys.prevFocus):
+		if m.logsFocused {
+			indices := m.focusableColumnIndices()
+			if len(indices) > 0 {
+				m.setFocusIndex(indices[len(indices)-1])
+			}
+			return true, nil
+		}
 		m.moveFocus(-1)
 		return true, nil
 	case key.Matches(msg, m.keys.nextFeature):
@@ -2429,7 +2581,16 @@ func (m *model) handleGlobalKey(msg tea.KeyMsg) (bool, tea.Cmd) {
 		return true, nil
 	case key.Matches(msg, m.keys.toggleLogs):
 		m.showLogs = !m.showLogs
+		if !m.showLogs {
+			m.logsSelectionActive = false
+			m.logsSelectionAnchor = -1
+			m.logsSelectionCursor = -1
+			m.logsFocused = false
+		} else {
+			m.refreshLogs()
+		}
 		m.applyLayout()
+		m.clampFocusAfterLayout()
 		return true, nil
 	case key.Matches(msg, m.keys.focusChat):
 		m.focusChatInput()
@@ -2623,6 +2784,9 @@ func (m *model) textEntryActive() bool {
 		return true
 	}
 	for _, col := range m.columns {
+		if _, ok := col.(*textEditorColumn); ok {
+			return true
+		}
 		if sc, ok := col.(*selectableColumn); ok && sc != nil && sc.model.SettingFilter() {
 			return true
 		}
@@ -2695,8 +2859,14 @@ func (m *model) hitTestColumn(x, y int) (int, int, int, bool) {
 }
 
 func (m *model) prepareMouseMessage(msg tea.MouseMsg) (int, int, int, tea.Cmd) {
+	prevHover := m.hoverColumn
 	if len(m.columns) == 0 {
 		m.hoverColumn = -1
+		if prevHover >= 0 && prevHover < len(m.columns) {
+			if hoverable, ok := m.columns[prevHover].(hoverAwareColumn); ok {
+				hoverable.ClearHover()
+			}
+		}
 		return -1, -1, -1, nil
 	}
 	target := -1
@@ -2717,6 +2887,11 @@ func (m *model) prepareMouseMessage(msg tea.MouseMsg) (int, int, int, tea.Cmd) {
 				m.setFocusIndex(idx)
 				m.adjustColumnsScroll()
 			}
+		}
+	}
+	if prevHover >= 0 && prevHover < len(m.columns) && prevHover != m.hoverColumn {
+		if hoverable, ok := m.columns[prevHover].(hoverAwareColumn); ok {
+			hoverable.ClearHover()
 		}
 	}
 	return target, localX, localY, nil
@@ -2771,6 +2946,8 @@ func (m *model) toggleMarkdownTheme() {
 }
 
 func (m *model) stepBack() {
+	defer m.updateVisibleColumns()
+
 	if m.currentFeature == "env" && m.usingEnvLayout {
 		if area, ok := m.focusedArea(); ok {
 			switch area {
@@ -2795,6 +2972,7 @@ func (m *model) stepBack() {
 		case focusPreview:
 			m.setFocusArea(focusItems)
 			m.currentItem = featureItemDefinition{}
+			m.itemsActivated = false
 			if m.currentFeature == "docs" {
 				m.resetDocSelection()
 			}
@@ -2806,6 +2984,7 @@ func (m *model) stepBack() {
 			m.itemsCol.SetItems(nil)
 			m.previewCol.SetContent("Select an item to preview details.\n")
 			m.currentItem = featureItemDefinition{}
+			m.itemsActivated = false
 			m.setFocusArea(focusFeatures)
 		case focusFeatures:
 			if m.currentFeature == "docs" {
@@ -2817,14 +2996,20 @@ func (m *model) stepBack() {
 			m.itemsCol.SetTitle("Actions")
 			m.previewCol.SetContent("Select an item to preview details.\n")
 			m.currentItem = featureItemDefinition{}
+			m.itemsActivated = false
 			m.setFocusArea(focusWorkspace)
 		}
 	}
 }
 
 func (m *model) handleWorkspaceSelected(item workspaceItem) tea.Cmd {
+	defer m.updateVisibleColumns()
+
 	switch item.kind {
 	case workspaceKindRoot:
+		if m.usingRfpEditor {
+			m.useRfpEditorLayout(false)
+		}
 		root := m.findRoot(item.path)
 		if root == nil {
 			label := labelForPath(item.path)
@@ -2856,7 +3041,9 @@ func (m *model) handleWorkspaceSelected(item workspaceItem) tea.Cmd {
 		}
 	case workspaceKindNewProject:
 		defaultPath := ""
-		if m.currentRoot != nil {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			defaultPath = filepath.Join(home, "new-project")
+		} else if m.currentRoot != nil {
 			defaultPath = filepath.Join(m.currentRoot.Path, "new-project")
 		}
 		m.startNewProjectFlow(defaultPath)
@@ -2872,6 +3059,8 @@ func (m *model) handleProjectSelected(project *discoveredProject) tea.Cmd {
 	if project == nil {
 		return nil
 	}
+	defer m.updateVisibleColumns()
+
 	if m.usingEnvLayout {
 		m.exitEnvEditor()
 	}
@@ -2879,6 +3068,7 @@ func (m *model) handleProjectSelected(project *discoveredProject) tea.Cmd {
 	m.currentProject = project
 	m.currentFeature = ""
 	m.currentItem = featureItemDefinition{}
+	m.itemsActivated = false
 	m.resetDocSelection()
 	m.currentGenerateTarget = ""
 	m.currentGenerateFile = ""
@@ -2921,7 +3111,23 @@ func (m *model) populateFeatureList() {
 			removeSelected = true
 		}
 	}
-	items := featureListEntries()
+	items := []list.Item{}
+	if m.isCurrentWorkspaceEmpty() {
+		items = append(items,
+			listEntry{
+				title:   "Add an RFP",
+				desc:    "Copy an external RFP into .gpt-creator/staging/inputs/",
+				payload: emptyWorkspaceAction{key: "add-rfp"},
+			},
+			listEntry{
+				title:   "Create an RFP",
+				desc:    "Generate a starter rfp.md under .gpt-creator/staging/inputs/",
+				payload: emptyWorkspaceAction{key: "create-rfp"},
+			},
+		)
+	} else {
+		items = featureListEntries()
+	}
 	if m.currentRoot != nil {
 		items = append(items, listEntry{
 			title:   "Remove Workspace…",
@@ -2949,9 +3155,190 @@ func (m *model) populateFeatureList() {
 	}
 }
 
+func (m *model) handleEmptyWorkspaceAction(action emptyWorkspaceAction) tea.Cmd {
+	switch action.key {
+	case "add-rfp":
+		return m.startAttachRFP()
+	case "create-rfp":
+		return m.openRfpEditor()
+	default:
+		return nil
+	}
+}
+
+func (m *model) isCurrentWorkspaceEmpty() bool {
+	project := m.currentProject
+	if project == nil {
+		return false
+	}
+	root := filepath.Clean(project.Path)
+	if root == "" {
+		return false
+	}
+	if dirExists(filepath.Join(root, ".gpt-creator")) {
+		return false
+	}
+	if project.Stats.StageIndex > 0 {
+		return false
+	}
+	empty, err := isDirEmpty(root)
+	if err != nil {
+		return false
+	}
+	return empty
+}
+
+func (m *model) openRfpEditor() tea.Cmd {
+	if m.currentProject == nil {
+		m.appendLog("Select a project before creating artifacts.")
+		m.setToast("Select a project first", 5*time.Second)
+		return nil
+	}
+	root := filepath.Clean(m.currentProject.Path)
+	if root == "" {
+		return nil
+	}
+	m.useRfpEditorLayout(true)
+	m.rfpEditorPath = filepath.Join(root, "docs", "rfp.md")
+
+	data, err := os.ReadFile(m.rfpEditorPath)
+	var content string
+	var markSaved bool
+	switch {
+	case err == nil:
+		content = string(data)
+		markSaved = true
+	case errors.Is(err, os.ErrNotExist):
+		content = defaultRfpTemplate()
+		markSaved = false
+	default:
+		m.appendLog(fmt.Sprintf("Failed to load existing RFP: %v", err))
+		m.setToast("Unable to open RFP", 6*time.Second)
+		return nil
+	}
+
+	m.rfpEditorCol.SetContent(content, markSaved)
+	if markSaved {
+		m.rfpEditorCol.SetStatus("Draft saved", "success")
+	} else {
+		m.rfpEditorCol.SetStatus("Draft not yet saved • click Save to create docs/rfp.md", "hint")
+	}
+	m.rfpEditorCol.SetOnSave(func(value string) tea.Cmd {
+		return m.saveRfpDraft(value)
+	})
+	m.rfpEditorCol.FocusEditor()
+
+	if markSaved {
+		m.previewCol.SetContent(previewPath(m.currentProject, filepath.ToSlash(filepath.Join("docs", "rfp.md"))))
+	} else {
+		m.previewCol.SetContent("Preview updates after you save docs/rfp.md.\n")
+	}
+	m.appendLog("RFP editor opened.")
+	m.setFocusArea(focusItems)
+	return nil
+}
+
+func (m *model) saveRfpDraft(content string) tea.Cmd {
+	if m.currentProject == nil {
+		return nil
+	}
+	root := filepath.Clean(m.currentProject.Path)
+	if root == "" {
+		return nil
+	}
+	path := strings.TrimSpace(m.rfpEditorPath)
+	if path == "" {
+		path = filepath.Join(root, "docs", "rfp.md")
+		m.rfpEditorPath = path
+	}
+	clean := filepath.Clean(path)
+	return func() tea.Msg {
+		dir := filepath.Dir(clean)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return rfpSavedMsg{path: clean, err: err}
+		}
+		if err := os.WriteFile(clean, []byte(content), 0o644); err != nil {
+			return rfpSavedMsg{path: clean, err: err}
+		}
+		return rfpSavedMsg{path: clean, content: content}
+	}
+}
+
+func (m *model) handleRfpSaved(msg rfpSavedMsg) tea.Cmd {
+	if msg.err != nil {
+		reason := fmt.Sprintf("Save failed: %v", msg.err)
+		m.appendLog(reason)
+		m.setToast("Failed to save RFP", 6*time.Second)
+		if m.rfpEditorCol != nil {
+			m.rfpEditorCol.SaveFailed(reason)
+			m.rfpEditorCol.FocusEditor()
+		}
+		return nil
+	}
+
+	m.rfpEditorPath = msg.path
+	rel := msg.path
+	if m.currentProject != nil {
+		if relPath, err := filepath.Rel(m.currentProject.Path, msg.path); err == nil {
+			rel = filepath.ToSlash(relPath)
+		} else {
+			rel = filepath.ToSlash(msg.path)
+		}
+	}
+	m.appendLog(fmt.Sprintf("Saved RFP → %s", abbreviatePath(msg.path)))
+	m.setToast("RFP saved", 4*time.Second)
+	if m.rfpEditorCol != nil {
+		m.rfpEditorCol.MarkSaved(msg.content, rel)
+		m.rfpEditorCol.FocusEditor()
+	}
+	if m.currentProject != nil {
+		m.refreshProjectSnapshot(filepath.Clean(m.currentProject.Path))
+		m.populateFeatureList()
+		if preview := previewPath(m.currentProject, rel); preview != "" {
+			m.previewCol.SetContent(preview)
+		}
+	}
+	return nil
+}
+
+func defaultRfpTemplate() string {
+	return `# Request for Proposal
+
+## Executive Summary
+Describe the opportunity, customer, and target outcome in a few sentences.
+
+## Problem Statement
+Explain the pain points or gaps that the solution must address.
+
+## Objectives
+- Objective 1
+- Objective 2
+- Objective 3
+
+## Scope
+Describe the key capabilities, integrations, and constraints for the engagement.
+
+## Success Metrics
+Detail the measurable signals that indicate the solution meets expectations.
+
+## Timeline
+- Phase 1 - Discovery (date)
+- Phase 2 - Delivery (date)
+- Phase 3 - Launch (date)
+
+## Assumptions & Risks
+List notable assumptions, dependencies, or risks the team should track.
+`
+}
+
 func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 	if m.currentProject == nil {
 		return nil
+	}
+	defer m.updateVisibleColumns()
+
+	if m.usingRfpEditor {
+		m.useRfpEditorLayout(false)
 	}
 	if feature.Key != "env" && m.usingEnvLayout {
 		m.exitEnvEditor()
@@ -2964,6 +3351,7 @@ func (m *model) handleFeatureSelected(feature featureDefinition) tea.Cmd {
 	}
 	m.currentFeature = feature.Key
 	m.currentItem = featureItemDefinition{}
+	m.itemsActivated = false
 	m.resetDocSelection()
 	if feature.Key != "generate" {
 		m.currentGenerateTarget = ""
@@ -3142,6 +3530,8 @@ func (m *model) cycleFeature(delta int) tea.Cmd {
 }
 
 func (m *model) handleItemSelected(msg itemSelectedMsg) tea.Cmd {
+	defer m.updateVisibleColumns()
+
 	targetProject := msg.project
 	if targetProject == nil {
 		targetProject = m.currentProject
@@ -3149,6 +3539,12 @@ func (m *model) handleItemSelected(msg itemSelectedMsg) tea.Cmd {
 	featureKey := msg.feature.Key
 	if featureKey == "" {
 		featureKey = m.currentFeature
+	}
+	if !msg.activate && !m.itemsActivated {
+		return nil
+	}
+	if msg.activate {
+		m.itemsActivated = true
 	}
 	if featureKey == "settings" {
 		return m.handleSettingsSelection(msg.item, msg.activate)
@@ -3795,7 +4191,6 @@ func (m *model) handleJobMessage(msg jobMsg) tea.Cmd {
 				m.setToast(fmt.Sprintf("%s completed", message.Title), 6*time.Second)
 			}
 			m.emitTelemetry("job_stopped", fields)
-
 			lower := strings.ToLower(message.Title)
 			switch {
 			case strings.Contains(lower, "create-jira-tasks"):
@@ -4101,18 +4496,15 @@ func (m *model) handleInputSubmit(value string) (tea.Cmd, bool) {
 		}
 		return nil, true
 	case inputNewProjectPath:
-		cmd := m.handleNewProjectPathSubmit(value)
-		keep := false
-		if m.inputMode == inputNewProjectTemplate || m.inputMode == inputNewProjectConfirm {
-			keep = true
-		} else if cmd == nil {
-			keep = true
-		}
-		return cmd, keep
+		return m.handleNewProjectPathSubmit(value)
 	case inputNewProjectConfirm:
 		if strings.EqualFold(strings.TrimSpace(value), "yes") {
-			m.openTemplatePrompt()
-			return nil, true
+			cmd, keep := m.finalizeNewProject(m.pendingNewProjectPath)
+			if !keep {
+				m.pendingNewProjectPath = ""
+				m.pendingNewProjectTemplate = ""
+			}
+			return cmd, keep
 		} else {
 			m.appendLog("Create project cancelled.")
 			m.setToast("Create project cancelled", 4*time.Second)
@@ -4121,20 +4513,12 @@ func (m *model) handleInputSubmit(value string) (tea.Cmd, bool) {
 		}
 		return nil, false
 	case inputNewProjectTemplate:
-		tpl := strings.TrimSpace(value)
-		if tpl == "" {
-			tpl = "auto"
+		cmd, keep := m.finalizeNewProject(m.pendingNewProjectPath)
+		if !keep {
+			m.pendingNewProjectPath = ""
+			m.pendingNewProjectTemplate = ""
 		}
-		m.pendingNewProjectTemplate = tpl
-		path := m.pendingNewProjectPath
-		if path == "" {
-			m.appendLog("No project path captured; aborting create-project.")
-			return nil, false
-		}
-		cmd := m.launchCreateProject(path, tpl)
-		m.pendingNewProjectPath = ""
-		m.pendingNewProjectTemplate = ""
-		return cmd, false
+		return cmd, keep
 	case inputAttachRFP:
 		keep := m.handleAttachRFPSubmit(value)
 		return nil, keep
@@ -4266,6 +4650,8 @@ func (m *model) refreshWorkspaceColumn() {
 }
 
 func (m *model) refreshProjectsForCurrentRoot() {
+	defer m.updateVisibleColumns()
+
 	if m.currentRoot == nil {
 		m.projects = nil
 		m.featureCol.SetItems(nil)
@@ -4274,6 +4660,7 @@ func (m *model) refreshProjectsForCurrentRoot() {
 		m.currentProject = nil
 		m.currentFeature = ""
 		m.currentItem = featureItemDefinition{}
+		m.itemsActivated = false
 		return
 	}
 
@@ -4387,6 +4774,7 @@ func (m *model) resolvePickerStart(initial string) (string, string) {
 			return parent, ""
 		}
 	}
+
 	if m.currentRoot != nil && dirExists(m.currentRoot.Path) {
 		return m.currentRoot.Path, ""
 	}
@@ -4520,7 +4908,6 @@ func (m *model) launchCreateProject(path string, template string) tea.Cmd {
 		m.createProjectJobs = make(map[string]string)
 	}
 	m.createProjectJobs[title] = resolved
-
 	return m.enqueueJob(jobRequest{
 		title:   title,
 		dir:     parent,
@@ -4531,9 +4918,9 @@ func (m *model) launchCreateProject(path string, template string) tea.Cmd {
 		},
 		onFinish: func(err error) {
 			m.refreshCreateProjectProgress(title)
-			delete(m.createProjectJobs, title)
 			delete(m.lastProjectRefresh, filepath.Clean(resolved))
 			if err != nil {
+				delete(m.createProjectJobs, title)
 				m.emitTelemetry("create_project_failed", map[string]string{
 					"path":    resolved,
 					"project": filepath.Clean(resolved),
@@ -4541,23 +4928,6 @@ func (m *model) launchCreateProject(path string, template string) tea.Cmd {
 				})
 				m.appendLog(fmt.Sprintf("create-project failed: %v", err))
 				m.setToast("Create project failed", 6*time.Second)
-				return
-			}
-			m.emitTelemetry("create_project_succeeded", map[string]string{
-				"path":    resolved,
-				"project": filepath.Clean(resolved),
-				"feature": "projects",
-			})
-			m.refreshCreateProjectProgress(title)
-			m.refreshProjectsForCurrentRoot()
-			if project := m.projectByPath(resolved); project != nil {
-				m.handleProjectSelected(project)
-				stats := project.Stats
-				toast := "Project ready"
-				if stats.VerifyTotal > 0 {
-					toast = fmt.Sprintf("Project ready • Verify acceptance: %d/%d ✓", stats.VerifyPass, stats.VerifyTotal)
-				}
-				m.setToast(toast, 8*time.Second)
 			}
 		},
 	})
@@ -5805,8 +6175,10 @@ func (m *model) handleServicesLoaded(items []featureItemDefinition) {
 			m.previewCol.SetContent("No services detected.\n")
 		}
 		m.currentItem = featureItemDefinition{}
+		m.itemsActivated = false
 	}
 	m.recordServiceHealth(items)
+	m.updateVisibleColumns()
 }
 
 func (m *model) recordServiceHealth(items []featureItemDefinition) {
@@ -6100,6 +6472,7 @@ func (m *model) removeWorkspacePath(clean string) tea.Cmd {
 		m.currentProject = nil
 		m.currentFeature = ""
 		m.currentItem = featureItemDefinition{}
+		m.itemsActivated = false
 		m.previewCol.SetContent("Select an item to preview details.\n")
 		m.itemsCol.SetItems(nil)
 		if len(m.workspaceRoots) > 0 {
@@ -6215,17 +6588,17 @@ func (m *model) writeUIConfig() {
 	}
 }
 
-func (m *model) handleNewProjectPathSubmit(raw string) tea.Cmd {
+func (m *model) handleNewProjectPathSubmit(raw string) (tea.Cmd, bool) {
 	resolved := m.resolvePath(strings.TrimSpace(raw))
 	if resolved == "" {
 		m.appendLog("Project path cannot be empty.")
-		return nil
+		return nil, true
 	}
 	needsConfirm, confirmMessage, err := m.validateNewProjectPath(resolved)
 	if err != nil {
 		m.appendLog(err.Error())
 		m.setToast("Invalid project path", 5*time.Second)
-		return nil
+		return nil, true
 	}
 	m.pendingNewProjectPath = resolved
 	var confirmReasons []string
@@ -6239,10 +6612,43 @@ func (m *model) handleNewProjectPathSubmit(raw string) tea.Cmd {
 	if len(confirmReasons) > 0 {
 		prompt := strings.Join(confirmReasons, " • ")
 		m.openInput(prompt+" (type YES to continue)", "", inputNewProjectConfirm)
-		return nil
+		return nil, true
 	}
-	m.openTemplatePrompt()
-	return nil
+	cmd, keep := m.finalizeNewProject(resolved)
+	if !keep {
+		m.pendingNewProjectPath = ""
+		m.pendingNewProjectTemplate = ""
+	}
+	return cmd, keep
+}
+
+func (m *model) finalizeNewProject(path string) (tea.Cmd, bool) {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "" {
+		m.setToast("Project path required", 4*time.Second)
+		return nil, true
+	}
+	if err := os.MkdirAll(cleanPath, 0o755); err != nil {
+		m.appendLog(fmt.Sprintf("Failed to create project directory: %v", err))
+		m.setToast("Failed to create project directory", 5*time.Second)
+		return nil, true
+	}
+	m.appendLog(fmt.Sprintf("Project directory ready: %s", abbreviatePath(cleanPath)))
+	if !m.hasWorkspaceRoot(cleanPath) {
+		if !m.addCustomWorkspaceRoot(cleanPath) {
+			return nil, true
+		}
+	} else {
+		m.refreshWorkspaceColumn()
+	}
+	m.selectWorkspacePath(cleanPath)
+	item := workspaceItem{
+		kind:   workspaceKindRoot,
+		path:   cleanPath,
+		pinned: m.pinnedPaths[cleanPath],
+	}
+	cmd := m.handleWorkspaceSelected(item)
+	return cmd, false
 }
 
 func (m *model) validateNewProjectPath(path string) (bool, string, error) {
@@ -6285,23 +6691,403 @@ func (m *model) appendLog(line string) {
 	if line == "" {
 		return
 	}
-	m.logLines = append(m.logLines, line)
+	decorated := m.decorateLogLine(line)
+	m.logLines = append(m.logLines, decorated)
 	if len(m.logLines) > 400 {
 		m.logLines = m.logLines[len(m.logLines)-400:]
 	}
 	m.refreshLogs()
+	if m.logsSelectionActive {
+		m.ensureLogCursorVisible()
+	}
 }
 
-func (m *model) refreshLogs() {
+func (m *model) appendDebugLog(format string, args ...interface{}) {
+	msg := strings.TrimSpace(fmt.Sprintf(format, args...))
+	if msg == "" {
+		return
+	}
+	m.appendLog("[DEBUG] " + msg)
+}
+
+func (m *model) decorateLogLine(line string) string {
+	if line == "" {
+		return line
+	}
+	if strings.Contains(line, "\x1b[") {
+		return line
+	}
+	trimmed := strings.TrimLeft(line, " \t")
+	if strings.HasPrefix(trimmed, "[DEBUG]") {
+		return m.styles.logDebug.Render(line)
+	}
+	return line
+}
+
+func (m *model) renderLogsViewportContent() string {
 	var parts []string
 	if queue := strings.TrimSpace(m.renderJobQueue()); queue != "" {
 		parts = append(parts, queue)
 	}
 	if len(m.logLines) > 0 {
-		parts = append(parts, strings.Join(m.logLines, "\n"))
+		parts = append(parts, m.renderLogLinesWithSelection())
 	}
-	content := strings.Join(parts, "\n\n")
+	return strings.Join(parts, "\n\n")
+}
+
+func (m *model) renderLogLinesWithSelection() string {
+	if len(m.logLines) == 0 {
+		return ""
+	}
+	start, end, ok := m.logSelectionRange()
+	if !ok {
+		return strings.Join(m.logLines, "\n")
+	}
+	var b strings.Builder
+	for i, line := range m.logLines {
+		if i >= start && i <= end {
+			b.WriteString(m.styles.logSelection.Render(line))
+		} else {
+			b.WriteString(line)
+		}
+		if i < len(m.logLines)-1 {
+			b.WriteRune('\n')
+		}
+	}
+	return b.String()
+}
+
+func (m *model) logSelectionRange() (int, int, bool) {
+	if !m.logsSelectionActive || len(m.logLines) == 0 {
+		return 0, 0, false
+	}
+	if m.logsSelectionAnchor < 0 || m.logsSelectionCursor < 0 {
+		return 0, 0, false
+	}
+	last := len(m.logLines) - 1
+	start := m.logsSelectionAnchor
+	if start < 0 {
+		start = 0
+	} else if start > last {
+		start = last
+	}
+	end := m.logsSelectionCursor
+	if end < 0 {
+		end = 0
+	} else if end > last {
+		end = last
+	}
+	if start > end {
+		start, end = end, start
+	}
+	return start, end, true
+}
+
+func (m *model) toggleLogsSelection() {
+	if len(m.logLines) == 0 {
+		m.setToast("No log entries available to select", 3*time.Second)
+		return
+	}
+	if m.logsSelectionActive {
+		m.logsSelectionActive = false
+		m.logsSelectionAnchor = -1
+		m.logsSelectionCursor = -1
+		m.refreshLogs()
+		m.setToast("Log selection cleared", 3*time.Second)
+		return
+	}
+	last := len(m.logLines) - 1
+	if last < 0 {
+		last = 0
+	}
+	m.logsSelectionActive = true
+	m.logsSelectionAnchor = last
+	m.logsSelectionCursor = last
+	m.refreshLogs()
+	m.ensureLogCursorVisible()
+	m.setToast("Log selection enabled • use ↑/↓ or Shift+↑/↓ to adjust", 4*time.Second)
+}
+
+func (m *model) ensureLogsSelectionInitialized() {
+	if !m.showLogs || len(m.logLines) == 0 {
+		return
+	}
+	if m.logsSelectionActive && m.logsSelectionCursor >= 0 && m.logsSelectionCursor < len(m.logLines) {
+		return
+	}
+	last := len(m.logLines) - 1
+	if last < 0 {
+		return
+	}
+	m.logsSelectionActive = true
+	m.logsSelectionAnchor = last
+	m.logsSelectionCursor = last
+	m.refreshLogs()
+	m.ensureLogCursorVisible()
+}
+
+func (m *model) handleLogsSelectionNav(msg tea.KeyMsg) bool {
+	if len(m.logLines) == 0 {
+		return false
+	}
+	switch msg.String() {
+	case "esc":
+		m.logsSelectionActive = false
+		m.logsSelectionAnchor = -1
+		m.logsSelectionCursor = -1
+		m.refreshLogs()
+		return true
+	case "up":
+		m.moveLogSelection(-1, false)
+		return true
+	case "down":
+		if m.logsSelectionCursor >= len(m.logLines)-1 {
+			return false
+		}
+		m.moveLogSelection(1, false)
+		return true
+	case "shift+up":
+		m.moveLogSelection(-1, true)
+		return true
+	case "shift+down":
+		if m.logsSelectionCursor >= len(m.logLines)-1 {
+			return false
+		}
+		m.moveLogSelection(1, true)
+		return true
+	case "home", "ctrl+home":
+		m.moveLogSelectionTo(0, false)
+		return true
+	case "shift+home", "ctrl+shift+home":
+		m.moveLogSelectionTo(0, true)
+		return true
+	case "end", "ctrl+end":
+		m.moveLogSelectionTo(len(m.logLines)-1, false)
+		return true
+	case "shift+end", "ctrl+shift+end":
+		m.moveLogSelectionTo(len(m.logLines)-1, true)
+		return true
+	case "pgup", "ctrl+pgup":
+		step := m.logs.Height
+		if step <= 0 {
+			step = 1
+		}
+		m.moveLogSelection(-step, false)
+		return true
+	case "shift+pgup", "ctrl+shift+pgup":
+		step := m.logs.Height
+		if step <= 0 {
+			step = 1
+		}
+		m.moveLogSelection(-step, true)
+		return true
+	case "pgdown", "ctrl+pgdown":
+		step := m.logs.Height
+		if step <= 0 {
+			step = 1
+		}
+		m.moveLogSelection(step, false)
+		return true
+	case "shift+pgdown", "ctrl+shift+pgdown":
+		step := m.logs.Height
+		if step <= 0 {
+			step = 1
+		}
+		m.moveLogSelection(step, true)
+		return true
+	}
+	return false
+}
+
+func (m *model) moveLogSelection(delta int, extend bool) {
+	if len(m.logLines) == 0 {
+		return
+	}
+	newCursor := m.logsSelectionCursor + delta
+	if newCursor < 0 {
+		newCursor = 0
+	}
+	last := len(m.logLines) - 1
+	if newCursor > last {
+		newCursor = last
+	}
+	m.logsSelectionCursor = newCursor
+	if !extend || m.logsSelectionAnchor < 0 {
+		m.logsSelectionAnchor = newCursor
+	}
+	m.refreshLogs()
+	m.ensureLogCursorVisible()
+}
+
+func (m *model) moveLogSelectionTo(index int, extend bool) {
+	if len(m.logLines) == 0 {
+		return
+	}
+	if index < 0 {
+		index = 0
+	}
+	last := len(m.logLines) - 1
+	if index > last {
+		index = last
+	}
+	m.logsSelectionCursor = index
+	if !extend || m.logsSelectionAnchor < 0 {
+		m.logsSelectionAnchor = index
+	}
+	m.refreshLogs()
+	m.ensureLogCursorVisible()
+}
+
+func (m *model) ensureLogCursorVisible() {
+	if !m.logsSelectionActive {
+		return
+	}
+	if m.logs.Height <= 0 {
+		return
+	}
+	if len(m.logLines) == 0 {
+		return
+	}
+	cursor := m.logsSelectionCursor
+	if cursor < 0 {
+		return
+	}
+	top := m.logs.YOffset
+	bottom := top + m.logs.Height - 1
+	if cursor < top {
+		m.logs.SetYOffset(cursor)
+	} else if cursor > bottom {
+		target := cursor - m.logs.Height + 1
+		if target < 0 {
+			target = 0
+		}
+		m.logs.SetYOffset(target)
+	}
+}
+
+func (m *model) copyLogSelection() {
+	var (
+		lines []string
+		msg   string
+	)
+	start, end, ok := m.logSelectionRange()
+	if ok {
+		lines = m.logLines[start : end+1]
+		count := end - start + 1
+		msg = fmt.Sprintf("Copied %d log line(s) to clipboard", count)
+	} else {
+		lines = m.logLines
+	}
+	if len(lines) == 0 {
+		m.setToast("No log entries available to copy", 3*time.Second)
+		return
+	}
+	raw := strings.Join(lines, "\n")
+	clean := stripANSI(raw)
+	if err := clipboard.WriteAll(clean); err != nil {
+		m.appendLog(fmt.Sprintf("Failed to copy logs: %v", err))
+		m.setToast("Clipboard unavailable", 4*time.Second)
+		return
+	}
+	if msg == "" {
+		msg = "Copied all logs to clipboard"
+	}
+	m.setToast(msg, 4*time.Second)
+}
+
+func (m *model) refreshLogs() {
+	content := m.renderLogsViewportContent()
+	prevOffset := m.logs.YOffset
 	m.logs.SetContent(content)
+	if m.logsSelectionActive {
+		maxOffset := 0
+		if total := len(m.logLines) - m.logs.Height; total > 0 {
+			maxOffset = total
+		}
+		if prevOffset > maxOffset {
+			prevOffset = maxOffset
+		}
+		if prevOffset < 0 {
+			prevOffset = 0
+		}
+		m.logs.SetYOffset(prevOffset)
+	} else {
+		m.logs.GotoBottom()
+	}
+}
+
+func (m *model) handleLogsKey(msg tea.KeyMsg) (bool, tea.Cmd) {
+	if !m.showLogs {
+		return false, nil
+	}
+	if !m.logsFocused {
+		return false, nil
+	}
+	if key.Matches(msg, m.keys.logsSelect) {
+		m.toggleLogsSelection()
+		return true, nil
+	}
+	if key.Matches(msg, m.keys.logsCopy) {
+		m.copyLogSelection()
+		return true, nil
+	}
+	if m.logsSelectionActive && m.handleLogsSelectionNav(msg) {
+		return true, nil
+	}
+	switch {
+	case msg.String() == "up" || key.Matches(msg, m.keys.logsLineUp):
+		m.logs.LineUp(1)
+		return true, nil
+	case msg.String() == "down" || key.Matches(msg, m.keys.logsLineDown):
+		if lines := m.logs.LineDown(1); lines == nil && m.logs.AtBottom() {
+			m.focusNextColumn()
+		}
+		return true, nil
+	case key.Matches(msg, m.keys.logsPageUp):
+		m.logs.ViewUp()
+		return true, nil
+	case key.Matches(msg, m.keys.logsPageDown):
+		m.logs.ViewDown()
+		return true, nil
+	case key.Matches(msg, m.keys.logsTop):
+		m.logs.GotoTop()
+		return true, nil
+	case key.Matches(msg, m.keys.logsBottom):
+		m.logs.GotoBottom()
+		return true, nil
+	}
+	return false, nil
+}
+
+func (m *model) handleLogsMouse(msg tea.MouseMsg) (bool, tea.Cmd) {
+	if !m.showLogs || m.logsCol == nil {
+		return false, nil
+	}
+	if m.logsPanelHeight <= 0 || m.logsPanelTop < 0 {
+		return false, nil
+	}
+	if msg.Y < m.logsPanelTop || msg.Y >= m.logsPanelTop+m.logsPanelHeight {
+		return false, nil
+	}
+	panelWidth := logsColumnWidth
+	if panelWidth > m.width {
+		panelWidth = m.width
+	}
+	logStart := max(m.width-panelWidth, 0)
+	if msg.X < logStart || msg.X >= logStart+panelWidth {
+		return false, nil
+	}
+	m.focusLogsPanel()
+	localX := msg.X - logStart
+	localY := msg.Y - m.logsPanelTop
+	col, cmd := m.logsCol.HandleMouse(localX, localY, msg)
+	if next, ok := col.(*logsColumn); ok && next != nil {
+		m.logsCol = next
+	}
+	if m.logsSelectionActive {
+		m.ensureLogCursorVisible()
+	}
+	return true, cmd
 }
 
 func (m *model) showSpinner(message string) {
@@ -6349,59 +7135,72 @@ func (m *model) applyLayout() {
 		columnsTop = 0
 	}
 	m.columnsTop = columnsTop
-	m.columnsHeight = max(bodyHeight, 0)
+
+	chatWidth := m.chatAreaWidth()
+
+	chatReserved := 0
+	if chatWidth > 0 {
+		chatReserved = m.applyChatLayout(bodyHeight, chatWidth)
+	} else {
+		m.chatReservedHeight = 0
+	}
+
+	logsReserved := 0
+	if m.showLogs {
+		logsReserved = logsColumnHeight
+	}
+
+	bottomReserved := logsReserved
+	if chatReserved > bottomReserved {
+		bottomReserved = chatReserved
+	}
+	if bottomReserved > bodyHeight {
+		bottomReserved = bodyHeight
+	}
+
+	columnsAvailable := bodyHeight - bottomReserved
+	if columnsAvailable < 0 {
+		columnsAvailable = 0
+	}
+	m.columnsHeight = max(columnsAvailable, 0)
 
 	if len(m.columns) == 0 {
 		m.columnWidths = m.columnWidths[:0]
 		m.columnOffsets = m.columnOffsets[:0]
 		m.columnsTotalWidth = 0
 		m.columnsScrollX = 0
+		m.columnsHeight = columnsAvailable
+		if m.showLogs && m.logsCol != nil {
+			m.logsCol.SetSize(logsColumnWidth, logsColumnHeight)
+			m.logsPanelHeight = logsColumnHeight
+			top := m.columnsTop + m.columnsHeight + 1
+			if top < 0 {
+				top = 0
+			}
+			m.logsPanelTop = top
+		} else {
+			m.logsPanelHeight = 0
+			m.logsPanelTop = -1
+		}
 		return
 	}
 
-	if m.showLogs {
-		bodyHeight -= m.logsHeight
-		if bodyHeight < 3 {
-			bodyHeight = 3
-		}
-		m.logs.Width = availableWidth - 2
-		if m.logs.Width < 10 {
-			m.logs.Width = availableWidth
-		}
-		m.logs.Height = m.logsHeight - 2
-	}
-	if m.chatVisible {
-		bodyHeight = m.applyChatLayout(bodyHeight, availableWidth)
-	} else {
-		m.chatReservedHeight = 0
-	}
-	m.columnsHeight = max(bodyHeight, 0)
-
-	widths := []int{44, 52, 52, 28}
+	widths := []int{44, 41, 60, 32}
 	if m.usingTasksLayout {
-		widths = []int{44, 52, 64, 36}
+		widths = []int{44, 49, 64, 36}
 	} else if m.usingServicesLayout {
-		widths = []int{44, 52, 48, 44}
+		widths = []int{44, 41, 66, 32}
 	} else if m.usingArtifactsLayout {
-		widths = []int{44, 52, 52, 36}
+		widths = []int{44, 45, 52, 32}
 	} else if m.usingReportsLayout {
-		widths = []int{44, 52, 60, 36}
+		widths = []int{44, 41, 58, 32}
 	} else if m.usingTokensLayout {
-		widths = []int{44, 52, 60, 40}
+		widths = []int{44, 41, 60, 32}
 	} else if m.usingEnvLayout {
-		widths = []int{44, 52, 56, 42}
+		widths = []int{44, 41, 58, 32}
+	} else if m.usingRfpEditor {
+		widths = []int{44, 41, 72, 32}
 	}
-	remaining := availableWidth
-	for i := range widths {
-		if widths[i] > remaining {
-			widths[i] = max(remaining, 10)
-		}
-		remaining -= widths[i]
-	}
-	if remaining < 24 {
-		remaining = max(remaining, 24)
-	}
-	widths = append(widths, remaining)
 
 	for len(widths) < len(m.columns) {
 		widths = append(widths, 24)
@@ -6409,6 +7208,18 @@ func (m *model) applyLayout() {
 	if len(widths) > len(m.columns) {
 		widths = widths[:len(m.columns)]
 	}
+
+	minWidths := make([]int, len(m.columns))
+	for i, col := range m.columns {
+		minWidths[i] = minimumColumnWidth(col)
+		if minWidths[i] < 0 {
+			minWidths[i] = 0
+		}
+		if widths[i] < minWidths[i] {
+			widths[i] = minWidths[i]
+		}
+	}
+	widths = distributeColumnWidths(widths, minWidths, availableWidth)
 
 	if cap(m.columnWidths) < len(m.columns) {
 		m.columnWidths = make([]int, len(m.columns))
@@ -6424,16 +7235,279 @@ func (m *model) applyLayout() {
 	total := 0
 	for i, col := range m.columns {
 		width := widths[i]
-		col.SetSize(width, bodyHeight)
+		if width < 0 {
+			width = 0
+		}
+		col.SetSize(width, columnsAvailable)
 		m.columns[i] = col
+		actualWidth := actualColumnWidth(col, width)
 		m.columnOffsets[i] = total
-		m.columnWidths[i] = width
-		total += width
+		m.columnWidths[i] = actualWidth
+		total += actualWidth
 	}
 	m.columnsTotalWidth = total
 	m.adjustColumnsScroll()
+	if m.showLogs && m.logsCol != nil {
+		m.logsCol.SetSize(logsColumnWidth, logsColumnHeight)
+		m.logsPanelHeight = logsColumnHeight
+		top := m.columnsTop + m.columnsHeight + 1
+		if top < 0 {
+			top = 0
+		}
+		m.logsPanelTop = top
+	} else {
+		m.logsPanelHeight = 0
+		m.logsPanelTop = -1
+		if m.logsFocused {
+			m.logsFocused = false
+		}
+	}
 	if m.chatVisible {
 		m.refreshChatView()
+	}
+}
+
+func (m *model) inBaseLayout() bool {
+	return !m.usingTasksLayout &&
+		!m.usingServicesLayout &&
+		!m.usingArtifactsLayout &&
+		!m.usingEnvLayout &&
+		!m.usingTokensLayout &&
+		!m.usingReportsLayout &&
+		!m.usingRfpEditor
+}
+
+func (m *model) shouldShowFeatureColumn() bool {
+	if m.featureCol == nil {
+		return false
+	}
+	return m.currentRoot != nil
+}
+
+func (m *model) shouldShowItemsColumn() bool {
+	if m.itemsCol == nil {
+		return false
+	}
+	return m.currentFeature != ""
+}
+
+func (m *model) shouldShowPreviewColumn() bool {
+	if m.previewCol == nil {
+		return false
+	}
+	if !m.itemsActivated {
+		return false
+	}
+	if strings.TrimSpace(m.currentItem.Key) != "" {
+		return true
+	}
+	return strings.TrimSpace(m.currentItem.Title) != ""
+}
+
+func (m *model) updateVisibleColumns() {
+	if !m.inBaseLayout() {
+		return
+	}
+
+	columns := make([]column, 0, 4)
+	if m.workspaceCol != nil {
+		columns = append(columns, m.workspaceCol)
+	} else {
+		columns = append(columns, newSpacerColumn())
+	}
+
+	if m.featureCol != nil && m.shouldShowFeatureColumn() {
+		columns = append(columns, m.featureCol)
+	} else {
+		columns = append(columns, newSpacerColumn())
+	}
+
+	if m.itemsCol != nil && m.shouldShowItemsColumn() {
+		columns = append(columns, m.itemsCol)
+	} else {
+		columns = append(columns, newSpacerColumn())
+	}
+
+	if m.previewCol != nil && m.shouldShowPreviewColumn() {
+		columns = append(columns, m.previewCol)
+	} else {
+		columns = append(columns, newSpacerColumn())
+	}
+
+	prev := m.columns
+	changed := len(prev) != len(columns)
+	if !changed {
+		for i := range columns {
+			if prev[i] != columns[i] {
+				changed = true
+				break
+			}
+		}
+	}
+
+	m.columns = columns
+	if changed {
+		m.clampFocusAfterLayout()
+	}
+	m.applyLayout()
+}
+
+func isSpacerColumn(col column) bool {
+	_, ok := col.(*spacerColumn)
+	return ok
+}
+
+func minimumColumnWidth(col column) int {
+	switch col.(type) {
+	case *spacerColumn:
+		return 0
+	case *selectableColumn:
+		return 8
+	case *backlogTreeColumn:
+		return 12
+	case *artifactTreeColumn:
+		return 24
+	case *actionColumn:
+		return 20
+	case *textEditorColumn:
+		return 16
+	case *envTableColumn:
+		return 20
+	case *servicesTableColumn:
+		return 36
+	case *tokensTableColumn:
+		return 32
+	case *reportsTableColumn:
+		return 32
+	case *backlogTableColumn:
+		return 30
+	case *previewColumn:
+		return 8
+	case *logsColumn:
+		return 12
+	default:
+		return 8
+	}
+}
+
+func distributeColumnWidths(desired, min []int, available int) []int {
+	count := len(desired)
+	if count == 0 || available <= 0 {
+		return make([]int, count)
+	}
+	if len(min) != count {
+		tmp := make([]int, count)
+		copy(tmp, min)
+		min = tmp
+	}
+	result := make([]int, count)
+	totalMin := 0
+	for i := 0; i < count; i++ {
+		if min[i] < 0 {
+			min[i] = 0
+		}
+		if desired[i] < min[i] {
+			desired[i] = min[i]
+		}
+		result[i] = min[i]
+		totalMin += min[i]
+	}
+	if available <= totalMin {
+		return result
+	}
+
+	leftover := available - totalMin
+	grow := make([]int, count)
+	sumGrow := 0
+	for i := 0; i < count; i++ {
+		grow[i] = desired[i] - min[i]
+		if grow[i] < 0 {
+			grow[i] = 0
+		}
+		sumGrow += grow[i]
+	}
+	if sumGrow > 0 {
+		allocations := make([]int, count)
+		fractions := make([]float64, count)
+		assigned := 0
+		for i := 0; i < count; i++ {
+			if grow[i] == 0 {
+				continue
+			}
+			exact := float64(leftover) * float64(grow[i]) / float64(sumGrow)
+			alloc := int(math.Floor(exact))
+			if alloc > grow[i] {
+				alloc = grow[i]
+			}
+			allocations[i] = alloc
+			assigned += alloc
+			fractions[i] = exact - float64(alloc)
+		}
+		remaining := leftover - assigned
+		for remaining > 0 {
+			bestIdx := -1
+			bestFrac := -1.0
+			for i := 0; i < count; i++ {
+				if grow[i] == 0 || allocations[i] >= grow[i] {
+					continue
+				}
+				if fractions[i] > bestFrac {
+					bestFrac = fractions[i]
+					bestIdx = i
+				}
+			}
+			if bestIdx == -1 {
+				break
+			}
+			allocations[bestIdx]++
+			remaining--
+		}
+		for i := 0; i < count; i++ {
+			result[i] += allocations[i]
+		}
+		totalAllocated := 0
+		for _, alloc := range allocations {
+			totalAllocated += alloc
+		}
+		if totalAllocated > leftover {
+			totalAllocated = leftover
+		}
+		leftover -= totalAllocated
+	}
+	if leftover > 0 {
+		result[count-1] += leftover
+	}
+	return result
+}
+
+func actualColumnWidth(col column, fallback int) int {
+	switch c := col.(type) {
+	case *selectableColumn:
+		return c.width
+	case *backlogTreeColumn:
+		return c.width
+	case *backlogTableColumn:
+		return c.width
+	case *artifactTreeColumn:
+		return c.width
+	case *actionColumn:
+		return c.width
+	case *textEditorColumn:
+		return c.width
+	case *envTableColumn:
+		return c.width
+	case *servicesTableColumn:
+		return c.width
+	case *tokensTableColumn:
+		return c.width
+	case *reportsTableColumn:
+		return c.width
+	case *previewColumn:
+		return c.width
+	case *logsColumn:
+		return c.width
+	default:
+		return fallback
 	}
 }
 
@@ -6496,7 +7570,8 @@ func (m *model) adjustColumnsScroll() {
 
 func (m *model) applyChatLayout(bodyHeight, availableWidth int) int {
 	if bodyHeight <= 0 {
-		return bodyHeight
+		m.chatReservedHeight = 0
+		return 0
 	}
 
 	minColumns := 6
@@ -6574,18 +7649,87 @@ func (m *model) applyChatLayout(bodyHeight, availableWidth int) int {
 		m.chatInput.Width = innerWidth
 	}
 
-	if remaining < minColumns {
-		remaining = minColumns
+	return reserved
+}
+
+func (m *model) chatAreaWidth() int {
+	if !m.chatVisible {
+		return 0
 	}
-	return remaining
+	width := m.width
+	if m.showLogs {
+		width -= logsColumnWidth
+	}
+	if width < 0 {
+		width = 0
+	}
+	return width
+}
+
+func (m *model) focusableColumnIndices() []int {
+	indices := make([]int, 0, len(m.columns))
+	for i, col := range m.columns {
+		if !isSpacerColumn(col) {
+			indices = append(indices, i)
+		}
+	}
+	return indices
+}
+
+func (m *model) focusNextColumn() {
+	indices := m.focusableColumnIndices()
+	if len(indices) == 0 {
+		return
+	}
+	current := m.focus
+	next := indices[0]
+	for _, idx := range indices {
+		if idx > current {
+			next = idx
+			break
+		}
+	}
+	if next == current {
+		if len(indices) == 1 {
+			return
+		}
+		next = indices[0]
+	}
+	m.setFocusIndex(next)
 }
 
 func (m *model) focusSlotCount() int {
-	count := len(m.columns)
-	if m.chatVisible {
+	count := len(m.focusableColumnIndices())
+	if m.showLogs {
+		count++
+	}
+	if m.chatAreaWidth() > 0 {
 		count++
 	}
 	return count
+}
+
+func (m *model) currentFocusSlot() int {
+	indices := m.focusableColumnIndices()
+	for i, idx := range indices {
+		if idx == m.focus {
+			return i
+		}
+	}
+
+	offset := len(indices)
+	if m.showLogs {
+		if m.logsFocused {
+			return offset
+		}
+		offset++
+	}
+
+	if m.chatAreaWidth() > 0 && (m.chatFocused || m.focus == len(m.columns)) {
+		return offset
+	}
+
+	return -1
 }
 
 func (m *model) applyFocus(target int) {
@@ -6593,6 +7737,7 @@ func (m *model) applyFocus(target int) {
 	if total == 0 {
 		m.focus = -1
 		m.blurChatInput()
+		m.logsFocused = false
 		return
 	}
 	if target < 0 {
@@ -6602,26 +7747,38 @@ func (m *model) applyFocus(target int) {
 		target = total - 1
 	}
 
-	chatIndex := len(m.columns)
-	if m.chatVisible && target == chatIndex {
-		m.focus = chatIndex
+	indices := m.focusableColumnIndices()
+	if target < len(indices) {
+		m.setFocusIndex(indices[target])
+		return
+	}
+	target -= len(indices)
+
+	if m.showLogs {
+		if target == 0 {
+			m.focusLogsPanel()
+			return
+		}
+		target--
+	} else {
+		m.logsFocused = false
+	}
+
+	if m.chatAreaWidth() > 0 && target == 0 {
 		m.focusChatInput()
 		return
 	}
 
-	if m.chatFocused {
-		m.blurChatInput()
-	}
-
-	if len(m.columns) == 0 {
+	// Fallback when no matching slot found.
+	if len(indices) > 0 {
+		m.setFocusIndex(indices[0])
+	} else if m.showLogs {
+		m.focusLogsPanel()
+	} else if m.chatVisible {
+		m.focusChatInput()
+	} else {
 		m.focus = -1
-		return
 	}
-
-	if target >= len(m.columns) {
-		target = len(m.columns) - 1
-	}
-	m.focus = target
 }
 
 func (m *model) moveFocus(delta int) {
@@ -6630,11 +7787,16 @@ func (m *model) moveFocus(delta int) {
 		return
 	}
 
-	current := m.focus
-	if current < 0 || current >= total {
-		current = 0
-		if len(m.columns) == 0 && m.chatVisible {
-			current = len(m.columns)
+	current := m.currentFocusSlot()
+	if current < 0 {
+		if len(m.focusableColumnIndices()) > 0 {
+			current = 0
+		} else if m.showLogs {
+			current = len(m.focusableColumnIndices())
+		} else if m.chatAreaWidth() > 0 {
+			current = total - 1
+		} else {
+			return
 		}
 	}
 
@@ -6650,6 +7812,7 @@ func (m *model) moveFocus(delta int) {
 }
 
 func (m *model) setFocusIndex(idx int) {
+	m.blurLogsPanel()
 	if m.chatFocused {
 		m.blurChatInput()
 	}
@@ -6663,7 +7826,43 @@ func (m *model) setFocusIndex(idx int) {
 	if idx >= len(m.columns) {
 		idx = len(m.columns) - 1
 	}
+	if isSpacerColumn(m.columns[idx]) {
+		indices := m.focusableColumnIndices()
+		if len(indices) == 0 {
+			m.focus = -1
+			return
+		}
+		chosen := indices[0]
+		for _, candidate := range indices {
+			if candidate <= idx {
+				chosen = candidate
+			} else {
+				break
+			}
+		}
+		m.focus = chosen
+		return
+	}
 	m.focus = idx
+}
+
+func (m *model) focusLogsPanel() {
+	if !m.showLogs || m.logsCol == nil {
+		m.logsFocused = false
+		return
+	}
+	if m.chatFocused {
+		m.blurChatInput()
+	}
+	m.logsFocused = true
+	m.focus = -1
+	m.ensureLogsSelectionInitialized()
+}
+
+func (m *model) blurLogsPanel() {
+	if m.logsFocused {
+		m.logsFocused = false
+	}
 }
 
 func (m *model) setFocusArea(area focusArea) {
@@ -6678,6 +7877,9 @@ func (m *model) focusedArea() (focusArea, bool) {
 }
 
 func (m *model) focusedColumn() (column, bool) {
+	if m.logsFocused && m.logsCol != nil {
+		return m.logsCol, true
+	}
 	if m.focus >= 0 && m.focus < len(m.columns) {
 		return m.columns[m.focus], true
 	}
@@ -6695,12 +7897,22 @@ func (m *model) activeColumnCanMoveDown() bool {
 }
 
 func (m *model) clampFocusAfterLayout() {
+	if !m.showLogs && m.logsFocused {
+		m.logsFocused = false
+	}
 	if len(m.columns) == 0 {
+		if m.showLogs {
+			m.focusLogsPanel()
+			return
+		}
 		if m.chatVisible {
 			m.focusChatInput()
 			return
 		}
 		m.focus = -1
+		return
+	}
+	if m.logsFocused {
 		return
 	}
 	if m.focus >= len(m.columns) {
@@ -6709,6 +7921,10 @@ func (m *model) clampFocusAfterLayout() {
 		} else {
 			m.setFocusIndex(len(m.columns) - 1)
 		}
+	} else if m.focus >= 0 && isSpacerColumn(m.columns[m.focus]) {
+		m.setFocusIndex(m.focus)
+	} else if m.focus < 0 {
+		m.setFocusIndex(0)
 	}
 }
 
@@ -6734,6 +7950,10 @@ func (m *model) focusChatInput() {
 	if !m.chatVisible {
 		m.chatVisible = true
 	}
+	if m.chatAreaWidth() <= 0 {
+		return
+	}
+	m.blurLogsPanel()
 	m.focus = len(m.columns)
 	if m.chatFocused {
 		m.chatInput.Focus()
@@ -6980,18 +8200,40 @@ func (m *model) renderChatMessages(width int) string {
 	return strings.Join(sections, "\n\n")
 }
 
-func (m *model) renderChat() string {
-	if !m.chatVisible || m.width <= 0 {
+func (m *model) renderChat(width int) string {
+	if !m.chatVisible || width <= 0 {
+		return ""
+	}
+	if m.width <= 0 {
 		return ""
 	}
 	innerWidth := m.chatViewport.Width
-	if innerWidth <= 0 {
-		frame := m.styles.panel.GetBorderLeftSize() + m.styles.panel.GetBorderRightSize() + m.styles.panel.GetPaddingLeft() + m.styles.panel.GetPaddingRight()
-		innerWidth = max(m.width-frame, 10)
+	frame := m.styles.panel.GetBorderLeftSize() + m.styles.panel.GetBorderRightSize() + m.styles.panel.GetPaddingLeft() + m.styles.panel.GetPaddingRight()
+	if innerWidth <= 0 || innerWidth > width-frame {
+		calculated := width - frame
+		if calculated < 10 {
+			calculated = max(width-2, 10)
+		}
+		if calculated < 1 {
+			calculated = 1
+		}
+		innerWidth = calculated
+		m.chatViewport.Width = innerWidth
+		if innerWidth > 0 {
+			m.chatInput.Width = innerWidth
+		}
 	}
+	if innerWidth > width {
+		innerWidth = width
+		m.chatViewport.Width = innerWidth
+		if innerWidth > 0 {
+			m.chatInput.Width = innerWidth
+		}
+	}
+
 	header := m.styles.chatHeader.Width(innerWidth).Render("Codex Chat")
 	history := m.chatViewport.View()
-	historyPanel := m.styles.panel.Width(m.width).Render(header + "\n" + history)
+	historyPanel := m.styles.panel.Width(width).Render(header + "\n" + history)
 
 	inputHeader := m.styles.chatHeader.Width(innerWidth).Render("Message")
 	inputField := m.chatInput.View()
@@ -7000,7 +8242,7 @@ func (m *model) renderChat() string {
 		hintParts = append(hintParts, fmt.Sprintf("%d running", m.chatInFlight))
 	}
 	hint := m.styles.chatHint.Render(strings.Join(hintParts, " • "))
-	inputPanel := m.styles.panel.Width(m.width).Render(inputHeader + "\n" + inputField + "\n" + hint)
+	inputPanel := m.styles.panel.Width(width).Render(inputHeader + "\n" + inputField + "\n" + hint)
 
 	return historyPanel + "\n" + inputPanel
 }
@@ -7010,6 +8252,7 @@ func (m *model) useTasksLayout(enable bool) {
 		if m.usingTasksLayout {
 			return
 		}
+		m.useRfpEditorLayout(false)
 		m.columns = []column{
 			m.workspaceCol,
 			m.backlogCol,
@@ -7046,6 +8289,7 @@ func (m *model) useServicesLayout(enable bool) {
 		if m.usingServicesLayout {
 			return
 		}
+		m.useRfpEditorLayout(false)
 		m.columns = []column{
 			m.workspaceCol,
 			m.featureCol,
@@ -7075,6 +8319,7 @@ func (m *model) useTokensLayout(enable bool) {
 		if m.usingTokensLayout {
 			return
 		}
+		m.useRfpEditorLayout(false)
 		m.columns = []column{
 			m.workspaceCol,
 			m.featureCol,
@@ -7104,6 +8349,7 @@ func (m *model) useReportsLayout(enable bool) {
 		if m.usingReportsLayout {
 			return
 		}
+		m.useRfpEditorLayout(false)
 		m.columns = []column{
 			m.workspaceCol,
 			m.featureCol,
@@ -7137,6 +8383,7 @@ func (m *model) useArtifactsLayout(enable bool) {
 		if m.usingArtifactsLayout {
 			return
 		}
+		m.useRfpEditorLayout(false)
 		m.columns = []column{
 			m.workspaceCol,
 			m.artifactsCol,
@@ -7170,6 +8417,7 @@ func (m *model) useEnvLayout(enable bool) {
 		if m.usingEnvLayout {
 			return
 		}
+		m.useRfpEditorLayout(false)
 		m.columns = []column{
 			m.workspaceCol,
 			m.featureCol,
@@ -7193,6 +8441,46 @@ func (m *model) useEnvLayout(enable bool) {
 			}
 		}
 		m.usingEnvLayout = false
+		m.clampFocusAfterLayout()
+	}
+	m.applyLayout()
+}
+
+func (m *model) useRfpEditorLayout(enable bool) {
+	if enable {
+		if m.usingRfpEditor {
+			return
+		}
+		m.useTasksLayout(false)
+		m.useArtifactsLayout(false)
+		m.useServicesLayout(false)
+		m.useEnvLayout(false)
+		m.useTokensLayout(false)
+		m.useReportsLayout(false)
+		m.columns = []column{
+			m.workspaceCol,
+			m.featureCol,
+			m.rfpEditorCol,
+			m.previewCol,
+		}
+		m.usingRfpEditor = true
+		m.clampFocusAfterLayout()
+	} else {
+		if !m.usingRfpEditor {
+			return
+		}
+		if len(m.defaultColumns) == len(m.columns) && len(m.defaultColumns) > 0 {
+			m.columns = append([]column(nil), m.defaultColumns...)
+		} else {
+			m.columns = []column{
+				m.workspaceCol,
+				m.featureCol,
+				m.itemsCol,
+				m.previewCol,
+			}
+		}
+		m.usingRfpEditor = false
+		m.rfpEditorCol.BlurEditor()
 		m.clampFocusAfterLayout()
 	}
 	m.applyLayout()
@@ -8210,6 +9498,7 @@ func (m *model) refreshSettingsItems() {
 	m.itemsCol.SetItems(items)
 	if len(items) == 0 {
 		m.currentItem = featureItemDefinition{}
+		m.itemsActivated = false
 		if m.previewCol != nil {
 			m.previewCol.SetContent("No settings available.\n")
 		}
@@ -9016,7 +10305,10 @@ func (m *model) renderStatus() string {
 		if provider, ok := col.(interface{ ActivationHint() string }); ok {
 			focusHint = strings.TrimSpace(provider.ActivationHint())
 		}
-	} else if m.chatVisible && m.focus == len(m.columns) {
+		if m.logsFocused {
+			focusHint = "ctrl/cmd+c copy"
+		}
+	} else if m.chatAreaWidth() > 0 && m.focus == len(m.columns) {
 		focusTitle = "Chat"
 		if m.chatInFlight > 0 {
 			focusValue = fmt.Sprintf("%d running", m.chatInFlight)

@@ -17,6 +17,7 @@ var (
 	crushPrimary       = lipgloss.Color("#9D7DFF")
 	crushPrimaryBright = lipgloss.Color("#C7ADFF")
 	crushAccent        = lipgloss.Color("#5DE4C7")
+	crushDebug         = lipgloss.Color("#F6C177")
 
 	crushBorder       = lipgloss.Color("#2F3253")
 	crushBorderSoft   = lipgloss.Color("#24273D")
@@ -35,6 +36,8 @@ type styles struct {
 	tabsRow                                            lipgloss.Style
 	breadcrumbs                                        lipgloss.Style
 	statusBar, statusSeg, statusHint                   lipgloss.Style
+	logDebug                                           lipgloss.Style
+	logSelection                                       lipgloss.Style
 	tableHeader, tableCell, tableActive                lipgloss.Style
 	listItem, listSel, textBlock                       lipgloss.Style
 	rightPaneTitle                                     lipgloss.Style
@@ -194,6 +197,11 @@ func newStyles() styles {
 			MarginRight(1),
 		statusHint: base.Copy().
 			Foreground(crushForegroundFaint),
+		logDebug: base.Copy().
+			Foreground(crushDebug),
+		logSelection: base.Copy().
+			Background(crushSurfaceElevated).
+			Bold(true),
 		tableHeader: base.Copy().
 			Foreground(crushPrimaryBright).
 			Background(crushSurfaceSoft).

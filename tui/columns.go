@@ -2,39 +2,43 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
 	reansi "github.com/muesli/reflow/ansi"
+	"github.com/muesli/reflow/truncate"
 )
 
-const maxColumnScroll = 240
+const (
+	maxColumnScroll = 240
+	ellipsis        = "..."
+)
 
-func columnHeaderWidth(totalWidth, frameWidth int) int {
-	inner := totalWidth - frameWidth
+func columnHeaderWidth(totalWidth, panelFrameWidth, titleFrameWidth int) int {
+	inner := totalWidth - panelFrameWidth - titleFrameWidth
 	if inner < 1 {
-		inner = totalWidth
+		return 1
 	}
-	if inner < 1 {
-		inner = 1
-	}
-	adjusted := inner
-	if adjusted < 1 {
-		adjusted = inner
-	}
-	if adjusted < 1 {
-		adjusted = 1
-	}
-	return adjusted
+	return inner
+}
+
+// Only the internal frame (padding + border). Ignore margins so headers render
+// edge-to-edge inside the panel without a trailing gap.
+func horizontalInnerFrameSize(s lipgloss.Style) int {
+	return s.GetBorderLeftSize() + s.GetBorderRightSize() + s.GetPaddingLeft() + s.GetPaddingRight()
 }
 
 type column interface {
@@ -50,10 +54,92 @@ type mouseAwareColumn interface {
 	HandleMouse(localX, localY int, msg tea.MouseMsg) (column, tea.Cmd)
 }
 
+type hoverAwareColumn interface {
+	ClearHover()
+}
+
+type spacerColumn struct {
+	width  int
+	height int
+}
+
+func newSpacerColumn() *spacerColumn {
+	return &spacerColumn{}
+}
+
+func (c *spacerColumn) SetSize(width, height int) {
+	if width < 0 {
+		width = 0
+	}
+	if height < 0 {
+		height = 0
+	}
+	c.width = width
+	c.height = height
+}
+
+func (c *spacerColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	return c, nil
+}
+
+func (c *spacerColumn) View(styles styles, focused bool) string {
+	if c.width <= 0 || c.height <= 0 {
+		return ""
+	}
+	height := c.height
+	if height < 1 {
+		height = 1
+	}
+	return lipgloss.NewStyle().
+		Width(c.width).
+		Height(height).
+		Render("")
+}
+
+func (c *spacerColumn) Title() string {
+	return ""
+}
+
+func (c *spacerColumn) FocusValue() string {
+	return ""
+}
+
+func (c *spacerColumn) ScrollHorizontal(int) bool {
+	return false
+}
+
+type selectableColumnDelegate struct {
+	list.DefaultDelegate
+	column *selectableColumn
+}
+
+type columnRect struct {
+	x      int
+	y      int
+	width  int
+	height int
+}
+
+func (r columnRect) contains(px, py int) bool {
+	if r.width <= 0 || r.height <= 0 {
+		return false
+	}
+	if px < r.x || py < r.y {
+		return false
+	}
+	if px >= r.x+r.width {
+		return false
+	}
+	if py >= r.y+r.height {
+		return false
+	}
+	return true
+}
+
 type selectableColumn struct {
 	title             string
 	model             list.Model
-	delegate          *list.DefaultDelegate
+	delegate          *selectableColumnDelegate
 	width             int
 	height            int
 	scrollX           int
@@ -72,6 +158,19 @@ type selectableColumn struct {
 	columnTitleStyle  lipgloss.Style
 	contentOffsetX    int
 	contentOffsetY    int
+	contentPaddingTop int
+	hoverIndex        int
+	hoverTitleBase    lipgloss.Style
+	hoverDescBase     lipgloss.Style
+	hoverTitle        lipgloss.Style
+	hoverDesc         lipgloss.Style
+	hasHoverStyles    bool
+	hoverPrefix       string
+	hoverPrefixStyle  lipgloss.Style
+	hoverPrefixWidth  int
+	debugLog          func(format string, args ...interface{})
+	debugLastColWidth int
+	debugLastTitle    int
 }
 
 type listEntry struct {
@@ -85,14 +184,22 @@ func (e listEntry) Description() string { return e.desc }
 func (e listEntry) FilterValue() string { return e.title }
 
 func newSelectableColumn(title string, items []list.Item, width int, onSelect func(listEntry) tea.Cmd) *selectableColumn {
-	delegate := list.NewDefaultDelegate()
+	baseDelegate := list.NewDefaultDelegate()
 
 	column := &selectableColumn{
 		title:          title,
 		width:          width,
 		onSelect:       onSelect,
-		delegate:       &delegate,
 		activationHint: "Click or Enter to open",
+		hoverIndex:     -1,
+		// hoverPrefix:    "› ",
+		hoverPrefix: "",
+	}
+
+	column.hoverPrefixWidth = runewidth.StringWidth(column.hoverPrefix)
+	column.delegate = &selectableColumnDelegate{
+		DefaultDelegate: baseDelegate,
+		column:          column,
 	}
 
 	m := list.New(items, column.delegate, width, 20)
@@ -105,11 +212,16 @@ func newSelectableColumn(title string, items []list.Item, width int, onSelect fu
 	return column
 }
 
+func (c *selectableColumn) SetDebugLogger(fn func(format string, args ...interface{})) {
+	c.debugLog = fn
+}
+
 func (c *selectableColumn) SetItems(items []list.Item) {
 	c.model.SetItems(items)
 	if len(items) > 0 {
 		c.model.Select(0)
 	}
+	c.hoverIndex = -1
 }
 
 func (c *selectableColumn) SetSize(width, height int) {
@@ -133,6 +245,7 @@ func (c *selectableColumn) applyModelSize() {
 	c.model.SetSize(effectiveWidth, contentHeight)
 	c.updateSelectedWidths()
 	c.updateNormalWidths()
+	c.updateHoverWidths()
 	c.recalcContentOffsets()
 }
 
@@ -181,6 +294,21 @@ func (c *selectableColumn) updateNormalWidths() {
 	}
 }
 
+func (c *selectableColumn) updateHoverWidths() {
+	if !c.hasHoverStyles {
+		return
+	}
+	inner := c.contentWidth()
+	hoverTitle := c.hoverTitleBase
+	hoverDesc := c.hoverDescBase
+	if inner > 0 {
+		hoverTitle = hoverTitle.Width(inner)
+		hoverDesc = hoverDesc.Width(inner)
+	}
+	c.hoverTitle = hoverTitle
+	c.hoverDesc = hoverDesc
+}
+
 func (c *selectableColumn) recalcContentOffsets() {
 	panelLeft := c.panelStyle.GetBorderLeftSize() + c.panelStyle.GetPaddingLeft()
 	focusedLeft := c.panelFocusedStyle.GetBorderLeftSize() + c.panelFocusedStyle.GetPaddingLeft()
@@ -192,7 +320,8 @@ func (c *selectableColumn) recalcContentOffsets() {
 
 	titleHeight := 1
 	if strings.TrimSpace(c.title) != "" {
-		titleWidth := columnHeaderWidth(c.width, c.panelFrameWidth)
+		titleFrame := horizontalInnerFrameSize(c.columnTitleStyle)
+		titleWidth := columnHeaderWidth(c.width, c.panelFrameWidth, titleFrame)
 		rendered := c.columnTitleStyle.Width(titleWidth).Render(c.title)
 		if h := lipgloss.Height(rendered); h > 0 {
 			titleHeight = h
@@ -200,7 +329,7 @@ func (c *selectableColumn) recalcContentOffsets() {
 	}
 
 	c.contentOffsetX = left
-	c.contentOffsetY = top + titleHeight
+	c.contentOffsetY = top + titleHeight + c.contentPaddingTop
 }
 
 func (c *selectableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
@@ -253,6 +382,24 @@ func (c *selectableColumn) highlightSelection(prev int) tea.Cmd {
 	return nil
 }
 
+func (c *selectableColumn) setHoverIndex(idx int) {
+	if idx < 0 || idx >= len(c.model.VisibleItems()) {
+		c.ClearHover()
+		return
+	}
+	if c.hoverIndex == idx {
+		return
+	}
+	c.hoverIndex = idx
+}
+
+func (c *selectableColumn) ClearHover() {
+	if c.hoverIndex == -1 {
+		return
+	}
+	c.hoverIndex = -1
+}
+
 func (c *selectableColumn) HandleMouse(localX, localY int, msg tea.MouseMsg) (column, tea.Cmd) {
 	if msg.Type == tea.MouseWheelUp {
 		return c, c.handleMouseWheel(-1)
@@ -294,6 +441,7 @@ func (c *selectableColumn) HandleMouse(localX, localY int, msg tea.MouseMsg) (co
 	if target < 0 || target >= len(items) {
 		return c, nil
 	}
+	c.setHoverIndex(target)
 
 	prev := c.model.Index()
 	c.model.Select(target)
@@ -316,6 +464,115 @@ func (c *selectableColumn) HandleMouse(localX, localY int, msg tea.MouseMsg) (co
 	return c, tea.Batch(cmds...)
 }
 
+func (d *selectableColumnDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	defaultItem, ok := item.(list.DefaultItem)
+	if !ok {
+		return
+	}
+
+	title := defaultItem.Title()
+	desc := defaultItem.Description()
+
+	width := m.Width()
+	if width <= 0 {
+		return
+	}
+
+	s := &d.Styles
+
+	hovered := false
+	var hoverTitle lipgloss.Style
+	var hoverDesc lipgloss.Style
+	var hoverPrefix string
+	var hoverPrefixStyle lipgloss.Style
+	prefixWidth := 0
+
+	if d.column != nil && d.column.hasHoverStyles && d.column.hoverIndex == index {
+		hovered = true
+		hoverTitle = d.column.hoverTitle
+		hoverDesc = d.column.hoverDesc
+		hoverPrefix = d.column.hoverPrefix
+		hoverPrefixStyle = d.column.hoverPrefixStyle
+		prefixWidth = d.column.hoverPrefixWidth
+	}
+
+	textWidth := width - s.NormalTitle.GetPaddingLeft() - s.NormalTitle.GetPaddingRight()
+	if textWidth < 0 {
+		textWidth = 0
+	}
+	if hovered && prefixWidth > 0 {
+		if prefixWidth >= textWidth {
+			textWidth = 0
+		} else {
+			textWidth -= prefixWidth
+		}
+	}
+
+	title = truncate.StringWithTail(title, uint(textWidth), ellipsis)
+
+	if d.ShowDescription {
+		var lines []string
+		maxLines := d.Height()
+		if maxLines < 1 {
+			maxLines = 1
+		}
+		for i, line := range strings.Split(desc, "\n") {
+			if i >= maxLines-1 {
+				break
+			}
+			lines = append(lines, truncate.StringWithTail(line, uint(textWidth), ellipsis))
+		}
+		desc = strings.Join(lines, "\n")
+	}
+
+	matchedRunes := m.MatchesForItem(index)
+	isSelected := index == m.Index()
+	filterState := m.FilterState()
+	emptyFilter := filterState == list.Filtering && m.FilterValue() == ""
+	isFiltered := filterState == list.Filtering || filterState == list.FilterApplied
+
+	switch {
+	case emptyFilter:
+		title = s.DimmedTitle.Render(title)
+		desc = s.DimmedDesc.Render(desc)
+	case isSelected && filterState != list.Filtering:
+		if isFiltered {
+			unmatched := s.SelectedTitle.Inline(true)
+			matched := unmatched.Copy().Inherit(s.FilterMatch)
+			title = lipgloss.StyleRunes(title, matchedRunes, matched, unmatched)
+		}
+		title = s.SelectedTitle.Render(title)
+		desc = s.SelectedDesc.Render(desc)
+	case hovered:
+		if isFiltered {
+			unmatched := hoverTitle.Inline(true)
+			matched := unmatched.Copy().Inherit(s.FilterMatch)
+			title = lipgloss.StyleRunes(title, matchedRunes, matched, unmatched)
+		}
+		title = hoverTitle.Render(title)
+		desc = hoverDesc.Render(desc)
+	default:
+		if isFiltered {
+			unmatched := s.NormalTitle.Inline(true)
+			matched := unmatched.Copy().Inherit(s.FilterMatch)
+			title = lipgloss.StyleRunes(title, matchedRunes, matched, unmatched)
+		}
+		title = s.NormalTitle.Render(title)
+		desc = s.NormalDesc.Render(desc)
+	}
+
+	if hovered && hoverPrefix != "" {
+		renderedPrefix := hoverPrefixStyle.Render(hoverPrefix)
+		title = lipgloss.JoinHorizontal(lipgloss.Left, renderedPrefix, title)
+	}
+
+	if d.ShowDescription {
+		fmt.Fprintf(w, "%s\n%s", title, desc)
+		return
+	}
+	fmt.Fprintf(w, "%s", title)
+}
+
 func (c *selectableColumn) handleMouseWheel(delta int) tea.Cmd {
 	prev := c.model.Index()
 	if delta < 0 {
@@ -330,16 +587,36 @@ func (c *selectableColumn) handleMouseWheel(delta int) tea.Cmd {
 }
 
 func (c *selectableColumn) View(s styles, focused bool) string {
-	title := s.columnTitle.Width(columnHeaderWidth(c.width, c.panelFrameWidth)).Render(c.title)
-	content := c.model.View()
-	body := lipgloss.JoinVertical(lipgloss.Left, title, content)
 	panel := s.panel
 	bg := crushSurface
 	if focused {
 		panel = s.panelFocused
 		bg = crushSurfaceElevated
 	}
-	return renderPanelWithScroll(panel, c.width, c.height, c.scrollX, body, bg)
+
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleWidth := columnHeaderWidth(c.width, panelFrame, titleFrame)
+	if c.debugLog != nil {
+		if c.width != c.debugLastColWidth || titleWidth != c.debugLastTitle {
+			c.debugLog("column %q width=%d titleWidth=%d panelFrame=%d titleFrame=%d scrollX=%d", c.title, c.width, titleWidth, panelFrame, titleFrame, c.scrollX)
+			c.debugLastColWidth = c.width
+			c.debugLastTitle = titleWidth
+		}
+	}
+	title := s.columnTitle.Width(titleWidth).Render(c.title)
+	content := c.model.View()
+	leading := countLeadingBlankLines(content)
+	if leading != c.contentPaddingTop {
+		c.contentPaddingTop = leading
+		c.recalcContentOffsets()
+	}
+	body := lipgloss.JoinVertical(lipgloss.Left, title, content)
+	headerLines := lipgloss.Height(title)
+	if headerLines < 0 {
+		headerLines = 0
+	}
+	return renderPanelWithScroll(panel, c.width, c.height, c.scrollX, body, bg, headerLines)
 }
 
 func (c *selectableColumn) Title() string {
@@ -446,9 +723,21 @@ func (c *selectableColumn) ApplyStyles(s styles) {
 		c.delegate.Styles.FilterMatch = s.cmdPrompt.Copy().Underline(true).
 			Background(crushSurface).
 			ColorWhitespace(true)
+		hover := normal.Copy().
+			Foreground(crushPrimaryBright).
+			Underline(true)
+		c.hoverTitleBase = hover
+		c.hoverDescBase = desc.Copy().
+			Foreground(crushAccent).
+			Underline(false)
+		c.hoverPrefixStyle = s.cmdPrompt.Copy().
+			Foreground(crushPrimaryBright)
+		c.hoverPrefixWidth = runewidth.StringWidth(c.hoverPrefix)
+		c.hasHoverStyles = true
 		c.model.SetDelegate(c.delegate)
 		c.updateSelectedWidths()
 		c.updateNormalWidths()
+		c.updateHoverWidths()
 	}
 
 	c.panelStyle = s.panel
@@ -731,15 +1020,18 @@ func (c *backlogTreeColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 }
 
 func (c *backlogTreeColumn) View(s styles, focused bool) string {
-	title := s.columnTitle.Width(columnHeaderWidth(c.width, c.panelFrameWidth)).Render(c.title)
-	body := lipgloss.JoinVertical(lipgloss.Left, title, c.model.View())
 	panel := s.panel
 	bg := crushSurface
 	if focused {
 		panel = s.panelFocused
 		bg = crushSurfaceElevated
 	}
-	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg)
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleWidth := columnHeaderWidth(c.width, panelFrame, titleFrame)
+	title := s.columnTitle.Width(titleWidth).Render(c.title)
+	body := lipgloss.JoinVertical(lipgloss.Left, title, c.model.View())
+	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg, 0)
 }
 
 func (c *backlogTreeColumn) Title() string {
@@ -945,7 +1237,7 @@ func (c *backlogTableColumn) View(s styles, focused bool) string {
 		panel = s.panelFocused
 		bg = crushSurfaceElevated
 	}
-	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg, 0)
 }
 
 func (c *backlogTableColumn) Title() string {
@@ -1288,15 +1580,18 @@ func (c *artifactTreeColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 }
 
 func (c *artifactTreeColumn) View(s styles, focused bool) string {
-	title := s.columnTitle.Width(columnHeaderWidth(c.width, c.panelFrameWidth)).Render(c.title)
-	body := lipgloss.JoinVertical(lipgloss.Left, title, c.model.View())
 	panel := s.panel
 	bg := crushSurface
 	if focused {
 		panel = s.panelFocused
 		bg = crushSurfaceElevated
 	}
-	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg)
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleWidth := columnHeaderWidth(c.width, panelFrame, titleFrame)
+	title := s.columnTitle.Width(titleWidth).Render(c.title)
+	body := lipgloss.JoinVertical(lipgloss.Left, title, c.model.View())
+	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg, 0)
 }
 
 func (c *artifactTreeColumn) Title() string {
@@ -1517,7 +1812,15 @@ func (c *actionColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 }
 
 func (c *actionColumn) View(s styles, focused bool) string {
-	titleWidth := columnHeaderWidth(c.width, c.panelFrame)
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleWidth := columnHeaderWidth(c.width, panelFrame, titleFrame)
 	title := s.columnTitle.Width(titleWidth).Render(c.title)
 	var body string
 	if len(c.items) == 0 {
@@ -1526,13 +1829,7 @@ func (c *actionColumn) View(s styles, focused bool) string {
 		body = c.table.View()
 	}
 	inner := lipgloss.JoinVertical(lipgloss.Left, title, body)
-	panel := s.panel
-	bg := crushSurface
-	if focused {
-		panel = s.panelFocused
-		bg = crushSurfaceElevated
-	}
-	return renderPanelWithScroll(panel, c.width, c.height, 0, inner, bg)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, inner, bg, 0)
 }
 
 func (c *actionColumn) Title() string {
@@ -1544,6 +1841,572 @@ func (c *actionColumn) FocusValue() string {
 		return item.Title
 	}
 	return ""
+}
+
+type textEditorColumn struct {
+	title               string
+	width               int
+	height              int
+	panelStyle          lipgloss.Style
+	panelFocusedStyle   lipgloss.Style
+	columnTitleStyle    lipgloss.Style
+	hintStyle           lipgloss.Style
+	statusErrorStyle    lipgloss.Style
+	statusSuccessStyle  lipgloss.Style
+	buttonStyle         lipgloss.Style
+	buttonDisabledStyle lipgloss.Style
+	scrollbarTrackStyle lipgloss.Style
+	scrollbarThumbStyle lipgloss.Style
+	panelFrameWidth     int
+	panelFrameHeight    int
+	textarea            textarea.Model
+	onSave              func(string) tea.Cmd
+	scrollbarWidth      int
+	scrollbarGap        int
+	scrollTop           int
+	totalDisplayRows    int
+	original            string
+	hasSaved            bool
+	dirty               bool
+	saving              bool
+	status              string
+	statusKind          string
+	hint                string
+	saveButtonArea      columnRect
+}
+
+func newTextEditorColumn(title string) *textEditorColumn {
+	ta := textarea.New()
+	ta.Prompt = ""
+	ta.CharLimit = 0
+	ta.FocusedStyle.CursorLine = ta.FocusedStyle.CursorLine.Copy().Background(crushSurfaceElevated)
+	ta.SetHeight(10)
+	ta.SetWidth(40)
+	ta.ShowLineNumbers = false
+	return &textEditorColumn{
+		title:            title,
+		textarea:         ta,
+		hint:             "cmd/ctrl+s save • esc: C1",
+		scrollbarWidth:   1,
+		scrollbarGap:     1,
+		totalDisplayRows: 1,
+	}
+}
+
+func (c *textEditorColumn) ApplyStyles(s styles) {
+	c.panelStyle = s.panel
+	c.panelFocusedStyle = s.panelFocused
+	c.columnTitleStyle = s.columnTitle
+	c.hintStyle = s.statusHint
+	c.statusErrorStyle = s.listItem.Copy().Foreground(crushDanger)
+	c.statusSuccessStyle = s.listItem.Copy().Foreground(crushAccent)
+	c.buttonStyle = s.tabActive.Copy().
+		Foreground(crushBackground).
+		Background(crushAccent).
+		Padding(0, 2).
+		Bold(true)
+	c.buttonDisabledStyle = s.statusHint.Copy().
+		Background(crushSurface).
+		Padding(0, 2)
+	c.scrollbarTrackStyle = s.statusHint.Copy().
+		Foreground(crushForegroundFaint)
+	c.scrollbarThumbStyle = s.statusHint.Copy().
+		Foreground(crushAccent).
+		Bold(true)
+	c.panelFrameWidth = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+	c.panelFrameHeight = maxInt(s.panel.GetVerticalFrameSize(), s.panelFocused.GetVerticalFrameSize())
+}
+
+func (c *textEditorColumn) SetHint(hint string) {
+	c.hint = strings.TrimSpace(hint)
+}
+
+func (c *textEditorColumn) SetOnSave(fn func(string) tea.Cmd) {
+	c.onSave = fn
+}
+
+func (c *textEditorColumn) SetContent(value string, markSaved bool) {
+	c.textarea.SetValue(value)
+	for c.textarea.Line() > 0 {
+		c.textarea.CursorUp()
+	}
+	c.textarea.CursorStart()
+	c.scrollTop = 0
+	c.original = value
+	c.hasSaved = markSaved
+	c.saving = false
+	c.updateDirtyFlag()
+	if !markSaved {
+		c.status = ""
+		c.statusKind = ""
+	}
+}
+
+func (c *textEditorColumn) FocusEditor() {
+	c.textarea.Focus()
+}
+
+func (c *textEditorColumn) BlurEditor() {
+	c.textarea.Blur()
+}
+
+func (c *textEditorColumn) SetSize(width, height int) {
+	c.width = width
+	if height < 6 {
+		height = 6
+	}
+	c.height = height
+
+	innerWidth := c.contentWidth()
+	if innerWidth < 16 {
+		innerWidth = 16
+	}
+	usableWidth := innerWidth - c.scrollbarWidth - c.scrollbarGap
+	if usableWidth < 12 {
+		usableWidth = 12
+	}
+	c.textarea.SetWidth(usableWidth)
+
+	innerHeight := c.contentHeight()
+	editorHeight := innerHeight - 5
+	if editorHeight < 1 {
+		editorHeight = 1
+	}
+	c.textarea.SetHeight(editorHeight)
+}
+
+func (c *textEditorColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	switch message := msg.(type) {
+	case tea.KeyMsg:
+		switch message.String() {
+		case "ctrl+s", "cmd+s":
+			if cmd := c.triggerSave(); cmd != nil {
+				return c, cmd
+			}
+		case "esc":
+			return c, func() tea.Msg { return tea.KeyMsg{Type: tea.KeyLeft} }
+		}
+	}
+	var cmd tea.Cmd
+	c.textarea, cmd = c.textarea.Update(msg)
+	prevDirty := c.dirty
+	c.updateDirtyFlag()
+	if c.saving && cmd == nil {
+		// keep saving state until response arrives
+	}
+	if c.dirty && !c.saving && (msg != nil) {
+		if !prevDirty || c.statusKind == "success" || c.statusKind == "error" {
+			c.status = "Unsaved changes"
+			c.statusKind = "hint"
+		}
+	}
+	if !c.dirty && !c.saving && prevDirty {
+		if c.hasSaved {
+			c.status = "Draft saved"
+			c.statusKind = "success"
+		} else {
+			c.status = ""
+			c.statusKind = ""
+		}
+	}
+	return c, cmd
+}
+
+func (c *textEditorColumn) View(s styles, focused bool) string {
+	if focused {
+		if !c.textarea.Focused() {
+			c.textarea.Focus()
+		}
+	} else if c.textarea.Focused() {
+		c.textarea.Blur()
+	}
+
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleFrame := horizontalInnerFrameSize(c.columnTitleStyle)
+	headerWidth := columnHeaderWidth(c.width, panelFrame, titleFrame)
+	header := c.columnTitleStyle.Width(headerWidth).Render(c.title)
+
+	innerWidth := c.contentWidth()
+	if innerWidth < 16 {
+		innerWidth = 16
+	}
+
+	saveRow, saveLabel, saveEnabled := c.renderSaveRow(innerWidth)
+	statusRow := c.renderStatusRow(innerWidth)
+	c.updateScrollMetrics()
+	editorView := c.textarea.View()
+	editorView = c.attachScrollbar(editorView)
+
+	body := lipgloss.JoinVertical(lipgloss.Left, header, saveRow, statusRow, "", editorView)
+
+	rendered := renderPanelWithScroll(panel, c.width, c.height, 0, body, bg, 0)
+	c.updateSaveButtonArea(rendered, header, saveLabel, saveEnabled, panel)
+	return rendered
+}
+
+func (c *textEditorColumn) Title() string {
+	return c.title
+}
+
+func (c *textEditorColumn) FocusValue() string {
+	if c.saving {
+		return "Saving draft"
+	}
+	if c.dirty || !c.hasSaved {
+		return "Draft unsaved"
+	}
+	return "Draft saved"
+}
+
+func (c *textEditorColumn) ActivationHint() string {
+	return c.hint
+}
+
+func (c *textEditorColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func (c *textEditorColumn) HandleMouse(localX, localY int, msg tea.MouseMsg) (column, tea.Cmd) {
+	if msg.Type != tea.MouseLeft {
+		return c, nil
+	}
+	if !c.saveButtonArea.contains(localX, localY) {
+		return c, nil
+	}
+	if cmd := c.triggerSave(); cmd != nil {
+		return c, cmd
+	}
+	return c, nil
+}
+
+func (c *textEditorColumn) triggerSave() tea.Cmd {
+	if c.onSave == nil {
+		return nil
+	}
+	if c.saving {
+		return nil
+	}
+	if !c.dirty && c.hasSaved {
+		return nil
+	}
+	c.saving = true
+	c.status = "Saving draft…"
+	c.statusKind = "hint"
+	value := c.textarea.Value()
+	return c.onSave(value)
+}
+
+func (c *textEditorColumn) updateDirtyFlag() {
+	current := c.textarea.Value()
+	c.dirty = !c.hasSaved || current != c.original
+}
+
+func (c *textEditorColumn) renderSaveRow(innerWidth int) (string, string, bool) {
+	label := " Save "
+	if c.saving {
+		label = " Saving… "
+	} else if c.dirty || !c.hasSaved {
+		label = " Save Draft "
+	} else {
+		label = " Saved "
+	}
+	saveEnabled := !c.saving && (c.dirty || !c.hasSaved)
+	style := c.buttonDisabledStyle
+	if saveEnabled {
+		style = c.buttonStyle
+	}
+	button := style.Render(label)
+	buttonWidth := runewidth.StringWidth(button)
+	if buttonWidth > innerWidth {
+		buttonWidth = innerWidth
+		button = sliceLineANSI(button, 0, innerWidth, "")
+	}
+	hint := strings.TrimSpace(c.hint)
+	var row string
+	if hint != "" {
+		hintSegment := c.hintStyle.Copy().Render(hint)
+		row = lipgloss.JoinHorizontal(lipgloss.Left, button, "  ", hintSegment)
+	} else {
+		row = button
+	}
+	rowWidth := stringWidthANSI(row)
+	if rowWidth < innerWidth {
+		row += strings.Repeat(" ", innerWidth-rowWidth)
+	}
+	return row, strings.TrimSpace(label), saveEnabled
+}
+
+func (c *textEditorColumn) updateSaveButtonArea(rendered, header, label string, saveEnabled bool, panel lipgloss.Style) {
+	if !saveEnabled {
+		c.saveButtonArea = columnRect{}
+		return
+	}
+	needle := strings.TrimSpace(label)
+	lines := strings.Split(rendered, "\n")
+	panelLeft := panel.GetBorderLeftSize() + panel.GetPaddingLeft()
+	panelRight := panel.GetBorderRightSize() + panel.GetPaddingRight()
+	if panelLeft < 0 {
+		panelLeft = 0
+	}
+	if panelRight < 0 {
+		panelRight = 0
+	}
+	innerWidth := c.width - panelLeft - panelRight
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	for i, line := range lines {
+		if strings.Contains(stripANSI(line), needle) {
+			c.saveButtonArea = columnRect{x: panelLeft, y: i, width: innerWidth, height: 1}
+			return
+		}
+	}
+	// Fallback: align based on header height if we can't match the rendered line.
+	headerLines := lipgloss.Height(header)
+	if headerLines < 0 {
+		headerLines = 0
+	}
+	panelTop := panel.GetBorderTopSize() + panel.GetPaddingTop()
+	if panelTop < 0 {
+		panelTop = 0
+	}
+	c.saveButtonArea = columnRect{
+		x:      panelLeft,
+		y:      panelTop + headerLines,
+		width:  innerWidth,
+		height: 1,
+	}
+}
+
+func stripANSI(line string) string {
+	if line == "" {
+		return ""
+	}
+	var (
+		builder strings.Builder
+		seq     strings.Builder
+		ansi    bool
+	)
+	for _, r := range line {
+		if ansi {
+			seq.WriteRune(r)
+			if reansi.IsTerminator(r) {
+				ansi = false
+				seq.Reset()
+			}
+			continue
+		}
+		if r == reansi.Marker {
+			ansi = true
+			seq.Reset()
+			seq.WriteRune(r)
+			continue
+		}
+		builder.WriteRune(r)
+	}
+	return builder.String()
+}
+
+func countLeadingBlankLines(value string) int {
+	if strings.TrimSpace(value) == "" {
+		// Entire content is blank; treat as zero padding to avoid out-of-range math.
+		return 0
+	}
+	lines := strings.Split(value, "\n")
+	count := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func (c *textEditorColumn) renderStatusRow(innerWidth int) string {
+	msg := strings.TrimSpace(c.status)
+	style := c.hintStyle
+	switch c.statusKind {
+	case "error":
+		style = c.statusErrorStyle
+	case "success":
+		style = c.statusSuccessStyle
+	default:
+		if msg == "" {
+			msg = c.hint
+			style = c.hintStyle
+		}
+	}
+	if msg == "" {
+		msg = strings.Repeat(" ", innerWidth)
+	}
+	rendered := style.Render(msg)
+	width := stringWidthANSI(rendered)
+	if width < innerWidth {
+		rendered += strings.Repeat(" ", innerWidth-width)
+	}
+	return rendered
+}
+
+func (c *textEditorColumn) contentWidth() int {
+	width := c.width - c.panelFrameWidth
+	if width < 1 {
+		width = c.width - 2
+	}
+	if width < 1 {
+		width = 1
+	}
+	return width
+}
+
+func (c *textEditorColumn) contentHeight() int {
+	height := c.height - c.panelFrameHeight
+	if height < 1 {
+		height = c.height
+	}
+	if height < 1 {
+		height = 1
+	}
+	return height
+}
+
+func (c *textEditorColumn) MarkSaved(content, rel string) {
+	c.original = content
+	c.hasSaved = true
+	c.saving = false
+	c.updateDirtyFlag()
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		rel = "docs/rfp.md"
+	}
+	c.status = fmt.Sprintf("Saved %s", rel)
+	c.statusKind = "success"
+}
+
+func (c *textEditorColumn) SaveFailed(reason string) {
+	c.saving = false
+	c.updateDirtyFlag()
+	c.status = reason
+	c.statusKind = "error"
+}
+
+func (c *textEditorColumn) SetStatus(message, kind string) {
+	c.status = strings.TrimSpace(message)
+	c.statusKind = strings.TrimSpace(kind)
+}
+
+func (c *textEditorColumn) attachScrollbar(editorView string) string {
+	lines := strings.Split(editorView, "\n")
+	height := len(lines)
+	scrollbar := c.renderScrollbar(height)
+	if strings.TrimSpace(scrollbar) == "" {
+		return editorView
+	}
+	scrollLines := strings.Split(scrollbar, "\n")
+	if len(scrollLines) < height {
+		diff := height - len(scrollLines)
+		for i := 0; i < diff; i++ {
+			scrollLines = append(scrollLines, strings.Repeat(" ", c.scrollbarGap+c.scrollbarWidth))
+		}
+	}
+	for i := 0; i < height; i++ {
+		lines[i] = lines[i] + scrollLines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (c *textEditorColumn) renderScrollbar(height int) string {
+	if height <= 0 {
+		return ""
+	}
+	total := c.totalDisplayRows
+	if total <= height {
+		segment := strings.Repeat(" ", c.scrollbarGap) + c.scrollbarTrackStyle.Render("│")
+		return strings.TrimRight(strings.Repeat(segment+"\n", height), "\n")
+	}
+	thumbSize := int(math.Round(float64(height*height) / float64(total)))
+	if thumbSize < 1 {
+		thumbSize = 1
+	}
+	if thumbSize > height {
+		thumbSize = height
+	}
+	maxTop := total - height
+	thumbStart := 0
+	if maxTop > 0 {
+		thumbStart = int(math.Round(float64(c.scrollTop) * float64(height-thumbSize) / float64(maxTop)))
+		if thumbStart < 0 {
+			thumbStart = 0
+		}
+		if thumbStart > height-thumbSize {
+			thumbStart = height - thumbSize
+		}
+	}
+	lines := make([]string, height)
+	for i := 0; i < height; i++ {
+		style := c.scrollbarTrackStyle
+		char := "│"
+		if i >= thumbStart && i < thumbStart+thumbSize {
+			style = c.scrollbarThumbStyle
+			char = "█"
+		}
+		lines[i] = strings.Repeat(" ", c.scrollbarGap) + style.Render(char)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (c *textEditorColumn) updateScrollMetrics() {
+	height := c.textarea.Height()
+	if height < 1 {
+		height = len(strings.Split(c.textarea.View(), "\n"))
+	}
+	width := c.textarea.Width()
+	if width < 1 {
+		width = 1
+	}
+	lineWraps, total := computeWrappedLineCounts(c.textarea.Value(), width, c.textarea.LineCount())
+	if total <= 0 {
+		total = 1
+	}
+	cursorLine := c.textarea.Line()
+	if cursorLine < 0 {
+		cursorLine = 0
+	}
+	if cursorLine >= len(lineWraps) {
+		cursorLine = len(lineWraps) - 1
+		if cursorLine < 0 {
+			cursorLine = 0
+		}
+	}
+	cursorOffset := 0
+	for i := 0; i < cursorLine && i < len(lineWraps); i++ {
+		cursorOffset += lineWraps[i]
+	}
+	lineInfo := c.textarea.LineInfo()
+	cursorOffset += lineInfo.RowOffset
+	maxTop := maxInt(total-height, 0)
+	if c.scrollTop > maxTop {
+		c.scrollTop = maxTop
+	}
+	if cursorOffset < c.scrollTop {
+		c.scrollTop = cursorOffset
+	} else if cursorOffset >= c.scrollTop+height {
+		c.scrollTop = cursorOffset - height + 1
+	}
+	if c.scrollTop < 0 {
+		c.scrollTop = 0
+	}
+	if c.scrollTop > maxTop {
+		c.scrollTop = maxTop
+	}
+	c.totalDisplayRows = maxInt(total, 1)
 }
 
 func (c *actionColumn) ScrollHorizontal(delta int) bool {
@@ -1812,7 +2675,15 @@ func (c *actionColumn) toggleSelection(index int) bool {
 }
 
 func (c *envTableColumn) View(s styles, focused bool) string {
-	title := s.columnTitle.Width(columnHeaderWidth(c.width, c.panelFrame)).Render(c.title)
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	title := s.columnTitle.Width(columnHeaderWidth(c.width, panelFrame, titleFrame)).Render(c.title)
 	var body string
 	if len(c.entries) == 0 {
 		body = s.listItem.Copy().Faint(true).Render("No variables detected")
@@ -1820,13 +2691,7 @@ func (c *envTableColumn) View(s styles, focused bool) string {
 		body = c.table.View()
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
-	panel := s.panel
-	bg := crushSurface
-	if focused {
-		panel = s.panelFocused
-		bg = crushSurfaceElevated
-	}
-	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg, 0)
 }
 
 func (c *envTableColumn) Title() string {
@@ -2054,7 +2919,15 @@ func (c *servicesTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 }
 
 func (c *servicesTableColumn) View(s styles, focused bool) string {
-	title := s.columnTitle.Width(columnHeaderWidth(c.width, c.panelFrame)).Render(c.title)
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	title := s.columnTitle.Width(columnHeaderWidth(c.width, panelFrame, titleFrame)).Render(c.title)
 	var body string
 	if len(c.items) == 0 {
 		body = s.listItem.Copy().Faint(true).Render("No services detected")
@@ -2062,13 +2935,7 @@ func (c *servicesTableColumn) View(s styles, focused bool) string {
 		body = c.table.View()
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
-	panel := s.panel
-	bg := crushSurface
-	if focused {
-		panel = s.panelFocused
-		bg = crushSurfaceElevated
-	}
-	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg, 0)
 }
 
 func (c *servicesTableColumn) Title() string {
@@ -2276,7 +3143,15 @@ func (c *tokensTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 }
 
 func (c *tokensTableColumn) View(s styles, focused bool) string {
-	title := s.columnTitle.Width(columnHeaderWidth(c.width, c.panelFrame)).Render(c.title)
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	title := s.columnTitle.Width(columnHeaderWidth(c.width, panelFrame, titleFrame)).Render(c.title)
 	var body string
 	if len(c.rows) == 0 {
 		message := strings.TrimSpace(c.empty)
@@ -2291,13 +3166,7 @@ func (c *tokensTableColumn) View(s styles, focused bool) string {
 		body = lipgloss.JoinVertical(lipgloss.Left, s.statusHint.Render(context), body)
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
-	panel := s.panel
-	bg := crushSurface
-	if focused {
-		panel = s.panelFocused
-		bg = crushSurfaceElevated
-	}
-	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg, 0)
 }
 
 func (c *tokensTableColumn) Title() string {
@@ -2500,7 +3369,15 @@ func (c *reportsTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 }
 
 func (c *reportsTableColumn) View(s styles, focused bool) string {
-	title := s.columnTitle.Width(columnHeaderWidth(c.width, c.panelFrame)).Render(c.title)
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	title := s.columnTitle.Width(columnHeaderWidth(c.width, panelFrame, titleFrame)).Render(c.title)
 	var body string
 	if len(c.rows) == 0 {
 		message := c.placeholder
@@ -2512,13 +3389,7 @@ func (c *reportsTableColumn) View(s styles, focused bool) string {
 		body = c.table.View()
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
-	panel := s.panel
-	bg := crushSurface
-	if focused {
-		panel = s.panelFocused
-		bg = crushSurfaceElevated
-	}
-	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg, 0)
 }
 
 func (c *reportsTableColumn) Title() string {
@@ -2633,16 +3504,17 @@ func (p *previewColumn) Update(msg tea.Msg) (column, tea.Cmd) {
 }
 
 func (p *previewColumn) View(s styles, focused bool) string {
-	frame := s.panel.GetHorizontalFrameSize()
-	header := s.columnTitle.Width(columnHeaderWidth(p.width, frame)).Render(p.title)
-	body := header + "\n" + p.view.View()
 	panel := s.panel
 	bg := crushSurface
 	if focused {
 		panel = s.panelFocused
 		bg = crushSurfaceElevated
 	}
-	return renderPanelWithScroll(panel, p.width, p.height, 0, body, bg)
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	header := s.columnTitle.Width(columnHeaderWidth(p.width, panelFrame, titleFrame)).Render(p.title)
+	body := lipgloss.JoinVertical(lipgloss.Left, header, p.view.View())
+	return renderPanelWithScroll(panel, p.width, p.height, 0, body, bg, 0)
 }
 
 func (p *previewColumn) Title() string {
@@ -3891,7 +4763,130 @@ func itemRequiresDocker(item featureItemDefinition) bool {
 	return false
 }
 
-func renderPanelWithScroll(panel lipgloss.Style, width, height, scrollX int, content string, background lipgloss.Color) string {
+func stringWidthANSI(line string) int {
+	if line == "" {
+		return 0
+	}
+	var width int
+	ansiMode := false
+	for _, r := range line {
+		if ansiMode {
+			if reansi.IsTerminator(r) {
+				ansiMode = false
+			}
+			continue
+		}
+		if r == reansi.Marker {
+			ansiMode = true
+			continue
+		}
+		width += runewidth.RuneWidth(r)
+	}
+	return width
+}
+
+func computeWrappedLineCounts(text string, width int, expectedLines int) ([]int, int) {
+	if width < 1 {
+		width = 1
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	if expectedLines > len(lines) {
+		extra := expectedLines - len(lines)
+		for i := 0; i < extra; i++ {
+			lines = append(lines, "")
+		}
+	}
+	wrapped := make([]int, len(lines))
+	total := 0
+	for i, line := range lines {
+		rows := wrappedRowCount(line, width)
+		wrapped[i] = rows
+		total += rows
+	}
+	return wrapped, total
+}
+
+func wrappedRowCount(line string, width int) int {
+	runes := []rune(line)
+	segments := wrapRunesForWidth(runes, width)
+	if len(segments) == 0 {
+		return 1
+	}
+	return len(segments)
+}
+
+func wrapRunesForWidth(runes []rune, width int) [][]rune {
+	if width < 1 {
+		width = 1
+	}
+	var (
+		lines  = [][]rune{{}}
+		word   = []rune{}
+		row    int
+		spaces int
+	)
+
+	for _, r := range runes {
+		if unicode.IsSpace(r) {
+			spaces++
+		} else {
+			word = append(word, r)
+		}
+
+		if spaces > 0 {
+			if runewidth.StringWidth(string(lines[row]))+runewidth.StringWidth(string(word))+spaces > width {
+				row++
+				lines = append(lines, []rune{})
+				lines[row] = append(lines[row], word...)
+				lines[row] = append(lines[row], repeatSpaces(spaces)...)
+				spaces = 0
+				word = nil
+			} else {
+				lines[row] = append(lines[row], word...)
+				lines[row] = append(lines[row], repeatSpaces(spaces)...)
+				spaces = 0
+				word = nil
+			}
+		} else {
+			if len(word) > 0 {
+				lastCharLen := runewidth.RuneWidth(word[len(word)-1])
+				if runewidth.StringWidth(string(word))+lastCharLen > width {
+					if len(lines[row]) > 0 {
+						row++
+						lines = append(lines, []rune{})
+					}
+					lines[row] = append(lines[row], word...)
+					word = nil
+				}
+			}
+		}
+	}
+
+	if runewidth.StringWidth(string(lines[row]))+runewidth.StringWidth(string(word))+spaces >= width {
+		lines = append(lines, []rune{})
+		lines[row+1] = append(lines[row+1], word...)
+		spaces++
+		lines[row+1] = append(lines[row+1], repeatSpaces(spaces)...)
+	} else {
+		lines[row] = append(lines[row], word...)
+		spaces++
+		lines[row] = append(lines[row], repeatSpaces(spaces)...)
+	}
+
+	return lines
+}
+
+func repeatSpaces(n int) []rune {
+	if n <= 0 {
+		return nil
+	}
+	return []rune(strings.Repeat(" ", n))
+}
+
+func renderPanelWithScroll(panel lipgloss.Style, width, height, scrollX int, content string, background lipgloss.Color, fixedLines int) string {
 	if width <= 0 {
 		return ""
 	}
@@ -3919,9 +4914,19 @@ func renderPanelWithScroll(panel lipgloss.Style, width, height, scrollX int, con
 	}
 
 	bgSeq := ansiBackgroundSequence(background)
+	if fixedLines < 0 {
+		fixedLines = 0
+	}
+	if fixedLines > len(lines) {
+		fixedLines = len(lines)
+	}
 
 	for i := range lines {
-		lines[i] = sliceLineANSI(lines[i], scrollX, innerWidth, bgSeq)
+		lineScroll := scrollX
+		if i < fixedLines {
+			lineScroll = 0
+		}
+		lines[i] = sliceLineANSI(lines[i], lineScroll, innerWidth, bgSeq)
 	}
 
 	body := strings.Join(lines, "\n")

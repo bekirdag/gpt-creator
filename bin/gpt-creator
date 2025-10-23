@@ -4850,6 +4850,73 @@ PY
   } >"$dest_file"
 }
 
+gc_discovery_is_stale() {
+  local discovery_file="${1:-}"
+  shift || true
+  local -a required_keys=("$@")
+  if [[ -z "$discovery_file" || ! -f "$discovery_file" || ! -s "$discovery_file" ]]; then
+    return 0
+  fi
+  python3 - "$discovery_file" "${required_keys[@]}" <<'PY'
+import pathlib, sys
+
+file_path = pathlib.Path(sys.argv[1])
+required = sys.argv[2:]
+
+try:
+    raw = file_path.read_text(encoding="utf-8")
+except Exception:
+    sys.exit(0)
+
+entries = {}
+for line in raw.splitlines():
+    stripped = line.strip()
+    if not stripped.startswith("- "):
+        continue
+    payload = stripped[2:]
+    if ":" not in payload:
+        continue
+    key, value = payload.split(":", 1)
+    entries[key.strip()] = value.strip()
+
+if not required:
+    required = ["pdr", "sds", "rfp", "jira", "ui_pages", "openapi", "sql"]
+
+def is_empty(value: str) -> bool:
+    if value is None:
+        return True
+    text = value.strip()
+    return text in {"", "null", "~"}
+
+for key in required:
+    if is_empty(entries.get(key)):
+        sys.exit(0)
+
+sys.exit(1)
+PY
+}
+
+gc_refresh_discovery_if_needed() {
+  local discovery_file="${STAGING_DIR}/discovery.yaml"
+  local -a required=("pdr" "sds" "rfp" "jira" "ui_pages" "openapi")
+  if gc_discovery_is_stale "$discovery_file" "${required[@]}"; then
+    info "Discovery manifest missing context; running scan + normalize."
+    if ! cmd_scan --project "$PROJECT_ROOT"; then
+      warn "Automatic scan failed; rerun 'gpt-creator scan' manually."
+      return
+    fi
+    if ! cmd_normalize --project "$PROJECT_ROOT"; then
+      warn "Automatic normalize failed; rerun 'gpt-creator normalize' manually."
+      return
+    fi
+    if ! gc_discovery_is_stale "$discovery_file" "${required[@]}"; then
+      ok "Discovery manifest refreshed."
+    else
+      warn "Discovery manifest still incomplete after refresh; check project docs."
+    fi
+  fi
+}
+
 gc_build_context_digest() {
   local context_file="${1:?context file required}"
   local digest_file="${2:?digest destination required}"
@@ -12269,6 +12336,7 @@ EOHELP
   fi
 
   ensure_node_dependencies "$PROJECT_ROOT"
+  gc_refresh_discovery_if_needed
 
   if (( prompt_compact )); then
     export GC_PROMPT_COMPACT=1
@@ -13573,7 +13641,7 @@ def fetch_rate(cursor):
 
 rate, rate_samples = fetch_rate(cur)
 try:
-    rows = cur.execute("SELECT story_points, status FROM tasks").fetchall()
+    rows = cur.execute("SELECT id, story_points, status FROM tasks").fetchall()
 except sqlite3.DatabaseError as exc:
     conn.close()
     raise SystemExit(f"Failed to read tasks: {exc}")
@@ -13581,14 +13649,55 @@ except sqlite3.DatabaseError as exc:
 done_statuses = {"complete", "completed", "done"}
 total_points = 0.0
 remaining_tasks = 0
+completed_points = 0.0
+task_info = {}
 
 for row in rows:
     status = (row["status"] or "").strip().lower()
+    points = parse_points(row["story_points"])
+    points = max(points, 0.0)
+    task_info[row["id"]] = {"points": points, "status": status}
     if status in done_statuses:
+        completed_points += points
         continue
     remaining_tasks += 1
-    points = parse_points(row["story_points"])
-    total_points += max(points, 0.0)
+    total_points += points
+
+tokens_total = 0.0
+token_samples = 0
+covered_points = 0.0
+
+def table_exists(cursor, name):
+    try:
+        row = cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (name,),
+        ).fetchone()
+        return row is not None
+    except sqlite3.DatabaseError:
+        return False
+
+if table_exists(cur, "task_progress"):
+    token_by_task = {}
+    try:
+        for progress in cur.execute(
+            "SELECT id, task_id, tokens_total FROM task_progress "
+            "WHERE tokens_total IS NOT NULL AND tokens_total > 0 "
+            "ORDER BY id"
+        ):
+            task_id = progress["task_id"]
+            if task_id is None:
+                continue
+            token_by_task[task_id] = float(progress["tokens_total"])
+    except sqlite3.DatabaseError:
+        token_by_task = {}
+
+    token_samples = len(token_by_task)
+    for task_id, tokens in token_by_task.items():
+        tokens_total += tokens
+        info = task_info.get(task_id)
+        if info:
+            covered_points += info["points"]
 
 conn.close()
 
@@ -13620,6 +13729,12 @@ def fmt_rate(value: float) -> str:
         return str(int(round(value)))
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
+def fmt_tokens(value: float) -> str:
+    return f"{int(round(value)):,}"
+
+def fmt_ratio(value: float) -> str:
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
 estimate = " ".join(parts)
 print(f"Remaining tasks: {remaining_tasks}")
 print(f"Remaining story points: {fmt_points(total_points)}")
@@ -13629,6 +13744,25 @@ if rate_samples > 0 and rate > 0:
 else:
     print("Using default throughput assumption: 15 SP/hour.")
 print(f"Estimated completion time @{fmt_rate(rate)} SP/hour: {estimate}")
+
+if tokens_total > 0 and token_samples > 0:
+    print(f"Tokens observed: {fmt_tokens(tokens_total)} across {token_samples} task(s).")
+    if covered_points > 0:
+        avg_tokens_per_point = tokens_total / covered_points
+        print(
+            f"Average tokens per story point: {fmt_ratio(avg_tokens_per_point)} tokens/SP "
+            f"(based on {fmt_points(covered_points)} SP)."
+        )
+        estimated_tokens_hour = avg_tokens_per_point * rate if rate > 0 else 0.0
+        if estimated_tokens_hour > 0:
+            print(f"Estimated token burn @{fmt_rate(rate)} SP/hour: {fmt_tokens(estimated_tokens_hour)} tokens/hour.")
+        projected_remaining = avg_tokens_per_point * total_points if total_points > 0 else 0.0
+        if projected_remaining > 0:
+            print(f"Projected remaining tokens: {fmt_tokens(projected_remaining)} tokens for {fmt_points(total_points)} SP.")
+    else:
+        print("Average tokens per story point: insufficient data (no story points recorded on tokenized tasks).")
+else:
+    print("Token usage data unavailable; run work-on-tasks to capture token telemetry.")
 PY
 }
 

@@ -10278,6 +10278,7 @@ gc_write_task_prompt() {
   python3 - "$db_path" "$story_slug" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" "$staging_dir" <<'PY'
 import json
 import os
+import pathlib
 import re
 import sqlite3
 import sys

@@ -33,6 +33,12 @@ temp/
 .gomodcache/
 .gocache/
 .gpt-creator/
+**/.gpt-creator/logs/
+**/.gpt-creator/tmp/
+**/.gpt-creator/tmp/view-cache/
+**/.gpt-creator/scan.tsv
+**/.gpt-creator/scan.tsv.*
+**/.gpt-creator/staging/docs/
 
 # Docker (local volumes/artifacts)
 docker/.data/

@@ -9421,6 +9421,47 @@ def _normalize_focus(items):
                 normalized.append(candidate)
     return normalized
 
+def _extract_focus_from_text(text):
+    import json
+    import ast
+    import re
+
+    if not isinstance(text, str):
+        return []
+
+    matches = re.findall(
+        r'focus\s*:\s*(\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}|[^;]+)',
+        text,
+        flags=re.IGNORECASE,
+    )
+    extracted = []
+    for segment in matches:
+        segment = segment.strip()
+        if not segment:
+            continue
+        parsed = None
+        opening = segment[:1]
+        closing = segment[-1:]
+        if (opening, closing) in {('[', ']'), ('{', '}'), ('(', ')')}:
+            inner = segment[1:-1].strip()
+            if opening in {'[', '{'}:
+                try:
+                    parsed = json.loads(segment)
+                except Exception:
+                    try:
+                        parsed = ast.literal_eval(segment)
+                    except Exception:
+                        parsed = None
+            else:
+                parsed = [item.strip() for item in inner.split(',')]
+            if isinstance(parsed, (list, tuple)):
+                extracted.extend(_normalize_focus(parsed))
+                continue
+            segment = inner
+        parts = [item.strip() for item in re.split(r'[,\n]', segment) if item.strip()]
+        extracted.extend(_normalize_focus(parts))
+    return extracted
+
 focus_targets = payload.get('focus')
 focus_valid = False
 if isinstance(focus_targets, list) and focus_targets:
@@ -9452,6 +9493,7 @@ if not focus_valid:
                 else:
                     inferred_plan.append(json.dumps(entry, ensure_ascii=False))
             elif isinstance(entry, str):
+                inferred_focus.extend(_extract_focus_from_text(entry))
                 inferred_plan.append(entry)
     if inferred_focus:
         seen = set()
@@ -9471,6 +9513,31 @@ if not focus_valid:
             notes_list.append(message)
         else:
             payload['notes'] = [message]
+
+if not focus_valid:
+    note_focus = []
+    notes_field = payload.get('notes')
+    if isinstance(notes_field, list):
+        for entry in notes_field:
+            if not isinstance(entry, str):
+                continue
+            note_focus.extend(_extract_focus_from_text(entry))
+        if note_focus:
+            seen = set()
+            ordered = []
+            for item in note_focus:
+                if item not in seen:
+                    seen.add(item)
+                    ordered.append(item)
+            if ordered:
+                focus_targets = ordered
+                payload['focus'] = focus_targets
+                focus_valid = True
+                reminder = "Focus array inferred from notes; include a top-level `focus` list next time."
+                if isinstance(notes_field, list):
+                    notes_field.append(reminder)
+                else:
+                    payload['notes'] = [reminder]
 
 if not focus_valid:
     print('STATUS parse-error')

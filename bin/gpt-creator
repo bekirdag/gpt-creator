@@ -9345,20 +9345,65 @@ else:
                 print(f"RAW {rel_dump}")
                 break
 
+def _normalize_focus(items):
+    normalized = []
+    for raw_item in items:
+        if isinstance(raw_item, str):
+            candidate = raw_item.strip()
+            if len(candidate) >= 2:
+                normalized.append(candidate)
+    return normalized
+
 focus_targets = payload.get('focus')
 focus_valid = False
 if isinstance(focus_targets, list) and focus_targets:
-    normalized_focus = []
-    for item in focus_targets:
-        if not isinstance(item, str):
-            break
-        target = item.strip()
-        if len(target) < 2:
-            break
-        normalized_focus.append(target)
-    else:
+    normalized_focus = _normalize_focus(focus_targets)
+    if len(normalized_focus) == len(focus_targets):
         focus_valid = True
         focus_targets = normalized_focus
+
+if not focus_valid:
+    inferred_focus = []
+    plan_entries = payload.get('plan')
+    inferred_plan = []
+    if isinstance(plan_entries, list):
+        for entry in plan_entries:
+            if isinstance(entry, dict):
+                entry_focus = entry.get('focus')
+                if isinstance(entry_focus, list):
+                    inferred_focus.extend(_normalize_focus(entry_focus))
+                text_fields = [
+                    entry.get('task'),
+                    entry.get('step'),
+                    entry.get('description'),
+                    entry.get('summary'),
+                ]
+                for text_value in text_fields:
+                    if isinstance(text_value, str) and text_value.strip():
+                        inferred_plan.append(text_value.strip())
+                        break
+                else:
+                    inferred_plan.append(json.dumps(entry, ensure_ascii=False))
+            elif isinstance(entry, str):
+                inferred_plan.append(entry)
+    if inferred_focus:
+        seen = set()
+        ordered_focus = []
+        for item in inferred_focus:
+            if item not in seen:
+                seen.add(item)
+                ordered_focus.append(item)
+        focus_targets = ordered_focus
+        payload['focus'] = focus_targets
+        focus_valid = True
+        if inferred_plan:
+            payload['plan'] = inferred_plan
+        notes_list = payload.get('notes')
+        message = "Focus array inferred from plan; include a top-level `focus` list next time."
+        if isinstance(notes_list, list):
+            notes_list.append(message)
+        else:
+            payload['notes'] = [message]
 
 if not focus_valid:
     print('STATUS parse-error')
@@ -10590,7 +10635,9 @@ task_rows = cur.execute(
     'SELECT task_id, title, description, estimate, assignees_json, tags_json, acceptance_json, dependencies_json, '
     'tags_text, story_points, dependencies_text, assignee_text, document_reference, idempotency, rate_limits, rbac, '
     'messaging_workflows, performance_targets, observability, acceptance_text, endpoints, sample_create_request, '
-    'sample_create_response, user_story_ref_id, epic_ref_id '
+    'sample_create_response, user_story_ref_id, epic_ref_id, status, last_progress_at, last_progress_run, '
+    'last_log_path, last_output_path, last_prompt_path, last_notes_json, last_commands_json, last_apply_status, '
+    'last_changes_applied, last_tokens_total, last_duration_seconds '
     'FROM tasks WHERE story_slug = ? ORDER BY position ASC',
     (STORY_SLUG,)
 ).fetchall()
@@ -10611,6 +10658,58 @@ def parse_json_list(value):
     except Exception:
         pass
     return []
+
+def parse_int_field(value):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(str(value).strip()))
+        except Exception:
+            return None
+
+def format_duration(seconds_value):
+    seconds = parse_int_field(seconds_value)
+    if seconds is None or seconds <= 0:
+        return ""
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if sec or not parts:
+        parts.append(f"{sec}s")
+    return " ".join(parts)
+
+def clamp_text(text: str, limit: int) -> str:
+    if limit <= 0 or not text:
+        return text
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+def build_log_excerpt(path_obj: Path, max_lines: int = 40, max_chars: int = 160) -> list[str]:
+    try:
+        raw = path_obj.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return [f"(unable to read log: {exc})"]
+    lines_local = raw.splitlines()
+    if not lines_local:
+        return []
+    excerpt = []
+    if len(lines_local) > max_lines:
+        trimmed = len(lines_local) - max_lines
+        excerpt.append(f"... trimmed {trimmed} earlier line(s) ...")
+        subset = lines_local[-max_lines:]
+    else:
+        subset = lines_local
+    for line in subset:
+        excerpt.append(clamp_text(line, max_chars))
+    return excerpt
 
 def clean(value: str) -> str:
     return (value or '').strip()
@@ -10667,8 +10766,25 @@ sample_create_response = (task['sample_create_response'] or '').strip() if task[
 user_story_ref_id = clean(task['user_story_ref_id'])
 epic_ref_id = clean(task['epic_ref_id'])
 
+task_status = clean(task['status'])
+last_progress_at = clean(task['last_progress_at'])
+last_progress_run = clean(task['last_progress_run'])
+last_apply_status = clean(task['last_apply_status'])
+last_log_path = clean(task['last_log_path'])
+last_output_path = clean(task['last_output_path'])
+last_prompt_path = clean(task['last_prompt_path'])
+last_changes_applied = parse_int_field(task['last_changes_applied']) or 0
+last_tokens_total = parse_int_field(task['last_tokens_total'])
+last_duration_seconds = parse_int_field(task['last_duration_seconds'])
+last_notes = parse_json_list(task['last_notes_json'])
+last_commands = parse_json_list(task['last_commands_json'])
+
 project_display = project_display_name(PROJECT_ROOT)
 repo_path = PROJECT_ROOT or '.'
+try:
+    prompt_dir = Path(PROMPT_PATH).resolve().parent
+except Exception:
+    prompt_dir = Path(".").resolve()
 
 sample_limit_env = os.getenv("GC_PROMPT_SAMPLE_LINES", "").strip()
 try:
@@ -10828,6 +10944,114 @@ if endpoints_text:
 doc_snippets_enabled = os.getenv("GC_PROMPT_DOC_SNIPPETS", "").strip().lower() not in {"", "0", "false"}
 staging_root = Path(STAGING_DIR).resolve() if STAGING_DIR else None
 project_root_path = Path(PROJECT_ROOT).resolve() if PROJECT_ROOT else None
+
+has_previous_attempt = any([
+    last_progress_at,
+    last_apply_status,
+    last_log_path,
+    last_output_path,
+    last_notes,
+    last_commands,
+])
+
+if has_previous_attempt:
+    def resolve_history_path(raw_path: str) -> Optional[Path]:
+        if not raw_path:
+            return None
+        candidate = Path(raw_path)
+        if candidate.is_absolute():
+            candidates = [candidate]
+        else:
+            candidates = []
+            for base in [prompt_dir, project_root_path, staging_root]:
+                if not base:
+                    continue
+                base_path = base if isinstance(base, Path) else Path(base)
+                candidates.append(base_path / candidate)
+            candidates.append(candidate)
+        for option in candidates:
+            try:
+                resolved = option.resolve()
+            except Exception:
+                resolved = option
+            if resolved.exists():
+                return resolved
+        return candidates[0] if candidates else candidate
+
+    def render_relative(path_obj: Path) -> str:
+        for root in filter(None, [project_root_path, staging_root]):
+            if isinstance(root, Path):
+                try:
+                    return str(path_obj.relative_to(root))
+                except ValueError:
+                    continue
+        return str(path_obj)
+
+    lines.append("")
+    lines.append("### Previous Attempt Summary")
+
+    status_bits = []
+    if task_status:
+        status_bits.append(task_status)
+    if last_apply_status:
+        status_bits.append(f"apply:{last_apply_status}")
+    if last_changes_applied:
+        status_bits.append(f"changes:{last_changes_applied}")
+    if status_bits:
+        lines.append(f"- Status: {', '.join(status_bits)}")
+
+    metrics_bits = []
+    if last_progress_at:
+        metrics_bits.append(f"at {last_progress_at}")
+    if last_progress_run:
+        metrics_bits.append(f"run {last_progress_run}")
+    if last_tokens_total is not None:
+        metrics_bits.append(f"tokens {last_tokens_total}")
+    duration_text = format_duration(last_duration_seconds)
+    if duration_text:
+        metrics_bits.append(f"duration {duration_text}")
+    if metrics_bits:
+        lines.append(f"- Metrics: {', '.join(metrics_bits)}")
+
+    if last_notes:
+        lines.append("- Notes:")
+        for note in last_notes[:4]:
+            lines.append(f"  - {clamp_text(note, 220)}")
+
+    if last_commands:
+        lines.append("- Prior command attempts:")
+        for cmd in last_commands[:3]:
+            lines.append(f"  - {clamp_text(cmd, 160)}")
+
+    log_excerpt_lines: list[str] = []
+    log_display = ""
+    if last_log_path:
+        resolved_path = resolve_history_path(last_log_path)
+        if isinstance(resolved_path, Path) and resolved_path.exists():
+            log_display = render_relative(resolved_path)
+            log_excerpt_lines = build_log_excerpt(resolved_path)
+        else:
+            log_display = last_log_path
+    if log_display:
+        lines.append(f"- Log: {log_display}")
+        if log_excerpt_lines:
+            lines.append("```text")
+            lines.extend(log_excerpt_lines)
+            lines.append("```")
+
+    if last_output_path:
+        output_path_resolved = resolve_history_path(last_output_path)
+        if isinstance(output_path_resolved, Path) and output_path_resolved.exists():
+            lines.append(f"- Output: {render_relative(output_path_resolved)}")
+        else:
+            lines.append(f"- Output: {last_output_path}")
+
+    if last_prompt_path:
+        prompt_path_resolved = resolve_history_path(last_prompt_path)
+        if isinstance(prompt_path_resolved, Path) and prompt_path_resolved.exists():
+            lines.append(f"- Prompt: {render_relative(prompt_path_resolved)}")
+        else:
+            lines.append(f"- Prompt: {last_prompt_path}")
 
 def _split_items(raw: str):
     if not raw:

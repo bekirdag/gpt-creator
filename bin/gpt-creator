@@ -10282,6 +10282,7 @@ import re
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Optional
 
 DB_PATH, STORY_SLUG, TASK_INDEX, PROMPT_PATH, CONTEXT_TAIL_PATH, MODEL_NAME, PROJECT_ROOT, STAGING_DIR = sys.argv[1:9]
 TASK_INDEX = int(TASK_INDEX)

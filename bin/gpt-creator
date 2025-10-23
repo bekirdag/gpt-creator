@@ -2742,91 +2742,91 @@ def normalise_candidate_path(raw: str, cwd: str) -> Optional[pathlib.Path]:
     current_seq = None
     gap_threshold = 40
     for entry in command_sequence:
-    command_text = entry.get("command") or ""
-    workdir_path = resolve_workdir(entry.get("cwd") or "", project_root_path)
-    pnpm_issues = []
-    if command_text:
-        try:
-            parts = shlex.split(command_text)
-        except ValueError:
-            parts = command_text.split()
-        if parts and parts[0] == "pnpm":
-            task_token = ""
-            idx = 1
-            skip_next = False
-            while idx < len(parts):
-                token = parts[idx]
-                if skip_next:
-                    skip_next = False
-                    idx += 1
-                    continue
-                if token in {"-C", "--dir", "--filter", "-F"}:
-                    skip_next = True
-                    idx += 1
-                    continue
-                if token.startswith("-"):
-                    idx += 1
-                    continue
-                task_token = token
-                idx += 1
-                break
-            if task_token == "run" and idx < len(parts):
-                task_token = parts[idx]
-            pnpm_task = task_token
-            if pnpm_task in {"test", "build"}:
-                modules_paths = [
-                    workdir_path / "node_modules",
-                    workdir_path / "node_modules" / ".pnpm",
-                ]
-                if project_root_path:
-                    modules_paths.extend([
-                        project_root_path / "node_modules",
-                        project_root_path / "node_modules" / ".pnpm",
-                    ])
-                modules_present = any(path.exists() for path in modules_paths)
-                if not modules_present:
-                    pnpm_issues.append("node_modules missing; run `pnpm install` before invoking pnpm test/build.")
-                # Check for cached failures of the same command.
-                failure_entry = cached_failure_details.get(command_text)
-                if failure_entry:
-                    try:
-                        prev_count = int(failure_entry.get("count") or 0)
-                    except Exception:
-                        prev_count = 0
-                    if prev_count > 0:
-                        summary = (failure_entry.get("last_summary") or failure_entry.get("summary") or "").strip()
-                        pnpm_issues.append(
-                            f"Command previously failed {prev_count} time(s){': ' + summary if summary else ''}"
-                        )
-                # Check for failed pnpm install
-                for value in cached_failure_cache.values():
-                    if not isinstance(value, dict):
+        command_text = entry.get("command") or ""
+        workdir_path = resolve_workdir(entry.get("cwd") or "", project_root_path)
+        pnpm_issues = []
+        if command_text:
+            try:
+                parts = shlex.split(command_text)
+            except ValueError:
+                parts = command_text.split()
+            if parts and parts[0] == "pnpm":
+                task_token = ""
+                idx = 1
+                skip_next = False
+                while idx < len(parts):
+                    token = parts[idx]
+                    if skip_next:
+                        skip_next = False
+                        idx += 1
                         continue
-                    cmd_text = value.get("command")
-                    if isinstance(cmd_text, str) and cmd_text.strip().startswith("pnpm install"):
+                    if token in {"-C", "--dir", "--filter", "-F"}:
+                        skip_next = True
+                        idx += 1
+                        continue
+                    if token.startswith("-"):
+                        idx += 1
+                        continue
+                    task_token = token
+                    idx += 1
+                    break
+                if task_token == "run" and idx < len(parts):
+                    task_token = parts[idx]
+                pnpm_task = task_token
+                if pnpm_task in {"test", "build"}:
+                    modules_paths = [
+                        workdir_path / "node_modules",
+                        workdir_path / "node_modules" / ".pnpm",
+                    ]
+                    if project_root_path:
+                        modules_paths.extend([
+                            project_root_path / "node_modules",
+                            project_root_path / "node_modules" / ".pnpm",
+                        ])
+                    modules_present = any(path.exists() for path in modules_paths)
+                    if not modules_present:
+                        pnpm_issues.append("node_modules missing; run `pnpm install` before invoking pnpm test/build.")
+                    # Check for cached failures of the same command.
+                    failure_entry = cached_failure_details.get(command_text)
+                    if failure_entry:
                         try:
-                            install_fail_count = int(value.get("count") or 0)
+                            prev_count = int(failure_entry.get("count") or 0)
                         except Exception:
-                            install_fail_count = 0
-                        if install_fail_count > 0:
-                            install_summary = (value.get("last_summary") or value.get("summary") or "").strip()
+                            prev_count = 0
+                        if prev_count > 0:
+                            summary = (failure_entry.get("last_summary") or failure_entry.get("summary") or "").strip()
                             pnpm_issues.append(
-                                f"`pnpm install` previously failed {install_fail_count} time(s){': ' + install_summary if install_summary else ''}"
+                                f"Command previously failed {prev_count} time(s){': ' + summary if summary else ''}"
                             )
-                        break
-            if pnpm_issues:
-                digest_source = f"{project_root_hint}\n{command_text}\n{entry.get('cwd') or ''}"
-                guard_digest = hashlib.sha256(digest_source.encode('utf-8', 'ignore')).hexdigest()[:12]
-                encoded_command = base64.b64encode(command_text.encode('utf-8')).decode('ascii') if command_text else ""
-                guard_message = ' '.join(pnpm_issues)
-                encoded_message = base64.b64encode(guard_message.encode('utf-8')).decode('ascii') if guard_message else ""
-                command_guard_lines.append(
-                    f"CMDGUARD	{guard_digest}	0	{len(pnpm_issues)}	{encoded_command}	{encoded_message}"
-                )
-                guard_entries.append({
-                    "command": command_text,
-                    "issues": list(pnpm_issues),
-                })
+                    # Check for failed pnpm install
+                    for value in cached_failure_cache.values():
+                        if not isinstance(value, dict):
+                            continue
+                        cmd_text = value.get("command")
+                        if isinstance(cmd_text, str) and cmd_text.strip().startswith("pnpm install"):
+                            try:
+                                install_fail_count = int(value.get("count") or 0)
+                            except Exception:
+                                install_fail_count = 0
+                            if install_fail_count > 0:
+                                install_summary = (value.get("last_summary") or value.get("summary") or "").strip()
+                                pnpm_issues.append(
+                                    f"`pnpm install` previously failed {install_fail_count} time(s){': ' + install_summary if install_summary else ''}"
+                                )
+                            break
+                if pnpm_issues:
+                    digest_source = f"{project_root_hint}\n{command_text}\n{entry.get('cwd') or ''}"
+                    guard_digest = hashlib.sha256(digest_source.encode('utf-8', 'ignore')).hexdigest()[:12]
+                    encoded_command = base64.b64encode(command_text.encode('utf-8')).decode('ascii') if command_text else ""
+                    guard_message = ' '.join(pnpm_issues)
+                    encoded_message = base64.b64encode(guard_message.encode('utf-8')).decode('ascii') if guard_message else ""
+                    command_guard_lines.append(
+                        f"CMDGUARD	{guard_digest}	0	{len(pnpm_issues)}	{encoded_command}	{encoded_message}"
+                    )
+                    guard_entries.append({
+                        "command": command_text,
+                        "issues": list(pnpm_issues),
+                    })
         parsed = parse_sed_chunk(command_text)
         if not parsed:
             if current_seq:

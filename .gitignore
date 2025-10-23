@@ -32,6 +32,7 @@ temp/
 .cache/
 .gomodcache/
 .gocache/
+.gpt-creator/
 
 # Docker (local volumes/artifacts)
 docker/.data/
@@ -50,4 +51,3 @@ Thumbs.db
 
 # Misc
 *.orig
-

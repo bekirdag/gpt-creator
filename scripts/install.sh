@@ -66,29 +66,278 @@ as_root() {
 
 ver_major() { echo "${1#v}" | awk -F. '{print $1}'; }
 
+INSTALL_WARNINGS=()
+NODE_REQUIRED_MAJOR=20
+NODE_CURRENT_VERSION=""
+APT_UPDATED=0
+
+log_info() { echo "› $1"; }
+log_warn() { echo "⚠ $1" >&2; }
+record_warning() {
+  local msg="$1"
+  INSTALL_WARNINGS+=("$msg")
+  log_warn "$msg"
+}
+
+apt_get_install() {
+  command -v apt-get >/dev/null 2>&1 || return 1
+  if (( APT_UPDATED == 0 )); then
+    if ! as_root "/" apt-get update; then
+      return 1
+    fi
+    APT_UPDATED=1
+  fi
+  if as_root "/" apt-get install -y "$@"; then
+    return 0
+  fi
+  return 1
+}
+
+dnf_install() {
+  command -v dnf >/dev/null 2>&1 || return 1
+  if as_root "/" dnf install -y "$@"; then
+    return 0
+  fi
+  return 1
+}
+
+brew_install() {
+  command -v brew >/dev/null 2>&1 || return 1
+  if brew install "$@"; then
+    return 0
+  fi
+  return 1
+}
+
+node_version_ok() {
+  if ! need_cmd node; then
+    NODE_CURRENT_VERSION=""
+    return 1
+  fi
+  local nv major
+  nv="$(node -v 2>/dev/null || true)"
+  NODE_CURRENT_VERSION="$nv"
+  [[ -n "$nv" ]] || return 1
+  major="$(ver_major "$nv")"
+  [[ -n "$major" ]] || return 1
+  [[ "$major" =~ ^[0-9]+$ ]] || return 1
+  if (( major >= NODE_REQUIRED_MAJOR )); then
+    return 0
+  fi
+  return 1
+}
+
+ensure_docker() {
+  if need_cmd docker; then
+    if docker info >/dev/null 2>&1; then
+      echo "✔ Docker CLI available."
+    else
+      record_warning "Docker CLI detected but daemon not reachable. Start Docker Desktop/Engine before running docker-based commands."
+    fi
+    return 0
+  fi
+
+  log_info "Docker CLI not found; attempting automatic install…"
+  case "$INSTALL_MODE" in
+    macos)
+      record_warning "Docker Desktop is not installed. Install it manually from https://www.docker.com/products/docker-desktop/ before running docker-based commands."
+      ;;
+    linux)
+      local installed=0
+      if apt_get_install docker.io docker-compose-plugin; then
+        installed=1
+      elif dnf_install docker docker-compose; then
+        installed=1
+      elif dnf_install docker-ce docker-compose-plugin; then
+        installed=1
+      fi
+      if (( installed )); then
+        if need_cmd systemctl; then
+          as_root "/" systemctl enable --now docker >/dev/null 2>&1 || true
+        fi
+        if need_cmd docker; then
+          echo "✔ Docker CLI installed (ensure daemon is running)."
+          return 0
+        fi
+      fi
+      record_warning "Docker could not be installed automatically. Install Docker Engine manually via your distribution instructions."
+      ;;
+    *)
+      record_warning "Docker installation is not supported automatically on this platform."
+      ;;
+  esac
+}
+
+ensure_node() {
+  if node_version_ok; then
+    echo "✔ Node.js ${NODE_CURRENT_VERSION} detected."
+    return 0
+  fi
+
+  log_info "Node.js ${NODE_REQUIRED_MAJOR}+ not found or outdated; attempting installation…"
+  local installed=0
+  case "$INSTALL_MODE" in
+    macos)
+      if command -v brew >/dev/null 2>&1; then
+        if brew_install node@20; then
+          brew link --overwrite --force node@20 >/dev/null 2>&1 || true
+          installed=1
+        fi
+      else
+        record_warning "Homebrew not found; install Node.js ${NODE_REQUIRED_MAJOR}+ manually from https://nodejs.org/."
+      fi
+      ;;
+    linux)
+      if command -v apt-get >/dev/null 2>&1; then
+        if command -v curl >/dev/null 2>&1; then
+          if as_root "/" bash -lc 'curl -fsSL https://deb.nodesource.com/setup_20.x | bash -'; then
+            if apt_get_install nodejs; then
+              installed=1
+            fi
+          fi
+        fi
+        if (( installed == 0 )); then
+          if apt_get_install nodejs npm; then
+            installed=1
+          fi
+        fi
+      elif command -v dnf >/dev/null 2>&1; then
+        if dnf_install nodejs; then
+          installed=1
+        fi
+      fi
+      ;;
+  esac
+
+  if (( installed )); then
+    hash -r
+  fi
+  if node_version_ok; then
+    echo "✔ Node.js ${NODE_CURRENT_VERSION} ready."
+    return 0
+  fi
+
+  record_warning "Node.js ${NODE_REQUIRED_MAJOR}+ is required. Install it manually (https://nodejs.org/) before running code generation commands."
+}
+
+ensure_pnpm() {
+  if need_cmd pnpm; then
+    echo "✔ pnpm $(pnpm --version 2>/dev/null || true) detected."
+    return 0
+  fi
+
+  log_info "pnpm not found; attempting activation via corepack/npm…"
+  local version="${GC_PNPM_VERSION:-latest}"
+  if need_cmd corepack; then
+    corepack enable >/dev/null 2>&1 || true
+    if corepack prepare "pnpm@${version}" --activate >/dev/null 2>&1; then
+      hash -r
+      if need_cmd pnpm; then
+        echo "✔ pnpm $(pnpm --version 2>/dev/null || true) activated via corepack."
+        return 0
+      fi
+    fi
+  fi
+  if need_cmd npm; then
+    if npm install -g "pnpm@${version}"; then
+      hash -r
+      if need_cmd pnpm; then
+        echo "✔ pnpm $(pnpm --version 2>/dev/null || true) installed globally."
+        return 0
+      fi
+    fi
+  fi
+
+  record_warning "pnpm could not be installed automatically. Install it manually via corepack or npm (https://pnpm.io/installation)."
+}
+
+ensure_mysql_client() {
+  if need_cmd mysql; then
+    echo "✔ MySQL client $(mysql --version 2>/dev/null || true) detected."
+    return 0
+  fi
+
+  log_info "MySQL client (mysql) not found; attempting installation…"
+  local installed=0
+  case "$INSTALL_MODE" in
+    macos)
+      if command -v brew >/dev/null 2>&1; then
+        if brew_install mysql-client; then
+          local prefix
+          prefix="$(brew --prefix mysql-client 2>/dev/null || true)"
+          if [[ -n "$prefix" && -d "$prefix/bin" ]]; then
+            if ! echo ":$PATH:" | grep -q ":$prefix/bin:"; then
+              log_warn "Add ${prefix}/bin to PATH (e.g. export PATH=\"${prefix}/bin:\$PATH\") so 'mysql' is available."
+            fi
+          fi
+          installed=1
+        fi
+      else
+        record_warning "Homebrew not found; install the MySQL client manually (e.g. https://dev.mysql.com/downloads/mysql/)."
+      fi
+      ;;
+    linux)
+      if apt_get_install mysql-client; then
+        installed=1
+      elif apt_get_install mariadb-client; then
+        installed=1
+      elif dnf_install mysql; then
+        installed=1
+      elif dnf_install mariadb; then
+        installed=1
+      fi
+      ;;
+  esac
+
+  if (( installed )); then
+    hash -r
+    if need_cmd mysql; then
+      echo "✔ MySQL client $(mysql --version 2>/dev/null || true) installed."
+      return 0
+    fi
+  fi
+
+  record_warning "MySQL client not installed. Install it manually (package name: mysql-client or mariadb-client)."
+}
+
+ensure_codex() {
+  if need_cmd codex; then
+    echo "✔ Codex CLI detected (codex)."
+    return 0
+  fi
+  if need_cmd codex-client; then
+    echo "✔ Codex CLI detected (codex-client)."
+    return 0
+  fi
+
+  record_warning "Codex CLI not found. Install the Codex CLI or point CODEX_BIN/CODEX_CMD to a compatible binary."
+}
+
+ensure_openai_api_key() {
+  if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    echo "✔ OPENAI_API_KEY detected in environment."
+    return 0
+  fi
+  record_warning "OPENAI_API_KEY is not set. Set it before running Codex-powered commands."
+}
+
 preflight() {
   echo "› Preflight…"
-  need_cmd docker || { echo "✖ docker not found. Install Docker Engine/Desktop." >&2; exit 1; }
-  if ! docker info >/dev/null 2>&1; then
-    echo "✖ Docker is installed but not running. Start the Docker daemon." >&2; exit 1;
+  ensure_docker
+  ensure_node
+  ensure_pnpm
+  ensure_mysql_client
+  ensure_codex
+  ensure_openai_api_key
+  if (( ${#INSTALL_WARNINGS[@]} > 0 )); then
+    echo "⚠ Preflight completed with warnings:"
+    for warn in "${INSTALL_WARNINGS[@]}"; do
+      echo "   - $warn"
+    done
+    echo "  Related commands will prompt for the missing tooling when invoked."
+  else
+    echo "✔ Preflight complete. Required tooling detected."
   fi
-
-  need_cmd node || { echo "✖ node not found. Install Node 20+ (e.g. via brew install node@20 or your distro packages)." >&2; exit 1; }
-  local nv; nv="$(node -v)"; local major; major="$(ver_major "$nv")"
-  if (( major < 20 )); then echo "✖ Node $nv found; require ≥ v20." >&2; exit 1; fi
-
-  need_cmd pnpm || { echo "✖ pnpm not found. Install via corepack: 'corepack enable && corepack prepare pnpm@latest --activate'." >&2; exit 1; }
-
-  need_cmd mysql || { echo "✖ mysql client not found. Install the MySQL client tools (e.g. brew install mysql-client) and ensure they’re on PATH." >&2; exit 1; }
-
-  if ! need_cmd codex && ! need_cmd codex-client; then
-    echo "✖ Codex client not found (expected 'codex' or 'codex-client' on PATH)." >&2; exit 1;
-  fi
-
-  if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-    echo "✖ OPENAI_API_KEY not set in env. Export it before running the CLI." >&2; exit 1;
-  fi
-  echo "✔ Preflight OK."
 }
 
 install_files() {

@@ -265,6 +265,10 @@ cjt::init() {
   CJT_CONTEXT_EPIC_FILE="$CJT_PIPELINE_DIR/context-epics.md"
   CJT_CONTEXT_BOILER_CACHE="$CJT_PIPELINE_DIR/context-boilerplate-cache.txt"
   CJT_TASKS_DIR="$CJT_PLAN_DIR/tasks"
+  CJT_PLAN_DOCS_DIR="$CJT_PLAN_DIR/docs"
+  CJT_DOC_LIBRARY_PATH="${CJT_PLAN_DOCS_DIR}/doc-library.md"
+  CJT_DOC_INDEX_PATH="${CJT_PLAN_DOCS_DIR}/doc-index.md"
+  CJT_DOC_CATALOG_PATH="$CJT_PLAN_DIR/work/doc-catalog.json"
 
   mkdir -p "$CJT_TASKS_DIR"
   CJT_TASKS_DB_PATH="${CJT_TASKS_DB_PATH:-$CJT_TASKS_DIR/tasks.db}"
@@ -739,6 +743,14 @@ if current_title is not None:
     if body:
         sections.append((current_title, body))
 
+filtered_sections = []
+for title, body in sections:
+    lowered = title.strip().lower()
+    if lowered.startswith("documentation library") or lowered.startswith("documentation table of contents"):
+        continue
+    filtered_sections.append((title, body))
+sections = filtered_sections
+
 if not sections:
     trimmed = raw.strip()
     if total_char_limit > 0 and len(trimmed) > total_char_limit:
@@ -805,6 +817,285 @@ dest.write_text("\n".join(lines_out), encoding="utf-8")
 PY
 }
 
+cjt::render_context_snippet() {
+  local manifest_path="${1:?manifest required}"
+  local output_path="${2:?output path required}"
+  local catalog_path="${3:-}"
+  local library_path="${4:-}"
+  local index_path="${5:-}"
+  python3 - "$manifest_path" "$output_path" "$catalog_path" "$library_path" "$index_path" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+manifest_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+catalog_path = Path(sys.argv[3]).expanduser() if len(sys.argv) > 3 and sys.argv[3] else None
+library_path = Path(sys.argv[4]).expanduser() if len(sys.argv) > 4 and sys.argv[4] else None
+index_path = Path(sys.argv[5]).expanduser() if len(sys.argv) > 5 and sys.argv[5] else None
+
+def parse_int(env: str, default: int) -> int:
+    try:
+        return int(os.environ.get(env, default))
+    except Exception:
+        return default
+
+DOC_LIBRARY_LINES = parse_int("CJT_DOC_LIBRARY_SECTION_LINES", 48)
+DOC_LIBRARY_CHAR_LIMIT = parse_int("CJT_DOC_LIBRARY_SECTION_CHAR_LIMIT", 2200)
+DOC_INDEX_LINES = parse_int("CJT_DOC_INDEX_SECTION_LINES", 72)
+DOC_INDEX_CHAR_LIMIT = parse_int("CJT_DOC_INDEX_SECTION_CHAR_LIMIT", 2600)
+DOC_HEADINGS_LIMIT = parse_int("CJT_DOC_HEADINGS_LIMIT", 8)
+DOC_EXCERPT_CHAR_LIMIT = parse_int("CJT_DOC_EXCERPT_CHAR_LIMIT", 900)
+DOC_EXCERPT_PARAGRAPH_LIMIT = parse_int("CJT_DOC_EXCERPT_PARAGRAPH_LIMIT", 5)
+
+# Support legacy environment knobs for snippet sizing.
+legacy_lines = os.environ.get("CJT_CONTEXT_SNIPPET_LINES")
+if legacy_lines and "CJT_DOC_EXCERPT_PARAGRAPH_LIMIT" not in os.environ:
+    try:
+        DOC_EXCERPT_PARAGRAPH_LIMIT = int(legacy_lines)
+    except Exception:
+        pass
+legacy_chars = os.environ.get("CJT_CONTEXT_SNIPPET_CHAR_LIMIT")
+if legacy_chars and "CJT_DOC_EXCERPT_CHAR_LIMIT" not in os.environ:
+    try:
+        DOC_EXCERPT_CHAR_LIMIT = int(legacy_chars)
+    except Exception:
+        pass
+
+def limited_section(path: Path, max_lines: int, max_chars: int, notice: str) -> List[str]:
+    if not path or not path.exists():
+        return []
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    lines = raw.splitlines()
+    truncated = False
+    if max_lines > 0 and len(lines) > max_lines:
+        lines = lines[:max_lines]
+        truncated = True
+    joined = "\n".join(lines)
+    if max_chars > 0 and len(joined) > max_chars:
+        joined = joined[:max_chars].rstrip()
+        truncated = True
+    section_lines = joined.splitlines()
+    if truncated and notice:
+        section_lines.append(notice)
+    return section_lines
+
+def normalise_key(text: str) -> str:
+    return text.replace("\\", "/").strip().lower()
+
+def build_excerpt(text: str) -> Tuple[str, bool]:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    blocks: List[str] = []
+    current: List[str] = []
+    for raw_line in text.split("\n"):
+        stripped = raw_line.strip()
+        if stripped:
+            current.append(stripped)
+        elif current:
+            blocks.append(" ".join(current))
+            current = []
+    if current:
+        blocks.append(" ".join(current))
+    if not blocks:
+        fallback = " ".join(text.split())
+        if DOC_EXCERPT_CHAR_LIMIT > 0 and len(fallback) > DOC_EXCERPT_CHAR_LIMIT:
+            return fallback[:DOC_EXCERPT_CHAR_LIMIT].rstrip() + "…", True
+        return fallback, False
+    excerpt_parts: List[str] = []
+    total_chars = 0
+    truncated = False
+    for block in blocks:
+        if not block:
+            continue
+        candidate = block
+        block_len = len(candidate)
+        if DOC_EXCERPT_CHAR_LIMIT > 0 and total_chars + block_len > DOC_EXCERPT_CHAR_LIMIT:
+            allowance = DOC_EXCERPT_CHAR_LIMIT - total_chars
+            if allowance > 0:
+                candidate = candidate[:allowance].rstrip()
+                if candidate:
+                    candidate += "…"
+                    excerpt_parts.append(candidate)
+            truncated = True
+            break
+        excerpt_parts.append(candidate)
+        total_chars += block_len
+        if DOC_EXCERPT_PARAGRAPH_LIMIT > 0 and len(excerpt_parts) >= DOC_EXCERPT_PARAGRAPH_LIMIT:
+            truncated = True
+            break
+    if not excerpt_parts:
+        return "", truncated
+    return "\n".join(excerpt_parts), truncated
+
+def load_manifest(path: Path) -> List[Tuple[str, str]]:
+    entries: List[Tuple[str, str]] = []
+    if not path.exists():
+        return entries
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip():
+            continue
+        if "\t" in raw_line:
+            original, cleaned = raw_line.split("\t", 1)
+        else:
+            original, cleaned = raw_line, ""
+        entries.append((original.strip(), cleaned.strip()))
+    return entries
+
+manifest_entries = load_manifest(manifest_path)
+
+meta_lookup: Dict[str, Dict] = {}
+if catalog_path and catalog_path.exists():
+    try:
+        catalog_raw = catalog_path.read_text(encoding="utf-8")
+        catalog_data = json.loads(catalog_raw) if catalog_raw.strip() else {}
+    except Exception:
+        catalog_data = {}
+    documents = catalog_data.get("documents", {})
+    for doc_id, payload in documents.items():
+        if not isinstance(payload, dict):
+            continue
+        meta = {
+            "doc_id": doc_id,
+            "path": str(payload.get("path") or ""),
+            "rel_path": str(payload.get("rel_path") or ""),
+            "title": str(payload.get("title") or ""),
+            "tags": list(payload.get("tags") or []),
+            "headings": list(payload.get("headings") or []),
+        }
+        for key in [
+            meta["path"],
+            meta["rel_path"],
+            Path(meta["path"]).name if meta["path"] else "",
+            Path(meta["rel_path"]).name if meta["rel_path"] else "",
+        ]:
+            if not key:
+                continue
+            meta_lookup.setdefault(normalise_key(key), meta)
+        try:
+            resolved = str(Path(meta["path"]).resolve())
+            if resolved:
+                meta_lookup.setdefault(normalise_key(resolved), meta)
+        except Exception:
+            pass
+
+def lookup_metadata(original_path: str) -> Dict:
+    if not original_path:
+        return {}
+    key = normalise_key(original_path)
+    if key in meta_lookup:
+        return meta_lookup[key]
+    try:
+        resolved = normalise_key(str(Path(original_path).resolve()))
+        if resolved in meta_lookup:
+            return meta_lookup[resolved]
+    except Exception:
+        pass
+    name_key = normalise_key(Path(original_path).name)
+    return meta_lookup.get(name_key, {})
+
+lines: List[str] = []
+lines.append("# Context Excerpt")
+lines.append("Documentation catalog snapshot with trimmed excerpts sourced from the doc-library and table of contents.")
+lines.append("")
+
+library_lines = limited_section(
+    library_path,
+    DOC_LIBRARY_LINES,
+    DOC_LIBRARY_CHAR_LIMIT,
+    "... (truncated; see doc-library.md for full listing)"
+)
+if library_lines:
+    lines.append("## Documentation Library Snapshot")
+    lines.extend(library_lines)
+    lines.append("")
+
+index_lines = limited_section(
+    index_path,
+    DOC_INDEX_LINES,
+    DOC_INDEX_CHAR_LIMIT,
+    "... (truncated; see doc-index.md for all headings)"
+)
+if index_lines:
+    lines.append("## Documentation Table of Contents")
+    lines.extend(index_lines)
+    lines.append("")
+
+seen_docs = set()
+for original_path, cleaned_path in manifest_entries:
+    meta = lookup_metadata(original_path)
+    doc_id = meta.get("doc_id") or ""
+    if doc_id and doc_id in seen_docs:
+        continue
+    if doc_id:
+        seen_docs.add(doc_id)
+    title = meta.get("title") or meta.get("rel_path") or Path(original_path).name
+    heading = f"## {title}"
+    if doc_id:
+        heading += f" ({doc_id})"
+    lines.append(heading)
+    rel_path = meta.get("rel_path")
+    if rel_path:
+        lines.append(f"- Path: `{rel_path}`")
+    elif original_path:
+        lines.append(f"- Path: `{original_path}`")
+    if doc_id:
+        lines.append(f"- Doc ID: {doc_id}")
+    tags = [str(tag) for tag in meta.get("tags") or [] if str(tag).strip()]
+    if tags:
+        lines.append(f"- Tags: {', '.join(tags)}")
+    headings = meta.get("headings") or []
+    if headings:
+        lines.append("- Key headings:")
+        for heading_item in headings[:DOC_HEADINGS_LIMIT]:
+            if not isinstance(heading_item, dict):
+                continue
+            label = str(heading_item.get("title") or "").strip()
+            if not label:
+                continue
+            line_no = heading_item.get("line")
+            level = int(heading_item.get("level") or 1)
+            indent = "  " * max(0, level - 1)
+            if line_no:
+                lines.append(f"{indent}- {label} (line {line_no})")
+            else:
+                lines.append(f"{indent}- {label}")
+        if len(headings) > DOC_HEADINGS_LIMIT:
+            lines.append(f"  - ... {len(headings) - DOC_HEADINGS_LIMIT} more heading(s) recorded in doc-index.md")
+    excerpt = ""
+    truncated = False
+    if cleaned_path:
+        cleaned = Path(cleaned_path)
+        if cleaned.exists():
+            try:
+                text = cleaned.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                text = ""
+            if text.strip():
+                excerpt, truncated = build_excerpt(text)
+    if excerpt:
+        lines.append("")
+        lines.append(excerpt)
+        if truncated:
+            lines.append("... (excerpt truncated; consult the source document for additional detail)")
+        lines.append("")
+    else:
+        lines.append("")
+        lines.append("(excerpt unavailable; see the source document for full context)")
+        lines.append("")
+
+if not manifest_entries:
+    lines.append("## Documentation")
+    lines.append("(No staged documentation discovered.)")
+
+output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+PY
+}
+
 cjt::build_context_files() {
   local _had_nounset=0
   if [[ $- == *u* ]]; then
@@ -818,6 +1109,13 @@ cjt::build_context_files() {
   : "${CJT_CONTEXT_FULL_CHAR_LIMIT:=8000}"
   : "${CJT_CONTEXT_SNIPPET_LINES:=45}"
   : "${CJT_CONTEXT_SNIPPET_CHAR_LIMIT:=3200}"
+  : "${CJT_DOC_LIBRARY_SECTION_LINES:=48}"
+  : "${CJT_DOC_LIBRARY_SECTION_CHAR_LIMIT:=2200}"
+  : "${CJT_DOC_INDEX_SECTION_LINES:=72}"
+  : "${CJT_DOC_INDEX_SECTION_CHAR_LIMIT:=2600}"
+  : "${CJT_DOC_HEADINGS_LIMIT:=8}"
+  : "${CJT_DOC_EXCERPT_CHAR_LIMIT:=900}"
+  : "${CJT_DOC_EXCERPT_PARAGRAPH_LIMIT:=5}"
 
   local cleaned_dir="$CJT_PIPELINE_DIR/cleaned-docs"
   local dedupe_cache="${CJT_CONTEXT_BOILER_CACHE:-$CJT_PIPELINE_DIR/context-boilerplate-cache.txt}"
@@ -827,18 +1125,14 @@ cjt::build_context_files() {
   : > "$CJT_CONTEXT_SNIPPET_FILE"
   : > "$CJT_CONTEXT_EPIC_FILE"
   : > "$dedupe_cache"
+  local doc_manifest="$CJT_TMP_DIR/context-doc-manifest.tsv"
+  : > "$doc_manifest"
 
   {
     echo "# Consolidated Project Context"
     echo "(Source: .gpt-creator staging copy)"
     echo
   } >> "$CJT_CONTEXT_FILE"
-
-  {
-    echo "# Context Excerpt"
-    echo "The following snippets provide quick access to key sections. Refer to the consolidated context for additional detail."
-    echo
-  } >> "$CJT_CONTEXT_SNIPPET_FILE"
 
   local sds_candidate="" sds_clean_path=""
   local file
@@ -861,19 +1155,14 @@ cjt::build_context_files() {
     context_filtered="$(mktemp "$cleaned_dir/context_XXXXXX")"
     cjt::filter_context_boilerplate "$cleaned_path" "$context_filtered" "$dedupe_cache"
 
-    printf '----- FILE: %s -----\n' "$rel_path" >> "$CJT_CONTEXT_FILE"
+    printf -- '----- FILE: %s -----\n' "$rel_path" >> "$CJT_CONTEXT_FILE"
     if [[ -s "$context_filtered" ]]; then
       cjt::append_file_with_char_limit "$context_filtered" "$CJT_CONTEXT_FILE" "$CJT_CONTEXT_FULL_CHAR_LIMIT"
     else
       printf '(empty after sanitization)\n\n' >> "$CJT_CONTEXT_FILE"
     fi
 
-    printf '## %s\n' "$rel_path" >> "$CJT_CONTEXT_SNIPPET_FILE"
-    if [[ -s "$context_filtered" ]]; then
-      cjt::append_file_with_line_limit "$context_filtered" "$CJT_CONTEXT_SNIPPET_FILE" "$CJT_CONTEXT_SNIPPET_LINES" "$CJT_CONTEXT_SNIPPET_CHAR_LIMIT"
-    else
-      printf '(empty after sanitization)\n\n' >> "$CJT_CONTEXT_SNIPPET_FILE"
-    fi
+    printf '%s\t%s\n' "$file" "$context_filtered" >> "$doc_manifest"
 
     if [[ -z "$sds_clean_path" && "$file" == "$sds_candidate" ]]; then
       sds_clean_path="$cleaned_path"
@@ -897,6 +1186,21 @@ cjt::build_context_files() {
     CJT_SDS_SOURCE=""
     CJT_SDS_CHUNKS_DIR=""
     CJT_SDS_CHUNKS_LIST=""
+  fi
+
+  if [[ -s "$doc_manifest" ]]; then
+    cjt::render_context_snippet \
+      "$doc_manifest" \
+      "$CJT_CONTEXT_SNIPPET_FILE" \
+      "${CJT_DOC_CATALOG_PATH:-}" \
+      "${CJT_DOC_LIBRARY_PATH:-}" \
+      "${CJT_DOC_INDEX_PATH:-}"
+  else
+    {
+      echo "# Context Excerpt"
+      echo "(No documentation discovered in staging.)"
+      echo
+    } > "$CJT_CONTEXT_SNIPPET_FILE"
   fi
 
   cjt::build_epic_context_summary "$CJT_CONTEXT_SNIPPET_FILE" "$CJT_CONTEXT_EPIC_FILE"
@@ -1511,13 +1815,7 @@ cjt::write_epics_prompt() {
     printf "You are a senior delivery lead creating Jira epics for the %s initiative.\n\n" "$project_label"
     echo "Project scope: prioritize the customer-facing and admin/backoffice experiences described in the documentation."
     echo "Ignore DevOps, infrastructure, and tooling work unless explicitly documented."
-    echo "Investigate the provided documentation thoroughly before proposing epics. Cover end-to-end functionality, including sunny-day flows and edge cases."
-    echo
-    echo "## Documentation Index"
-    local file
-    for file in "${CJT_DOC_FILES[@]}"; do
-      echo "- ${file#$CJT_PROJECT_ROOT/}"
-    done
+    echo "Review the documentation catalog, table of contents, and excerpts below before proposing epics. Reuse doc IDs/headings to stay grounded in the staged sources."
     echo
     echo "## Context Excerpt (summary)"
     if [[ -s "$CJT_CONTEXT_EPIC_FILE" ]]; then
@@ -1722,6 +2020,9 @@ def extract_keywords(epic_payload: dict):
 def score_sections(sections, keywords):
     scored = []
     for idx, (title, body) in enumerate(sections):
+        title_lower = title.lower()
+        if title_lower.startswith("documentation library") or title_lower.startswith("documentation table of contents"):
+            continue
         lower = body.lower()
         score = sum(lower.count(keyword) for keyword in keywords)
         length_score = min(len(body), 2000)
@@ -2172,6 +2473,13 @@ def choose_context_sections(blob: str, keywords: set[str]) -> list[tuple[str, st
     char_limit = int(os.environ.get("CJT_TASK_CONTEXT_SECTION_CHAR_LIMIT", "450"))
     summary_limit = int(os.environ.get("CJT_TASK_CONTEXT_SUMMARY_CHAR_LIMIT", "220"))
     sections = parse_context_sections(blob)
+    filtered_sections = []
+    for title, text in sections:
+        title_lower = title.lower()
+        if title_lower.startswith("documentation library") or title_lower.startswith("documentation table of contents"):
+            continue
+        filtered_sections.append((title, text))
+    sections = filtered_sections
     if not sections:
         return []
     scored = []

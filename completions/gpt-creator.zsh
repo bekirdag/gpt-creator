@@ -23,6 +23,7 @@ _gpt_creator() {
     'create-tasks:Convert Jira tasks into a SQLite backlog'
     'backlog:Render backlog summaries from the tasks database'
     'estimate:Estimate backlog completion time from story points'
+    'sweep-artifacts:Sweep legacy progress artifacts into .gpt-creator'
     'work-on-tasks:Execute tasks from the SQLite backlog with Codex'
     'reports:List or show captured issue reports'
     'task-convert:[deprecated] Alias for create-tasks'
@@ -108,6 +109,22 @@ _gpt_creator() {
         '--progress[Show overall backlog progress]' \
         '--task-details=[Task identifier]'
       ;;
+    sweep-artifacts)
+      _arguments \
+        '--project=[Project root]:dir:_files -/' \
+        '*:project dir:_files -/'
+      ;;
+    show-file)
+      _arguments \
+        '--project=[Project root]:dir:_files -/' \
+        '--range=[Line range (A:B)]' \
+        '--head=[Show first N lines]' \
+        '--tail=[Show last N lines]' \
+        '--max-lines=[Default line budget when no range/head/tail provided]' \
+        '--diff[Show diff against cached snapshot]' \
+        '--refresh[Force cache refresh]' \
+        '1:file:_files'
+      ;;
     work-on-tasks)
       _arguments \
         '--story=[Start from story id or slug]' \
@@ -129,8 +146,10 @@ _gpt_creator() {
         '--context-skip=[Glob pattern to exclude from shared context]' \
         '--prompt-compact[Use a shorter instruction/schema block in prompts]' \
         '--prompt-expanded[Use the legacy verbose instruction/schema block]' \
-        '--context-doc-snippets[Pull scoped excerpts for referenced docs/endpoints]' \
-        '--sample-lines=[Include at most N lines from sample payloads]'
+        '--context-doc-snippets[(default) Pull scoped excerpts for referenced docs/endpoints]' \
+        '--no-context-doc-snippets[Disable doc-snippet mode and include staged docs verbatim]' \
+        '--sample-lines=[Include at most N lines from sample payloads]' \
+        '--idle-timeout=[Abort if no task progress for N seconds]'
       ;;
     iterate)
       _arguments \

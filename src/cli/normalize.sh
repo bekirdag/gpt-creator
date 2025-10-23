@@ -4,6 +4,7 @@
 set -Eeuo pipefail
 
 __DIR__="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${__DIR__}/.." && pwd)"
 if [[ -f "${__DIR__}/../constants.sh" ]]; then
   # shellcheck source=../constants.sh
   source "${__DIR__}/../constants.sh"
@@ -127,6 +128,24 @@ done
 for s in "${SQLS[@]}"; do
   [[ -f "${s}" ]] && copy_if "${s}" "${SQL_DIR}/$(basename "${s}")" >> "${MAN_OUT}"
 done
+
+PLAN_DIR="${STAGING_DIR}/plan"
+WORK_DIR="${PLAN_DIR}/work"
+PLAN_DOCS_DIR="${PLAN_DIR}/docs"
+mkdir -p "${WORK_DIR}" "${PLAN_DOCS_DIR}"
+CATALOG_TOOL="${ROOT_DIR}/src/lib/doc_catalog.py"
+if command -v python3 >/dev/null 2>&1 && [[ -f "${CATALOG_TOOL}" ]]; then
+  if ! python3 "${CATALOG_TOOL}" \
+    --project-root "${PROJECT_DIR}" \
+    --staging-dir "${STAGING_DIR}" \
+    --out-json "${WORK_DIR}/doc-catalog.json" \
+    --out-library "${PLAN_DOCS_DIR}/doc-library.md" \
+    --out-index "${PLAN_DOCS_DIR}/doc-index.md"; then
+    echo "[normalize] Warning: documentation catalog refresh failed." >&2
+  fi
+else
+  echo "[normalize] Skipping documentation catalog refresh (python3 or catalog tool unavailable)." >&2
+fi
 
 echo "[normalize] Staged files under: ${NORM}"
 echo "${MAN_OUT}"

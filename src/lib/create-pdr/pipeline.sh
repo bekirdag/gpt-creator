@@ -727,6 +727,7 @@ cpdr::run_pipeline() {
   cpdr::generate_sections
   cpdr::assemble_document
   cpdr::review_document
+  gc::refresh_doc_catalog "$CPDR_PROJECT_ROOT" "$CPDR_STAGING_DIR"
 }
 
 return 0

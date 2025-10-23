@@ -225,7 +225,43 @@ gc::normalize_to_staging() {
     install -m 0644 "$f" "$destdir/$base"
   done
 
+  gc::refresh_doc_catalog "$project_root" "$stage"
   echo "$work_dir"
+}
+
+gc::refresh_doc_catalog() {
+  local project_root="${1:-$PWD}"
+  local staging_dir="${2:-}"
+  if [[ -z "$staging_dir" ]]; then
+    local work_dir
+    work_dir="$(gc::ensure_workspace "$project_root")"
+    staging_dir="$work_dir/staging"
+  fi
+  [[ -d "$staging_dir" ]] || return 0
+  local plan_dir="$staging_dir/plan"
+  local work_dir="$plan_dir/work"
+  local docs_dir="$plan_dir/docs"
+  mkdir -p "$work_dir" "$docs_dir"
+  local out_json="$work_dir/doc-catalog.json"
+  local out_library="$docs_dir/doc-library.md"
+  local out_index="$docs_dir/doc-index.md"
+  if ! command -v python3 >/dev/null 2>&1; then
+    gc::warn "python3 not found; skipping documentation catalog refresh."
+    return 0
+  fi
+  local catalog_tool="$GC_LIB_DIR/lib/doc_catalog.py"
+  if [[ ! -f "$catalog_tool" ]]; then
+    gc::warn "Missing catalog tool (${catalog_tool}); skipping doc catalog refresh."
+    return 0
+  fi
+  if ! python3 "$catalog_tool" \
+    --project-root "$project_root" \
+    --staging-dir "$staging_dir" \
+    --out-json "$out_json" \
+    --out-library "$out_library" \
+    --out-index "$out_index"; then
+    gc::warn "Documentation catalog refresh failed for ${staging_dir}."
+  fi
 }
 
 # ------------- Codex glue (placeholder — user may adjust to local client) -------------

@@ -175,7 +175,10 @@ Deprecated alias of \fBcreate-tasks\fR retained for backwards compatibility.
 Render backlog summaries from \fI.gpt-creator/staging/plan/tasks/tasks.db\fR without entering an interactive menu. Use \fB--type epics\fR (default) to list every epic with story/task counts and completion ratios, \fB--type stories\fR to show every story across epics, \fB--item-children\fR to print the direct children of an epic or story (identified by slug/key/ID), \fB--task-details\fR to display a single task record, and \fB--progress\fR to emit an overall task progress bar. Pass \fB--project\fR (or legacy \fB--root\fR) to inspect a different workspace.
 .TP
 .B estimate
-Summarise remaining backlog story points and emit a completion time estimate assuming 15 story points per hour. Requires \fI.gpt-creator/staging/plan/tasks/tasks.db\fR; use \fB--project\fR to target a different workspace.
+Summarise remaining backlog story points and emit a completion time estimate using the throughput captured during \fBwork-on-tasks\fR runs (defaults to 15 story points per hour until telemetry exists). Requires \fI.gpt-creator/staging/plan/tasks/tasks.db\fR; use \fB--project\fR to target a different workspace.
+.TP
+.B sweep-artifacts
+Sweep legacy Codex work artifacts (for example \fItmp_*.json\fR, \fIfinal_*.json\fR, \fIdiff*\fR, \fIqaDoc.json\fR, \fI*_patch.jsonstr\fR) into the structured \fI.gpt-creator/\fR hierarchy. Defaults to tidying the current directory; pass \fB--project DIR\fR or one or more paths to clean multiple workspaces. A relocation manifest is appended to \fI.gpt-creator/logs/progress-migration.log\fR. The deprecated alias \fBtidy-progress\fR remains as a shim.
 .TP
 .B work-on-tasks
 Drive Codex over tasks sourced from the SQLite backlog, apply returned JSON diff/file instructions automatically, and persist task/story status back into the database for precise resume support.
@@ -195,6 +198,9 @@ Set \fBGC_CONTEXT_INCLUDE_UI=1\fR when you need the legacy raw UI dumps preserve
 .TP
 .B reports
 Inspect captured crash/stall reports under \fIPROJECT_ROOT/.gpt-creator/logs/issue-reports/\fR. Without arguments the command lists reports (newest first) with their slug identifiers; provide a slug (or use \fBshow\fR) to print the matching YAML. Pass \fB--open\fR to launch the report in \fBEDITOR_CMD\fR for annotation, and \fB--project\fR to target a different workspace. Use \fBbacklog\fR to filter to open issues and surface a popularity score derived from recorded likes/comments so maintainers can prioritise high-signal bugs. \fBauto\fR sweeps every matching report (defaulting to the current reporter or an explicit \fB--reporter\fR) and resolves them sequentially with Codex, honouring \fB--no-push\fR/\fB--prompt-only\fR. \fBwork <slug>\fR prepares a Codex prompt, marks the report in progress, and directs Codex to implement, commit, and push the fix (override with \fB--branch\fR, \fB--no-push\fR, or \fB--prompt-only\fR). \fBaudit\fR queries GitHub for issues labelled `auto-report`, recomputes the CLI watermark/signature against a trusted digest manifest, and (with \fB--close-invalid\fR) posts an "Authenticity failed" comment before closing each mismatched issue. Provide additional digests via \fIconfig/release-digests.json\fR, the \fB--digests\fR flag, or inline overrides such as \fB--allow 0.2.0=<sha256>\fR.
+.TP
+.B keys
+Show configured third-party API keys (OpenAI, Jira, GitHub) and manage stored credentials under \fI~/.config/gpt-creator/api-keys.env\fR. Run \fBgpt-creator keys\fR to display the status table, or \fBgpt-creator keys set <service>\fR (also accepting the shorthand \fBgpt-creator keys <service>\fR) to update a specific credential.
 .TP
 .B iterate
 Deprecated legacy Jira loop. The command runs with a deprecation warning; prefer \fBcreate-tasks\fR followed by \fBwork-on-tasks\fR.
@@ -235,6 +241,9 @@ Override the assignee recorded when Codex starts working on a report (defaults t
 .SH FILES
 .I ~/.config/gpt-creator/config.yaml
 \- CLI configuration.
+.br
+.I ~/.config/gpt-creator/api-keys.env
+\- stored third-party API keys managed by \fBgpt-creator keys\fR.
 .br
 .I ~/.cache/gpt-creator/
 \- cache and run artifacts.

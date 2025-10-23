@@ -46,7 +46,9 @@ export COMPOSE_HTTP_TIMEOUT DOCKER_CLIENT_TIMEOUT
 : "${GC_DOCKER_HEALTH_TIMEOUT:=10}"
 : "${GC_DOCKER_HEALTH_INTERVAL:=1}"
 : "${GC_PNPM_VERSION:=10.17.1}"
+GC_CODEX_EXEC_TIMEOUT_INITIAL="${GC_CODEX_EXEC_TIMEOUT-}"
 : "${GC_CODEX_EXEC_TIMEOUT:=0}"
+: "${GC_CODEX_MAX_TOKENS_PER_TASK:=0}"
 
 resolve_cli_root() {
   local source="${BASH_SOURCE[0]}"
@@ -70,6 +72,66 @@ cmd_task_convert() {
 CLI_ROOT="$(resolve_cli_root)"
 unset -f resolve_cli_root
 
+gc_configure_tmpdir() {
+  local base="${1:-${PROJECT_ROOT:-$PWD}}"
+  local dir="${base}/.gpt-creator/tmp"
+  if mkdir -p "$dir" 2>/dev/null; then
+    GC_TMP_DIR="$dir"
+    TMPDIR="$dir"
+    export GC_TMP_DIR TMPDIR
+  else
+    if [[ -n "${GC_TMP_DIR:-}" ]]; then
+      :
+    elif [[ -n "${TMPDIR:-}" && -d "${TMPDIR}" ]]; then
+      GC_TMP_DIR="$TMPDIR"
+      export GC_TMP_DIR
+    fi
+  fi
+}
+
+gc_configure_tmpdir
+
+if [[ -z "${GC_COMMAND_FAILURE_CACHE:-}" ]]; then
+  if [[ -n "${GC_TMP_DIR:-}" ]]; then
+    GC_COMMAND_FAILURE_CACHE="${GC_TMP_DIR}/command-failures.json"
+  else
+    GC_COMMAND_FAILURE_CACHE="${TMPDIR:-/tmp}/command-failures.json"
+  fi
+fi
+export GC_COMMAND_FAILURE_CACHE
+GC_COMMAND_FAILURE_WARN_DIGESTS=""
+
+if [[ -z "${GC_COMMAND_STREAM_CACHE:-}" ]]; then
+  if [[ -n "${GC_TMP_DIR:-}" ]]; then
+    GC_COMMAND_STREAM_CACHE="${GC_TMP_DIR}/command-stream.json"
+  else
+    GC_COMMAND_STREAM_CACHE="${TMPDIR:-/tmp}/command-stream.json"
+  fi
+fi
+export GC_COMMAND_STREAM_CACHE
+GC_COMMAND_STREAM_WARN_DIGESTS=""
+
+if [[ -z "${GC_COMMAND_FILE_CACHE:-}" ]]; then
+  if [[ -n "${GC_TMP_DIR:-}" ]]; then
+    GC_COMMAND_FILE_CACHE="${GC_TMP_DIR}/command-file-cache.json"
+  else
+    GC_COMMAND_FILE_CACHE="${TMPDIR:-/tmp}/command-file-cache.json"
+  fi
+fi
+export GC_COMMAND_FILE_CACHE
+GC_COMMAND_FILE_WARN_DIGESTS=""
+
+if [[ -z "${GC_COMMAND_SCAN_CACHE:-}" ]]; then
+  if [[ -n "${GC_TMP_DIR:-}" ]]; then
+    GC_COMMAND_SCAN_CACHE="${GC_TMP_DIR}/command-scan.json"
+  else
+    GC_COMMAND_SCAN_CACHE="${TMPDIR:-/tmp}/command-scan.json"
+  fi
+fi
+export GC_COMMAND_SCAN_CACHE
+GC_COMMAND_SCAN_WARN_DIGESTS=""
+GC_COMMAND_GUARD_WARN_DIGESTS=""
+
 gc_env_file() { echo "${PROJECT_ROOT:-$PWD}/.env"; }
 
 gc_random_string() {
@@ -80,10 +142,9 @@ print(''.join(secrets.choice(alphabet) for _ in range(32)))
 PY
 }
 
-gc_set_env_var() {
-  local key="$1" value="$2"
-  local env_file="$(gc_env_file)"
-  python3 - <<'PY' "$env_file" "$key" "$value"
+gc_write_env_var() {
+  local target="$1" key="$2" value="$3"
+  python3 - <<'PY' "$target" "$key" "$value"
 import pathlib, sys
 path = pathlib.Path(sys.argv[1])
 key = sys.argv[2]
@@ -100,7 +161,6 @@ for line in raw_lines:
         continue
     if stripped.startswith('#') or '=' in line:
         lines.append(line)
-# Non key/value lines are dropped
 for idx, line in enumerate(lines):
     if line.startswith(f"{key}="):
         lines[idx] = f"{key}={value}"
@@ -108,6 +168,334 @@ for idx, line in enumerate(lines):
 else:
     lines.append(f"{key}={value}")
 path.write_text('\n'.join(lines) + '\n')
+PY
+}
+
+gc_set_env_var() {
+  local key="$1" value="$2"
+  local env_file="$(gc_env_file)"
+  gc_write_env_var "$env_file" "$key" "$value"
+}
+
+gc_remove_env_var() {
+  local target="$1" key="$2"
+  [[ -f "$target" ]] || return 0
+  python3 - <<'PY' "$target" "$key"
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2]
+if not path.exists():
+    raise SystemExit(0)
+lines = path.read_text().splitlines()
+filtered = []
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith('#'):
+        filtered.append(line)
+        continue
+    if line.startswith(f"{key}=") or line.startswith(f"export {key}="):
+        continue
+    filtered.append(line)
+path.write_text('\n'.join(filtered) + ('\n' if filtered else ''))
+PY
+}
+
+gc_decode_base64() {
+  python3 - <<'PY' "$1"
+import base64, sys
+try:
+    sys.stdout.write(base64.b64decode(sys.argv[1]).decode('utf-8'))
+except Exception:
+    pass
+PY
+}
+
+cmd_show_file() {
+  local project="${PROJECT_ROOT:-$PWD}"
+  local target_path=""
+  local range_spec="" head_lines="" tail_lines="" refresh=0 diff_mode=0
+  local max_lines="${GC_SHOW_FILE_MAX_LINES:-400}"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project)
+        project="$(abs_path "$2")"
+        shift 2
+        ;;
+      --range)
+        range_spec="$2"
+        shift 2
+        ;;
+      --head)
+        head_lines="$2"
+        shift 2
+        ;;
+      --tail)
+        tail_lines="$2"
+        shift 2
+        ;;
+      --max-lines)
+        max_lines="$2"
+        shift 2
+        ;;
+      --refresh|--force)
+        refresh=1
+        shift
+        ;;
+      --diff)
+        diff_mode=1
+        shift
+        ;;
+      -h|--help)
+        cat <<'EOHELP'
+Usage: gpt-creator show-file [options] PATH
+
+Display a cached snippet of PATH without repeatedly streaming large files.
+
+Options:
+  --project DIR       Project root (defaults to current PROJECT_ROOT)
+  --range A:B         Show inclusive line range A..B (1-based)
+  --head N            Show first N lines
+  --tail N            Show last N lines
+  --max-lines N       Default line count when no range/head/tail is provided (default: 400)
+  --diff              Show a unified diff against the cached snapshot (if any)
+  --refresh           Re-read the file and update the cache even if unchanged
+EOHELP
+        return 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        die "Unknown show-file option: ${1}"
+        ;;
+      *)
+        if [[ -z "$target_path" ]]; then
+          target_path="$1"
+          shift
+        else
+          break
+        fi
+        ;;
+    esac
+  done
+
+  [[ -n "$target_path" ]] || die "show-file requires a path argument"
+  local project_abs
+  project_abs="$(abs_path "$project")"
+  local resolved_path
+  resolved_path="$(abs_path "$target_path")"
+  [[ -f "$resolved_path" ]] || die "File not found: ${target_path}"
+
+  [[ -z "$max_lines" || "$max_lines" =~ ^[0-9]+$ ]] || die "--max-lines must be numeric"
+  [[ -z "$head_lines" || "$head_lines" =~ ^[0-9]+$ ]] || die "--head value must be numeric"
+  [[ -z "$tail_lines" || "$tail_lines" =~ ^[0-9]+$ ]] || die "--tail value must be numeric"
+
+  local cache_dir="${GC_TMP_DIR:-${project_abs}/.gpt-creator/tmp}/view-cache"
+  mkdir -p "$cache_dir"
+
+  local rel_path="$resolved_path"
+  if [[ "$resolved_path" == "$project_abs"* ]]; then
+    rel_path="${resolved_path#$project_abs/}"
+  fi
+
+  GC_SHOW_FILE_PROJECT="$project_abs" \
+  GC_SHOW_FILE_PATH="$resolved_path" \
+  GC_SHOW_FILE_REL="$rel_path" \
+  GC_SHOW_FILE_RANGE="$range_spec" \
+  GC_SHOW_FILE_HEAD="$head_lines" \
+  GC_SHOW_FILE_TAIL="$tail_lines" \
+  GC_SHOW_FILE_MAX_LINES="$max_lines" \
+  GC_SHOW_FILE_REFRESH="$refresh" \
+  GC_SHOW_FILE_DIFF="$diff_mode" \
+  GC_SHOW_FILE_CACHE_DIR="$cache_dir" \
+  python3 <<'PY'
+import difflib
+import hashlib
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+project_root = Path(os.environ.get("GC_SHOW_FILE_PROJECT", "") or ".").resolve()
+path = Path(os.environ.get("GC_SHOW_FILE_PATH", "")).resolve()
+rel_path = os.environ.get("GC_SHOW_FILE_REL") or str(path)
+range_spec = (os.environ.get("GC_SHOW_FILE_RANGE") or "").strip()
+head_lines = (os.environ.get("GC_SHOW_FILE_HEAD") or "").strip()
+tail_lines = (os.environ.get("GC_SHOW_FILE_TAIL") or "").strip()
+max_lines_raw = (os.environ.get("GC_SHOW_FILE_MAX_LINES") or "").strip()
+refresh = os.environ.get("GC_SHOW_FILE_REFRESH") == "1"
+diff_mode = os.environ.get("GC_SHOW_FILE_DIFF") == "1"
+cache_dir = Path(os.environ.get("GC_SHOW_FILE_CACHE_DIR") or "").resolve()
+
+if not path.exists():
+    print(f"File not found: {rel_path}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    max_lines = int(max_lines_raw or 400)
+except Exception:
+    max_lines = 400
+if max_lines <= 0:
+    max_lines = 400
+
+mode_descriptor = []
+if range_spec:
+    mode_descriptor.append(f"range:{range_spec}")
+if head_lines:
+    mode_descriptor.append(f"head:{head_lines}")
+if tail_lines:
+    mode_descriptor.append(f"tail:{tail_lines}")
+if not mode_descriptor:
+    mode_descriptor.append(f"default:{max_lines}")
+mode_string = "|".join(mode_descriptor)
+
+cache_key_raw = f"{path}::{mode_string}"
+cache_key = hashlib.sha256(cache_key_raw.encode("utf-8", "replace")).hexdigest()
+cache_path = cache_dir / f"{cache_key}.json"
+
+def load_lines(file_path: Path):
+    text = file_path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    return lines, len(lines)
+
+def select_snippet(lines, total):
+    if total == 0:
+        return [], 1, 0
+
+    if range_spec:
+        raw = range_spec
+        if ":" in raw:
+            start_s, end_s = raw.split(":", 1)
+        else:
+            start_s, end_s = raw, ""
+        try:
+            start_line = int(start_s) if start_s.strip() else 1
+        except Exception:
+            start_line = 1
+        try:
+            end_line = int(end_s) if end_s.strip() else total
+        except Exception:
+            end_line = total
+        if start_line < 1:
+            start_line = 1
+        if end_line < start_line:
+            end_line = start_line
+        if end_line > total:
+            end_line = total
+        snippet = lines[start_line - 1: end_line]
+        return snippet, start_line, end_line
+
+    if head_lines:
+        try:
+            count = int(head_lines)
+        except Exception:
+            count = max_lines
+        if count <= 0:
+            count = max_lines
+        snippet = lines[:count]
+        end_line = min(total, count)
+        return snippet, 1, end_line
+
+    if tail_lines:
+        try:
+            count = int(tail_lines)
+        except Exception:
+            count = max_lines
+        if count <= 0:
+            count = max_lines
+        snippet = lines[-count:] if count < total else lines[:]
+        start_line = total - len(snippet) + 1
+        return snippet, start_line, total
+
+    snippet = lines[:min(total, max_lines)]
+    end_line = len(snippet)
+    return snippet, 1, end_line
+
+def write_cache(payload):
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def format_header(start_line, end_line, total, digest, note=""):
+    details = f"{rel_path} (lines {start_line}-{end_line} of {total}; sha256 {digest})"
+    if note:
+        details += f" — {note}"
+    return f"## {details}"
+
+file_stat = path.stat()
+existing = None
+if cache_path.exists():
+    try:
+        existing = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        existing = None
+
+if existing and not refresh and not diff_mode:
+    if (existing.get("mtime_ns") == file_stat.st_mtime_ns and
+            existing.get("size") == file_stat.st_size):
+        start_line = existing.get("start_line", 1)
+        end_line = existing.get("end_line", start_line - 1)
+        total_lines = existing.get("total_lines", "?")
+        digest = existing.get("snippet_hash", "unknown")
+        updated_at = existing.get("updated_at", "")
+        note = f"cached snapshot {updated_at}" if updated_at else "cached snapshot"
+        print(f"(cached) {rel_path} lines {start_line}-{end_line} of {total_lines} (sha256 {digest}); use --refresh to re-display or --diff to compare.")
+        sys.exit(0)
+
+lines, total_lines = load_lines(path)
+snippet_lines, start_line, end_line = select_snippet(lines, total_lines)
+snippet_text = "\n".join(snippet_lines)
+snippet_hash = hashlib.sha256(snippet_text.encode("utf-8", "replace")).hexdigest()[:12]
+timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+cache_payload = {
+    "path": str(path),
+    "relative": rel_path,
+    "mode": mode_string,
+    "start_line": start_line,
+    "end_line": end_line,
+    "total_lines": total_lines,
+    "snippet_hash": snippet_hash,
+    "snippet": snippet_text,
+    "mtime_ns": file_stat.st_mtime_ns,
+    "size": file_stat.st_size,
+    "updated_at": timestamp,
+}
+
+if diff_mode and existing:
+    old_snippet = existing.get("snippet", "")
+    old_start = existing.get("start_line", 1)
+    old_end = existing.get("end_line", old_start - 1)
+    old_hash = existing.get("snippet_hash", "unknown")
+    if old_snippet == snippet_text:
+        print(f"(no diff) {rel_path} lines {start_line}-{end_line} unchanged compared to cached snapshot.")
+    else:
+        old_lines = old_snippet.splitlines()
+        diff = list(difflib.unified_diff(
+            old_lines,
+            snippet_text.splitlines(),
+            fromfile=f"cached/{rel_path}:{old_start}-{old_end}",
+            tofile=f"updated/{rel_path}:{start_line}-{end_line}",
+            lineterm="",
+        ))
+        if not diff:
+            print(f"(no diff) {rel_path} lines {start_line}-{end_line} unchanged compared to cached snapshot.")
+        else:
+            print(format_header(start_line, end_line, total_lines, snippet_hash, note="diff vs cached"))
+            for line in diff:
+                print(line)
+    write_cache(cache_payload)
+    sys.exit(0)
+
+print(format_header(start_line, end_line, total_lines, snippet_hash))
+if snippet_text:
+    print(snippet_text)
+else:
+    print("(no content in selected range)")
+
+write_cache(cache_payload)
 PY
 }
 
@@ -207,6 +595,218 @@ gc_load_env() {
   gc_env_sync_ports
 }
 
+GC_API_KEYS_METADATA=(
+  "openai|OpenAI Codex|OPENAI_API_KEY|AI automation commands (plan, generate, work-on-tasks)|GC_OPENAI_API_KEY,GC_OPENAI_KEY"
+  "jira|Jira Automation|JIRA_API_TOKEN|Backlog integrations that sync with Jira (create-jira-tasks)|GC_JIRA_API_TOKEN"
+  "github|GitHub Auto Reports|GC_GITHUB_TOKEN|Crash/stall reports published as GitHub issues|"
+)
+
+gc_find_api_key_entry() {
+  local query input lower entry key_id label primary desc alias_csv
+  query="${1:-}"
+  [[ -n "$query" ]] || return 1
+  lower="$(to_lower "$query")"
+  for entry in "${GC_API_KEYS_METADATA[@]}"; do
+    IFS='|' read -r key_id label primary desc alias_csv <<<"$entry"
+    if [[ "$lower" == "$(to_lower "$key_id")" || "$lower" == "$(to_lower "$primary")" ]]; then
+      printf '%s\n' "$entry"
+      return 0
+    fi
+    if [[ -n "$alias_csv" ]]; then
+      IFS=',' read -ra input <<<"$alias_csv"
+      for alias in "${input[@]}"; do
+        alias="${alias//[[:space:]]/}"
+        [[ -n "$alias" ]] || continue
+        if [[ "$lower" == "$(to_lower "$alias")" ]]; then
+          printf '%s\n' "$entry"
+          return 0
+        fi
+      done
+    fi
+  done
+  return 1
+}
+
+gc_apply_api_key_aliases() {
+  local entry key_id label primary desc alias_csv value alias
+  local alias_arr
+  for entry in "${GC_API_KEYS_METADATA[@]}"; do
+    IFS='|' read -r key_id label primary desc alias_csv <<<"$entry"
+    value="${!primary:-}"
+    if [[ -z "$value" && -n "$alias_csv" ]]; then
+      IFS=',' read -ra alias_arr <<<"$alias_csv"
+      for alias in "${alias_arr[@]}"; do
+        alias="${alias//[[:space:]]/}"
+        [[ -n "$alias" ]] || continue
+        if [[ -n "${!alias:-}" ]]; then
+          value="${!alias}"
+          break
+        fi
+      done
+    fi
+    [[ -n "$value" ]] || continue
+    export "$primary"="$value"
+    if [[ -n "$alias_csv" ]]; then
+      IFS=',' read -ra alias_arr <<<"$alias_csv"
+      for alias in "${alias_arr[@]}"; do
+        alias="${alias//[[:space:]]/}"
+        [[ -n "$alias" && "$alias" != "$primary" ]] || continue
+        if [[ -z "${!alias:-}" ]]; then
+          export "$alias"="$value"
+        fi
+      done
+    fi
+  done
+}
+
+gc_api_keys_loaded=0
+
+gc_load_api_keys() {
+  if (( gc_api_keys_loaded )); then
+    gc_apply_api_key_aliases
+    return
+  fi
+  gc_ensure_config_dir
+  local keys_file
+  keys_file="$(gc_keys_file)"
+  if [[ -f "$keys_file" ]]; then
+    gc_sanitize_env_file "$keys_file"
+    set -a
+    # shellcheck disable=SC1090
+    source "$keys_file"
+    set +a
+  fi
+  gc_apply_api_key_aliases
+  gc_api_keys_loaded=1
+}
+
+gc_read_env_file_var() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  python3 - <<'PY' "$file" "$key"
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2]
+if not path.exists():
+    raise SystemExit(0)
+for raw in path.read_text().splitlines():
+    stripped = raw.strip()
+    if not stripped or stripped.startswith('#'):
+        continue
+    if raw.startswith(f"{key}="):
+        value = raw[len(key) + 1:].strip()
+    elif raw.startswith(f"export {key}="):
+        value = raw[len(key) + 8:].strip()
+    else:
+        continue
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    print(value)
+    break
+PY
+}
+
+gc_api_keys_list() {
+  gc_load_api_keys
+  gc_ensure_config_dir
+  local keys_file status_header="Status"
+  keys_file="$(gc_keys_file)"
+  printf "API keys status (storage file: %s)\n\n" "$keys_file"
+  printf "%-22s %-20s %-24s %s\n" "Service" "Environment" "$status_header" "Used for"
+  printf "%-22s %-20s %-24s %s\n" "-------" "-----------" "------" "-------"
+  local entry key_id label primary desc alias_csv value stored_value status alias
+  local alias_arr
+  for entry in "${GC_API_KEYS_METADATA[@]}"; do
+    IFS='|' read -r key_id label primary desc alias_csv <<<"$entry"
+    value="${!primary:-}"
+    if [[ -z "$value" && -n "$alias_csv" ]]; then
+      IFS=',' read -ra alias_arr <<<"$alias_csv"
+      for alias in "${alias_arr[@]}"; do
+        alias="${alias//[[:space:]]/}"
+        [[ -n "$alias" ]] || continue
+        if [[ -n "${!alias:-}" ]]; then
+          value="${!alias}"
+          break
+        fi
+      done
+    fi
+    stored_value="$(gc_read_env_file_var "$keys_file" "$primary")"
+    if [[ -n "$value" ]]; then
+      if [[ -n "$stored_value" ]]; then
+        status="configured (stored)"
+      else
+        status="configured (env)"
+      fi
+    else
+      status="missing"
+    fi
+    printf "%-22s %-20s %-24s %s\n" "$label" "$primary" "$status" "$desc"
+  done
+  if [[ -n "${GC_GITHUB_TOKEN:-}" && -z "${GC_GITHUB_REPO:-}" ]]; then
+    printf "\nHint: set GC_GITHUB_REPO (owner/name) so GitHub Auto Reports knows where to file issues.\n"
+  fi
+  printf "\nSet a value with: gpt-creator keys set <service>\n"
+}
+
+gc_api_keys_set() {
+  local query="${1:-}"
+  [[ -n "$query" ]] || die "keys set requires a service name or environment variable"
+  local entry
+  if ! entry="$(gc_find_api_key_entry "$query")"; then
+    die "Unknown API key: ${query}"
+  fi
+  IFS='|' read -r key_id label primary desc alias_csv <<<"$entry"
+  gc_load_api_keys
+  gc_ensure_config_dir
+  local keys_file value alias
+  local alias_arr
+  keys_file="$(gc_keys_file)"
+  printf "Updating %s (%s)\n" "$label" "$primary"
+  printf "Press ENTER without a value to remove the stored credential.\n"
+  if [[ -n "$alias_csv" ]]; then
+    printf "Aliases: %s\n" "${alias_csv//,/ }"
+  fi
+  if [[ -t 0 ]]; then
+    read -rsp "Enter value: " value
+    printf '\n'
+  else
+    info "Reading ${primary} from stdin (input will be visible)."
+    if ! read -r value; then
+      die "Failed to read value from stdin"
+    fi
+  fi
+  value="${value//$'\r'/}"
+  value="$(printf '%s' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if [[ -z "$value" ]]; then
+    gc_remove_env_var "$keys_file" "$primary"
+    unset "$primary"
+    if [[ -n "$alias_csv" ]]; then
+      IFS=',' read -ra alias_arr <<<"$alias_csv"
+      for alias in "${alias_arr[@]}"; do
+        alias="${alias//[[:space:]]/}"
+        [[ -n "$alias" ]] || continue
+        unset "$alias"
+      done
+    fi
+    ok "Removed stored value for ${label}"
+    return 0
+  fi
+  gc_write_env_var "$keys_file" "$primary" "$value"
+  chmod 600 "$keys_file" 2>/dev/null || true
+  export "$primary"="$value"
+  if [[ -n "$alias_csv" ]]; then
+    IFS=',' read -ra alias_arr <<<"$alias_csv"
+    for alias in "${alias_arr[@]}"; do
+      alias="${alias//[[:space:]]/}"
+      [[ -n "$alias" && "$alias" != "$primary" ]] || continue
+      export "$alias"="$value"
+    done
+  fi
+  gc_apply_api_key_aliases
+  ok "Stored credentials for ${label}"
+  printf "Saved to %s\n" "$keys_file"
+}
+
 gc_create_env_if_missing() {
   local env_file="$(gc_env_file)"
   if [[ -f "$env_file" ]]; then
@@ -272,6 +872,172 @@ die() { echo "${c_red}✖${c_reset} $*" >&2; exit 1; }
 info(){ echo "${c_cyan}➜${c_reset} $*"; }
 ok()  { echo "${c_green}✔${c_reset} $*"; }
 warn(){ echo "${c_yellow}!${c_reset} $*"; }
+
+gc_format_duration_compact() {
+  local total="${1:-0}"
+  if [[ ! "$total" =~ ^[0-9]+$ ]]; then
+    total=0
+  fi
+  local hours=$(( total / 3600 ))
+  local minutes=$(( (total % 3600) / 60 ))
+  local seconds=$(( total % 60 ))
+  local parts=()
+  if (( hours > 0 )); then
+    parts+=("${hours}H")
+  fi
+  if (( minutes > 0 || hours > 0 )); then
+    parts+=("${minutes}M")
+  fi
+  parts+=("${seconds}S")
+  printf '%s' "${parts[*]}"
+}
+
+gc_format_tokens_compact() {
+  local raw="${1:-0}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw=0
+  fi
+  if (( raw >= 1000000000 )); then
+    local rounded=$(( (raw + 500000000) / 1000000000 ))
+    printf '%dB' "$rounded"
+  elif (( raw >= 1000000 )); then
+    local rounded=$(( (raw + 500000) / 1000000 ))
+    printf '%dM' "$rounded"
+  elif (( raw >= 1000 )); then
+    local rounded=$(( (raw + 500) / 1000 ))
+    printf '%dK' "$rounded"
+  else
+    printf '%d' "$raw"
+  fi
+}
+
+gc_render_task_banner() {
+  local header_position="top"
+  case "$1" in
+    --header-bottom)
+      header_position="bottom"
+      shift
+      ;;
+    --header-top)
+      shift
+      ;;
+  esac
+
+  local header="${1:?header text required}"
+  shift
+  local -a lines=("$@")
+
+  local min_width=23
+  local banner_margin=4
+  local header_padding_extra=8
+  local inner_width="$min_width"
+
+  local line
+  for line in "${lines[@]}"; do
+    local length=${#line}
+    local candidate=$(( length + banner_margin ))
+    if (( candidate > inner_width )); then
+      inner_width=$candidate
+    fi
+  done
+
+  local header_width=$(( inner_width + header_padding_extra ))
+  if (( header_width < ${#header} + 2 )); then
+    header_width=$(( ${#header} + 2 ))
+  fi
+
+  local shade_line
+  printf -v shade_line '%*s' "$header_width" ''
+  shade_line="${shade_line// /░}"
+
+  local header_pad_left=$(( (header_width - ${#header}) / 2 ))
+  local header_pad_right=$(( header_width - header_pad_left - ${#header} ))
+  (( header_pad_left < 0 )) && header_pad_left=0
+  (( header_pad_right < 0 )) && header_pad_right=0
+  local header_line_left header_line_right
+  printf -v header_line_left '%*s' "$header_pad_left" ''
+  printf -v header_line_right '%*s' "$header_pad_right" ''
+  local header_line="${header_line_left// /░}${header}${header_line_right// /░}"
+
+  local border_inner
+  printf -v border_inner '%*s' "$inner_width" ''
+  local border_line="|${border_inner// /-}|"
+
+  if [[ "$header_position" == "top" ]]; then
+    info "$shade_line"
+    info "$header_line"
+    info "$shade_line"
+  fi
+
+  info "$border_line"
+  for line in "${lines[@]}"; do
+    local line_length=${#line}
+    local pad_total=$(( inner_width - line_length ))
+    (( pad_total < 0 )) && pad_total=0
+    local pad_left=$(( pad_total / 2 ))
+    local pad_right=$(( pad_total - pad_left ))
+    local padded_line
+    printf -v padded_line '|%*s%s%*s|' "$pad_left" '' "$line" "$pad_right" ''
+    info "$padded_line"
+    info "$border_line"
+  done
+
+  if [[ "$header_position" == "bottom" ]]; then
+    printf '\n'
+    info "$shade_line"
+    info "$header_line"
+    info "$shade_line"
+  fi
+}
+
+gc_user_config_root() {
+  python3 - <<'PY'
+import os
+import pathlib
+import sys
+
+def user_config_dir():
+    # Windows
+    if sys.platform.startswith("win"):
+        for key in ("APPDATA", "LOCALAPPDATA"):
+            base = os.environ.get(key)
+            if base:
+                return base
+    # macOS
+    try:
+        home = pathlib.Path.home()
+    except Exception:
+        home = None
+    if sys.platform == "darwin" and home is not None:
+        return str(home / "Library" / "Application Support")
+    # XDG (Linux/Unix)
+    base = os.environ.get("XDG_CONFIG_HOME")
+    if base:
+        return base
+    if home is not None:
+        return str(home / ".config")
+    return "."
+
+print(user_config_dir())
+PY
+}
+
+gc_config_dir() {
+  local root
+  root="$(gc_user_config_root)"
+  [[ -n "$root" ]] || root="."
+  printf '%s\n' "${root%/}/gpt-creator"
+}
+
+gc_keys_file() {
+  printf '%s/api-keys.env\n' "$(gc_config_dir)"
+}
+
+gc_ensure_config_dir() {
+  local dir
+  dir="$(gc_config_dir)"
+  mkdir -p "$dir"
+}
 
 abs_path() {
   python3 - "$1" <<'PY' 2>/dev/null || perl -MCwd=abs_path -e 'print abs_path(shift)."\n"' "$1" || echo "$1"
@@ -359,9 +1125,240 @@ gc_port_reserved_by_other() {
   return 1
 }
 
+GC_PROGRESS_DIR_MIGRATIONS=(
+  "docs/delivery::staging/docs"
+  "Design::staging/docs"
+  "legal_editor_tmp::artifacts"
+)
+
+GC_PROGRESS_FILE_MIGRATIONS=(
+  "tmp_*::artifacts/tmp"
+  "final_*::artifacts/final"
+  "dump_*::artifacts/dump"
+  "diff*::artifacts/diff"
+  "change_*::artifacts/change"
+  "changes_*::artifacts/change"
+  "codex_*::artifacts/codex"
+  "delivery_plan*::artifacts/delivery"
+  "qaDoc.json::artifacts/delivery"
+  "backlog.md::artifacts/planning"
+  "plan.md::artifacts/planning"
+  "tasks.json::staging/plan/legacy"
+  "encoded*::artifacts/encoded"
+  "session_lifecycle*::artifacts/session"
+  "breadcrumbs*.json::artifacts/ui"
+  "cli_content.json::artifacts/context"
+  "focusTrap.json::artifacts/ui"
+  "navStore.json::artifacts/ui"
+  "service_content.json::artifacts/context"
+  "login_diff.txt::artifacts/diff"
+  "login_json.txt::artifacts/context"
+  "output_payload.json::artifacts/output"
+  "changes_output.json::artifacts/change"
+  "changes_strings.txt::artifacts/change"
+  "*.patch::artifacts/patches"
+  "*_patch.jsonstr::artifacts/patches"
+  "*.rej::artifacts/patches"
+  "*.rej.orig::artifacts/patches"
+  "*.orig::artifacts/patches"
+)
+
+GC_PROGRESS_MIGRATION_LAST_COUNT=0
+
+gc_move_progress_artifact() {
+  local source_path="$1"
+  local dest_dir="$2"
+  [[ -e "$source_path" ]] || return 1
+  mkdir -p "$dest_dir"
+  local base name ext target candidate idx
+  base="$(basename "$source_path")"
+  name="$base"
+  ext=""
+  if [[ -f "$source_path" ]]; then
+    if [[ "$base" == .* ]]; then
+      if [[ "$base" == *.* ]]; then
+        ext=".${base##*.}"
+        name="${base%$ext}"
+        [[ -z "$name" ]] && name="$base"
+      fi
+    else
+      if [[ "$base" == *.* ]]; then
+        ext=".${base##*.}"
+        name="${base%$ext}"
+      fi
+    fi
+  fi
+  target="${dest_dir}/${base}"
+  if [[ -e "$target" ]]; then
+    idx=2
+    while :; do
+      if [[ -n "$ext" && "$name" != "$base" ]]; then
+        candidate="${dest_dir}/${name}-${idx}${ext}"
+      else
+        candidate="${dest_dir}/${base}-${idx}"
+      fi
+      if [[ ! -e "$candidate" ]]; then
+        target="$candidate"
+        break
+      fi
+      idx=$((idx + 1))
+    done
+  fi
+  if mv -- "$source_path" "$target"; then
+    printf '%s\t%s\n' "$source_path" "$target"
+    return 0
+  fi
+  return 1
+}
+
+gc_migrate_progress_artifacts() {
+  local project_root="$1"
+  local work_dir_name="${GC_WORK_DIR_NAME:-.gpt-creator}"
+  local gc_root="${project_root}/${work_dir_name}"
+  local skip="${GC_SKIP_PROGRESS_MIGRATION:-0}"
+  [[ -d "$project_root" ]] || return 0
+  [[ "$skip" == "1" ]] && return 0
+  if [[ -n "${GC_ROOT:-}" && "$project_root" == "$GC_ROOT" ]]; then
+    return 0
+  fi
+  GC_PROGRESS_MIGRATION_LAST_COUNT=0
+  local -a moved=()
+  local entry src_rel dest_rel src_path dest_dir record
+
+  for entry in "${GC_PROGRESS_DIR_MIGRATIONS[@]}"; do
+    src_rel="${entry%%::*}"
+    dest_rel="${entry#*::}"
+    src_path="${project_root}/${src_rel}"
+    [[ -d "$src_path" ]] || continue
+    dest_dir="${gc_root}/${dest_rel}"
+    if record="$(gc_move_progress_artifact "$src_path" "$dest_dir")"; then
+      moved+=("$record")
+    fi
+  done
+
+  shopt -s nullglob dotglob
+  for entry in "${GC_PROGRESS_FILE_MIGRATIONS[@]}"; do
+    src_rel="${entry%%::*}"
+    dest_rel="${entry#*::}"
+    local matches=("$project_root"/$src_rel)
+    local path
+    for path in "${matches[@]}"; do
+      [[ -e "$path" ]] || continue
+      [[ "$path" == "$gc_root"* ]] && continue
+      dest_dir="${gc_root}/${dest_rel}"
+      if record="$(gc_move_progress_artifact "$path" "$dest_dir")"; then
+        moved+=("$record")
+      fi
+    done
+  done
+  shopt -u nullglob dotglob
+
+  if ((${#moved[@]} > 0)); then
+    local log_dir="${gc_root}/logs"
+    mkdir -p "$log_dir"
+    local log_file="${log_dir}/progress-migration.log"
+    {
+      printf '--- %s ---\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+      local row src_abs dst_abs src_relpath dst_relpath
+      for row in "${moved[@]}"; do
+        src_abs="${row%%$'\t'*}"
+        dst_abs="${row#*$'\t'}"
+        src_relpath="${src_abs#$project_root/}"
+        dst_relpath="${dst_abs#$project_root/}"
+        printf '%s -> %s\n' "$src_relpath" "$dst_relpath"
+      done
+    } >>"$log_file"
+    info "Migrated ${#moved[@]} work artifacts into .gpt-creator (see ${log_file#$project_root/})."
+  fi
+  GC_PROGRESS_MIGRATION_LAST_COUNT=${#moved[@]}
+}
+
+# Manual command helper to sweep legacy artifacts
+cmd_sweep_artifacts() {
+  local -a projects=()
+  local arg project_path prev_skip
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project|-p)
+        [[ -n "${2:-}" ]] || die "--project requires a directory path"
+        project_path="$(abs_path "$2")"
+        projects+=("$project_path")
+        shift 2
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: gpt-creator sweep-artifacts [--project PATH] [PATH...]
+
+Sweep legacy Codex work artifacts (tmp/final/diff/etc.) into the standard
+.gpt-creator folder structure. Defaults to the current directory when no path
+is supplied. You can pass multiple project directories to tidy them in batch.
+EOF
+        return 0
+        ;;
+      --)
+        shift
+        while [[ $# -gt 0 ]]; do
+          projects+=("$(abs_path "$1")")
+          shift
+        done
+        ;;
+      -*)
+        die "Unknown flag for sweep-artifacts: $1"
+        ;;
+      *)
+        projects+=("$(abs_path "$1")")
+        shift
+        ;;
+    esac
+  done
+
+  if ((${#projects[@]} == 0)); then
+    projects+=("$(abs_path "${PROJECT_ROOT:-$PWD}")")
+  fi
+
+  local root moved_any=0 count prev_skip_set prev_skip_val
+  for root in "${projects[@]}"; do
+    if [[ ! -d "$root" ]]; then
+      warn "Skipping missing directory: ${root}"
+      continue
+    fi
+    info "Tidying progress artifacts under ${root}"
+    prev_skip_set=0
+    prev_skip_val=""
+    if [[ ${GC_SKIP_PROGRESS_MIGRATION+x} ]]; then
+      prev_skip_set=1
+      prev_skip_val="$GC_SKIP_PROGRESS_MIGRATION"
+    else
+      prev_skip_set=0
+      prev_skip_val=""
+    fi
+    GC_SKIP_PROGRESS_MIGRATION=0
+    gc_migrate_progress_artifacts "$root"
+    count=${GC_PROGRESS_MIGRATION_LAST_COUNT:-0}
+    if (( prev_skip_set )); then
+      GC_SKIP_PROGRESS_MIGRATION="$prev_skip_val"
+    else
+      unset GC_SKIP_PROGRESS_MIGRATION
+    fi
+    if (( count > 0 )); then
+      ok "Relocated ${count} artifact(s) into ${root}/.gpt-creator."
+      moved_any=1
+    else
+      info "No legacy artifacts found outside .gpt-creator."
+    fi
+  done
+
+  return 0
+}
+
+cmd_tidy_progress() {
+  warn "'tidy-progress' has been renamed to 'sweep-artifacts'. Running the renamed command."
+  cmd_sweep_artifacts "$@"
+}
+
 # Context directories inside project
 ensure_ctx() {
-  local root="${1:-}"
+  local root="${1:-}" TMP_DIR=""
   if [[ -z "${root}" ]]; then root="${PROJECT_ROOT:-$PWD}"; fi
   PROJECT_ROOT="$(abs_path "$root")"
   GC_DIR="${PROJECT_ROOT}/.gpt-creator"
@@ -370,7 +1367,10 @@ ensure_ctx() {
   PLAN_DIR="${STAGING_DIR}/plan"
   LOG_DIR="${GC_DIR}/logs"
   ART_DIR="${GC_DIR}/artifacts"
-  mkdir -p "$GC_DIR" "$STAGING_DIR" "$INPUT_DIR" "$PLAN_DIR" "$LOG_DIR" "$ART_DIR"
+  TMP_DIR="${GC_DIR}/tmp"
+  mkdir -p "$GC_DIR" "$STAGING_DIR" "$INPUT_DIR" "$PLAN_DIR" "$LOG_DIR" "$ART_DIR" "$TMP_DIR"
+  gc_migrate_progress_artifacts "$PROJECT_ROOT"
+  gc_configure_tmpdir "$PROJECT_ROOT"
   gc_create_env_if_missing
   gc_load_env
   local base_name
@@ -1272,6 +2272,10 @@ gc_record_codex_usage() {
   local prompt_file="${4:-}"
   local exit_code="${5:-0}"
 
+  GC_LAST_CODEX_PROMPT_TOKENS=0
+  GC_LAST_CODEX_COMPLETION_TOKENS=0
+  GC_LAST_CODEX_TOTAL_TOKENS=0
+
   [[ -n "$log_file" && -f "$log_file" ]] || return 0
 
   local usage_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
@@ -1287,12 +2291,16 @@ gc_record_codex_usage() {
     return 1
   }
 
-  if python3 - <<'PY' "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" >"$tmp_output"
+  if python3 - <<'PY' "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" "${GC_COMMAND_FAILURE_CACHE:-}" "${GC_COMMAND_STREAM_CACHE:-}" "${GC_COMMAND_FILE_CACHE:-}" "${GC_COMMAND_SCAN_CACHE:-}" >"$tmp_output"
+import base64
 import hashlib
 import json
+import os
 import pathlib
 import re
+import shlex
 import sys
+from typing import Optional
 
 log_path = pathlib.Path(sys.argv[1])
 usage_path = pathlib.Path(sys.argv[2])
@@ -1301,6 +2309,14 @@ task = sys.argv[4] or None
 model = sys.argv[5] or None
 prompt_file = sys.argv[6] or None
 exit_code = int(sys.argv[7])
+cmd_cache_arg = sys.argv[8] if len(sys.argv) > 8 else ""
+cmd_cache_path = pathlib.Path(cmd_cache_arg) if cmd_cache_arg else None
+stream_cache_arg = sys.argv[9] if len(sys.argv) > 9 else ""
+stream_cache_path = pathlib.Path(stream_cache_arg) if stream_cache_arg else None
+file_cache_arg = sys.argv[10] if len(sys.argv) > 10 else ""
+file_cache_path = pathlib.Path(file_cache_arg) if file_cache_arg else None
+scan_cache_arg = sys.argv[11] if len(sys.argv) > 11 else ""
+scan_cache_path = pathlib.Path(scan_cache_arg) if scan_cache_arg else None
 
 if log_path.exists():
     raw_text = log_path.read_text(encoding="utf-8", errors="ignore")
@@ -1309,10 +2325,34 @@ else:
 
 fields = {}
 def parse_number(text: str) -> int:
-    cleaned = re.sub(r"[,_]", "", text.strip())
+    cleaned = (text or "").strip()
     if not cleaned:
         raise ValueError("empty")
-    return int(cleaned)
+    cleaned = cleaned.strip("[]{}()")
+    cleaned = cleaned.lstrip("≈~<>≤≥=")
+    cleaned = cleaned.replace(",", "").replace("_", "").replace(" ", "")
+    if not cleaned:
+        raise ValueError("empty")
+    suffix = ""
+    if cleaned and cleaned[-1].lower() in ("k", "m", "b", "g", "t"):
+        suffix = cleaned[-1].lower()
+        cleaned = cleaned[:-1]
+    if not cleaned:
+        raise ValueError("empty")
+    number_match = re.match(r"^[-+]?(?:\d+|\d*\.\d+)$", cleaned)
+    if not number_match:
+        raise ValueError("unparsable")
+    value = float(cleaned)
+    multipliers = {
+        "": 1,
+        "k": 1_000,
+        "m": 1_000_000,
+        "b": 1_000_000_000,
+        "g": 1_000_000_000,
+        "t": 1_000_000_000_000,
+    }
+    factor = multipliers.get(suffix, 1)
+    return int(round(value * factor))
 
 def capture(field: str, value: str) -> None:
     if not value:
@@ -1322,47 +2362,28 @@ def capture(field: str, value: str) -> None:
     except Exception:
         pass
 
-specific_patterns = [
-    ("prompt_tokens", r'prompt[\s_\-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*([\d,._]+)'),
-    ("completion_tokens", r'completion[\s_\-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*([\d,._]+)'),
-    ("total_tokens", r'total[\s_\-]*tokens(?:\s*(?:used|consumed))?["\']?\s*[:=]\s*([\d,._]+)'),
-    ("total_tokens", r'tokens[\s_\-]*used\s*[:=]\s*([\d,._]+)'),
-    ("total_tokens", r'tokens[\s_\-]*consumed\s*[:=]\s*([\d,._]+)'),
-    ("prompt_tokens", r'prompt\s*=\s*([\d,._]+)'),
-    ("completion_tokens", r'completion\s*=\s*([\d,._]+)'),
-    ("total_tokens", r'total\s*=\s*([\d,._]+)'),
-    ("prompt_tokens", r'input[\s_\-]*tokens?["\']?\s*[:=]\s*([\d,._]+)'),
-    ("completion_tokens", r'output[\s_\-]*tokens?["\']?\s*[:=]\s*([\d,._]+)'),
-    ("cached_tokens", r'cached[\s_\-]*tokens?["\']?\s*[:=]\s*([\d,._]+)'),
-    ("billable_units", r'(?:billable|chargeable)[\s_\-]*(?:tokens|units)?["\']?\s*[:=]\s*([\d,._]+)'),
-    ("request_units", r'request[\s_\-]*(?:tokens|units)?["\']?\s*[:=]\s*([\d,._]+)'),
+number_pattern = r'((?:\d[\d,._]*|\d*\.\d+)(?:[kKmMbBgGtT]?))'
+line_patterns = [
+    ("total_tokens", re.compile(r'tokens[\s_\-]*used[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
+    ("total_tokens", re.compile(r'tokens[\s_\-]*consumed[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
+    ("total_tokens", re.compile(r'total[\s_\-]*tokens?(?:\s*(?:used|consumed))?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
+    ("prompt_tokens", re.compile(r'prompt[\s_\-]*tokens?(?:\s*(?:used|consumed))?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
+    ("completion_tokens", re.compile(r'completion[\s_\-]*tokens?(?:\s*(?:used|consumed))?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
+    ("cached_tokens", re.compile(r'cached[\s_\-]*tokens?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
+    ("prompt_tokens", re.compile(r'input[\s_\-]*tokens?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
+    ("completion_tokens", re.compile(r'output[\s_\-]*tokens?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
+    ("prompt_tokens", re.compile(r'\bprompt\s*=\s*' + number_pattern, re.IGNORECASE)),
+    ("completion_tokens", re.compile(r'\bcompletion\s*=\s*' + number_pattern, re.IGNORECASE)),
+    ("total_tokens", re.compile(r'\btotal\s*=\s*' + number_pattern, re.IGNORECASE)),
+    ("cached_tokens", re.compile(r'\bcached\s*=\s*' + number_pattern, re.IGNORECASE)),
 ]
 
-for key, pattern in specific_patterns:
-    matches = re.findall(pattern, raw_text, flags=re.IGNORECASE)
-    if matches:
-        capture(key, matches[-1])
-
-general_pattern = re.compile(
-    r'\b(?P<label>(?:prompt|completion|total|tokens|input|output|cached|billable|chargeable|request|requests)'
-    r'(?:[\s_-]*(?:tokens?|units?|used|consumed))?)\b[^0-9]{0,20}(\d[\d,._]*)',
-    re.IGNORECASE,
-)
-
-for label, value in general_pattern.findall(raw_text):
-    label_lower = label.lower()
-    if "prompt" in label_lower or "input" in label_lower:
-        capture("prompt_tokens", value)
-    elif "completion" in label_lower or "output" in label_lower:
-        capture("completion_tokens", value)
-    elif "cached" in label_lower:
-        capture("cached_tokens", value)
-    elif "billable" in label_lower or "chargeable" in label_lower:
-        capture("billable_units", value)
-    elif "request" in label_lower:
-        capture("request_units", value)
-    else:
-        capture("total_tokens", value)
+for line in raw_text.splitlines():
+    if not line:
+        continue
+    for field, pattern in line_patterns:
+        for match in pattern.finditer(line):
+            capture(field, match.group(1))
 
 if "total_tokens" not in fields:
     prompt_val = fields.get("prompt_tokens")
@@ -1414,10 +2435,850 @@ if limit_message:
     record["limit_detected"] = True
     record["limit_message"] = limit_message
 
+command_failure_lines = []
+command_stream_lines = []
+command_file_lines = []
+command_scan_lines = []
+command_guard_lines = []
+failure_remediation_notes = {}
+
+cached_failure_cache = {}
+cached_failure_counts = {}
+cached_failure_details = {}
+if cmd_cache_path:
+    try:
+        cache_raw = cmd_cache_path.read_text(encoding="utf-8")
+        cached_failure_cache = json.loads(cache_raw) if cache_raw.strip() else {}
+        if not isinstance(cached_failure_cache, dict):
+            cached_failure_cache = {}
+    except Exception:
+        cached_failure_cache = {}
+
+if cached_failure_cache:
+    for value in cached_failure_cache.values():
+        if not isinstance(value, dict):
+            continue
+        command_text = value.get("command")
+        if not isinstance(command_text, str):
+            continue
+        try:
+            count = int(value.get("count") or 0)
+        except Exception:
+            count = 0
+        if count < 0:
+            count = 0
+        cached_failure_counts[command_text] = count
+        cached_failure_details.setdefault(command_text, value)
+if raw_text:
+    lines_list = raw_text.splitlines()
+    total_lines = len(lines_list)
+    exec_pattern = re.compile(
+        r"exec\s+[^\s]+\s+-lc\s+(?:'(?P<sqcmd>[^']*)'|\"(?P<dqcmd>[^\"]*)\"|(?P<plain>\S+))(?:\s+in\s+(?P<cwd>\S+))?"
+    )
+    result_pattern = re.compile(
+        r"^\[(?P<ts>[^]]+)\]\s+[^\s]+\s+-lc\s+(?:(?P<sq>'(?P<sqcmd>[^']*)')|(?P<dq>\"(?P<dqcmd>[^\"]*)\")|(?P<plain>\S+))\s+(?P<outcome>succeeded|exited)\s*(?P<rest>.*)$"
+    )
+    timestamp_pattern = re.compile(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\]")
+    line_timestamp_pattern = re.compile(r"^\[(?P<ts>[^]]+)\]")
+    project_root_hint = os.getenv("PROJECT_ROOT", "")
+    try:
+        project_root_path = pathlib.Path(project_root_hint).resolve() if project_root_hint else None
+    except (OSError, RuntimeError, ValueError):
+        project_root_path = None
+def normalise_candidate_path(raw: str, cwd: str) -> Optional[pathlib.Path]:
+    candidate = (raw or "").strip()
+    if not candidate:
+        return None
+        candidate = candidate.split("|", 1)[0]
+        candidate = candidate.split(">", 1)[0]
+        candidate = candidate.split("<", 1)[0]
+        candidate = candidate.split(";", 1)[0]
+        candidate = candidate.strip()
+        if candidate.startswith(("'", '"')) and candidate.endswith(candidate[0]) and len(candidate) >= 2:
+            candidate = candidate[1:-1].strip()
+        if not candidate:
+            return None
+        candidate = os.path.expanduser(candidate)
+        if os.path.isabs(candidate):
+            path_obj = pathlib.Path(candidate)
+        else:
+            base = pathlib.Path(cwd) if cwd else project_root_path
+            if base:
+                path_obj = base / candidate
+            else:
+                path_obj = pathlib.Path(candidate)
+        try:
+            resolved = path_obj.resolve(strict=False)
+        except (OSError, RuntimeError):
+            resolved = path_obj
+        if not resolved.exists() or not resolved.is_file():
+            return None
+        return resolved
+
+    def build_file_info(path_obj: pathlib.Path, start: Optional[int], end: Optional[int], mode: str) -> Optional[dict]:
+        try:
+            stat = path_obj.stat()
+        except OSError:
+            return None
+        mtime_ns = getattr(stat, "st_mtime_ns", None)
+        if mtime_ns is None:
+            mtime_ns = int(stat.st_mtime * 1_000_000_000)
+        size = int(stat.st_size)
+        rel_path = str(path_obj)
+        if project_root_path:
+            try:
+                rel_path = str(path_obj.relative_to(project_root_path))
+            except ValueError:
+                rel_path = str(path_obj)
+        max_chars = 2000
+        max_lines = 80
+        excerpt_lines: list[str] = []
+        if start is not None and end is not None:
+            lower = max(1, min(start, end))
+            upper = max(lower, max(start, end))
+            try:
+                with path_obj.open("r", encoding="utf-8", errors="replace") as handle:
+                    for idx, line in enumerate(handle, start=1):
+                        if idx < lower:
+                            continue
+                        if idx > upper:
+                            break
+                        excerpt_lines.append(line.rstrip("\n"))
+                        if len(excerpt_lines) >= max_lines:
+                            break
+            except OSError:
+                excerpt_lines = []
+            summary = f"{rel_path} lines {lower}-{upper}"
+            range_value = [lower, upper]
+        else:
+            try:
+                with path_obj.open("r", encoding="utf-8", errors="replace") as handle:
+                    for _, line in zip(range(max_lines), handle):
+                        excerpt_lines.append(line.rstrip("\n"))
+            except OSError:
+                excerpt_lines = []
+            summary = f"{rel_path} (sample)"
+            range_value = None
+        excerpt_text = "\n".join(excerpt_lines)
+        if len(excerpt_text) > max_chars:
+            excerpt_text = excerpt_text[: max_chars - 3].rstrip() + "..."
+        return {
+            "path": str(path_obj),
+            "rel_path": rel_path,
+            "range": range_value,
+            "mode": mode,
+            "excerpt": excerpt_text,
+            "mtime_ns": int(mtime_ns),
+            "size": size,
+            "summary": summary,
+        }
+
+    sed_chunk_pattern = re.compile(
+        r"^sed\s+-n\s+['\"]?(?P<start>\d+)\s*,\s*(?P<end>\d+)[pP]['\"]?\s+(?P<path>[^|;]+)"
+    )
+    cat_pattern = re.compile(r"^cat\s+(?P<path>[^>|;&]+)$")
+
+    def parse_file_read(command: str, cwd: str) -> Optional[dict]:
+        command = (command or "").strip()
+        if not command:
+            return None
+        sed_match = sed_chunk_pattern.match(command)
+        if sed_match:
+            path_obj = normalise_candidate_path(sed_match.group("path"), cwd)
+            if not path_obj:
+                return None
+            try:
+                start_val = int(sed_match.group("start"))
+                end_val = int(sed_match.group("end"))
+            except (TypeError, ValueError):
+                return None
+            return build_file_info(path_obj, start_val, end_val, "sed")
+        cat_match = cat_pattern.match(command)
+        if cat_match:
+            path_obj = normalise_candidate_path(cat_match.group("path"), cwd)
+            if not path_obj:
+                return None
+            return build_file_info(path_obj, None, None, "cat")
+        return None
+
+    failures = {}
+    command_sequence = []
+    i = 0
+    while i < total_lines:
+        line = lines_list[i]
+        exec_match = exec_pattern.search(line)
+        if exec_match:
+            raw_cmd = (
+                exec_match.group("sqcmd")
+                or exec_match.group("dqcmd")
+                or exec_match.group("plain")
+                or ""
+            )
+            command_text = raw_cmd.strip()
+            command_cwd = exec_match.group("cwd") or ""
+            ts_match = line_timestamp_pattern.match(line)
+            command_timestamp = ts_match.group("ts") if ts_match else ""
+            current_entry = None
+            if command_text:
+                current_entry = {
+                    "command": command_text,
+                    "timestamp": command_timestamp,
+                    "cwd": command_cwd,
+                }
+                command_sequence.append(current_entry)
+            j = i + 1
+            while j < total_lines:
+                result_line = lines_list[j]
+                result_match = result_pattern.match(result_line)
+                if result_match:
+                    outcome = result_match.group("outcome")
+                    exit_value = 0
+                    if outcome == "exited":
+                        rest_text = result_match.group("rest") or ""
+                        code_match = re.search(r"(-?\d+)", rest_text)
+                        if code_match:
+                            try:
+                                exit_value = int(code_match.group(1))
+                            except Exception:
+                                exit_value = 1
+                        else:
+                            exit_value = 1
+                    output_lines = []
+                    k = j + 1
+                    while k < total_lines and not timestamp_pattern.match(lines_list[k]):
+                        output_lines.append(lines_list[k])
+                        k += 1
+                    summary_text = "\n".join(output_lines).strip()
+                    stored_lines = output_lines[:80]
+                    truncated_flag = len(output_lines) > len(stored_lines)
+                    preview_text = "\n".join(stored_lines).strip()
+                    if len(preview_text) > 2000:
+                        preview_text = preview_text[:1997] + "..."
+                        truncated_flag = True
+                    if current_entry is not None:
+                        current_entry["output_lines"] = stored_lines
+                        current_entry["output_line_count"] = len(output_lines)
+                        current_entry["output_truncated"] = truncated_flag
+                        current_entry["output"] = preview_text
+                    if exit_value != 0:
+                        trimmed_summary = summary_text
+                        if trimmed_summary.count("\n") > 30:
+                            summary_rows = trimmed_summary.splitlines()
+                            trimmed_summary = "\n".join(summary_rows[:30])
+                            trimmed_summary += "\n... (output truncated) ..."
+                        if len(trimmed_summary) > 1800:
+                            trimmed_summary = trimmed_summary[:1797] + "..."
+                        digest_source = f"{project_root_hint}\n{command_text}\n{exit_value}\n{trimmed_summary}"
+                        digest = hashlib.sha256(digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
+                        entry = failures.get(digest)
+                        if entry:
+                            entry["count"] += 1
+                        else:
+                            entry = {
+                                "command": command_text,
+                                "exit": exit_value,
+                                "summary": trimmed_summary,
+                                "count": 1,
+                                "digest": digest,
+                            }
+                        failures[digest] = entry
+                    i = k - 1
+                    break
+                elif timestamp_pattern.match(result_line):
+                    i = j - 1
+                    break
+                else:
+                    j += 1
+        i += 1
+
+    sed_chunk_pattern = re.compile(
+        r"^sed\s+-n\s+['\"]?(?P<start>\d+)\s*,\s*(?P<end>\d+)[pP]['\"]?\s+(?P<path>[^|;]+)"
+    )
+
+    def parse_sed_chunk(command: str):
+        match = sed_chunk_pattern.match(command)
+        if not match:
+            return None
+        try:
+            start = int(match.group("start"))
+            end = int(match.group("end"))
+        except Exception:
+            return None
+        path = match.group("path").strip()
+        path = path.split("|", 1)[0].strip()
+        path = path.split(";", 1)[0].strip()
+        if path.startswith(("'", '"')) and path.endswith(path[0]) and len(path) >= 2:
+            path = path[1:-1]
+        if not path:
+            return None
+        return {"file": path, "start": start, "end": end}
+
+    build_artifact_dirs = {"dist", "dist-tests", "build", "coverage", "out", "tmp", ".next", "node_modules", "public-build"}
+
+    def is_build_artifact_path(rel_path: str) -> bool:
+        if not rel_path:
+            return False
+        normalized = rel_path.replace("\\", "/").strip("/")
+        if not normalized:
+            return False
+        parts = [part for part in normalized.split("/") if part]
+        for idx, part in enumerate(parts):
+            if part in build_artifact_dirs:
+                if part == "dist" and idx > 0 and parts[idx - 1] == "src":
+                    continue
+                return True
+        return False
+
+    def finalize_sequence(seq, results):
+        if not seq:
+            return
+        coverage_lines = seq["coverage_end"] - seq["coverage_start"] + 1
+        if seq["count"] >= 2 and coverage_lines >= 180:
+            seq["coverage_lines"] = coverage_lines
+            results.append(seq)
+
+    stream_sequences = []
+    current_seq = None
+    gap_threshold = 40
+    for entry in command_sequence:
+    command_text = entry.get("command") or ""
+    workdir_path = resolve_workdir(entry.get("cwd") or "", project_root_path)
+    pnpm_issues = []
+    if command_text:
+        try:
+            parts = shlex.split(command_text)
+        except ValueError:
+            parts = command_text.split()
+        if parts and parts[0] == "pnpm":
+            task_token = ""
+            idx = 1
+            skip_next = False
+            while idx < len(parts):
+                token = parts[idx]
+                if skip_next:
+                    skip_next = False
+                    idx += 1
+                    continue
+                if token in {"-C", "--dir", "--filter", "-F"}:
+                    skip_next = True
+                    idx += 1
+                    continue
+                if token.startswith("-"):
+                    idx += 1
+                    continue
+                task_token = token
+                idx += 1
+                break
+            if task_token == "run" and idx < len(parts):
+                task_token = parts[idx]
+            pnpm_task = task_token
+            if pnpm_task in {"test", "build"}:
+                modules_paths = [
+                    workdir_path / "node_modules",
+                    workdir_path / "node_modules" / ".pnpm",
+                ]
+                if project_root_path:
+                    modules_paths.extend([
+                        project_root_path / "node_modules",
+                        project_root_path / "node_modules" / ".pnpm",
+                    ])
+                modules_present = any(path.exists() for path in modules_paths)
+                if not modules_present:
+                    pnpm_issues.append("node_modules missing; run `pnpm install` before invoking pnpm test/build.")
+                # Check for cached failures of the same command.
+                failure_entry = cached_failure_details.get(command_text)
+                if failure_entry:
+                    try:
+                        prev_count = int(failure_entry.get("count") or 0)
+                    except Exception:
+                        prev_count = 0
+                    if prev_count > 0:
+                        summary = (failure_entry.get("last_summary") or failure_entry.get("summary") or "").strip()
+                        pnpm_issues.append(
+                            f"Command previously failed {prev_count} time(s){': ' + summary if summary else ''}"
+                        )
+                # Check for failed pnpm install
+                for value in cached_failure_cache.values():
+                    if not isinstance(value, dict):
+                        continue
+                    cmd_text = value.get("command")
+                    if isinstance(cmd_text, str) and cmd_text.strip().startswith("pnpm install"):
+                        try:
+                            install_fail_count = int(value.get("count") or 0)
+                        except Exception:
+                            install_fail_count = 0
+                        if install_fail_count > 0:
+                            install_summary = (value.get("last_summary") or value.get("summary") or "").strip()
+                            pnpm_issues.append(
+                                f"`pnpm install` previously failed {install_fail_count} time(s){': ' + install_summary if install_summary else ''}"
+                            )
+                        break
+            if pnpm_issues:
+                digest_source = f"{project_root_hint}\n{command_text}\n{entry.get('cwd') or ''}"
+                guard_digest = hashlib.sha256(digest_source.encode('utf-8', 'ignore')).hexdigest()[:12]
+                encoded_command = base64.b64encode(command_text.encode('utf-8')).decode('ascii') if command_text else ""
+                guard_message = ' '.join(pnpm_issues)
+                encoded_message = base64.b64encode(guard_message.encode('utf-8')).decode('ascii') if guard_message else ""
+                command_guard_lines.append(
+                    f"CMDGUARD	{guard_digest}	0	{len(pnpm_issues)}	{encoded_command}	{encoded_message}"
+                )
+                guard_entries.append({
+                    "command": command_text,
+                    "issues": list(pnpm_issues),
+                })
+        parsed = parse_sed_chunk(command_text)
+        if not parsed:
+            if current_seq:
+                finalize_sequence(current_seq, stream_sequences)
+                current_seq = None
+            continue
+        start = min(parsed["start"], parsed["end"])
+        end = max(parsed["start"], parsed["end"])
+        length = max(0, end - start + 1)
+        if length <= 0:
+            if current_seq:
+                finalize_sequence(current_seq, stream_sequences)
+                current_seq = None
+            continue
+        if current_seq and current_seq["file"] == parsed["file"]:
+            prev = current_seq["entries"][-1]
+            gap = start - prev["end"]
+            if gap <= gap_threshold or start <= prev["end"]:
+                current_seq["entries"].append(
+                    {"start": start, "end": end, "command": entry["command"], "length": length}
+                )
+                current_seq["coverage_start"] = min(current_seq["coverage_start"], start)
+                current_seq["coverage_end"] = max(current_seq["coverage_end"], end)
+                current_seq["total_lines"] += length
+                current_seq["count"] += 1
+                continue
+            finalize_sequence(current_seq, stream_sequences)
+        current_seq = {
+            "file": parsed["file"],
+            "entries": [{"start": start, "end": end, "command": entry["command"], "length": length}],
+            "coverage_start": start,
+            "coverage_end": end,
+            "total_lines": length,
+            "count": 1,
+        }
+    if current_seq:
+        finalize_sequence(current_seq, stream_sequences)
+
+    file_cache_data = {}
+    if file_cache_path:
+        try:
+            contents = file_cache_path.read_text(encoding="utf-8")
+            file_cache_data = json.loads(contents) if contents.strip() else {}
+            if not isinstance(file_cache_data, dict):
+                file_cache_data = {}
+        except Exception:
+            file_cache_data = {}
+
+    for entry in command_sequence:
+        parsed_read = parse_file_read(entry.get("command"), entry.get("cwd") or "")
+        if not parsed_read:
+            continue
+        digest_source_parts = [
+            parsed_read.get("path", ""),
+            parsed_read.get("mode", ""),
+            str(parsed_read.get("range") or "full"),
+            str(parsed_read.get("mtime_ns") or 0),
+        ]
+        digest_source = "::".join(digest_source_parts)
+        digest = hashlib.sha256(digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
+        existing_entry = None
+        if file_cache_data:
+            existing_entry = file_cache_data.get(digest)
+        prev_count = 0
+        repeat_flag = False
+        if isinstance(existing_entry, dict):
+            try:
+                prev_count = int(existing_entry.get("count") or 0)
+            except Exception:
+                prev_count = 0
+            repeat_flag = prev_count > 0
+        new_count = prev_count + 1
+        record_entry = existing_entry or {}
+        if not record_entry.get("first_seen"):
+            record_entry["first_seen"] = timestamp
+        record_entry["last_seen"] = timestamp
+        record_entry["path"] = parsed_read.get("path")
+        record_entry["rel_path"] = parsed_read.get("rel_path")
+        record_entry["range"] = parsed_read.get("range")
+        record_entry["mode"] = parsed_read.get("mode")
+        record_entry["count"] = new_count
+        record_entry["mtime_ns"] = parsed_read.get("mtime_ns")
+        record_entry["size"] = parsed_read.get("size")
+        record_entry["summary"] = parsed_read.get("summary")
+        record_entry["excerpt"] = parsed_read.get("excerpt")
+        record_entry["last_task"] = task
+        rel_hint = record_entry.get("rel_path") or parsed_read.get("rel_path") or ""
+        abs_hint = record_entry.get("path") or parsed_read.get("path") or ""
+        build_artifact = False
+        if rel_hint and is_build_artifact_path(rel_hint):
+            build_artifact = True
+        elif abs_hint:
+            try:
+                abs_path_obj = pathlib.Path(abs_hint)
+                if project_root_path:
+                    try:
+                        rel_from_root = abs_path_obj.resolve().relative_to(project_root_path)
+                        if is_build_artifact_path(str(rel_from_root)):
+                            build_artifact = True
+                    except Exception:
+                        if is_build_artifact_path(str(abs_path_obj)):
+                            build_artifact = True
+                else:
+                    if is_build_artifact_path(str(abs_path_obj)):
+                        build_artifact = True
+            except Exception:
+                build_artifact = False
+        if build_artifact:
+            record_entry["category"] = "build-artifact"
+            parsed_read["category"] = "build-artifact"
+            parsed_read["excerpt"] = ""
+            record_entry["excerpt"] = ""
+        file_cache_data[digest] = record_entry
+        summary_text = parsed_read.get("summary") or ""
+        excerpt_text = parsed_read.get("excerpt") or ""
+        encoded_summary = base64.b64encode(summary_text.encode("utf-8")).decode("ascii")
+        encoded_excerpt = base64.b64encode(excerpt_text.encode("utf-8")).decode("ascii") if excerpt_text else ""
+        repeat_flag_int = 1 if repeat_flag else 0
+        command_file_lines.append(
+            f"CMDFILE\t{digest}\t{repeat_flag_int}\t{new_count}\t{encoded_summary}\t{encoded_excerpt}"
+        )
+
+    scan_cache_data = {}
+    if scan_cache_path:
+        try:
+            contents = scan_cache_path.read_text(encoding="utf-8")
+            scan_cache_data = json.loads(contents) if contents.strip() else {}
+            if not isinstance(scan_cache_data, dict):
+                scan_cache_data = {}
+        except Exception:
+            scan_cache_data = {}
+
+    for entry in command_sequence:
+        classification = classify_directory_crawl(entry.get("command") or "")
+        if not classification:
+            continue
+        digest_source = f"{project_root_hint}\n{entry.get('command') or ''}\n{entry.get('cwd') or ''}"
+        digest = hashlib.sha256(digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
+        prev_count = 0
+        repeat_flag = False
+        existing_entry = None
+        if scan_cache_data:
+            existing_entry = scan_cache_data.get(digest)
+            if isinstance(existing_entry, dict):
+                try:
+                    prev_count = int(existing_entry.get("count") or 0)
+                except Exception:
+                    prev_count = 0
+                repeat_flag = prev_count > 0
+            else:
+                existing_entry = None
+        new_count = prev_count + 1
+        record_entry = existing_entry or {}
+        if not record_entry.get("first_seen"):
+            record_entry["first_seen"] = timestamp
+        record_entry["last_seen"] = timestamp
+        command_text = entry.get("command") or ""
+        record_entry["command"] = command_text
+        cwd_raw = entry.get("cwd") or ""
+        record_entry["cwd"] = cwd_raw
+        cwd_display = cwd_raw
+        if project_root_path:
+            try:
+                resolved_cwd = resolve_workdir(cwd_raw, project_root_path)
+            except Exception:
+                resolved_cwd = None
+            if resolved_cwd:
+                try:
+                    rel_cwd = resolved_cwd.relative_to(project_root_path)
+                    cwd_display = "." if str(rel_cwd) in {"", "."} else str(rel_cwd)
+                except Exception:
+                    try:
+                        cwd_display = str(resolved_cwd)
+                    except Exception:
+                        cwd_display = cwd_raw
+        record_entry["cwd_display"] = cwd_display
+        record_entry["count"] = new_count
+        record_entry["message"] = classification
+        output_lines = entry.get("output_lines") or []
+        try:
+            line_count = int(entry.get("output_line_count") or len(output_lines))
+        except Exception:
+            line_count = len(output_lines)
+        truncated_flag = bool(entry.get("output_truncated"))
+        if output_lines:
+            max_preview_lines = 12
+            preview_lines = []
+            for raw_line in output_lines[:max_preview_lines]:
+                preview_lines.append((raw_line or "").strip())
+            record_entry["lines"] = preview_lines
+            record_entry["line_count"] = line_count
+            record_entry["truncated"] = int(truncated_flag or len(output_lines) > max_preview_lines)
+            preview_text = (entry.get("output") or "\n".join(preview_lines)).strip()
+            if len(preview_text) > 480:
+                preview_text = preview_text[:477] + "..."
+                record_entry["truncated"] = 1
+            record_entry["preview"] = preview_text
+        else:
+            if "lines" not in record_entry:
+                record_entry["lines"] = []
+            if "line_count" not in record_entry or line_count:
+                record_entry["line_count"] = line_count
+            if truncated_flag:
+                record_entry["truncated"] = 1
+            if "preview" not in record_entry:
+                record_entry["preview"] = ""
+        scan_cache_data[digest] = record_entry
+        encoded_command = base64.b64encode(command_text.encode("utf-8")).decode("ascii") if command_text else ""
+        encoded_message = base64.b64encode(classification.encode("utf-8")).decode("ascii")
+        repeat_flag_int = 1 if repeat_flag else 0
+        command_scan_lines.append(
+            f"CMDSCAN\t{digest}\t{repeat_flag_int}\t{new_count}\t{encoded_command}\t{encoded_message}"
+        )
+
+    if scan_cache_path:
+        if len(scan_cache_data) > 80:
+            sorted_items = sorted(
+                scan_cache_data.items(),
+                key=lambda item: item[1].get("last_seen", ""),
+                reverse=True,
+            )
+            scan_cache_data = dict(sorted_items[:80])
+        try:
+            scan_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            scan_cache_path.write_text(json.dumps(scan_cache_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def remediation_message(command_text, failure_count=1, exit_code=None):
+        cmd = (command_text or "").strip()
+        lower = cmd.lower()
+        base = "Investigate the failure output above and fix the root cause."
+        if "pnpm" in lower and "build" in lower:
+            base = "Review the pnpm build errors and update the source code or configuration."
+        elif "pnpm" in lower and "test" in lower:
+            base = "Fix the failing tests or prerequisites before running this test command again."
+        elif "pnpm" in lower and "install" in lower:
+            base = "Resolve the installation issue (dependency or network) before retrying `pnpm install`."
+        elif "pnpm" in lower:
+            base = "Resolve the pnpm command failure before rerunning."
+        elif "npm" in lower and "run" in lower:
+            base = "Fix the npm script failure before rerunning the command." 
+        elif lower.startswith("go test") or " go test" in lower:
+            base = "Correct the Go test failure before re-running `go test`."
+        elif "pytest" in lower:
+            base = "Fix the pytest errors before rerunning the tests."
+        elif "make " in lower:
+            base = "Address the make target failure before rerunning."
+        if failure_count and failure_count > 1:
+            suffix = f" It has already failed {failure_count} time(s); do not rerun until the fix is applied and documented."
+        else:
+            suffix = " Do not rerun until the fix is applied and documented."
+        return base + suffix
+
+    if failures:
+        cache_data = dict(cached_failure_cache)
+        for digest, entry in failures.items():
+            summary_line = entry.get("summary") or ""
+            summary_line = re.sub(r'\s+\n', '\n', summary_line)
+            summary_line = re.sub(r'\n\s+', '\n', summary_line).strip()
+            entry["summary"] = summary_line
+            if cmd_cache_path:
+                existing = cache_data.get(digest)
+                if isinstance(existing, dict):
+                    prev_count = int(existing.get("count", 0))
+                    existing["count"] = prev_count + entry["count"]
+                    existing["last_seen"] = timestamp
+                    existing["last_summary"] = summary_line
+                    existing["command"] = entry["command"]
+                    existing["exit"] = entry["exit"]
+                    if "first_seen" not in existing:
+                        existing["first_seen"] = timestamp
+                    entry["repeat"] = prev_count > 0
+                    entry["total_failures"] = existing["count"]
+                else:
+                    cache_data[digest] = {
+                        "command": entry["command"],
+                        "exit": entry["exit"],
+                        "summary": summary_line,
+                        "count": entry["count"],
+                        "first_seen": timestamp,
+                        "last_seen": timestamp,
+                        "last_summary": summary_line,
+                    }
+                    entry["repeat"] = False
+                    entry["total_failures"] = entry["count"]
+            else:
+                entry["repeat"] = False
+                entry["total_failures"] = entry["count"]
+
+        if cmd_cache_path:
+            if len(cache_data) > 50:
+                sorted_items = sorted(
+                    cache_data.items(),
+                    key=lambda item: item[1].get("last_seen", ""),
+                    reverse=True,
+                )
+                cache_data = dict(sorted_items[:50])
+            try:
+                cmd_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cmd_cache_path.write_text(json.dumps(cache_data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+        guard_failure_commands = set()
+        for entry in failures.values():
+            summary_single = entry.get("summary") or ""
+            summary_single = re.sub(r'\s+', ' ', summary_single).strip()
+            if len(summary_single) > 240:
+                summary_single = summary_single[:237] + "..."
+            encoded_command = base64.b64encode(entry["command"].encode("utf-8")).decode("ascii")
+            encoded_summary = base64.b64encode(summary_single.encode("utf-8")).decode("ascii") if summary_single else ""
+            repeat_flag = 1 if entry.get("repeat") else 0
+            total_failures = entry.get("total_failures", entry["count"])
+            remediation_note = remediation_message(entry.get("command"), total_failures, entry.get("exit"))
+            command_text_clean = (entry.get("command") or "").strip()
+                if command_text_clean:
+                    failure_remediation_notes[command_text_clean] = remediation_note
+                    if command_text_clean not in guard_failure_commands:
+                        issues = [remediation_note]
+                        if summary_single:
+                            issues.append(f"Last failure: {summary_single}")
+                        guard_digest_source = f"{project_root_hint}\n{command_text_clean}\nremediation"
+                        guard_digest = hashlib.sha256(guard_digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
+                        encoded_guard_command = base64.b64encode(command_text_clean.encode("utf-8")).decode("ascii")
+                        encoded_guard_message = base64.b64encode("; ".join(issues).encode("utf-8")).decode("ascii")
+                        repeat_flag_guard = 1 if total_failures and total_failures > 1 else 0
+                        command_guard_lines.append(
+                            f"CMDGUARD\t{guard_digest}\t{repeat_flag_guard}\t{len(issues)}\t{encoded_guard_command}\t{encoded_guard_message}"
+                        )
+                        guard_entries.append({
+                            "command": command_text_clean,
+                            "issues": issues,
+                        })
+                        guard_failure_commands.add(command_text_clean)
+            command_failure_lines.append(
+                f"CMDFAIL\t{repeat_flag}\t{total_failures}\t{entry['exit']}\t{entry['digest']}\t{encoded_command}\t{encoded_summary}"
+            )
+
+    if stream_sequences:
+        stream_cache_data = {}
+        if stream_cache_path:
+            try:
+                contents = stream_cache_path.read_text(encoding="utf-8")
+                stream_cache_data = json.loads(contents) if contents.strip() else {}
+                if not isinstance(stream_cache_data, dict):
+                    stream_cache_data = {}
+            except Exception:
+                stream_cache_data = {}
+        for seq in stream_sequences:
+            coverage_start = seq["coverage_start"]
+            coverage_end = seq["coverage_end"]
+            coverage_lines = seq["coverage_lines"]
+            command_examples = [item["command"] for item in seq["entries"][:3]]
+            summary_text = (
+                f"{seq['file']}: sequential sed chunks {coverage_start}-{coverage_end} covering ~{coverage_lines} lines via {seq['count']} commands."
+            )
+            if command_examples:
+                summary_text += f" Example: {command_examples[0]}"
+                if len(command_examples) > 1:
+                    summary_text += f" → {command_examples[1]}"
+            advice_text = (
+                f"Switch to targeted search (e.g. rg -n '<term>' {seq['file']} -C20) or "
+                f"use gpt-creator show-file {seq['file']} --range {coverage_start}:{min(coverage_end, coverage_start + 200)} "
+                "to inspect slices without streaming entire files."
+            )
+            digest_source = f"{project_root_hint}\n{seq['file']}\n{coverage_start}-{coverage_end}"
+            digest = hashlib.sha256(digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
+            prev_count = 0
+            repeat_flag = False
+            existing_entry = None
+            if stream_cache_path:
+                existing_entry = stream_cache_data.get(digest)
+                if isinstance(existing_entry, dict):
+                    try:
+                        prev_count = int(existing_entry.get("count", 0))
+                    except Exception:
+                        prev_count = 0
+                    repeat_flag = prev_count > 0
+                else:
+                    existing_entry = None
+            new_count = prev_count + 1
+            if stream_cache_path:
+                record_entry = existing_entry or {}
+                if not record_entry.get("first_seen"):
+                    record_entry["first_seen"] = timestamp
+                record_entry["last_seen"] = timestamp
+                record_entry["file"] = seq["file"]
+                record_entry["coverage"] = [coverage_start, coverage_end]
+                record_entry["count"] = new_count
+                record_entry["summary"] = summary_text
+                record_entry["advice"] = advice_text
+                record_entry["commands"] = command_examples
+                stream_cache_data[digest] = record_entry
+            encoded_summary = base64.b64encode(summary_text.encode("utf-8")).decode("ascii")
+            encoded_advice = base64.b64encode(advice_text.encode("utf-8")).decode("ascii") if advice_text else ""
+            repeat_flag_int = 1 if repeat_flag else 0
+            command_stream_lines.append(
+                f"CMDSTREAM\t{digest}\t{repeat_flag_int}\t{new_count}\t{encoded_summary}\t{encoded_advice}"
+            )
+        if stream_cache_path:
+            if len(stream_cache_data) > 50:
+                sorted_items = sorted(
+                    stream_cache_data.items(),
+                    key=lambda item: item[1].get("last_seen", ""),
+                    reverse=True,
+                )
+                stream_cache_data = dict(sorted_items[:50])
+            try:
+                stream_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                stream_cache_path.write_text(json.dumps(stream_cache_data, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+    if file_cache_path:
+        if len(file_cache_data) > 120:
+            sorted_items = sorted(
+                file_cache_data.items(),
+                key=lambda item: item[1].get("last_seen", ""),
+                reverse=True,
+            )
+            file_cache_data = dict(sorted_items[:120])
+        try:
+            file_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            file_cache_path.write_text(json.dumps(file_cache_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
 usage_path.parent.mkdir(parents=True, exist_ok=True)
 with usage_path.open("a", encoding="utf-8") as fh:
     fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
     fh.write("\n")
+
+for entry_line in command_failure_lines:
+    print(entry_line)
+
+for entry_line in command_stream_lines:
+    print(entry_line)
+
+for entry_line in command_scan_lines:
+    print(entry_line)
+
+for entry_line in command_guard_lines:
+    print(entry_line)
+
+for entry_line in command_file_lines:
+    print(entry_line)
+
+if fields:
+    prompt_value = int(fields.get("prompt_tokens") or 0)
+    completion_value = int(fields.get("completion_tokens") or 0)
+    total_value = int(fields.get("total_tokens") or (prompt_value + completion_value))
+    print(f"USAGE\t{prompt_value}\t{completion_value}\t{total_value}")
 
 if limit_message:
     print(f"LIMIT_DETECTED\t{limit_message}")
@@ -1425,12 +3286,204 @@ PY
   then
     py_output="$(<"$tmp_output")"
     rm -f "$tmp_output" || true
-    if [[ "$py_output" == LIMIT_DETECTED$'\t'* ]]; then
-      GC_CODEX_USAGE_LIMIT_REACHED=1
-      GC_CODEX_USAGE_LIMIT_MESSAGE="${py_output#LIMIT_DETECTED$'\t'}"
-    elif [[ "$py_output" == "LIMIT_DETECTED" ]]; then
-      GC_CODEX_USAGE_LIMIT_REACHED=1
-      GC_CODEX_USAGE_LIMIT_MESSAGE=""
+    if [[ -n "$py_output" ]]; then
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        case "$line" in
+          LIMIT_DETECTED$'\t'*)
+            GC_CODEX_USAGE_LIMIT_REACHED=1
+            GC_CODEX_USAGE_LIMIT_MESSAGE="${line#LIMIT_DETECTED$'\t'}"
+            ;;
+          LIMIT_DETECTED)
+            GC_CODEX_USAGE_LIMIT_REACHED=1
+            GC_CODEX_USAGE_LIMIT_MESSAGE=""
+            ;;
+          USAGE$'\t'*)
+            IFS=$'\t' read -r _ prompt_val completion_val total_val <<<"$line"
+            if [[ "$prompt_val" =~ ^[0-9]+$ ]]; then
+              GC_LAST_CODEX_PROMPT_TOKENS=$((prompt_val))
+            else
+              GC_LAST_CODEX_PROMPT_TOKENS=0
+            fi
+            if [[ "$completion_val" =~ ^[0-9]+$ ]]; then
+              GC_LAST_CODEX_COMPLETION_TOKENS=$((completion_val))
+            else
+              GC_LAST_CODEX_COMPLETION_TOKENS=0
+            fi
+            if [[ "$total_val" =~ ^[0-9]+$ ]]; then
+              GC_LAST_CODEX_TOTAL_TOKENS=$((total_val))
+            else
+              GC_LAST_CODEX_TOTAL_TOKENS=$((GC_LAST_CODEX_PROMPT_TOKENS + GC_LAST_CODEX_COMPLETION_TOKENS))
+            fi
+            ;;
+          CMDFAIL$'\t'*)
+            local rest="${line#CMDFAIL$'\t'}"
+            local repeat_flag total_fail exit_status digest encoded_command encoded_summary
+            IFS=$'\t' read -r repeat_flag total_fail exit_status digest encoded_command encoded_summary <<<"$rest"
+            local command_text summary_text
+            command_text="$(gc_decode_base64 "${encoded_command:-}")"
+            summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
+            command_text="${command_text//$'\r'/ }"
+            command_text="${command_text//$'\n'/ }"
+            summary_text="${summary_text//$'\r'/ }"
+            summary_text="${summary_text//$'\n'/ }"
+            command_text="${command_text#"${command_text%%[![:space:]]*}"}"
+            command_text="${command_text%"${command_text##*[![:space:]]}"}"
+            summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
+            summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
+            if [[ ${#summary_text} -gt 160 ]]; then
+              summary_text="${summary_text:0:157}..."
+            fi
+            if [[ "$repeat_flag" == "1" && -n "$digest" ]]; then
+              if [[ "$GC_COMMAND_FAILURE_WARN_DIGESTS" != *"|$digest|"* ]]; then
+                if [[ -n "$command_text" ]]; then
+                  warn "Repeated command failure detected (x${total_fail}): ${command_text}"
+                else
+                  warn "Repeated command failure detected (x${total_fail})."
+                fi
+                if [[ -n "$summary_text" ]]; then
+                  warn "  Last failure: ${summary_text}"
+                fi
+                GC_COMMAND_FAILURE_WARN_DIGESTS+="|$digest|"
+              fi
+            fi
+            ;;
+          CMDSTREAM$'\t'*)
+            local rest="${line#CMDSTREAM$'\t'}"
+            local digest repeat_flag total_seen encoded_summary encoded_advice
+            IFS=$'\t' read -r digest repeat_flag total_seen encoded_summary encoded_advice <<<"$rest"
+            local summary_text advice_text
+            summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
+            advice_text="$(gc_decode_base64 "${encoded_advice:-}")"
+            summary_text="${summary_text//$'\r'/ }"
+            summary_text="${summary_text//$'\n'/ }"
+            advice_text="${advice_text//$'\r'/ }"
+            advice_text="${advice_text//$'\n'/ }"
+            summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
+            summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
+            advice_text="${advice_text#"${advice_text%%[![:space:]]*}"}"
+            advice_text="${advice_text%"${advice_text##*[![:space:]]}"}"
+            if [[ "$GC_COMMAND_STREAM_WARN_DIGESTS" != *"|$digest|"* ]]; then
+              local repeat_note=""
+              if [[ "$repeat_flag" == "1" ]]; then
+                repeat_note=" (repeat)"
+              fi
+              warn "Sequential sed/cat streaming detected${repeat_note}: ${summary_text}"
+              if [[ -n "$advice_text" ]]; then
+                warn "  Recommendation: ${advice_text}"
+              fi
+              if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
+                warn "  Observed ${total_seen} times; pivot to targeted searches to cut token usage."
+              fi
+              GC_COMMAND_STREAM_WARN_DIGESTS+="|$digest|"
+            fi
+            ;;
+          CMDSCAN$'\t'*)
+            local rest="${line#CMDSCAN$'\t'}"
+            local digest repeat_flag total_seen encoded_command encoded_message
+            IFS=$'\t' read -r digest repeat_flag total_seen encoded_command encoded_message <<<"$rest"
+            local command_text message_text
+            command_text="$(gc_decode_base64 "${encoded_command:-}")"
+            message_text="$(gc_decode_base64 "${encoded_message:-}")"
+            command_text="${command_text//$'\r'/ }"
+            command_text="${command_text//$'\n'/ }"
+            message_text="${message_text//$'\r'/ }"
+            message_text="${message_text//$'\n'/ }"
+            command_text="${command_text#"${command_text%%[![:space:]]*}"}"
+            command_text="${command_text%"${command_text##*[![:space:]]}"}"
+            message_text="${message_text#"${message_text%%[![:space:]]*}"}"
+            message_text="${message_text%"${message_text##*[![:space:]]}"}"
+            if [[ "$GC_COMMAND_SCAN_WARN_DIGESTS" != *"|$digest|"* ]]; then
+              local repeat_note=""
+              if [[ "$repeat_flag" == "1" ]]; then
+                repeat_note=" (repeat)"
+              fi
+              warn "Directory crawl detected${repeat_note}: ${command_text:-<command unavailable>}"
+              if [[ -n "$message_text" ]]; then
+                warn "  Reason: ${message_text}"
+              fi
+              if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
+                warn "  Observed ${total_seen} times; declare new focus before exploring other areas."
+              fi
+              GC_COMMAND_SCAN_WARN_DIGESTS+="|$digest|"
+            fi
+            ;;
+          CMDGUARD$'\t'*)
+            local rest="${line#CMDGUARD$'\t'}"
+            local digest repeat_flag issue_count encoded_command encoded_message
+            IFS=$'\t' read -r digest repeat_flag issue_count encoded_command encoded_message <<<"$rest"
+            local command_text message_text
+            command_text="$(gc_decode_base64 "${encoded_command:-}")"
+            message_text="$(gc_decode_base64 "${encoded_message:-}")"
+            command_text="${command_text//$'\r'/ }"
+            command_text="${command_text//$'\n'/ }"
+            message_text="${message_text//$'\r'/ }"
+            message_text="${message_text//$'\n'/ }"
+            command_text="${command_text#"${command_text%%[![:space:]]*}"}"
+            command_text="${command_text%"${command_text##*[![:space:]]}"}"
+            message_text="${message_text#"${message_text%%[![:space:]]*}"}"
+            message_text="${message_text%"${message_text##*[![:space:]]}"}"
+            if [[ "$GC_COMMAND_GUARD_WARN_DIGESTS" != *"|$digest|"* ]]; then
+              warn "Guardrails blocked expensive command: ${command_text:-pnpm}"
+              if [[ -n "$message_text" ]]; then
+                warn "  Fix before retry: ${message_text}"
+              fi
+              if [[ "$issue_count" =~ ^[0-9]+$ && "$issue_count" -gt 1 ]]; then
+                warn "  Multiple pre-check issues detected; update plan/focus once resolved."
+              fi
+              GC_COMMAND_GUARD_WARN_DIGESTS+="|$digest|"
+            fi
+            ;;
+          CMDFILE$'\t'*)
+            local rest="${line#CMDFILE$'\t'}"
+            local digest repeat_flag total_seen encoded_summary encoded_excerpt
+            IFS=$'\t' read -r digest repeat_flag total_seen encoded_summary encoded_excerpt <<<"$rest"
+            local summary_text excerpt_text
+            summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
+            excerpt_text="$(gc_decode_base64 "${encoded_excerpt:-}")"
+            summary_text="${summary_text//$'\r'/ }"
+            summary_text="${summary_text//$'\n'/ }"
+            excerpt_text="${excerpt_text//$'\r'/ }"
+            excerpt_text="${excerpt_text//$'\n'/ }"
+            summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
+            summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
+            excerpt_text="${excerpt_text#"${excerpt_text%%[![:space:]]*}"}"
+            excerpt_text="${excerpt_text%"${excerpt_text##*[![:space:]]}"}"
+            if [[ "$repeat_flag" == "1" ]]; then
+              if [[ "$GC_COMMAND_FILE_WARN_DIGESTS" != *"|$digest|"* ]]; then
+                warn "Repeated file read detected: ${summary_text}"
+                if [[ -n "$excerpt_text" ]]; then
+                  local preview="$excerpt_text"
+                  if [[ ${#preview} -gt 140 ]]; then
+                    preview="${preview:0:137}..."
+                  fi
+                  warn "  Refer to cached excerpt instead of re-running cat/sed: \"${preview}\""
+                else
+                  warn "  Refer to the cached excerpt listed in the prompt instead of re-reading the file."
+                fi
+                if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
+                  warn "  Observed ${total_seen} reads for this slice; reuse the cached snippet unless the file changed."
+                fi
+                GC_COMMAND_FILE_WARN_DIGESTS+="|$digest|"
+              fi
+            else
+              if [[ -n "$summary_text" ]]; then
+                info "Cached file excerpt saved: ${summary_text}"
+              fi
+            fi
+            ;;
+        esac
+      done <<<"$py_output"
+    fi
+    local limit_value="${GC_CODEX_MAX_TOKENS_PER_TASK:-0}"
+    if [[ "$limit_value" =~ ^[0-9]+$ ]]; then
+      limit_value=$((limit_value))
+      if (( limit_value > 0 && GC_LAST_CODEX_TOTAL_TOKENS > limit_value )); then
+        GC_CODEX_USAGE_LIMIT_REACHED=1
+        if [[ -z "${GC_CODEX_USAGE_LIMIT_MESSAGE:-}" ]]; then
+          GC_CODEX_USAGE_LIMIT_MESSAGE="Codex tokens ${GC_LAST_CODEX_TOTAL_TOKENS} exceeded per-task limit ${limit_value}."
+        fi
+      fi
     fi
     rm -f "$log_file" || true
     return 0
@@ -2338,6 +4391,15 @@ gc_build_context_file() {
   local staging_dir="${2:-$GC_STAGING_DIR}"
   local max_lines="${GC_CONTEXT_FILE_LINES:-200}"
   local allow_ui_dump="${GC_CONTEXT_INCLUDE_UI:-0}"
+  local doc_snippet_env="${GC_PROMPT_DOC_SNIPPETS:-}"
+  local doc_snippet_mode=0
+  if [[ -n "$doc_snippet_env" ]]; then
+    case "${doc_snippet_env,,}" in
+      0|false|no) doc_snippet_mode=0 ;;
+      *) doc_snippet_mode=1 ;;
+    esac
+  fi
+  local -A gc_context_pointer_seen=()
   local -a skip_patterns=()
   if declare -p GC_CONTEXT_SKIP_PATTERNS >/dev/null 2>&1; then
     skip_patterns=("${GC_CONTEXT_SKIP_PATTERNS[@]}")
@@ -2368,6 +4430,39 @@ gc_build_context_file() {
       [[ -f "$f" ]] || continue
       local base_name
       base_name="$(basename "$f")"
+
+      local pointer_digest=""
+      if (( doc_snippet_mode )); then
+        pointer_digest="$(GC_CONTEXT_POINTER_FILE="$f" python3 <<'PY'
+import hashlib
+import os
+import pathlib
+
+path = pathlib.Path(os.environ.get("GC_CONTEXT_POINTER_FILE", ""))
+chunk = b""
+try:
+    with path.open("rb") as handle:
+        chunk = handle.read(8192)
+except Exception:
+    chunk = b""
+
+if not chunk:
+    print("")
+else:
+    print(hashlib.sha256(chunk).hexdigest()[:12])
+PY
+)"
+        if [[ -n "$pointer_digest" ]]; then
+          local existing="${gc_context_pointer_seen[$pointer_digest]}"
+          if [[ -n "$existing" ]]; then
+            echo ""
+            echo "----- FILE: ${base_name} -----"
+            echo "(duplicate staged doc skipped; same initial content as ${existing})"
+            continue
+          fi
+          gc_context_pointer_seen[$pointer_digest]="$base_name"
+        fi
+      fi
 
       local skip_file=0
       if ((${#skip_patterns[@]} > 0)); then
@@ -2405,7 +4500,190 @@ gc_build_context_file() {
             ;;
         esac
       fi
-      GC_DUMP_FILE="$f" GC_MAX_LINES="$max_lines" python3 <<'PY'
+      if (( doc_snippet_mode )); then
+        GC_CONTEXT_POINTER_MODE=1 GC_CONTEXT_POINTER_DIGEST="$pointer_digest" GC_DUMP_FILE="$f" GC_MAX_LINES="$max_lines" python3 <<'PY'
+import json
+import os
+import pathlib
+import re
+
+path = pathlib.Path(os.environ.get("GC_DUMP_FILE", ""))
+if not path:
+    raise SystemExit(0)
+
+try:
+    limit = int(os.environ.get("GC_MAX_LINES", "200"))
+except Exception:
+    limit = 200
+
+pointer_mode = os.environ.get("GC_CONTEXT_POINTER_MODE", "").strip().lower() not in {"", "0", "false"}
+
+def format_bytes(num: int) -> str:
+    if num < 0:
+        return f"{num} B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(num)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TB"
+
+if pointer_mode:
+    digest = os.environ.get("GC_CONTEXT_POINTER_DIGEST", "").strip()
+    try:
+        stat = path.stat()
+        size_bytes = stat.st_size
+    except Exception:
+        size_bytes = -1
+
+    preview_lines = []
+    pointer_limit = max(0, min(12, limit))
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for _ in range(pointer_limit):
+                line = handle.readline()
+                if not line:
+                    break
+                preview_lines.append(line.rstrip("\n"))
+    except Exception as exc:
+        print(f"(failed to read staged doc: {exc})")
+        raise SystemExit(0)
+
+    descriptor = path.name
+    if size_bytes >= 0:
+        descriptor += f" — {format_bytes(size_bytes)}"
+    if digest:
+        descriptor += f" (sha256≈{digest})"
+
+    print(f"(context trimmed for doc-snippet mode) {descriptor}")
+    if preview_lines:
+        print("Preview:")
+        for raw_line in preview_lines:
+            clean = raw_line.strip()
+            if len(clean) > 160:
+                clean = clean[:160].rstrip() + " …"
+            if not clean:
+                clean = "(blank line)"
+            print(f"- {clean}")
+    else:
+        print("(no preview available)")
+    raise SystemExit(0)
+
+try:
+    raw = path.read_text(encoding="utf-8", errors="replace")
+except Exception as exc:
+    print(f"(failed to read text: {exc})")
+    raise SystemExit(0)
+
+try:
+    parsed = json.loads(raw)
+    preview = json.dumps(parsed, indent=2)[:4000]
+    print("JSON summary:")
+    print(preview)
+    raise SystemExit(0)
+except Exception:
+    pass
+
+ext = path.suffix.lower()
+css_exts = {".css", ".scss", ".sass", ".less", ".pcss", ".styl"}
+markup_exts = {".html", ".htm", ".vue", ".jsx", ".tsx"}
+
+def emit(lines):
+    if limit > 0 and len(lines) > limit:
+        omitted = len(lines) - limit
+        lines = lines[:limit]
+        lines.append(f"... ({omitted} line(s) truncated) ...")
+    print("\n".join(lines))
+    raise SystemExit(0)
+
+if ext in css_exts:
+    tokens = re.findall(r"--([a-z0-9_-]+)", raw, re.I)
+    unique = sorted({token for token in tokens if token})
+    lines = ["CSS variables (first 40):"]
+    for token in unique[:40]:
+        lines.append(f"- --{token}")
+    if len(unique) > 40:
+        lines.append(f"... ({len(unique) - 40} additional variables omitted)")
+    emit(lines)
+
+if ext in markup_exts:
+    clean = re.sub(r"<script[\s\S]*?</script>", "", raw, flags=re.I)
+    clean = re.sub(r"<style[\s\S]*?</style>", "", clean, flags=re.I)
+    text = re.sub(r"<[^>]+>", " ", clean)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        emit(["(markup collapsed to empty after stripping tags)"])
+    chunks = [text[i:i + 200] for i in range(0, len(text), 200)]
+    lines = ["Markup summary:"] + chunks[:5]
+    if len(chunks) > 5:
+        lines.append(f"... ({len(chunks) - 5} additional chunks omitted)")
+    emit(lines)
+
+lines = raw.splitlines()
+result = []
+max_width = 160
+table_run = 0
+table_notice = False
+sql_insert_run = 0
+sql_notice = False
+
+def truncate(line: str) -> str:
+    if len(line) <= max_width:
+        return line
+    return line[:max_width].rstrip() + " …"
+
+for original in lines:
+    line = original.rstrip()
+    stripped = line.lstrip()
+
+    if not stripped:
+        if not result or result[-1] != "":
+            result.append("")
+        continue
+
+    pipe_count = line.count("|")
+    is_table_like = pipe_count >= 6 or (pipe_count >= 3 and "," in line and len(line) > 80)
+    if is_table_like:
+        table_run += 1
+    else:
+        table_run = 0
+        table_notice = False
+    if is_table_like and table_run > 30:
+        if not table_notice:
+            result.append("... (additional table rows truncated) ...")
+            table_notice = True
+        continue
+
+    upper = stripped.upper()
+    if upper.startswith("INSERT INTO") or upper.startswith("UPDATE "):
+        sql_insert_run += 1
+    else:
+        sql_insert_run = 0
+        sql_notice = False
+    if sql_insert_run > 40:
+        if not sql_notice:
+            result.append("... (repetitive SQL statements truncated) ...")
+            sql_notice = True
+        continue
+
+    line = truncate(line.replace("\t", "  "))
+    result.append(line)
+
+if not result:
+    result = ["(no textual content captured)"]
+
+if limit > 0 and len(result) > limit:
+    omitted = len(result) - limit
+    result = result[:limit]
+    result.append(f"... ({omitted} line(s) truncated) ...")
+
+print("\n".join(result))
+PY
+      else
+        GC_DUMP_FILE="$f" GC_MAX_LINES="$max_lines" python3 <<'PY'
 import json
 import os
 import pathlib
@@ -2519,6 +4797,7 @@ for original in lines:
 
 emit(result or ["(no textual content captured)"])
 PY
+      fi
     done
     shopt -u globstar 2>/dev/null || true
     shopt -u nullglob || true
@@ -2585,6 +4864,9 @@ if not sections:
 
 per_header_cost = 2  # heading + blank separator
 remaining_sections = len(sections)
+seen_digests: set[str] = set()
+duplicate_examples: list[str] = []
+duplicate_count = 0
 
 for index, (name, section_lines) in enumerate(sections, 1):
     if remaining <= 0:
@@ -2593,6 +4875,13 @@ for index, (name, section_lines) in enumerate(sections, 1):
 
     digest_src = "\n".join(section_lines).encode("utf-8", "replace")
     digest = hashlib.sha256(digest_src).hexdigest()[:12]
+    if digest in seen_digests:
+        duplicate_count += 1
+        if len(duplicate_examples) < 4:
+            duplicate_examples.append(name)
+        continue
+    seen_digests.add(digest)
+
     heading = f"### {name} (sha256 {digest})"
     output.append(heading)
     remaining -= 1
@@ -2638,9 +4927,66 @@ for index, (name, section_lines) in enumerate(sections, 1):
         output.append("")
         remaining -= 1
 
+if duplicate_count:
+    suffix = "" if duplicate_count == 1 else "s"
+    message = f"(Skipped {duplicate_count} additional context file{suffix} with duplicate content"
+    if duplicate_examples:
+        shown = ", ".join(duplicate_examples)
+        if duplicate_count > len(duplicate_examples):
+            shown += ", …"
+        message += f": {shown}"
+    message += ")"
+    output.append("")
+    output.append(message)
+
 dest_path.parent.mkdir(parents=True, exist_ok=True)
 dest_path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
 PY
+}
+
+gc_refresh_context_tail() {
+  local context_file="${1:?context file required}"
+  local tail_file="${2:?tail file required}"
+  local mode="${3:-digest}"
+  local limit="${4:-0}"
+
+  [[ -n "$tail_file" ]] || {
+    printf '%s\n' "$mode"
+    return 0
+  }
+
+  if (( limit <= 0 )); then
+    : >"$tail_file"
+    printf '%s\n' "$mode"
+    return 0
+  fi
+
+  local effective_mode="$mode"
+  case "$mode" in
+    digest)
+      if gc_build_context_digest "$context_file" "$tail_file" "$limit"; then
+        printf '%s\n' "$effective_mode"
+        return 0
+      fi
+      warn "Failed to build context digest (limit=${limit}); falling back to raw tail."
+      effective_mode="raw"
+      ;;
+  esac
+
+  case "$effective_mode" in
+    raw)
+      if ! tail -n "$limit" "$context_file" >"$tail_file" 2>/dev/null; then
+        cp "$context_file" "$tail_file"
+      fi
+      ;;
+    *)
+      if ! tail -n "$limit" "$context_file" >"$tail_file" 2>/dev/null; then
+        cp "$context_file" "$tail_file"
+      fi
+      ;;
+  esac
+
+  printf '%s\n' "$effective_mode"
 }
 
 gc_update_work_state() {
@@ -2782,6 +5128,158 @@ if row is not None:
 
 conn.commit()
 conn.close()
+PY
+}
+
+gc_update_throughput_metrics() {
+  local db_path="${1:?tasks database path required}"
+  local action="${2:?throughput action required}"
+  local story_slug="${3:-}"
+  local position="${4:-}"
+  python3 - <<'PY' "$db_path" "$action" "$story_slug" "$position"
+import re
+import sqlite3
+import sys
+import time
+
+db_path, action, story_slug, position = sys.argv[1:5]
+action = (action or "").strip().lower()
+story_slug = (story_slug or "").strip()
+position = (position or "").strip()
+
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+cur = conn.cursor()
+cur.execute('''
+    CREATE TABLE IF NOT EXISTS metadata (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+''')
+
+def get_meta(key, default=None):
+    row = cur.execute('SELECT value FROM metadata WHERE key = ?', (key,)).fetchone()
+    if not row or row['value'] is None:
+        return default
+    return row['value']
+
+def set_meta(key, value):
+    cur.execute('INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)', (key, value))
+
+def meta_float(key, default=0.0):
+    value = get_meta(key, None)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+def meta_int(key, default=0):
+    value = get_meta(key, None)
+    if value is None:
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+def parse_points(raw):
+    if raw is None:
+        return 0.0
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = str(raw).strip()
+    if not text:
+        return 0.0
+    normalized = text.lower().replace(',', '.')
+    match = re.search(r'-?\d+(?:\.\d+)?', normalized)
+    if not match:
+        return 0.0
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return 0.0
+
+now_ts = time.time()
+window_started_at = meta_float('throughput.window_started_at', now_ts)
+if window_started_at <= 0 or window_started_at > now_ts + 315360000:
+    window_started_at = now_ts
+window_points = meta_float('throughput.window_points', 0.0)
+total_points = meta_float('throughput.total_points', 0.0)
+total_seconds = meta_float('throughput.total_seconds', 0.0)
+samples = meta_int('throughput.samples', 0)
+rate = meta_float('throughput.rate_sp_per_hour', 0.0)
+
+points_increment = 0.0
+if action == 'task-complete' and story_slug and position:
+    try:
+        idx = int(position)
+    except ValueError:
+        idx = None
+    if idx is not None:
+        row = cur.execute(
+            'SELECT story_points, estimate, status FROM tasks WHERE story_slug = ? AND position = ?',
+            (story_slug, idx)
+        ).fetchone()
+        if row is not None:
+            status = (row['status'] or '').strip().lower()
+            if status == 'complete':
+                points_increment = parse_points(row['story_points'])
+                if points_increment <= 0:
+                    points_increment = parse_points(row['estimate'])
+                if points_increment < 0:
+                    points_increment = 0.0
+
+if points_increment > 0:
+    window_points += points_increment
+
+elapsed = max(0.0, now_ts - window_started_at)
+threshold = 3600.0
+should_flush = False
+if action == 'flush':
+    if elapsed > 0 or window_points > 0:
+        should_flush = True
+elif elapsed >= threshold:
+    should_flush = True
+
+updated = False
+window_points_before = window_points
+elapsed_before = elapsed
+
+if should_flush and (elapsed > 0 or window_points > 0):
+    total_points += window_points
+    total_seconds += elapsed
+    samples += 1
+    if total_points <= 0 or total_seconds <= 0:
+        rate = 0.0
+    else:
+        rate = (total_points / total_seconds) * 3600.0
+    set_meta('throughput.rate_sp_per_hour', f"{rate:.6f}")
+    set_meta('throughput.last_window_points', f"{window_points:.6f}")
+    set_meta('throughput.last_window_seconds', f"{elapsed:.3f}")
+    window_points = 0.0
+    window_started_at = now_ts
+    updated = True
+
+if action == 'init':
+    window_started_at = now_ts
+    window_points = 0.0
+
+timestamp_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now_ts))
+set_meta('throughput.window_started_at', f"{window_started_at:.3f}")
+set_meta('throughput.window_points', f"{window_points:.6f}")
+set_meta('throughput.total_points', f"{total_points:.6f}")
+set_meta('throughput.total_seconds', f"{total_seconds:.3f}")
+set_meta('throughput.samples', str(max(samples, 0)))
+set_meta('throughput.updated_at', timestamp_iso)
+
+conn.commit()
+conn.close()
+
+if updated:
+    hours = elapsed_before / 3600.0 if elapsed_before > 0 else 0.0
+    print(f"Throughput updated -> {rate:.2f} SP/hour (window: {hours:.2f}h, points: {window_points_before:.2f}, samples: {samples})")
 PY
 }
 
@@ -3378,7 +5876,7 @@ docker_compose() {
       docker-compose -p "$project_name" "$@"
     fi
   else
-    die "docker compose is not available. Install Docker Desktop or docker-compose."
+    die "Docker CLI not available. Install Docker Desktop or docker-compose before running this command."
   fi
 }
 
@@ -5802,54 +8300,15 @@ gc_exec_with_timeout() {
     return 1
   fi
 
-  if (( timeout <= 0 )); then
-    if [[ -n "$log_file" ]]; then
-      if [[ -n "$stdin_file" ]]; then
-        if "${cmd[@]}" <"$stdin_file" 2>&1 | tee "$log_file"; then
-          return 0
-        else
-          local -a pipeline_status=("${PIPESTATUS[@]}")
-          local rc=0
-          for status in "${pipeline_status[@]}"; do
-            if (( status != 0 )); then
-              rc="$status"
-            fi
-          done
-          (( rc == 0 )) && rc=1
-          return "$rc"
-        fi
-      else
-        if "${cmd[@]}" 2>&1 | tee "$log_file"; then
-          return 0
-        else
-          local -a pipeline_status=("${PIPESTATUS[@]}")
-          local rc=0
-          for status in "${pipeline_status[@]}"; do
-            if (( status != 0 )); then
-              rc="$status"
-            fi
-          done
-          (( rc == 0 )) && rc=1
-          return "$rc"
-        fi
-      fi
-    else
-      if [[ -n "$stdin_file" ]]; then
-        "${cmd[@]}" <"$stdin_file"
-      else
-        "${cmd[@]}"
-      fi
-      return "$?"
-    fi
-  fi
-
   python3 - "$timeout" "$stdin_file" "$log_file" "${cmd[@]}" <<'PY'
+import hashlib
 import os
 import select
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 def to_int(value: str) -> int:
     try:
@@ -5878,20 +8337,125 @@ if log_path:
     log_dir = os.path.dirname(log_path)
     if log_dir:
         os.makedirs(log_dir, exist_ok=True)
-    log = open(log_path, "ab", buffering=0)
+    log = open(log_path, "w", encoding="utf-8", buffering=1)
 
-def write_out(data: bytes) -> None:
-    if not data:
+diff_cache = {}
+diff_dir = None
+diff_counter = 0
+capturing_diff = False
+diff_header = ""
+diff_lines = []
+
+def ensure_diff_dir():
+    global diff_dir
+    if diff_dir is None and log_path:
+        base = Path(log_path)
+        diff_dir_path = base.parent / f"{base.name}.diffs"
+        diff_dir_path.mkdir(parents=True, exist_ok=True)
+        diff_dir = diff_dir_path
+    return diff_dir
+
+def emit(text: str) -> None:
+    if not text:
         return
     try:
-        os.write(sys.stdout.fileno(), data)
+        sys.stdout.write(text)
+        sys.stdout.flush()
     except OSError:
         pass
     if log:
         try:
-            log.write(data)
+            log.write(text)
+            log.flush()
         except OSError:
             pass
+
+def is_diff_line(line: str) -> bool:
+    if line == "":
+        return True
+    prefixes = (
+        "diff --git ",
+        "index ",
+        "@@",
+        "--- ",
+        "+++ ",
+        "+",
+        "-",
+        " ",
+        "Binary files ",
+        "No newline at end of file",
+        "rename ",
+        "similarity index",
+        "dissimilarity index",
+        "copy from",
+        "copy to",
+        "new file mode",
+        "deleted file mode",
+        "old mode",
+        "new mode",
+    )
+    return any(line.startswith(prefix) for prefix in prefixes)
+
+def flush_diff():
+    global capturing_diff, diff_header, diff_lines, diff_counter
+    if not diff_header:
+        capturing_diff = False
+        diff_lines = []
+        return
+    diff_text = "".join(diff_lines)
+    digest = hashlib.sha256(diff_text.encode("utf-8")).hexdigest()[:12]
+    diff_dir_path = ensure_diff_dir()
+    base_dir = diff_dir_path.parent if diff_dir_path is not None else os.getcwd()
+    base_dir_str = str(base_dir)
+    if digest in diff_cache:
+        stored_path = diff_cache[digest]
+        if stored_path:
+            rel = os.path.relpath(str(stored_path), base_dir_str)
+            emit(f"{diff_header.strip()} (repeat) see {rel}\n")
+        else:
+            emit(f"{diff_header.strip()} (repeat diff cached earlier)\n")
+    else:
+        if diff_dir_path is not None:
+            diff_counter += 1
+            stored_path = diff_dir_path / f"turn-{diff_counter:03d}-{digest}.patch"
+            stored_path.write_text(diff_text, encoding="utf-8")
+            diff_cache[digest] = stored_path
+            rel = os.path.relpath(str(stored_path), base_dir_str)
+            emit(f"{diff_header.strip()} stored patch {rel}\n")
+        else:
+            diff_cache[digest] = None
+            emit(f"{diff_header.strip()} (diff of {len(diff_text)} bytes captured)\n")
+    capturing_diff = False
+    diff_header = ""
+    diff_lines.clear()
+
+buffer = ""
+
+def process_line(line: str):
+    global capturing_diff, diff_header, diff_lines
+    stripped = line.rstrip("\n")
+    if capturing_diff:
+        if is_diff_line(stripped):
+            diff_lines.append(line)
+            return
+        flush_diff()
+        # fall through to treat current line normally
+    if stripped.lower().startswith("turn diff"):
+        capturing_diff = True
+        diff_header = stripped
+        diff_lines = []
+        return
+    emit(line)
+
+def process_text(text: str):
+    global buffer
+    buffer += text
+    while True:
+        if "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            process_line(line + "\n")
+        else:
+            break
 
 preexec = os.setsid if hasattr(os, "setsid") else None
 
@@ -5905,7 +8469,7 @@ try:
         preexec_fn=preexec,
     )
 except FileNotFoundError:
-    write_out(f"{cmd[0]} not found\n".encode())
+    emit(f"{cmd[0]} not found\n")
     if log:
         log.close()
     sys.exit(127)
@@ -5939,7 +8503,8 @@ try:
         if ready:
             chunk = os.read(fd, 8192)
             if chunk:
-                write_out(chunk)
+                text = chunk.decode("utf-8", errors="replace")
+                process_text(text)
                 last_activity = time.monotonic()
             else:
                 break
@@ -5951,7 +8516,8 @@ try:
             chunk = os.read(fd, 8192)
             if not chunk:
                 break
-            write_out(chunk)
+            text = chunk.decode("utf-8", errors="replace")
+            process_text(text)
 except KeyboardInterrupt:
     proc.terminate()
     raise
@@ -5960,6 +8526,12 @@ finally:
         stdin.close()
 
 proc.stdout.close()
+
+if buffer:
+    process_line(buffer)
+    buffer = ""
+
+flush_diff()
 
 if timed_out:
     try:
@@ -5980,7 +8552,7 @@ if timed_out:
         except ProcessLookupError:
             pass
         proc.wait()
-    write_out(f"\n[gc] Command produced no output for {timeout} seconds\n".encode())
+    emit(f"\n[gc] Command produced no output for {timeout} seconds\n")
     if log:
         log.flush()
         log.close()
@@ -6003,6 +8575,7 @@ codex_call() {
   local task="${1:?task}"; shift || true
   local prompt_dir="${GC_DIR}/prompts"
   mkdir -p "$prompt_dir"
+  GC_CODEX_CALL_TOKEN_ACCUM=0
 
   local prompt_file=""
   local output_file=""
@@ -6083,6 +8656,10 @@ PROMPT
           cmd_status=$?
         fi
         gc_record_codex_usage "$codex_log" "$task" "$model" "$prompt_file" "$cmd_status"
+        local attempt_tokens="${GC_LAST_CODEX_TOTAL_TOKENS:-0}"
+        if [[ "$attempt_tokens" =~ ^[0-9]+$ ]]; then
+          GC_CODEX_CALL_TOKEN_ACCUM=$((GC_CODEX_CALL_TOKEN_ACCUM + attempt_tokens))
+        fi
         if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
           return 95
         fi
@@ -6384,6 +8961,7 @@ gc_apply_codex_changes() {
   local project_root="${2:?project root required}"
   python3 - <<'PY' "$output_file" "$project_root"
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -6419,42 +8997,84 @@ if start == -1 or end == -1 or end <= start:
     raise SystemExit("JSON not found in Codex output")
 
 fragment = raw[start:end+1]
+prefix = raw[:start].strip()
+suffix = raw[end+1:].strip()
+has_extra_text = bool(prefix) or bool(suffix)
 
-import re
-fragment = re.sub(r'\\"(?=[}\]\n])', r'\\""', fragment)
-
-while True:
+if has_extra_text:
+    raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
+    raw_dump.parent.mkdir(parents=True, exist_ok=True)
+    raw_dump.write_text(raw, encoding='utf-8')
+    rel_dump = raw_dump
     try:
-        payload = json.loads(fragment)
-        break
-    except json.JSONDecodeError as exc:
-        if 'Invalid \\escape' in exc.msg:
-            fragment = fragment[:exc.pos] + '\\' + fragment[exc.pos:]
-            continue
-        decoder = json.JSONDecoder(strict=False)
+        rel_dump = raw_dump.relative_to(project_root)
+    except ValueError:
+        rel_dump = raw_dump
+    payload = {
+        'plan': [],
+        'changes': [],
+        'commands': [],
+        'notes': [
+            f"Codex output contained extra text outside the JSON envelope; review {rel_dump}."
+        ],
+    }
+    print('STATUS parse-error')
+    print(f"RAW {rel_dump}")
+else:
+    fragment = re.sub(r'\\"(?=[}\]\n])', r'\\""', fragment)
+
+    while True:
         try:
-            payload = decoder.decode(fragment)
+            payload = json.loads(fragment)
             break
-        except json.JSONDecodeError:
-            raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
-            raw_dump.parent.mkdir(parents=True, exist_ok=True)
-            raw_dump.write_text(raw, encoding='utf-8')
-            rel_dump = raw_dump
+        except json.JSONDecodeError as exc:
+            if 'Invalid \\escape' in exc.msg:
+                fragment = fragment[:exc.pos] + '\\' + fragment[exc.pos:]
+                continue
+            decoder = json.JSONDecoder(strict=False)
             try:
-                rel_dump = raw_dump.relative_to(project_root)
-            except ValueError:
+                payload = decoder.decode(fragment)
+                break
+            except json.JSONDecodeError:
+                raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
+                raw_dump.parent.mkdir(parents=True, exist_ok=True)
+                raw_dump.write_text(raw, encoding='utf-8')
                 rel_dump = raw_dump
-            payload = {
-                'plan': [],
-                'changes': [],
-                'commands': [],
-                'notes': [
-                    f"Codex output could not be parsed as JSON; review {rel_dump}."
-                ],
-            }
-            print('STATUS parse-error')
-            print(f"RAW {rel_dump}")
+                try:
+                    rel_dump = raw_dump.relative_to(project_root)
+                except ValueError:
+                    rel_dump = raw_dump
+                payload = {
+                    'plan': [],
+                    'changes': [],
+                    'commands': [],
+                    'notes': [
+                        f"Codex output could not be parsed as JSON; review {rel_dump}."
+                    ],
+                }
+                print('STATUS parse-error')
+                print(f"RAW {rel_dump}")
+                break
+
+focus_targets = payload.get('focus')
+focus_valid = False
+if isinstance(focus_targets, list) and focus_targets:
+    normalized_focus = []
+    for item in focus_targets:
+        if not isinstance(item, str):
             break
+        target = item.strip()
+        if len(target) < 2:
+            break
+        normalized_focus.append(target)
+    else:
+        focus_valid = True
+        focus_targets = normalized_focus
+
+if not focus_valid:
+    print('STATUS parse-error')
+    print('NOTE Focus targets missing or invalid. Add a `focus` array listing the exact files or symbols you will touch, then rerun work-on-tasks.')
+    sys.exit(1)
 
 changes = payload.get('changes') or []
 written = []
@@ -7967,6 +10587,48 @@ def _collect_candidate_files(ref: str):
 
     return candidates
 
+def classify_directory_crawl(command: str) -> Optional[str]:
+    if not command:
+        return None
+    stripped = command.strip()
+    if not stripped:
+        return None
+    tokens = stripped.split()
+    if not tokens:
+        return None
+    cmd = tokens[0]
+    args = tokens[1:]
+    non_option_args = [tok for tok in args if not tok.startswith('-')]
+    if cmd == 'ls':
+        if not non_option_args:
+            return "ls with no explicit target"
+        return None
+    if cmd == 'find':
+        target = non_option_args[0] if non_option_args else ''
+        if not target or target in {'.', './', '..'}:
+            return "find without explicit target"
+        return None
+    if cmd == 'rg':
+        if '--files' in tokens:
+            return "rg --files directory scan"
+        return None
+    if cmd == 'fd':
+        return "fd directory scan"
+    if cmd == 'tree':
+        if not non_option_args:
+            return "tree with no explicit target"
+        return None
+    return None
+
+def resolve_workdir(cwd: str, project_root_path: Optional[pathlib.Path]) -> pathlib.Path:
+    if cwd:
+        candidate = pathlib.Path(cwd)
+        if candidate.is_absolute():
+            return candidate
+        base = project_root_path or pathlib.Path.cwd()
+        return base / candidate
+    return project_root_path or pathlib.Path.cwd()
+
 def _extract_snippet(path: Path, term: str, limit: int):
     if limit <= 0:
         return ([], False)
@@ -8103,69 +10765,492 @@ if sample_create_request:
 if sample_create_response:
     append_sample_section("Sample Create Response", sample_create_response)
 
-doc_snippet_limit = 24 if sample_limit == 0 else max(12, min(30, sample_limit * 2))
-doc_snippets = []
-if doc_snippets_enabled and (staging_root or project_root_path):
-    def _record_snippet(title: str, snippet_lines: list[str], term_label: str) -> None:
-        if not snippet_lines:
-            return
-        digest = hashlib.sha256("\n".join(snippet_lines).encode("utf-8", "replace")).hexdigest()[:12]
-        if digest in seen_digests:
-            return
-        summary = _condense_snippet(snippet_lines, term_label)
-        if not summary:
-            return
-        seen_digests.add(digest)
-        doc_snippets.append({
-            "title": title,
-            "summary": summary,
-            "hash": digest,
-        })
+doc_catalog_entries = []
+doc_catalog_path = os.getenv("GC_DOC_CATALOG_PATH", "").strip()
+doc_catalog_data = {"version": 1, "documents": {}, "snippets": {}}
+doc_catalog_changed = {"value": False}
+if doc_catalog_path:
+    catalog_path_obj = Path(doc_catalog_path)
+    if catalog_path_obj.exists():
+        try:
+            loaded = json.loads(catalog_path_obj.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                docs_section = loaded.get("documents")
+                if isinstance(docs_section, dict):
+                    doc_catalog_data["documents"] = docs_section
+                for key, value in loaded.items():
+                    if key != "documents":
+                        doc_catalog_data[key] = value
+        except Exception:
+            pass
+documents_store = doc_catalog_data.setdefault("documents", {})
+snippet_store = doc_catalog_data.setdefault("snippets", {})
 
-    seen_pairs = set()
-    seen_digests = set()
+def _relative_path_for_prompt(path_obj: Path) -> str:
+    for base in filter(None, [project_root_path, staging_root]):
+        if not base:
+            continue
+        try:
+            return str(path_obj.relative_to(base))
+        except ValueError:
+            continue
+    return str(path_obj)
+
+def _build_doc_entry(path_obj: Path):
+    try:
+        stat = path_obj.stat()
+    except OSError:
+        return None
+    mtime_ns = getattr(stat, "st_mtime_ns", None)
+    if mtime_ns is None:
+        mtime_ns = int(stat.st_mtime * 1_000_000_000)
+    size = int(stat.st_size)
+    try:
+        resolved_str = str(path_obj.resolve())
+    except Exception:
+        resolved_str = str(path_obj)
+    doc_id = "DOC-" + hashlib.sha256(resolved_str.encode("utf-8", "replace")).hexdigest()[:8].upper()
+    existing = documents_store.get(doc_id)
+    if isinstance(existing, dict):
+        try:
+            existing_mtime = int(existing.get("mtime_ns", 0))
+        except Exception:
+            existing_mtime = -1
+        try:
+            existing_size = int(existing.get("size", -1))
+        except Exception:
+            existing_size = -1
+        if existing_mtime == int(mtime_ns) and existing_size == size:
+            entry = existing.copy()
+            entry["doc_id"] = doc_id
+            entry["rel_path"] = entry.get("rel_path") or _relative_path_for_prompt(path_obj)
+            return entry
+    headings = []
+    try:
+        with path_obj.open("r", encoding="utf-8", errors="replace") as handle:
+            for lineno, line in enumerate(handle, start=1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                title = None
+                level = None
+                suffix = path_obj.suffix.lower()
+                if suffix in {".md", ".markdown"}:
+                    match = re.match(r"^(#{1,4})\s+(.*)$", stripped)
+                    if match:
+                        level = len(match.group(1))
+                        title = match.group(2).strip()
+                if title is None:
+                    match = re.match(r"^((?:\d+\.)+\d*|\d+|[A-Z][.)]|[IVXLCM]+\.)\s+(.*)$", stripped)
+                    if match:
+                        title = match.group(2).strip()
+                        level = level or 2
+                if title:
+                    headings.append({
+                        "title": title,
+                        "line": lineno,
+                        "level": int(level or 1),
+                    })
+                if len(headings) >= 80:
+                    break
+    except Exception:
+        headings = []
+    entry = {
+        "doc_id": doc_id,
+        "path": str(path_obj),
+        "rel_path": _relative_path_for_prompt(path_obj),
+        "mtime_ns": int(mtime_ns),
+        "size": size,
+        "headings": headings,
+    }
+    documents_store[doc_id] = {
+        key: value for key, value in entry.items() if key != "doc_id"
+    }
+    doc_catalog_changed["value"] = True
+    return entry
+
+def _load_doc_snippet(path_obj: Path, doc_entry: dict) -> str:
+    doc_id = doc_entry.get("doc_id")
+    if not doc_id:
+        return ""
+    cached = snippet_store.get(doc_id)
+    current_mtime = doc_entry.get("mtime_ns")
+    if isinstance(cached, dict) and cached.get("mtime_ns") == current_mtime:
+        return cached.get("preview") or ""
+    preview_lines: list[str] = []
+    try:
+        with path_obj.open("r", encoding="utf-8", errors="replace") as handle:
+            for idx, line in enumerate(handle):
+                if idx >= 80:
+                    break
+                stripped = line.strip()
+                if stripped:
+                    preview_lines.append(stripped)
+    except Exception:
+        preview_lines = []
+    snippet_text = _condense_snippet(preview_lines, "", max_chars=360)
+    snippet_store[doc_id] = {"preview": snippet_text, "mtime_ns": current_mtime}
+    doc_catalog_changed["value"] = True
+    return snippet_text
+
+if doc_snippets_enabled and (staging_root or project_root_path):
+    seen_paths = set()
     references = _split_items(document_reference)
     endpoints_list = _split_items(endpoints_text)
-    max_snippets = 3
-
+    candidates = []
     for reference in references:
         for candidate in _collect_candidate_files(reference):
-            key = (str(candidate), reference.lower())
-            if key in seen_pairs:
+            try:
+                candidate_resolved = candidate.resolve()
+            except Exception:
+                candidate_resolved = candidate
+            key = str(candidate_resolved)
+            if key in seen_paths:
                 continue
-            snippet_lines, _ = _extract_snippet(candidate, reference, doc_snippet_limit)
-            _record_snippet(f"{candidate.name} — {reference}", snippet_lines, reference)
-            seen_pairs.add(key)
-            if len(doc_snippets) >= max_snippets:
-                break
-        if len(doc_snippets) >= max_snippets:
-            break
+            seen_paths.add(key)
+            candidates.append(candidate_resolved)
+    if staging_root and endpoints_list:
+        openapi_candidates = list(staging_root.glob("openapi.*"))
+        for candidate in openapi_candidates:
+            try:
+                candidate_resolved = candidate.resolve()
+            except Exception:
+                candidate_resolved = candidate
+            key = str(candidate_resolved)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            candidates.append(candidate_resolved)
+    for path_obj in candidates:
+        if not path_obj.exists() or not path_obj.is_file():
+            continue
+        doc_entry = _build_doc_entry(path_obj)
+        if not doc_entry:
+            continue
+        snippet_text = _load_doc_snippet(path_obj, doc_entry)
+        preview_headings = []
+        for heading in doc_entry.get("headings", [])[:12]:
+            title = heading.get("title") or ""
+            line_no = heading.get("line")
+            if line_no:
+                preview_headings.append(f"{title} (line {line_no})")
+            else:
+                preview_headings.append(title)
+        doc_catalog_entries.append({
+            "doc_id": doc_entry["doc_id"],
+            "rel_path": doc_entry["rel_path"],
+            "headings": preview_headings,
+            "snippet": snippet_text,
+        })
 
-    if staging_root and len(doc_snippets) < max_snippets and endpoints_list:
-        openapi_files = list(staging_root.glob("openapi.*"))
-        for endpoint in endpoints_list:
-            for candidate in openapi_files:
-                key = (str(candidate), f"endpoint:{endpoint.lower()}")
-                if key in seen_pairs:
-                    continue
-                snippet_lines, found = _extract_snippet(candidate, endpoint, doc_snippet_limit)
-                label = f"{candidate.name} — endpoint {endpoint}"
-                if not found:
-                    label += " (approximate match)"
-                _record_snippet(label, snippet_lines, endpoint)
-                seen_pairs.add(key)
-                if len(doc_snippets) >= max_snippets:
-                    break
-            if len(doc_snippets) >= max_snippets:
-                break
+if doc_catalog_path and doc_catalog_changed["value"]:
+    try:
+        Path(doc_catalog_path).write_text(json.dumps(doc_catalog_data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
-if doc_snippets:
+if doc_catalog_entries:
     lines.append("")
-    lines.append("## Referenced Docs")
-    for snippet in doc_snippets:
-        lines.append(f"### {snippet['title']} (sha256 {snippet['hash']})")
-        lines.append(f"- {snippet['summary']}")
+    lines.append("## Documentation Catalog")
+    lines.append("Use the catalog below to pick a section, then run `gpt-creator show-file <path> --range START:END` for a narrow excerpt. Avoid cat/sed on these manuals.")
+    for entry in doc_catalog_entries[:6]:
+        rel_path = entry['rel_path']
+        lines.append(f"- {entry['doc_id']} — {rel_path}")
+        headings_preview = entry.get("headings") or []
+        if headings_preview:
+            lines.append("  Sections:")
+            for heading in headings_preview[:6]:
+                lines.append(f"    • {heading}")
+        else:
+            lines.append(f"  (No headings detected; use `gpt-creator show-file {rel_path} --range START:END` to inspect a specific slice.)")
+        snippet_text = (entry.get("snippet") or "").strip()
+        if snippet_text:
+            snippet_clean = _normalise_space(snippet_text)[:280].rstrip()
+            lines.append(f"  Snippet: {snippet_clean}")
         lines.append("")
+
+command_failure_cache = os.getenv("GC_COMMAND_FAILURE_CACHE", "").strip()
+failure_entries = []
+if command_failure_cache:
+    cache_path = Path(command_failure_cache)
+    if cache_path.exists():
+        try:
+            cache_raw = cache_path.read_text(encoding='utf-8')
+            cache_data = json.loads(cache_raw) if cache_raw.strip() else {}
+        except Exception:
+            cache_data = {}
+        if isinstance(cache_data, dict):
+            for value in cache_data.values():
+                try:
+                    failure_count = int(value.get("count") or 0)
+                except Exception:
+                    failure_count = 0
+                if failure_count < 2:
+                    continue
+                command_text = str(value.get("command") or "").strip()
+                if not command_text:
+                    continue
+                summary_text = (value.get("last_summary") or value.get("summary") or "").strip()
+                summary_text = re.sub(r'\s+', ' ', summary_text)
+                exit_code_val = value.get("exit")
+                last_seen_val = value.get("last_seen") or ""
+                failure_entries.append((last_seen_val, failure_count, exit_code_val, command_text, summary_text))
+            failure_entries.sort(key=lambda item: item[0], reverse=True)
+
+if failure_entries:
+    lines.append("")
+    lines.append("## Known Command Failures")
+    lines.append("The following commands have already failed; do not rerun them until the underlying issue is addressed. Summarise the cached failure instead of executing the command again.")
+    max_failures = 4
+    for _, failure_count, exit_code_val, command_text, summary_text in failure_entries[:max_failures]:
+        exit_label = f"exit {exit_code_val}" if exit_code_val not in (None, "", 0) else "failed"
+        plural = "s" if failure_count != 1 else ""
+        if summary_text and len(summary_text) > 200:
+            summary_text = summary_text[:197] + "..."
+        suffix = f" — {summary_text}" if summary_text else ""
+        lines.append(f"- `{command_text}` ({exit_label}, {failure_count} attempt{plural}){suffix}")
+        remediation_note = failure_remediation_notes.get(command_text.strip())
+        if not remediation_note:
+            remediation_note = remediation_message(command_text, failure_count, exit_code_val)
+        if remediation_note:
+            lines.append(f"  -> {remediation_note}")
+
+stream_cache = os.getenv("GC_COMMAND_STREAM_CACHE", "").strip()
+stream_entries = []
+if stream_cache:
+    stream_path = Path(stream_cache)
+    if stream_path.exists():
+        try:
+            stream_raw = stream_path.read_text(encoding="utf-8")
+            stream_data = json.loads(stream_raw) if stream_raw.strip() else {}
+        except Exception:
+            stream_data = {}
+        if isinstance(stream_data, dict):
+            sorted_entries = sorted(
+                stream_data.values(),
+                key=lambda item: item.get("last_seen", ""),
+                reverse=True,
+            )
+            for entry in sorted_entries[:4]:
+                summary_text = (entry.get("summary") or "").strip()
+                advice_text = (entry.get("advice") or "").strip()
+                try:
+                    occurrences = int(entry.get("count") or 0)
+                except Exception:
+                    occurrences = 0
+                if summary_text:
+                    summary_text = re.sub(r"\s+", " ", summary_text)
+                    advice_text = re.sub(r"\s+", " ", advice_text)
+                    stream_entries.append((summary_text, advice_text, occurrences))
+
+scan_cache = os.getenv("GC_COMMAND_SCAN_CACHE", "").strip()
+scan_entries = []
+if scan_cache:
+    scan_path = Path(scan_cache)
+    if scan_path.exists():
+        try:
+            scan_raw = scan_path.read_text(encoding="utf-8")
+            scan_data = json.loads(scan_raw) if scan_raw.strip() else {}
+        except Exception:
+            scan_data = {}
+        if isinstance(scan_data, dict):
+            sorted_scans = sorted(
+                scan_data.values(),
+                key=lambda item: item.get("last_seen", ""),
+                reverse=True,
+            )
+            for entry in sorted_scans[:4]:
+                command_text = (entry.get("command") or "").strip()
+                preview_lines = entry.get("lines") or []
+                if not command_text or not preview_lines:
+                    continue
+                cwd_display = (entry.get("cwd_display") or entry.get("cwd") or "").strip()
+                message_text = (entry.get("message") or "").strip()
+                try:
+                    occurrences = int(entry.get("count") or 0)
+                except Exception:
+                    occurrences = 0
+                try:
+                    line_count_val = int(entry.get("line_count") or len(preview_lines))
+                except Exception:
+                    line_count_val = len(preview_lines)
+                truncated_flag = bool(entry.get("truncated"))
+                cleaned_lines = []
+                for raw_line in preview_lines[:6]:
+                    cleaned = (raw_line or "").strip()
+                    if cleaned:
+                        cleaned_lines.append(cleaned)
+                if not cleaned_lines and line_count_val > 0:
+                    cleaned_lines.append("(no cached output)")
+                scan_entries.append({
+                    "command": command_text,
+                    "cwd": cwd_display,
+                    "message": message_text,
+                    "occurrences": occurrences,
+                    "lines": cleaned_lines,
+                    "line_count": line_count_val,
+                    "truncated": truncated_flag or (line_count_val > len(cleaned_lines)),
+                })
+
+if stream_entries:
+    lines.append("")
+    lines.append("## Command Efficiency Alerts")
+    lines.append("Recent runs paged files with sequential sed/cat chunks. Pivot to targeted searches or cached viewers instead of streaming large slices.")
+    for summary_text, advice_text, occurrences in stream_entries:
+        entry_line = summary_text
+        if occurrences > 1:
+            entry_line += f" (seen {occurrences}x)"
+        if advice_text:
+            entry_line += f" — {advice_text}"
+        lines.append(f"- {entry_line}")
+
+if scan_entries:
+    lines.append("")
+    lines.append("## Workspace Directory Snapshots")
+    lines.append("Reuse these cached listings instead of rerunning ls/find on the same paths; refresh only if the tree changes.")
+    for entry in scan_entries:
+        summary_line = f"- `{entry['command']}`"
+        details = []
+        cwd_display = entry.get("cwd") or ""
+        if cwd_display:
+            details.append(f"cwd {cwd_display}")
+        occurrences = entry.get("occurrences") or 0
+        if isinstance(occurrences, int) and occurrences > 1:
+            details.append(f"seen {occurrences}x")
+        message_text = entry.get("message") or ""
+        if message_text:
+            details.append(message_text)
+        if details:
+            summary_line += " — " + "; ".join(details)
+        lines.append(summary_line)
+        preview_lines = entry.get("lines") or []
+        if preview_lines:
+            preview_text = ", ".join(preview_lines)
+            if len(preview_text) > 200:
+                preview_text = preview_text[:197] + "..."
+            lines.append(f"    {preview_text}")
+        else:
+            lines.append("    (no cached output)")
+        line_count_val = entry.get("line_count")
+        extra_count = 0
+        if isinstance(line_count_val, int):
+            extra_count = max(0, line_count_val - len(preview_lines))
+        if extra_count > 0:
+            lines.append(f"    ... (+{extra_count} more)")
+        elif entry.get("truncated"):
+            lines.append("    ... (truncated)")
+
+file_cache = os.getenv("GC_COMMAND_FILE_CACHE", "").strip()
+build_entries = []
+file_entries = []
+if file_cache:
+    file_cache_path = Path(file_cache)
+    if file_cache_path.exists():
+        try:
+            file_raw = file_cache_path.read_text(encoding="utf-8")
+            file_data = json.loads(file_raw) if file_raw.strip() else {}
+        except Exception:
+            file_data = {}
+        if isinstance(file_data, dict):
+            sorted_files = sorted(
+                file_data.values(),
+                key=lambda item: item.get("last_seen", ""),
+                reverse=True,
+            )
+            max_file_entries = 6
+            max_build_entries = 4
+            for entry in sorted_files:
+                if len(file_entries) >= max_file_entries and len(build_entries) >= max_build_entries:
+                    break
+                summary_text = (entry.get("summary") or "").strip()
+                excerpt_text = (entry.get("excerpt") or "").strip()
+                try:
+                    occurrences = int(entry.get("count") or 0)
+                except Exception:
+                    occurrences = 0
+                rel_path = (entry.get("rel_path") or entry.get("path") or "").strip()
+                range_value = entry.get("range")
+                mode_value = entry.get("mode")
+                category = entry.get("category") or ""
+                if summary_text:
+                    summary_text = re.sub(r"\s+", " ", summary_text)
+                    excerpt_text = re.sub(r"\s+", " ", excerpt_text)
+                    payload = {
+                        "summary": summary_text,
+                        "excerpt": excerpt_text,
+                        "occurrences": occurrences,
+                        "rel_path": rel_path,
+                        "range": range_value,
+                        "mode": mode_value,
+                    }
+                    if category == "build-artifact":
+                        if len(build_entries) < max_build_entries:
+                            build_entries.append(payload)
+                        continue
+                    file_entries.append(payload)
+
+if build_entries:
+    lines.append("")
+    lines.append("## Build Artifacts (opt-in)")
+    lines.append("Compiled outputs in dist/build/coverage directories are suppressed; inspect sources first and only open these artifacts when absolutely necessary.")
+    for entry in build_entries:
+        summary_text = entry.get("summary") or ""
+        rel_path = entry.get("rel_path") or ""
+        occurrences = entry.get("occurrences") or 0
+        info_line = summary_text
+        if rel_path:
+            info_line += f" [{rel_path}]"
+        if isinstance(occurrences, int) and occurrences > 1:
+            info_line += f" (seen {occurrences}x)"
+        lines.append(f"- {info_line}")
+        if rel_path:
+            lines.append(f"  -> If the compiled output is required, run `gpt-creator show-file \"{rel_path}\" --head 120`; otherwise focus on the source file.")
+
+if file_entries:
+    lines.append("")
+    lines.append("## Cached File Excerpts")
+    lines.append("Reuse the snippets below instead of repeating cat/sed on the same file; refresh only if the file changed. Prefer `gpt-creator show-file <path> --range start:end` or `rg -n '<term>' <path> -C20` to jump to new context.")
+    for entry in file_entries:
+        summary_text = entry.get("summary") or ""
+        excerpt_text = entry.get("excerpt") or ""
+        occurrences = entry.get("occurrences") or 0
+        entry_line = summary_text
+        if isinstance(occurrences, int) and occurrences > 1:
+            entry_line += f" (seen {occurrences}x)"
+        lines.append(f"- {entry_line}")
+        if excerpt_text:
+            preview = excerpt_text.strip()
+            if len(preview) > 160:
+                preview = preview[:157] + "..."
+            lines.append(f"  -> {preview}")
+        rel_path = entry.get("rel_path") or ""
+        range_value = entry.get("range")
+        command_hint = ""
+        if rel_path:
+            if isinstance(range_value, (list, tuple)) and len(range_value) == 2:
+                try:
+                    start_line = int(range_value[0])
+                    end_line = int(range_value[1])
+                except Exception:
+                    start_line = end_line = None
+                if start_line is not None and end_line is not None:
+                    command_hint = f"gpt-creator show-file {rel_path} --range {start_line}:{end_line}"
+            if not command_hint:
+                command_hint = f"gpt-creator show-file {rel_path} --head 120"
+        if command_hint:
+            lines.append(f"  -> Reopen via `{command_hint}`")
+        if rel_path:
+            lines.append(f"  -> Use `rg -n \"<term>\" {rel_path} -C20` to search within this file without re-reading it in full.")
+
+if guard_entries:
+    lines.append("")
+    lines.append("## Command Guard Alerts")
+    lines.append("Resolve these issues before rerunning commands that have already failed; focus on remediation instead of immediate retries.")
+    for entry in guard_entries[:4]:
+        command_label = (entry.get("command") or "pnpm").strip() or "pnpm"
+        issues = entry.get("issues") or []
+        summary = "; ".join(issues) if issues else "Pre-check violation detected."
+        lines.append(f"- {command_label} — {summary}")
 
 lines.append("")
 
@@ -8173,8 +11258,23 @@ lines.append("## Instructions")
 if compact_mode:
     lines.append('- Respond with JSON only: {"plan":[], "changes":[], "commands":[], "notes":[]}.')
     lines.append("- Keep plan bullets brief; record blockers or follow-ups in `notes`.")
+    lines.append("- Keep internal narration tight (≤3 short sentences) and focused on the current task.")
     lines.append("- Apply repository changes directly and confirm acceptance criteria (note gaps in `notes`).")
     lines.append("- Prefer pnpm for scripts; mention commands that cannot run because of network limits.")
+    lines.append("- Limit the plan to at most three short steps and keep every step focused on this deliverable; send unrelated workstreams to `notes` as follow-ups.")
+    lines.append("- Declare your target files/symbols in a `focus` array before running any shell commands; update both the plan and `focus` before touching new areas.")
+    lines.append("- Use `gpt-creator show-file <path> [--range/--head/--tail]` to inspect sources; it caches views and supports `--diff`/`--refresh` instead of re-streaming large files.")
+    lines.append("- Track file views; if you begin paging with sequential sed/cat ranges, pivot to `rg -n <pattern> <path> -C20` or `gpt-creator show-file <path> --range start:end` instead of streaming the file.")
+    lines.append("- When a cached excerpt below covers the context you need, cite it instead of re-running cat/sed; refresh only if the file changed.")
+    lines.append("- Before running `pnpm test` or `pnpm build`, confirm dependencies are installed and prior pnpm commands succeeded; fix failures before retrying.")
+    lines.append("- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; capture the remediation steps instead of rerunning immediately.")
+    lines.append("")
+    lines.append("## Guardrails")
+    lines.append("- Stay within this task's scope; avoid spinning up unrelated plans or subprojects.")
+    lines.append("- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.")
+    lines.append("- Keep command usage lean and focused on assets needed for the acceptance criteria.")
+    lines.append("- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.")
+    lines.append("- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.")
 
     lines.append("")
     lines.append("## Change Format")
@@ -8187,13 +11287,30 @@ else:
     lines.append("- Verify acceptance criteria before finishing.")
     lines.append("- If blocked, explain why and suggest next steps inside the JSON response.")
     lines.append("- Prefer pnpm for install/build scripts; avoid npm/yarn unless explicitly required.")
+    lines.append("- Limit the plan to three or fewer steps dedicated to this deliverable; capture other ideas or future work in `notes`.")
+    lines.append("- Keep internal narration tight (≤3 short sentences) and focused on the current task.")
+    lines.append("- After writing the plan, add a `focus` array listing the exact files/symbols you will touch. Update the plan and `focus` before exploring new areas.")
+    lines.append("- Use `gpt-creator show-file <path>` (with `--diff`/`--refresh` as needed) instead of re-reading the same file segments directly.")
+    lines.append("- Track file reads; when you find yourself chaining `sed` or `cat` ranges across the same file, switch to `rg -n <pattern> <path> -C20` or `gpt-creator show-file <path> --range start:end` for focused context.")
+    lines.append("- Reuse cached excerpts listed below rather than repeating cat/sed; only re-read files when you know the content changed.")
+    lines.append("- Before running `pnpm test` or `pnpm build`, verify dependencies (`pnpm install`) and resolve any previous pnpm failures first.")
+    lines.append("- Review `Known Command Failures` and `Command Guard Alerts`; plan remediation before retrying any listed command.")
     lines.append("- Assume limited network access; note any commands that cannot run for that reason instead of failing silently.")
+
+    lines.append("")
+    lines.append("## Guardrails")
+    lines.append("- Stay strictly within this task's scope; do not re-plan or chase unrelated issues.")
+    lines.append("- Read only the documents or files necessary to satisfy the acceptance criteria.")
+    lines.append("- Avoid long exploratory command sequences; focus on edits and checks that prove the task.")
+    lines.append("- Skip directory sweeps outside your declared `focus` unless you first update the plan and focus targets.")
+    lines.append("- Stop when outputs are ready; surface blockers or context gaps inside the JSON `notes`.")
 
     lines.append("")
     lines.append("## Output JSON schema")
     lines.append("Return a single JSON object with keys exactly as follows (omit null/empty collections when not needed):")
     lines.append("{")
     lines.append("  \"plan\": [\"short step-by-step plan items...\"],")
+    lines.append("  \"focus\": [\"src/foo.ts:loadWidget\", \"pkg/utils.ts\"],")
     lines.append("  \"changes\": [")
     lines.append("    { \"type\": \"patch\", \"path\": \"relative/file/path\", \"diff\": \"UNIFIED_DIFF\" },")
     lines.append("    { \"type\": \"file\", \"path\": \"relative/file/path\", \"content\": \"entire file content\" }")
@@ -8205,6 +11322,7 @@ else:
     lines.append("- Diff entries must be valid unified diffs (git apply compatible) against the current workspace.")
     lines.append("- File entries provide the complete desired file content (for new or fully rewritten files).")
     lines.append("- Do not emit markdown fences, commentary, or additional text outside the JSON object.")
+    lines.append("- Any text before or after the JSON object will be treated as an error and retried automatically.")
 
 if CONTEXT_TAIL_PATH:
     context_path = Path(CONTEXT_TAIL_PATH)
@@ -8353,7 +11471,7 @@ gc_note_requires_followup() {
 
 cmd_work_on_tasks() {
   local root="" resume=1 story_filter="" start_task_ref="" no_verify=0 keep_artifacts=0 memory_cycle=0 force_reset=0
-  local batch_size=0 sleep_between=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=0
+  local batch_size=0 sleep_between=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=1
   local context_mode="digest"
   local -a context_mode_flags=()
   local -a context_mode_choice_flag=()
@@ -8363,6 +11481,11 @@ cmd_work_on_tasks() {
   local -a prompt_mode_flag=()
   local -a sample_lines_flag=()
   local -a doc_snippets_flag=()
+  local token_limit="${GC_CODEX_MAX_TOKENS_PER_TASK:-0}"
+  local token_limit_override=0
+  local idle_timeout="${GC_WORK_ON_TASKS_IDLE_TIMEOUT:-0}"
+  local throughput_checkpoint_interval=300
+  local throughput_next_checkpoint=0
 
   local codex_timeout_default=600
   local codex_timeout_value="${GC_CODEX_EXEC_TIMEOUT:-}"
@@ -8370,7 +11493,9 @@ cmd_work_on_tasks() {
     GC_CODEX_EXEC_TIMEOUT="$codex_timeout_default"
   elif [[ "$codex_timeout_value" =~ ^[0-9]+$ ]]; then
     if (( codex_timeout_value <= 0 )); then
-      warn "GC_CODEX_EXEC_TIMEOUT (idle timeout) must be greater than zero; defaulting to ${codex_timeout_default}s."
+      if [[ -n "${GC_CODEX_EXEC_TIMEOUT_INITIAL:-}" ]]; then
+        warn "GC_CODEX_EXEC_TIMEOUT (idle timeout) must be greater than zero; defaulting to ${codex_timeout_default}s."
+      fi
       GC_CODEX_EXEC_TIMEOUT="$codex_timeout_default"
     fi
   else
@@ -8422,7 +11547,7 @@ cmd_work_on_tasks() {
       --context-skip)
         context_skip_patterns+=("$2")
         context_skip_flags+=(--context-skip "$2")
-        shift
+        shift 2
         ;;
       --prompt-compact)
         prompt_compact=1
@@ -8439,9 +11564,23 @@ cmd_work_on_tasks() {
         doc_snippets_flag=(--context-doc-snippets)
         shift
         ;;
+      --no-context-doc-snippets|--no-doc-snippets)
+        doc_snippets=0
+        doc_snippets_flag=()
+        shift
+        ;;
       --sample-lines)
         sample_lines="${2:-}"
         sample_lines_flag=(--sample-lines "$sample_lines")
+        shift 2
+        ;;
+      --token-limit)
+        token_limit="${2:-}"
+        token_limit_override=1
+        shift 2
+        ;;
+      --idle-timeout)
+        idle_timeout="${2:-}"
         shift 2
         ;;
       --)
@@ -8473,8 +11612,12 @@ Options:
   --prompt-compact     Use the compact instruction/schema block (default setting)
   --prompt-expanded    Restore the legacy verbose instruction/schema block
   --context-doc-snippets
-                        Pull scoped excerpts for referenced docs/endpoints when available
+                        (default) Pull scoped excerpts for referenced docs/endpoints when available
+  --no-context-doc-snippets
+                        Disable doc-snippet mode and include staged docs verbatim
   --sample-lines NUM   Include at most NUM chunks of minified sample payloads (default: 0; increase to view raw content)
+  --token-limit NUM    Stop after a task exceeds NUM Codex tokens (default: 0 → unlimited)
+  --idle-timeout SEC   Abort the run if no forward progress occurs for SEC seconds (default: 0 → disabled)
 EOHELP
         return 0
         ;;
@@ -8493,17 +11636,45 @@ EOHELP
   [[ "$context_lines" =~ ^[0-9]+$ ]] || die "Invalid --context-lines value: ${context_lines}"
   [[ "$context_file_lines" =~ ^[0-9]+$ ]] || die "Invalid --context-file-lines value: ${context_file_lines}"
   [[ "$sample_lines" =~ ^-?[0-9]+$ ]] || die "Invalid --sample-lines value: ${sample_lines}"
+  if [[ -z "$idle_timeout" ]]; then
+    idle_timeout=0
+  elif [[ "$idle_timeout" =~ ^[0-9]+$ ]]; then
+    :
+  else
+    die "Invalid --idle-timeout value: ${idle_timeout}"
+  fi
+  if [[ -z "$token_limit" ]]; then
+    token_limit=0
+  elif [[ "$token_limit" =~ ^[0-9]+$ ]]; then
+    :
+  else
+    if (( token_limit_override )); then
+      die "Invalid --token-limit value: ${token_limit}"
+    else
+      warn "GC_CODEX_MAX_TOKENS_PER_TASK ('${token_limit}') is not numeric; disabling per-task token guard."
+      token_limit=0
+    fi
+  fi
   batch_size=$((batch_size))
   sleep_between=$((sleep_between))
   context_lines=$((context_lines))
   context_file_lines=$((context_file_lines))
   sample_lines=$((sample_lines))
+  token_limit=$((token_limit))
+  idle_timeout=$((idle_timeout))
   (( sample_lines >= 0 )) || die "--sample-lines must be zero or positive (got ${sample_lines})"
   context_mode="${context_mode,,}"
   case "$context_mode" in
     digest|raw) ;;
     *) die "Invalid --context-mode value: ${context_mode}" ;;
   esac
+  export GC_CODEX_MAX_TOKENS_PER_TASK="$token_limit"
+  if (( token_limit > 0 )); then
+    info "Per-task Codex token guard active → ${token_limit} tokens."
+  fi
+  if (( idle_timeout > 0 )); then
+    info "Idle watchdog active → ${idle_timeout}s without progress."
+  fi
 
   if [[ -n "$start_task_ref" && $resume -eq 0 ]]; then
     info "--fresh ignored when --from-task is provided; resuming from the specified task instead."
@@ -8524,6 +11695,22 @@ EOHELP
 
   if ! gc_tasks_db_has_rows "$tasks_db"; then
     die "Task database missing or empty. Run 'gpt-creator create-tasks' (or create-jira-tasks + migrate-tasks) before work-on-tasks."
+  fi
+
+  local now_ts
+  now_ts="$(date +%s)"
+  throughput_next_checkpoint=$((now_ts + throughput_checkpoint_interval))
+
+  local throughput_msg=""
+  if throughput_msg="$(gc_update_throughput_metrics "$tasks_db" "flush")"; then
+    if [[ -n "$throughput_msg" ]]; then
+      info "$throughput_msg"
+    fi
+  else
+    warn "Failed to prime throughput metrics (flush)."
+  fi
+  if ! gc_update_throughput_metrics "$tasks_db" "init" >/dev/null; then
+    warn "Failed to start throughput metrics window."
   fi
 
   gc_align_task_story_slugs "$tasks_db"
@@ -8591,6 +11778,14 @@ EOHELP
   local run_stamp="$(date +%Y%m%d_%H%M%S)"
   local run_dir="${runs_dir}/${run_stamp}"
   mkdir -p "$run_dir"
+  local doc_catalog_path="${state_dir}/doc-catalog.json"
+  if [[ ! -f "$doc_catalog_path" ]]; then
+    mkdir -p "$(dirname "$doc_catalog_path")"
+    printf '{"version":1,"documents":{}}\n' >"$doc_catalog_path"
+  fi
+  export GC_DOC_CATALOG_PATH="$doc_catalog_path"
+  local last_progress_ts
+  local idle_timeout_triggered=0
   local ctx_file="${run_dir}/context.md"
   gc_build_context_file "$ctx_file" "$STAGING_DIR"
   local context_tail=""
@@ -8621,6 +11816,53 @@ EOHELP
     esac
   fi
 
+  local context_tail_mode="$context_mode"
+  local context_lines_current="$context_lines"
+  local context_file_lines_current="$context_file_lines"
+  local context_lines_min=0
+  local context_file_lines_min=0
+  local context_lines_min_default="${GC_CONTEXT_MIN_LINES:-80}"
+  local context_file_lines_min_default="${GC_CONTEXT_MIN_FILE_LINES:-60}"
+  if ! [[ "$context_lines_min_default" =~ ^[0-9]+$ ]]; then
+    context_lines_min_default=80
+  fi
+  if ! [[ "$context_file_lines_min_default" =~ ^[0-9]+$ ]]; then
+    context_file_lines_min_default=60
+  fi
+  if (( context_lines_current > 0 )); then
+    context_lines_min="$context_lines_min_default"
+    if (( context_lines_current < context_lines_min )); then
+      context_lines_min="$context_lines_current"
+    fi
+  fi
+  if (( context_file_lines_current > 0 )); then
+    context_file_lines_min="$context_file_lines_min_default"
+    if (( context_file_lines_current < context_file_lines_min )); then
+      context_file_lines_min="$context_file_lines_current"
+    fi
+  fi
+  local context_shrink_iterations=0
+  local context_last_shrink_tokens=0
+  local context_auto_shrink_threshold="${GC_CONTEXT_AUTO_SHRINK_THRESHOLD:-60000}"
+  if ! [[ "$context_auto_shrink_threshold" =~ ^[0-9]+$ ]]; then
+    context_auto_shrink_threshold=60000
+  fi
+  if (( token_limit > 0 )); then
+    local derived_threshold=$(( (token_limit * 85) / 100 ))
+    if (( derived_threshold <= 0 )); then
+      derived_threshold="$token_limit"
+    fi
+    if (( derived_threshold >= token_limit )); then
+      local delta=$(( token_limit / 10 ))
+      (( delta < 1 )) && delta=1
+      derived_threshold=$(( token_limit - delta ))
+    fi
+    if (( derived_threshold <= 0 )); then
+      derived_threshold="$token_limit"
+    fi
+    context_auto_shrink_threshold="$derived_threshold"
+  fi
+
   info "Work run directory → ${run_dir}"
 
   local resume_flag=1
@@ -8632,12 +11874,36 @@ EOHELP
   local usage_limit_triggered=0
   local batch_limit_reached=0
 
+  gc_touch_progress() {
+    last_progress_ts="$(date +%s)"
+  }
+
+  gc_check_idle_timeout() {
+    if (( idle_timeout > 0 )); then
+      local now_ts
+      now_ts="$(date +%s)"
+      if (( now_ts - last_progress_ts >= idle_timeout )); then
+        if (( idle_timeout_triggered == 0 )); then
+          idle_timeout_triggered=1
+          manual_followups=1
+          work_failed=1
+          warn "Idle timeout reached (${idle_timeout}s without progress); halting run."
+        fi
+        return 1
+      fi
+    fi
+    return 0
+  }
+
+  gc_touch_progress
+
   local processed_total=0
   local processed_any_total=0
   local remaining_tasks=0
   local memory_cycle_single=0
 
   while :; do
+    if gc_check_idle_timeout; then :; else break; fi
     local iteration_processed_any=0
     local iteration_processed=0
     local continue_current_run=0
@@ -8657,7 +11923,26 @@ EOHELP
         continue
       fi
 
+      if ! gc_check_idle_timeout; then
+        break
+      fi
+
       iteration_processed_any=1
+
+      if (( throughput_checkpoint_interval > 0 )); then
+        now_ts="$(date +%s)"
+        if (( throughput_next_checkpoint == 0 || now_ts >= throughput_next_checkpoint )); then
+          local throughput_checkpoint_msg=""
+          if throughput_checkpoint_msg="$(gc_update_throughput_metrics "$tasks_db" "checkpoint")"; then
+            if [[ -n "$throughput_checkpoint_msg" ]]; then
+              info "$throughput_checkpoint_msg"
+            fi
+          else
+            warn "Failed to checkpoint throughput metrics."
+          fi
+          throughput_next_checkpoint=$((now_ts + throughput_checkpoint_interval))
+        fi
+      fi
 
     : "${total_tasks:=0}"; : "${next_task:=0}"
     local total_tasks_int=0
@@ -8712,6 +11997,23 @@ EOHELP
     local task_index
     local story_failed=0
     for (( task_index = next_task_int; task_index < total_tasks_int; task_index++ )); do
+      if ! gc_check_idle_timeout; then
+        break
+      fi
+      if (( throughput_checkpoint_interval > 0 )); then
+        now_ts="$(date +%s)"
+        if (( throughput_next_checkpoint == 0 || now_ts >= throughput_next_checkpoint )); then
+          local throughput_checkpoint_msg=""
+          if throughput_checkpoint_msg="$(gc_update_throughput_metrics "$tasks_db" "checkpoint")"; then
+            if [[ -n "$throughput_checkpoint_msg" ]]; then
+              info "$throughput_checkpoint_msg"
+            fi
+          else
+            warn "Failed to checkpoint throughput metrics."
+          fi
+          throughput_next_checkpoint=$((now_ts + throughput_checkpoint_interval))
+        fi
+      fi
       if (( effective_batch_size > 0 && iteration_processed >= effective_batch_size )); then
         batch_limit_reached=1
         break
@@ -8730,13 +12032,24 @@ EOHELP
 
       local task_id="" task_title=""
       IFS=$'\t' read -r task_id task_title <<<"$prompt_meta"
-      info "  → Working on task ${task_number} (${task_id:-no-id})"
+      local banner_task_id="${task_id:-no-id}"
+      local task_start_epoch
+      task_start_epoch="$(date +%s)"
+      local task_tokens_total=0
+      local task_duration_seconds=0
+      local task_duration_display=""
+      local task_tokens_display=""
+
+      printf '\n'
+      gc_render_task_banner "START OF A NEW TASK" "START TASK ID" "$banner_task_id"
+      info "  → Working on task ${task_number} (${banner_task_id})"
       info "    ${task_title:-(untitled)}"
 
       local call_name="story-${slug}-task-${task_number}"
       local codex_ok=0
       local attempt=0
       local max_attempts=2
+      gc_touch_progress
       local prompt_augmented=0
       local keep_output=$keep_artifacts
       local parse_error_final=0
@@ -8754,7 +12067,12 @@ EOHELP
 
       while (( attempt < max_attempts )); do
         (( ++attempt ))
+        gc_touch_progress
         if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
+          local attempt_tokens="${GC_CODEX_CALL_TOKEN_ACCUM:-${GC_LAST_CODEX_TOTAL_TOKENS:-0}}"
+          if [[ "$attempt_tokens" =~ ^[0-9]+$ ]]; then
+            task_tokens_total=$((task_tokens_total + attempt_tokens))
+          fi
           if [[ ! -s "$output_path" ]]; then
             warn "  Codex produced no output for ${call_name}; manual review required."
             task_needs_review=1
@@ -8858,6 +12176,10 @@ REM
           codex_ok=1
         else
           local codex_status=$?
+          local attempt_tokens="${GC_CODEX_CALL_TOKEN_ACCUM:-${GC_LAST_CODEX_TOTAL_TOKENS:-0}}"
+          if [[ "$attempt_tokens" =~ ^[0-9]+$ ]]; then
+            task_tokens_total=$((task_tokens_total + attempt_tokens))
+          fi
           if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
             warn "  Codex usage limit reached for ${call_name}; halting further tasks."
             if [[ -n "${GC_CODEX_USAGE_LIMIT_MESSAGE:-}" ]]; then
@@ -8867,7 +12189,8 @@ REM
             task_needs_review=1
             manual_followups=1
             keep_output=1
-            task_notes+=("Codex usage limit reached; wait for quota reset before rerunning work-on-tasks.")
+            local limit_note="${GC_CODEX_USAGE_LIMIT_MESSAGE:-Codex usage limit reached; wait for quota reset before rerunning work-on-tasks.}"
+            task_notes+=("$limit_note")
             codex_ok=1
             usage_limit_triggered=1
             work_failed=1
@@ -8912,9 +12235,89 @@ REM
         task_notes+=("Codex execution did not complete; no changes were applied.")
       fi
 
+      if (( codex_ok )) && (( context_lines_current > context_lines_min || context_file_lines_current > context_file_lines_min )); then
+        local last_tokens="${GC_LAST_CODEX_TOTAL_TOKENS:-0}"
+        local shrink_threshold="$context_auto_shrink_threshold"
+        local trigger_shrink=0
+        if [[ "$last_tokens" =~ ^[0-9]+$ ]] && (( last_tokens > shrink_threshold )); then
+          trigger_shrink=1
+        elif (( token_limit > 0 )) && [[ "$last_tokens" =~ ^[0-9]+$ ]] && (( last_tokens >= token_limit )); then
+          trigger_shrink=1
+        fi
+        if (( trigger_shrink )); then
+          if (( context_shrink_iterations > 0 )) && (( last_tokens <= context_last_shrink_tokens )); then
+            trigger_shrink=0
+          fi
+        fi
+        if (( trigger_shrink )); then
+          local new_context_lines="$context_lines_current"
+          local new_context_file_lines="$context_file_lines_current"
+          local reduced=0
+          if (( context_lines_current > context_lines_min )); then
+            local decrement_lines=$(( context_lines_current / 3 ))
+            (( decrement_lines < 40 )) && decrement_lines=40
+            new_context_lines=$(( context_lines_current - decrement_lines ))
+            if (( new_context_lines < context_lines_min )); then
+              new_context_lines="$context_lines_min"
+            fi
+            if (( new_context_lines < context_lines_current )); then
+              reduced=1
+            fi
+          fi
+          if (( context_file_lines_current > context_file_lines_min )); then
+            local decrement_files=$(( context_file_lines_current / 2 ))
+            (( decrement_files < 20 )) && decrement_files=20
+            new_context_file_lines=$(( context_file_lines_current - decrement_files ))
+            if (( new_context_file_lines < context_file_lines_min )); then
+              new_context_file_lines="$context_file_lines_min"
+            fi
+            if (( new_context_file_lines < context_file_lines_current )); then
+              reduced=1
+            fi
+          fi
+          if (( reduced )); then
+            info "    Token usage ${last_tokens} exceeded budget (~${shrink_threshold}); pruning shared context to ${new_context_lines} lines (per-file ${new_context_file_lines})."
+            context_lines_current="$new_context_lines"
+            context_file_lines_current="$new_context_file_lines"
+            context_last_shrink_tokens="$last_tokens"
+            context_shrink_iterations=$((context_shrink_iterations + 1))
+            GC_CONTEXT_FILE_LINES="$context_file_lines_current"
+            export GC_CONTEXT_FILE_LINES
+            GC_CONTEXT_TAIL_LIMIT="$context_lines_current"
+            export GC_CONTEXT_TAIL_LIMIT
+            if ! gc_build_context_file "$ctx_file" "$STAGING_DIR"; then
+              warn "Failed to rebuild shared context after pruning."
+            else
+              if [[ -n "$context_tail" && -f "$ctx_file" ]]; then
+                local new_mode
+                new_mode="$(gc_refresh_context_tail "$ctx_file" "$context_tail" "$context_tail_mode" "$context_lines_current")"
+                if [[ "$new_mode" == "raw" && "$context_tail_mode" != "raw" ]]; then
+                  context_tail="${run_dir}/context_tail.md"
+                  new_mode="$(gc_refresh_context_tail "$ctx_file" "$context_tail" "raw" "$context_lines_current")"
+                fi
+                context_tail_mode="$new_mode"
+                GC_CONTEXT_TAIL_MODE="$context_tail_mode"
+                export GC_CONTEXT_TAIL_MODE
+              fi
+            fi
+          else
+            context_last_shrink_tokens="$last_tokens"
+          fi
+        fi
+      fi
+
       if [[ "$task_result_status" == "in-progress" ]]; then
         task_result_status="complete"
       fi
+
+      local task_end_epoch
+      task_end_epoch="$(date +%s)"
+      task_duration_seconds=$((task_end_epoch - task_start_epoch))
+      if (( task_duration_seconds < 0 )); then
+        task_duration_seconds=0
+      fi
+      task_duration_display="$(gc_format_duration_compact "$task_duration_seconds")"
+      task_tokens_display="$(gc_format_tokens_compact "$task_tokens_total")"
 
       local story_status_hint="in-progress"
       case "$task_result_status" in
@@ -8929,6 +12332,19 @@ REM
 
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "$task_result_status" "$run_stamp"
       gc_update_work_state "$tasks_db" "$slug" "$story_status_hint" "$completed_hint" "$total_tasks_int" "$run_stamp"
+
+      if [[ "$task_result_status" == "complete" ]]; then
+        local throughput_task_msg=""
+        if throughput_task_msg="$(gc_update_throughput_metrics "$tasks_db" "task-complete" "$slug" "$task_index")"; then
+          if [[ -n "$throughput_task_msg" ]]; then
+            info "  ${throughput_task_msg}"
+            now_ts="$(date +%s)"
+            throughput_next_checkpoint=$((now_ts + throughput_checkpoint_interval))
+          fi
+        else
+          warn "  Failed to record throughput metrics for task ${task_number}."
+        fi
+      fi
 
       local timestamp_utc
       timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -9023,6 +12439,22 @@ REM
           ;;
       esac
 
+      local task_status_display="${task_result_status:-unknown}"
+      if [[ "$task_status_display" == "complete" ]]; then
+        task_status_display="COMPLETED"
+      else
+        task_status_display="${task_status_display//-/ }"
+        task_status_display="$(printf '%s' "$task_status_display" | tr '[:lower:]' '[:upper:]')"
+      fi
+
+      printf '\n'
+      gc_render_task_banner --header-bottom "END OF THE TASK WORK" \
+        "END TASK ID" "$banner_task_id" \
+        "REPORT:" \
+        "TOKENS USED: ${task_tokens_display}" \
+        "TIME SPENT: ${task_duration_display}" \
+        "STATUS: ${task_status_display}"
+
       (( ++processed_total ))
       (( ++iteration_processed ))
 
@@ -9050,7 +12482,12 @@ REM
       break
     fi
 
+    if (( idle_timeout_triggered )); then
+      break
+    fi
+
     gc_update_work_state "$tasks_db" "$slug" "complete" "$total_tasks_int" "$total_tasks_int" "$run_stamp"
+    gc_touch_progress
     if (( keep_artifacts == 0 )); then
       rmdir "${story_run_dir}/prompts" 2>/dev/null || true
       rmdir "${story_run_dir}/out" 2>/dev/null || true
@@ -9184,6 +12621,10 @@ conn.close()
 PY
   )
 
+    if (( idle_timeout_triggered )); then
+      break
+    fi
+
     if (( iteration_processed_any )); then
       processed_any_total=1
     else
@@ -9239,8 +12680,21 @@ PY
     break
   done
 
+  if (( idle_timeout_triggered )); then
+    warn "work-on-tasks halted by idle timeout after ${idle_timeout}s without progress."
+  fi
+
   if (( processed_any_total == 0 )); then
     return 0
+  fi
+
+  throughput_msg=""
+  if throughput_msg="$(gc_update_throughput_metrics "$tasks_db" "flush")"; then
+    if [[ -n "$throughput_msg" ]]; then
+      info "$throughput_msg"
+    fi
+  else
+    warn "Failed to finalise throughput metrics."
   fi
 
   if [[ $work_failed -eq 0 && $batch_limit_reached -eq 0 && $no_verify -eq 0 && $remaining_tasks -eq 0 ]]; then
@@ -9487,7 +12941,7 @@ cmd_estimate() {
         cat <<'USAGE'
 Usage: gpt-creator estimate [--project PATH]
 
-Estimate how long it will take to finish the remaining tasks based on story points (15 SP/hour).
+Estimate how long it will take to finish the remaining tasks based on story points (default 15 SP/hour; refined by work-on-tasks throughput).
 USAGE
         return 0
         ;;
@@ -9510,13 +12964,11 @@ import sqlite3
 import sys
 
 db_path = sys.argv[1]
-rate = 15.0
+default_rate = 15.0
 
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 cur = conn.cursor()
-rows = cur.execute("SELECT story_points, status FROM tasks").fetchall()
-conn.close()
 
 def parse_points(raw):
     if raw is None:
@@ -9535,6 +12987,40 @@ def parse_points(raw):
     except ValueError:
         return 0.0
 
+def fetch_rate(cursor):
+    rate_value = None
+    samples = 0
+    try:
+        row = cursor.execute(
+            "SELECT value FROM metadata WHERE key = ?",
+            ("throughput.rate_sp_per_hour",),
+        ).fetchone()
+        if row and row["value"] not in (None, ""):
+            rate_value = float(row["value"])
+    except Exception:
+        rate_value = None
+
+    try:
+        row = cursor.execute(
+            "SELECT value FROM metadata WHERE key = ?",
+            ("throughput.samples",),
+        ).fetchone()
+        if row and row["value"] not in (None, ""):
+            samples = int(float(row["value"]))
+    except Exception:
+        samples = 0
+
+    if rate_value is not None and rate_value > 0 and samples > 0:
+        return rate_value, samples
+    return default_rate, 0
+
+rate, rate_samples = fetch_rate(cur)
+try:
+    rows = cur.execute("SELECT story_points, status FROM tasks").fetchall()
+except sqlite3.DatabaseError as exc:
+    conn.close()
+    raise SystemExit(f"Failed to read tasks: {exc}")
+
 done_statuses = {"complete", "completed", "done"}
 total_points = 0.0
 remaining_tasks = 0
@@ -9547,10 +13033,14 @@ for row in rows:
     points = parse_points(row["story_points"])
     total_points += max(points, 0.0)
 
+conn.close()
+
 if remaining_tasks == 0:
     print("All tasks are complete. No remaining story points.")
     raise SystemExit(0)
 
+if rate <= 0:
+    rate = default_rate
 total_minutes = math.ceil((total_points / rate) * 60) if total_points > 0 else 0
 days, rem_minutes = divmod(total_minutes, 1440)
 hours, minutes = divmod(rem_minutes, 60)
@@ -9568,10 +13058,20 @@ def fmt_points(value: float) -> str:
         return str(int(round(value)))
     return f"{value:.2f}".rstrip("0").rstrip(".")
 
+def fmt_rate(value: float) -> str:
+    if math.isclose(value, round(value), rel_tol=1e-9, abs_tol=1e-9):
+        return str(int(round(value)))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
 estimate = " ".join(parts)
 print(f"Remaining tasks: {remaining_tasks}")
 print(f"Remaining story points: {fmt_points(total_points)}")
-print(f"Estimated completion time @15 SP/hour: {estimate}")
+if rate_samples > 0 and rate > 0:
+    sample_label = "sample" if rate_samples == 1 else "samples"
+    print(f"Measured throughput: {fmt_rate(rate)} SP/hour (based on {rate_samples} {sample_label}).")
+else:
+    print("Using default throughput assumption: 15 SP/hour.")
+print(f"Estimated completion time @{fmt_rate(rate)} SP/hour: {estimate}")
 PY
 }
 
@@ -10894,6 +14394,40 @@ EOF
   ok "gpt-creator updated successfully"
 }
 
+cmd_keys() {
+  local action="${1:-list}"
+  case "$action" in
+    list|status)
+      shift || true
+      if (($#)); then
+        die "keys ${action} does not take additional arguments"
+      fi
+      gc_api_keys_list
+      ;;
+    set)
+      shift || true
+      local target="${1:-}"
+      [[ -n "$target" ]] || die "keys set requires a service name or environment variable"
+      gc_api_keys_set "$target"
+      ;;
+    help|-h|--help)
+      cat <<EOF
+Usage: ${APP_NAME} keys [list|status]
+       ${APP_NAME} keys set <service>
+       ${APP_NAME} keys <service>
+
+Lists required third-party API keys and stores credentials under your user config directory.
+EOF
+      ;;
+    *)
+      if (($# > 1)); then
+        die "Unknown keys action: $*"
+      fi
+      gc_api_keys_set "$action"
+      ;;
+  esac
+}
+
 cmd_tui() {
   ensure_go_runtime
   local go_bin="${GC_GO_BIN:-${GO_BIN:-go}}"
@@ -10964,8 +14498,13 @@ Usage:
   ${APP_NAME} estimate [--project <path>]
   ${APP_NAME} tokens [--project <path>] [--details] [--json]
   ${APP_NAME} reports [--project <path>] [list|backlog|show|work] [--branch NAME] [--no-push] [--prompt-only] [--open] [slug]
+  ${APP_NAME} show-file [--range A:B|--head N|--tail N|--diff|--refresh] <path>
+  ${APP_NAME} task-convert [options] (deprecated; runs create-tasks)
+  ${APP_NAME} sweep-artifacts [--project <path>] [path...]
+  ${APP_NAME} tidy-progress [--project <path>] [path...] (deprecated alias of sweep-artifacts)
   ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]
   ${APP_NAME} iterate [--project <path>] [--jira <file>] [--no-verify] (deprecated)
+  ${APP_NAME} keys [list|set <service>]
   ${APP_NAME} tui
   ${APP_NAME} update [--force]
   ${APP_NAME} version
@@ -11009,13 +14548,19 @@ main() {
     tokens)         cmd_tokens "$@" ;;
     reports)        cmd_reports "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;
+    show-file)      cmd_show_file "$@" ;;
+    sweep-artifacts)  cmd_sweep_artifacts "$@" ;;
+    tidy-progress)  cmd_tidy_progress "$@" ;;
     work-on-tasks)  cmd_work_on_tasks "$@" ;;
     iterate)        cmd_iterate "$@" ;;
+    keys)           cmd_keys "$@" ;;
     tui)            cmd_tui "$@" ;;
     update)         cmd_update "$@" ;;
     *) die "Unknown command: ${cmd}. See '${APP_NAME} help'" ;;
   esac
 }
+
+gc_load_api_keys
 
 GC_ORIGINAL_ARGS=("$@")
 gc_reports_extract_global_flags "$@"

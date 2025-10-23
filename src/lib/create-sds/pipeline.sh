@@ -726,6 +726,7 @@ csds::run_pipeline() {
   csds::generate_sections
   csds::assemble_document
   csds::review_document
+  gc::refresh_doc_catalog "$CSDS_PROJECT_ROOT" "$CSDS_STAGING_DIR"
 }
 
 return 0

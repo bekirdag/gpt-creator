@@ -11,6 +11,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Single-command bootstrap**: `gpt-creator create-project <path>` orchestrates scan → normalize → plan → generate → db → run, then runs acceptance verification. Additional NFR checks remain available via `verify all`.
 - **Fuzzy discovery**: Locates artifacts across diverse naming conventions (e.g., `*PDR*.md`, `openapi.*`, `sql_dump*.sql`, `*.mmd`, HTML/CSS samples).
 - **Deterministic staging**: Copies inputs into `.gpt-creator/staging/inputs/` with canonical names and provenance tracking.
+- **Progress cleanup**: Sweeps legacy Codex progress artifacts (e.g., `tmp_*`, `final_*`, `diff*`, `*_patch.jsonstr`) into `.gpt-creator/**` so the project root stays clean while runs remain resumable.
 - **Planning outputs**: Produces route/entity summaries and task hints under `.gpt-creator/staging/plan/` as scaffolding for further design work.
 - **Template-driven generation**: Renders baseline NestJS, Vue 3, Prisma, and Docker scaffolds into `/apps/**` and `/docker`, ready for manual extension or Codex-driven augmentation.
 - **Verification toolkit**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks that you can run on demand.
@@ -18,7 +19,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Database synthesis**: `create-db-dump` reads the SDS (and PDR context) to draft a full MySQL schema plus production-grade seed data, then reviews both dumps for consistency before storing them under `.gpt-creator/staging/plan/create-db-dump/sql/`.
 - **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, and `work-on-tasks` executes/resumes backlog items. The legacy `iterate` command is deprecated.
 - **Backlog browser**: `backlog` prints non-interactive terminal summaries so you can list epics, enumerate stories, inspect children, or dump task details straight from the SQLite backlog.
-- **Backlog ETA**: `estimate` aggregates remaining story points in `.gpt-creator/staging/plan/tasks/tasks.db` and translates them into a formatted duration at 15 story points per hour. Point `--project` at another workspace if needed.
+- **Backlog ETA**: `estimate` aggregates remaining story points in `.gpt-creator/staging/plan/tasks/tasks.db` and translates them into a formatted duration using the throughput observed during `work-on-tasks` runs (defaults to 15 story points per hour until telemetry is captured). Point `--project` at another workspace if needed.
 - **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
 
 ---
@@ -61,7 +62,7 @@ Installs:
 - Library assets: `/usr/local/lib/gpt-creator`
 - Shell completions: zsh/bash/fish (if writable)
 
-Use `--skip-preflight` to bypass dependency checks or `--force` to replace an existing symlink.
+Use `--skip-preflight` to bypass dependency checks or `--force` to replace an existing symlink. The installer will try to provision missing tooling like Node.js, pnpm, and the MySQL client automatically; dependencies that need manual setup (Docker Desktop, Codex CLI, API keys) surface as warnings when the relevant commands run.
 
 ### Option 2 — Local clone
 
@@ -340,6 +341,8 @@ gpt-creator work-on-tasks --project /path/to/project
 - Sample payloads now default to a short digest; raise `--sample-lines N` to stream the first N minified chunks when you truly need the raw body.
 - Surface targeted excerpts from referenced docs/endpoints with `--context-doc-snippets`; the CLI now condenses matches into short summaries with hashes so prompts stay lean.
 - `.gpt-creator/staging` context files collapse tables, SQL spam, JSON blobs, and markup dumps automatically; set `GC_CONTEXT_INCLUDE_UI=1` if you need the raw UI assets restored.
+- Stray Codex progress files from older runs (e.g., `tmp_*`, `final_*`, `diff*`, `qaDoc.json`) are swept into `.gpt-creator/artifacts/**`; inspect `.gpt-creator/logs/progress-migration.log` for the relocation manifest.
+- Use `gpt-creator sweep-artifacts --project /path/to/project` (or pass multiple paths) to run the sweep manually for legacy workspaces or after external scripts deposit artifacts in the repo root.
 - Ensure `.gpt-creator/staging/plan/tasks/tasks.db` exists before running `work-on-tasks`; automatic imports from legacy JSON are removed, so run `create-tasks` (or `create-jira-tasks` followed by `migrate-tasks`) to populate the database.
 - When memory pressure is a concern, `--memory-cycle` processes one task per run, prunes caches (Codex artifacts + Docker leftovers), and automatically restarts to continue from the next pending task while keeping peak RSS low.
 - Automatically installs Node.js dependencies before the first task when a pnpm workspace or package manifest is present; inspect `/tmp/gc_deps_install.log` if installation fails.
@@ -350,7 +353,7 @@ gpt-creator work-on-tasks --project /path/to/project
 gpt-creator estimate --project /path/to/project
 ```
 - Aggregates story points for every non-complete task in `.gpt-creator/staging/plan/tasks/tasks.db`.
-- Converts the remaining total into a formatted duration at 15 story points per hour (for example `1d 2h 30m`).
+- Converts the remaining total into a formatted duration using the latest measured throughput from `work-on-tasks` (falls back to 15 story points per hour, for example `1d 2h 30m`).
 - Defaults to the current directory; point `--project` at another workspace when estimating elsewhere.
 - Exits early with a friendly message if all tasks are already complete.
 
@@ -378,6 +381,7 @@ gpt-creator iterate --project /path/to/project --jira docs/jira.md
 | `GC_API_HEALTH_URL` | Explicit health endpoint; else derived from base. | `unset` |
 | `GC_WEB_URL`, `GC_ADMIN_URL` | Web/Admin URLs used during verification. | `http://localhost:8080/`, `http://localhost:8080/admin/` |
 | `GC_DB_NAME`, `GC_DB_USER`, `GC_DB_PASSWORD` | Injected into rendered DB templates. | `app`, `app`, `app_pass` |
+| `GC_SKIP_PROGRESS_MIGRATION` | Set to `1` to opt out of the automatic sweep that relocates legacy Codex artifacts into `.gpt-creator/`. | `0` |
 | `CODEX_BIN`, `CODEX_MODEL` | Override Codex executable/model. | `codex`, `gpt-5-high` |
 | `DOCKER_BIN`, `MYSQL_BIN`, `EDITOR_CMD` | Command overrides used within scripts. | `docker`, `mysql`, `code` |
 | `GC_REPORTS_ON` | Enable automatic crash/stall issue reporting by default. | `0` |
@@ -386,6 +390,8 @@ gpt-creator iterate --project /path/to/project --jira docs/jira.md
 | `GC_GITHUB_TOKEN` | Personal access token with `repo` scope used to create issues. | `unset` |
 | `GC_REPORTER` | Override reporter name recorded in new issue reports. | Git `user.name`/`$USER` |
 | `GC_REPORT_ASSIGNEE` | Name recorded when Codex takes ownership of a report. | `GC_REPORTER` |
+
+Run `gpt-creator keys` to see the supported third-party integrations (OpenAI, Jira, GitHub) and store their API keys in `~/.config/gpt-creator/api-keys.env`. Use `gpt-creator keys set <service>` (for example, `openai`, `jira`, or `github`) to add or update credentials without editing files manually.
 
 You can also create `~/.config/gpt-creator/config.sh` to export persistent overrides.
 

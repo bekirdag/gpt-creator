@@ -13464,7 +13464,10 @@ PY
     if (( continue_current_run == 0 )); then
       remaining_tasks="$(gc_count_pending_tasks "$tasks_db" || echo 0)"
       [[ "$remaining_tasks" =~ ^[0-9]+$ ]] || remaining_tasks=0
-      if (( work_failed == 0 && memory_cycle == 0 && batch_limit_reached == 0 && effective_batch_size == 0 && iteration_processed > 0 && remaining_tasks > 0 )); then
+
+      if (( manual_followups > 0 && remaining_tasks > 0 )); then
+        warn "Manual follow-ups detected; stopping before rerunning ${remaining_tasks} pending task(s)."
+      elif (( work_failed == 0 && manual_followups == 0 && memory_cycle == 0 && batch_limit_reached == 0 && effective_batch_size == 0 && iteration_processed > 0 && remaining_tasks > 0 )); then
         if [[ -n "$story_filter" ]]; then
           info "Remaining tasks detected beyond filtered story; rerun with a broader filter to continue."
         else

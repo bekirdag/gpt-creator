@@ -1258,14 +1258,14 @@ gc_migrate_progress_artifacts() {
     mkdir -p "$log_dir"
     local log_file="${log_dir}/progress-migration.log"
     {
-      printf '--- %s ---\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+      printf -- '--- %s ---\n' "$(date '+%Y-%m-%d %H:%M:%S')"
       local row src_abs dst_abs src_relpath dst_relpath
       for row in "${moved[@]}"; do
         src_abs="${row%%$'\t'*}"
         dst_abs="${row#*$'\t'}"
         src_relpath="${src_abs#$project_root/}"
         dst_relpath="${dst_abs#$project_root/}"
-        printf '%s -> %s\n' "$src_relpath" "$dst_relpath"
+        printf -- '%s -> %s\n' "$src_relpath" "$dst_relpath"
       done
     } >>"$log_file"
     info "Migrated ${#moved[@]} work artifacts into .gpt-creator (see ${log_file#$project_root/})."

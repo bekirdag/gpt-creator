@@ -4088,6 +4088,32 @@ def ensure_table():
           FOREIGN KEY(story_slug) REFERENCES stories(story_slug)
         )
     ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS task_progress (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER,
+          story_slug TEXT NOT NULL,
+          task_position INTEGER NOT NULL,
+          run_stamp TEXT,
+          status TEXT,
+          log_path TEXT,
+          prompt_path TEXT,
+          output_path TEXT,
+          attempts INTEGER,
+          tokens_total INTEGER,
+          duration_seconds INTEGER,
+          apply_status TEXT,
+          changes_applied INTEGER,
+          notes_json TEXT,
+          written_json TEXT,
+          patched_json TEXT,
+          commands_json TEXT,
+          occurred_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )
+    ''')
 
 ensure_table()
 
@@ -4130,6 +4156,20 @@ ensure_column('tasks', 'sample_create_request', 'TEXT')
 ensure_column('tasks', 'sample_create_response', 'TEXT')
 ensure_column('tasks', 'user_story_ref_id', 'TEXT')
 ensure_column('tasks', 'epic_ref_id', 'TEXT')
+ensure_column('tasks', 'last_log_path', 'TEXT')
+ensure_column('tasks', 'last_prompt_path', 'TEXT')
+ensure_column('tasks', 'last_output_path', 'TEXT')
+ensure_column('tasks', 'last_attempts', 'INTEGER')
+ensure_column('tasks', 'last_tokens_total', 'INTEGER')
+ensure_column('tasks', 'last_duration_seconds', 'INTEGER')
+ensure_column('tasks', 'last_apply_status', 'TEXT')
+ensure_column('tasks', 'last_changes_applied', 'INTEGER')
+ensure_column('tasks', 'last_notes_json', 'TEXT')
+ensure_column('tasks', 'last_written_json', 'TEXT')
+ensure_column('tasks', 'last_patched_json', 'TEXT')
+ensure_column('tasks', 'last_commands_json', 'TEXT')
+ensure_column('tasks', 'last_progress_at', 'TEXT')
+ensure_column('tasks', 'last_progress_run', 'TEXT')
 
 prior_story_slugs = {}
 prior_story_state = {}
@@ -5137,6 +5177,230 @@ conn.close()
 PY
 }
 
+gc_record_task_progress() {
+  local db_path="${1:?tasks database path required}"
+  local story_slug="${2:?story slug required}"
+  local position="${3:?task position required}"
+  local run_stamp="${4:-manual}"
+  local status="${5:-}"
+  local log_path="${6:-}"
+  local prompt_path="${7:-}"
+  local output_path="${8:-}"
+  local attempts="${9:-0}"
+  local tokens_total="${10:-0}"
+  local duration_seconds="${11:-0}"
+  local apply_status="${12:-}"
+  local changes_applied="${13:-0}"
+  local notes_text="${14:-}"
+  local written_text="${15:-}"
+  local patched_text="${16:-}"
+  local commands_text="${17:-}"
+  local occurred_at="${18:-}"
+  python3 - <<'PY' "$db_path" "$story_slug" "$position" "$run_stamp" "$status" "$log_path" "$prompt_path" "$output_path" "$attempts" "$tokens_total" "$duration_seconds" "$apply_status" "$changes_applied" "$notes_text" "$written_text" "$patched_text" "$commands_text" "$occurred_at"
+import json
+import sqlite3
+import sys
+import time
+
+(
+    db_path,
+    story_slug,
+    position,
+    run_stamp,
+    status,
+    log_path,
+    prompt_path,
+    output_path,
+    attempts,
+    tokens_total,
+    duration_seconds,
+    apply_status,
+    changes_applied,
+    notes_text,
+    written_text,
+    patched_text,
+    commands_text,
+    occurred_at,
+) = sys.argv[1:19]
+
+def parse_int(value):
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+def parse_bool(value):
+    text = (value or "").strip().lower()
+    return 1 if text in {"1", "true", "yes", "y", "on"} else 0
+
+position = int(position)
+attempts_int = parse_int(attempts) or 0
+tokens_int = parse_int(tokens_total)
+duration_int = parse_int(duration_seconds)
+changes_int = parse_bool(changes_applied)
+run_stamp = (run_stamp or "manual").strip() or "manual"
+status = (status or "").strip() or None
+log_path = (log_path or "").strip() or None
+prompt_path = (prompt_path or "").strip() or None
+output_path = (output_path or "").strip() or None
+apply_status = (apply_status or "").strip() or None
+notes_text = notes_text or ""
+written_text = written_text or ""
+patched_text = patched_text or ""
+commands_text = commands_text or ""
+
+def as_json(text):
+    items = [line.strip() for line in text.splitlines() if line.strip()]
+    return json.dumps(items, ensure_ascii=False) if items else None
+
+notes_json = as_json(notes_text)
+written_json = as_json(written_text)
+patched_json = as_json(patched_text)
+commands_json = as_json(commands_text)
+
+timestamp = (occurred_at or "").strip()
+if not timestamp:
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+cur = conn.cursor()
+
+def ensure_column(table: str, column: str, definition: str) -> None:
+    cur.execute(f"PRAGMA table_info({table})")
+    if not any(row["name"] == column for row in cur.fetchall()):
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+cur.execute(
+    '''
+    CREATE TABLE IF NOT EXISTS task_progress (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER,
+      story_slug TEXT NOT NULL,
+      task_position INTEGER NOT NULL,
+      run_stamp TEXT,
+      status TEXT,
+      log_path TEXT,
+      prompt_path TEXT,
+      output_path TEXT,
+      attempts INTEGER,
+      tokens_total INTEGER,
+      duration_seconds INTEGER,
+      apply_status TEXT,
+      changes_applied INTEGER,
+      notes_json TEXT,
+      written_json TEXT,
+      patched_json TEXT,
+      commands_json TEXT,
+      occurred_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    )
+    '''
+)
+
+for column, definition in (
+    ("last_log_path", "TEXT"),
+    ("last_prompt_path", "TEXT"),
+    ("last_output_path", "TEXT"),
+    ("last_attempts", "INTEGER"),
+    ("last_tokens_total", "INTEGER"),
+    ("last_duration_seconds", "INTEGER"),
+    ("last_apply_status", "TEXT"),
+    ("last_changes_applied", "INTEGER"),
+    ("last_notes_json", "TEXT"),
+    ("last_written_json", "TEXT"),
+    ("last_patched_json", "TEXT"),
+    ("last_commands_json", "TEXT"),
+    ("last_progress_at", "TEXT"),
+    ("last_progress_run", "TEXT"),
+):
+    ensure_column("tasks", column, definition)
+
+task_row = cur.execute(
+    "SELECT id FROM tasks WHERE story_slug = ? AND position = ?",
+    (story_slug, position),
+).fetchone()
+task_id = task_row["id"] if task_row else None
+
+progress_row = (
+    task_id,
+    story_slug,
+    position,
+    run_stamp,
+    status,
+    log_path,
+    prompt_path,
+    output_path,
+    attempts_int,
+    tokens_int,
+    duration_int,
+    apply_status,
+    changes_int,
+    notes_json,
+    written_json,
+    patched_json,
+    commands_json,
+    timestamp,
+    timestamp,
+    timestamp,
+)
+
+cur.execute(
+    '''
+    INSERT INTO task_progress (
+      task_id, story_slug, task_position, run_stamp, status, log_path,
+      prompt_path, output_path, attempts, tokens_total, duration_seconds,
+      apply_status, changes_applied, notes_json, written_json, patched_json,
+      commands_json, occurred_at, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''',
+    progress_row,
+)
+
+task_updates = []
+params = []
+
+def set_field(column: str, value):
+    task_updates.append(f"{column} = ?")
+    params.append(value)
+
+set_field("last_log_path", log_path)
+set_field("last_prompt_path", prompt_path)
+set_field("last_output_path", output_path)
+set_field("last_attempts", attempts_int)
+set_field("last_tokens_total", tokens_int)
+set_field("last_duration_seconds", duration_int)
+set_field("last_apply_status", apply_status)
+set_field("last_changes_applied", changes_int)
+set_field("last_notes_json", notes_json)
+set_field("last_written_json", written_json)
+set_field("last_patched_json", patched_json)
+set_field("last_commands_json", commands_json)
+set_field("last_progress_at", timestamp)
+set_field("last_progress_run", run_stamp)
+set_field("updated_at", timestamp)
+
+if task_row:
+    cur.execute(
+        f'''
+        UPDATE tasks
+           SET {", ".join(task_updates)}
+         WHERE id = ?
+        ''',
+        params + [task_id],
+    )
+
+conn.commit()
+conn.close()
+PY
+}
+
 gc_update_throughput_metrics() {
   local db_path="${1:?tasks database path required}"
   local action="${2:?throughput action required}"
@@ -5639,10 +5903,29 @@ cur.execute(
            started_at = NULL,
            completed_at = NULL,
            last_run = NULL,
+           last_log_path = NULL,
+           last_prompt_path = NULL,
+           last_output_path = NULL,
+           last_attempts = NULL,
+           last_tokens_total = NULL,
+           last_duration_seconds = NULL,
+           last_apply_status = NULL,
+           last_changes_applied = NULL,
+           last_notes_json = NULL,
+           last_written_json = NULL,
+           last_patched_json = NULL,
+           last_commands_json = NULL,
+           last_progress_at = NULL,
+           last_progress_run = NULL,
            updated_at = ?
     """,
     (timestamp,),
 )
+
+try:
+    cur.execute("DELETE FROM task_progress")
+except sqlite3.OperationalError:
+    pass
 
 conn.commit()
 conn.close()
@@ -11776,7 +12059,8 @@ EOHELP
 
   local state_dir="${PLAN_DIR}/work"
   local runs_dir="${state_dir}/runs"
-  mkdir -p "$runs_dir"
+  local work_logs_root="${LOG_DIR}/work-on-tasks"
+  mkdir -p "$runs_dir" "$work_logs_root"
 
   GC_CONTEXT_FILE_LINES="$context_file_lines"
   if ((${#context_skip_patterns[@]} > 0)); then
@@ -11789,7 +12073,8 @@ EOHELP
 
   local run_stamp="$(date +%Y%m%d_%H%M%S)"
   local run_dir="${runs_dir}/${run_stamp}"
-  mkdir -p "$run_dir"
+  local run_log_dir="${work_logs_root}/${run_stamp}"
+  mkdir -p "$run_dir" "$run_log_dir"
   local doc_catalog_path="${state_dir}/doc-catalog.json"
   if [[ ! -f "$doc_catalog_path" ]]; then
     mkdir -p "$(dirname "$doc_catalog_path")"
@@ -11969,7 +12254,8 @@ EOHELP
     printf -v story_prefix "%03d" "${sequence:-0}"
     [[ -n "$slug" ]] || slug="story-${story_prefix}"
     local story_run_dir="${run_dir}/story_${story_prefix}_${slug}"
-    mkdir -p "${story_run_dir}/prompts" "${story_run_dir}/out" "${story_run_dir}/reports"
+    local story_log_dir="${run_log_dir}/story_${story_prefix}_${slug}"
+    mkdir -p "${story_run_dir}/prompts" "${story_run_dir}/out" "${story_run_dir}/reports" "$story_log_dir"
     local report_dir="${story_run_dir}/reports"
 
     info "Story ${story_prefix} (${story_id:-$slug}) — ${story_title:-Unnamed}"
@@ -12079,6 +12365,7 @@ EOHELP
       local task_changes_applied=0
       local apply_status="pending"
       local task_report_path="${report_dir}/task_${task_number}.log"
+      local task_log_archive_path="${story_log_dir}/task_${task_number}.log"
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
 
       while (( attempt < max_attempts )); do
@@ -12367,7 +12654,9 @@ REM
 
       local prompt_entry="$prompt_path"
       local output_entry="$output_path"
-      local report_entry="$task_report_path"
+      local report_entry_path="$task_log_archive_path"
+      local report_entry_display="$report_entry_path"
+      local report_entry_db=""
       local project_prefix="${PROJECT_ROOT}/"
       if [[ -n "$PROJECT_ROOT" ]]; then
         if [[ "$prompt_entry" == "$project_prefix"* ]]; then
@@ -12376,10 +12665,11 @@ REM
         if [[ "$output_entry" == "$project_prefix"* ]]; then
           output_entry="${output_entry#$project_prefix}"
         fi
-        if [[ "$report_entry" == "$project_prefix"* ]]; then
-          report_entry="${report_entry#$project_prefix}"
+        if [[ "$report_entry_display" == "$project_prefix"* ]]; then
+          report_entry_display="${report_entry_display#$project_prefix}"
         fi
       fi
+      report_entry_db="$report_entry_display"
       if [[ ! -f "$prompt_path" ]]; then
         if (( keep_artifacts == 0 )); then
           prompt_entry="(discarded)"
@@ -12394,11 +12684,34 @@ REM
           output_entry="(missing)"
         fi
       fi
+      if [[ ! -f "$task_log_archive_path" ]]; then
+        report_entry_db=""
+        report_entry_display="(missing)"
+      fi
 
       local changes_flag="false"
       if (( task_changes_applied > 0 )); then
         changes_flag="true"
       fi
+
+      local notes_payload=""
+      if ((${#task_notes[@]} > 0)); then
+        notes_payload="$(printf '%s\n' "${task_notes[@]}")"
+      fi
+      local written_payload=""
+      if ((${#task_written_paths[@]} > 0)); then
+        written_payload="$(printf '%s\n' "${task_written_paths[@]}")"
+      fi
+      local patched_payload=""
+      if ((${#task_patched_paths[@]} > 0)); then
+        patched_payload="$(printf '%s\n' "${task_patched_paths[@]}")"
+      fi
+      local commands_payload=""
+      if ((${#task_commands[@]} > 0)); then
+        commands_payload="$(printf '%s\n' "${task_commands[@]}")"
+      fi
+
+      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$timestamp_utc"
 
       {
         printf 'task_number: %s\n' "$task_number"
@@ -12439,16 +12752,19 @@ REM
           printf '  - (none)\n'
         fi
       } >"$task_report_path"
+      if ! cp -f "$task_report_path" "$task_log_archive_path"; then
+        warn "  Failed to archive task log to ${task_log_archive_path}."
+      fi
 
       case "$task_result_status" in
         complete)
           info "  ✓ Task ${task_number} (${task_id:-no-id}) completed with status: ${task_result_status}"
           ;;
         on-hold)
-          warn "  Task ${task_number} (${task_id:-no-id}) marked ${task_result_status}; review ${report_entry}."
+          warn "  Task ${task_number} (${task_id:-no-id}) marked ${task_result_status}; review ${report_entry_display}."
           ;;
         blocked)
-          warn "  Task ${task_number} (${task_id:-no-id}) blocked; see ${report_entry}."
+          warn "  Task ${task_number} (${task_id:-no-id}) blocked; see ${report_entry_display}."
           ;;
         *)
           info "  Task ${task_number} (${task_id:-no-id}) finished with status: ${task_result_status}"

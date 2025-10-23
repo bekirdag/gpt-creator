@@ -195,6 +195,34 @@ def ensure_schema(cur: sqlite3.Cursor) -> None:
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS task_progress (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER,
+          story_slug TEXT NOT NULL,
+          task_position INTEGER NOT NULL,
+          run_stamp TEXT,
+          status TEXT,
+          log_path TEXT,
+          prompt_path TEXT,
+          output_path TEXT,
+          attempts INTEGER,
+          tokens_total INTEGER,
+          duration_seconds INTEGER,
+          apply_status TEXT,
+          changes_applied INTEGER,
+          notes_json TEXT,
+          written_json TEXT,
+          patched_json TEXT,
+          commands_json TEXT,
+          occurred_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        )
+        """
+    )
 
     # Optional columns that may appear in existing databases
     optional_story_columns = {
@@ -230,6 +258,20 @@ def ensure_schema(cur: sqlite3.Cursor) -> None:
         "epic_ref_id": "TEXT",
         "refined": "INTEGER DEFAULT 0",
         "refined_at": "TEXT",
+        "last_log_path": "TEXT",
+        "last_prompt_path": "TEXT",
+        "last_output_path": "TEXT",
+        "last_attempts": "INTEGER",
+        "last_tokens_total": "INTEGER",
+        "last_duration_seconds": "INTEGER",
+        "last_apply_status": "TEXT",
+        "last_changes_applied": "INTEGER",
+        "last_notes_json": "TEXT",
+        "last_written_json": "TEXT",
+        "last_patched_json": "TEXT",
+        "last_commands_json": "TEXT",
+        "last_progress_at": "TEXT",
+        "last_progress_run": "TEXT",
     }
     cur.execute("PRAGMA table_info(tasks)")
     task_columns = {row[1] for row in cur.fetchall()}

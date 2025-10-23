@@ -4453,7 +4453,10 @@ else:
 PY
 )"
         if [[ -n "$pointer_digest" ]]; then
-          local existing="${gc_context_pointer_seen[$pointer_digest]}"
+          local existing=""
+          if [[ -n "${gc_context_pointer_seen[$pointer_digest]+_}" ]]; then
+            existing="${gc_context_pointer_seen[$pointer_digest]}"
+          fi
           if [[ -n "$existing" ]]; then
             echo ""
             echo "----- FILE: ${base_name} -----"

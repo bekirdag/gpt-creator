@@ -2440,6 +2440,7 @@ command_stream_lines = []
 command_file_lines = []
 command_scan_lines = []
 command_guard_lines = []
+guard_entries = []
 failure_remediation_notes = {}
 
 cached_failure_cache = {}
@@ -10276,6 +10277,7 @@ gc_write_task_prompt() {
   local project_root="${7:-$PROJECT_ROOT}"
   local staging_dir="${8:-$GC_STAGING_DIR}"
   python3 - "$db_path" "$story_slug" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" "$staging_dir" <<'PY'
+import hashlib
 import json
 import os
 import pathlib

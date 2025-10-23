@@ -4917,6 +4917,102 @@ gc_refresh_discovery_if_needed() {
   fi
 }
 
+gc_clear_active_task() {
+  unset GC_ACTIVE_TASK_DB
+  unset GC_ACTIVE_TASK_SLUG
+  unset GC_ACTIVE_TASK_INDEX
+  unset GC_ACTIVE_RUN_STAMP
+  unset GC_ACTIVE_TASK_NUMBER
+  unset GC_ACTIVE_TASK_ID
+  unset GC_ACTIVE_TASK_REPORT
+  unset GC_ACTIVE_TASK_ARCHIVE
+  unset GC_ACTIVE_TASK_PROMPT
+  unset GC_ACTIVE_TASK_OUTPUT
+}
+
+gc_finalize_active_task() {
+  local signal="${1:-INT}"
+  local reason="${2:-Interrupted}"
+  local report_path="${GC_ACTIVE_TASK_REPORT:-}"
+  [[ -n "$report_path" ]] || return 0
+
+  local archive_path="${GC_ACTIVE_TASK_ARCHIVE:-}"
+  local prompt_path="${GC_ACTIVE_TASK_PROMPT:-}"
+  local output_path="${GC_ACTIVE_TASK_OUTPUT:-}"
+  local task_number="${GC_ACTIVE_TASK_NUMBER:-unknown}"
+  local task_id="${GC_ACTIVE_TASK_ID:-}"
+  local slug="${GC_ACTIVE_TASK_SLUG:-unknown}"
+  local tasks_db="${GC_ACTIVE_TASK_DB:-}"
+  local task_index="${GC_ACTIVE_TASK_INDEX:-}"
+  local run_stamp="${GC_ACTIVE_RUN_STAMP:-manual}"
+  local timestamp
+  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+  mkdir -p "$(dirname "$report_path")"
+  local prompt_entry="$prompt_path"
+  local output_entry="$output_path"
+  local report_entry_display="$report_path"
+  if [[ -n "$PROJECT_ROOT" ]]; then
+    local project_prefix="${PROJECT_ROOT%/}/"
+    if [[ "$prompt_entry" == "$project_prefix"* ]]; then
+      prompt_entry="${prompt_entry#$project_prefix}"
+    fi
+    if [[ "$output_entry" == "$project_prefix"* ]]; then
+      output_entry="${output_entry#$project_prefix}"
+    fi
+    if [[ "$report_entry_display" == "$project_prefix"* ]]; then
+      report_entry_display="${report_entry_display#$project_prefix}"
+    fi
+  fi
+
+  {
+    printf 'task_number: %s\n' "$task_number"
+    printf 'task_id: %s\n' "${task_id:-}"
+    printf 'task_title: %s\n' "(interrupted)"
+    printf 'story_slug: %s\n' "$slug"
+    printf 'status: %s\n' "interrupted"
+    printf 'timestamp: %s\n' "$timestamp"
+    printf 'attempts: %s\n' "0"
+    printf 'apply_status: %s\n' "interrupted"
+    printf 'changes_applied: %s\n' "false"
+    printf 'prompt_path: %s\n' "${prompt_entry:-"(none)"}"
+    printf 'output_path: %s\n' "${output_entry:-"(none)"}"
+    printf 'notes:\n'
+    printf '  - %s by signal %s; rerun work-on-tasks to resume.\n' "$reason" "$signal"
+  } >"$report_path"
+
+  if [[ -n "$archive_path" ]]; then
+    mkdir -p "$(dirname "$archive_path")"
+    cp -f "$report_path" "$archive_path" 2>/dev/null || true
+  fi
+
+  if [[ -n "$tasks_db" && -n "$slug" && -n "$task_index" ]]; then
+    local report_entry_db="$report_entry_display"
+    local prompt_db="$prompt_entry"
+    local output_db="$output_entry"
+    local notes_payload="Interrupted by signal ${signal}; rerun work-on-tasks to resume."
+    gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "on-hold" "$report_entry_db" "$prompt_db" "$output_db" "0" "0" "0" "interrupted" "false" "$notes_payload" "" "" "" "$timestamp"
+    gc_update_task_state "$tasks_db" "$slug" "$task_index" "on-hold" "$run_stamp"
+  fi
+
+  gc_clear_active_task
+}
+
+gc_interrupt_handler() {
+  local signal="${1:-INT}"
+  trap - INT TERM TSTP QUIT
+  warn "Received ${signal}; finalising active task and exiting."
+  gc_finalize_active_task "$signal" "Interrupted"
+  local code=128
+  case "$signal" in
+    INT) code=130 ;;
+    TERM) code=143 ;;
+    TSTP) code=148 ;;
+    QUIT) code=131 ;;
+  esac
+  exit "$code"
+}
+
 gc_build_context_digest() {
   local context_file="${1:?context file required}"
   local digest_file="${2:?digest destination required}"
@@ -12404,6 +12500,7 @@ EOHELP
 
   ensure_node_dependencies "$PROJECT_ROOT"
   gc_refresh_discovery_if_needed
+  gc_clear_active_task
 
   if (( prompt_compact )); then
     export GC_PROMPT_COMPACT=1
@@ -12654,6 +12751,7 @@ EOHELP
     local task_index
     local story_failed=0
     for (( task_index = next_task_int; task_index < total_tasks_int; task_index++ )); do
+      gc_clear_active_task
       if ! gc_check_idle_timeout; then
         break
       fi
@@ -12726,6 +12824,16 @@ EOHELP
       local task_report_path="${report_dir}/task_${task_number}.log"
       local task_log_archive_path="${story_log_dir}/task_${task_number}.log"
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
+      export GC_ACTIVE_TASK_DB="$tasks_db"
+      export GC_ACTIVE_TASK_SLUG="$slug"
+      export GC_ACTIVE_TASK_INDEX="$task_index"
+      export GC_ACTIVE_RUN_STAMP="$run_stamp"
+      export GC_ACTIVE_TASK_NUMBER="$task_number"
+      export GC_ACTIVE_TASK_ID="$task_id"
+      export GC_ACTIVE_TASK_REPORT="$task_report_path"
+      export GC_ACTIVE_TASK_ARCHIVE="$task_log_archive_path"
+      export GC_ACTIVE_TASK_PROMPT="$prompt_path"
+      export GC_ACTIVE_TASK_OUTPUT="$output_path"
 
       while (( attempt < max_attempts )); do
         (( ++attempt ))
@@ -13114,6 +13222,7 @@ REM
       if ! cp -f "$task_report_path" "$task_log_archive_path"; then
         warn "  Failed to archive task log to ${task_log_archive_path}."
       fi
+      gc_clear_active_task
 
       case "$task_result_status" in
         complete)
@@ -13377,8 +13486,11 @@ PY
   fi
 
   if (( processed_any_total == 0 )); then
+    gc_clear_active_task
     return 0
   fi
+
+  gc_clear_active_task
 
   throughput_msg=""
   if throughput_msg="$(gc_update_throughput_metrics "$tasks_db" "flush")"; then
@@ -15333,6 +15445,11 @@ fi
 if gc_reports_enabled; then
   trap 'gc_reports_activity_trap "$BASH_COMMAND"' DEBUG
 fi
+
+trap 'gc_interrupt_handler INT' INT
+trap 'gc_interrupt_handler TERM' TERM
+trap 'gc_interrupt_handler TSTP' TSTP
+trap 'gc_interrupt_handler QUIT' QUIT
 
 trap 'gc_capture_error_context $? "$BASH_COMMAND"' ERR
 trap 'gc_exit_handler $?' EXIT

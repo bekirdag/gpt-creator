@@ -10976,6 +10976,8 @@ if doc_catalog_entries:
             lines.append(f"  Snippet: {snippet_clean}")
         lines.append("")
 
+guard_entries = []
+
 command_failure_cache = os.getenv("GC_COMMAND_FAILURE_CACHE", "").strip()
 failure_entries = []
 if command_failure_cache:

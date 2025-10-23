@@ -3134,34 +3134,36 @@ def normalise_candidate_path(raw: str, cwd: str) -> Optional[pathlib.Path]:
         guard_failure_commands = set()
         for entry in failures.values():
             summary_single = entry.get("summary") or ""
-            summary_single = re.sub(r'\s+', ' ', summary_single).strip()
+            summary_single = re.sub(r"\s+", " ", summary_single).strip()
             if len(summary_single) > 240:
                 summary_single = summary_single[:237] + "..."
             encoded_command = base64.b64encode(entry["command"].encode("utf-8")).decode("ascii")
-            encoded_summary = base64.b64encode(summary_single.encode("utf-8")).decode("ascii") if summary_single else ""
+            encoded_summary = (
+                base64.b64encode(summary_single.encode("utf-8")).decode("ascii") if summary_single else ""
+            )
             repeat_flag = 1 if entry.get("repeat") else 0
             total_failures = entry.get("total_failures", entry["count"])
             remediation_note = remediation_message(entry.get("command"), total_failures, entry.get("exit"))
             command_text_clean = (entry.get("command") or "").strip()
-                if command_text_clean:
-                    failure_remediation_notes[command_text_clean] = remediation_note
-                    if command_text_clean not in guard_failure_commands:
-                        issues = [remediation_note]
-                        if summary_single:
-                            issues.append(f"Last failure: {summary_single}")
-                        guard_digest_source = f"{project_root_hint}\n{command_text_clean}\nremediation"
-                        guard_digest = hashlib.sha256(guard_digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
-                        encoded_guard_command = base64.b64encode(command_text_clean.encode("utf-8")).decode("ascii")
-                        encoded_guard_message = base64.b64encode("; ".join(issues).encode("utf-8")).decode("ascii")
-                        repeat_flag_guard = 1 if total_failures and total_failures > 1 else 0
-                        command_guard_lines.append(
-                            f"CMDGUARD\t{guard_digest}\t{repeat_flag_guard}\t{len(issues)}\t{encoded_guard_command}\t{encoded_guard_message}"
-                        )
-                        guard_entries.append({
-                            "command": command_text_clean,
-                            "issues": issues,
-                        })
-                        guard_failure_commands.add(command_text_clean)
+            if command_text_clean:
+                failure_remediation_notes[command_text_clean] = remediation_note
+                if command_text_clean not in guard_failure_commands:
+                    issues = [remediation_note]
+                    if summary_single:
+                        issues.append(f"Last failure: {summary_single}")
+                    guard_digest_source = f"{project_root_hint}\n{command_text_clean}\nremediation"
+                    guard_digest = hashlib.sha256(guard_digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
+                    encoded_guard_command = base64.b64encode(command_text_clean.encode("utf-8")).decode("ascii")
+                    encoded_guard_message = base64.b64encode("; ".join(issues).encode("utf-8")).decode("ascii")
+                    repeat_flag_guard = 1 if total_failures and total_failures > 1 else 0
+                    command_guard_lines.append(
+                        f"CMDGUARD\t{guard_digest}\t{repeat_flag_guard}\t{len(issues)}\t{encoded_guard_command}\t{encoded_guard_message}"
+                    )
+                    guard_entries.append({
+                        "command": command_text_clean,
+                        "issues": issues,
+                    })
+                    guard_failure_commands.add(command_text_clean)
             command_failure_lines.append(
                 f"CMDFAIL\t{repeat_flag}\t{total_failures}\t{entry['exit']}\t{entry['digest']}\t{encoded_command}\t{encoded_summary}"
             )
@@ -11356,7 +11358,8 @@ prompt_path = Path(PROMPT_PATH)
 prompt_path.parent.mkdir(parents=True, exist_ok=True)
 prompt_path.write_text("\n".join(lines) + "\n", encoding='utf-8')
 
-print(f"{task_id}\t{task_title}")
+story_points_meta = story_points or ""
+print(f"{task_id}\t{task_title}\t{story_points_meta}")
 PY
 }
 
@@ -12039,8 +12042,8 @@ EOHELP
         break
       fi
 
-      local task_id="" task_title=""
-      IFS=$'\t' read -r task_id task_title <<<"$prompt_meta"
+      local task_id="" task_title="" task_story_points=""
+      IFS=$'\t' read -r task_id task_title task_story_points <<<"$prompt_meta"
       local banner_task_id="${task_id:-no-id}"
       local task_start_epoch
       task_start_epoch="$(date +%s)"
@@ -12048,6 +12051,10 @@ EOHELP
       local task_duration_seconds=0
       local task_duration_display=""
       local task_tokens_display=""
+      local task_story_points_display="—"
+      if [[ -n "$task_story_points" ]]; then
+        task_story_points_display="$task_story_points"
+      fi
 
       printf '\n'
       gc_render_task_banner "START OF A NEW TASK" "START TASK ID" "$banner_task_id"
@@ -12461,6 +12468,7 @@ REM
         "END TASK ID" "$banner_task_id" \
         "REPORT:" \
         "TOKENS USED: ${task_tokens_display}" \
+        "STORY POINTS: ${task_story_points_display}" \
         "TIME SPENT: ${task_duration_display}" \
         "STATUS: ${task_status_display}"
 

@@ -27,7 +27,8 @@ mysql::_container() {
 }
 
 mysql_start() {
-  local container="$(mysql::_container)"
+  local container
+  container="$(mysql::_container)"
   if ! docker ps -q --filter "name=${container}" | grep -q .; then
     if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
       COMPOSE_PROJECT_NAME="$(mysql::_project_slug)" docker compose up -d db
@@ -55,20 +56,23 @@ mysql_import() {
     echo "Error: SQL file required."
     return 1
   fi
-  local container="$(mysql::_container)"
+  local container
+  container="$(mysql::_container)"
   local database="${MYSQL_DATABASE:-${DB_NAME:-app}}"
   docker exec -i "$container" mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" "$database" < "$sql_file"
   echo "SQL dump imported."
 }
 
 mysql_client() {
-  local container="$(mysql::_container)"
+  local container
+  container="$(mysql::_container)"
   local database="${MYSQL_DATABASE:-${DB_NAME:-app}}"
   docker exec -it "$container" mysql -uroot -p"${MYSQL_ROOT_PASSWORD}" "$database"
 }
 
 mysql_health_check() {
-  local container="$(mysql::_container)"
+  local container
+  container="$(mysql::_container)"
   if docker exec "$container" mysqladmin ping -h "127.0.0.1" --silent; then
     echo "MySQL is healthy."
   else

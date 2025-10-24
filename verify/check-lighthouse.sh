@@ -17,7 +17,8 @@ if command -v npx >/dev/null 2>&1; then
   if npx -y @lhci/cli@0.12.0 --help >/dev/null 2>&1; then
     echo "Running LHCI autorun…"
     export LHCI_BUILD_CONTEXT__CURRENT_BRANCH="${LH_BRANCH:-local}"
-    export LHCI_BUILD_CONTEXT__COMMIT_TIME="$(date +%s)"
+    commit_time="$(date +%s)"
+    export LHCI_BUILD_CONTEXT__COMMIT_TIME="$commit_time"
     # LHCI supports multiple URLs via config, so run simple lighthouse CLI for multi-URL:
     for u in "${URLS[@]}"; do
       base="$(echo "$u" | sed 's#https\?://##; s#/##g')"

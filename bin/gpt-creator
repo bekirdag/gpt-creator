@@ -177,7 +177,8 @@ PY
 
 gc_set_env_var() {
   local key="$1" value="$2"
-  local env_file="$(gc_env_file)"
+  local env_file
+  env_file="$(gc_env_file)"
   gc_write_env_var "$env_file" "$key" "$value"
 }
 
@@ -584,7 +585,8 @@ PY
 }
 
 gc_load_env() {
-  local env_file="$(gc_env_file)"
+  local env_file
+  env_file="$(gc_env_file)"
   if [[ -f "$env_file" ]]; then
     gc_sanitize_env_file "$env_file"
     set -a
@@ -812,7 +814,8 @@ gc_api_keys_set() {
 }
 
 gc_create_env_if_missing() {
-  local env_file="$(gc_env_file)"
+  local env_file
+  env_file="$(gc_env_file)"
   if [[ -f "$env_file" ]]; then
     return
   fi
@@ -824,8 +827,10 @@ gc_create_env_if_missing() {
   [[ -n "$slug" ]] || slug="app"
   local db_name="${slug}_db"
   local db_user="gc_${slug}_user"
-  local db_password="$(gc_random_string)"
-  local db_root_password="$(gc_random_string)"
+  local db_password
+  db_password="$(gc_random_string)"
+  local db_root_password
+  db_root_password="$(gc_random_string)"
   cat > "$env_file" <<EOF
 # gpt-creator environment
 DB_NAME=${db_name}
@@ -865,10 +870,10 @@ MYSQL_BIN="${MYSQL_BIN:-mysql}"
 
 # Colors (TTY-only)
 if [[ -t 1 ]]; then
-  c_reset=$'\033[0m'; c_dim=$'\033[2m'; c_bold=$'\033[1m'
+  c_reset=$'\033[0m'
   c_red=$'\033[31m'; c_yellow=$'\033[33m'; c_cyan=$'\033[36m'; c_green=$'\033[32m'
 else
-  c_reset=; c_dim=; c_bold=; c_red=; c_yellow=; c_cyan=; c_green=
+  c_reset=; c_red=; c_yellow=; c_cyan=; c_green=
 fi
 
 ts() { date +"%Y-%m-%dT%H:%M:%S"; }
@@ -1244,9 +1249,8 @@ gc_migrate_progress_artifacts() {
   for entry in "${GC_PROGRESS_FILE_MIGRATIONS[@]}"; do
     src_rel="${entry%%::*}"
     dest_rel="${entry#*::}"
-    local matches=("$project_root"/$src_rel)
     local path
-    for path in "${matches[@]}"; do
+    for path in "$project_root"/$src_rel; do
       [[ -e "$path" ]] || continue
       [[ "$path" == "$gc_root"* ]] && continue
       dest_dir="${gc_root}/${dest_rel}"
@@ -1320,7 +1324,7 @@ EOF
     projects+=("$(abs_path "${PROJECT_ROOT:-$PWD}")")
   fi
 
-  local root moved_any=0 count prev_skip_set prev_skip_val
+  local root count prev_skip_set prev_skip_val
   for root in "${projects[@]}"; do
     if [[ ! -d "$root" ]]; then
       warn "Skipping missing directory: ${root}"
@@ -1346,7 +1350,6 @@ EOF
     fi
     if (( count > 0 )); then
       ok "Relocated ${count} artifact(s) into ${root}/.gpt-creator."
-      moved_any=1
     else
       info "No legacy artifacts found outside .gpt-creator."
     fi
@@ -3616,10 +3619,11 @@ gc_bootstrap_run_step() {
 }
 
 gc_bootstrap_have_rfp() {
-  local stage="${STAGING_DIR:-}" input="${INPUT_DIR:-}"
-  [[ -n "$stage" && -f "$stage/docs/rfp.md" ]] && return 0
-  [[ -n "$stage" && -f "$stage/rfp.md" ]] && return 0
-  [[ -n "$input" && -f "$input/rfp.md" ]] && return 0
+  local stage_dir="${STAGING_DIR:-}"
+  local input_dir="${INPUT_DIR:-}"
+  [[ -n "$stage_dir" && -f "$stage_dir/docs/rfp.md" ]] && return 0
+  [[ -n "$stage_dir" && -f "$stage_dir/rfp.md" ]] && return 0
+  [[ -n "$input_dir" && -f "$input_dir/rfp.md" ]] && return 0
   return 1
 }
 
@@ -3738,15 +3742,17 @@ gc_apply_project_template() {
   }
 
   local chosen=""
-  local request_lower="$(to_lower "$template_request")"
+  local request_lower
+  request_lower="$(to_lower "$template_request")"
   if [[ "$request_lower" == "skip" ]]; then
     info "Skipping project template scaffolding (per flag)."
     return 0
   fi
 
   if [[ "$request_lower" != "auto" ]]; then
-    for tpl in "${available_templates[@]}"; do
-      local tpl_name="$(basename "$tpl")"
+      for tpl in "${available_templates[@]}"; do
+        local tpl_name
+        tpl_name="$(basename "$tpl")"
       if [[ "$(to_lower "$tpl_name")" == "$request_lower" ]]; then
         chosen="$tpl"
         template_request="$tpl_name"
@@ -3765,7 +3771,8 @@ gc_apply_project_template() {
     fi
   fi
 
-  local template_name="$(basename "$chosen")"
+  local template_name
+  template_name="$(basename "$chosen")"
   info "Applying project template → ${template_name}"
   if ! gc_copy_project_template "$chosen" "$project_root"; then
     warn "Failed to copy template '${template_name}'"
@@ -4519,7 +4526,7 @@ PY
         local pattern
         for pattern in "${skip_patterns[@]}"; do
           [[ -n "$pattern" ]] || continue
-          if [[ "$base_name" == $pattern || "$f" == $pattern ]]; then
+          if [[ "$base_name" == "$pattern" || "$f" == "$pattern" ]]; then
             skip_file=1
             break
           fi
@@ -6312,7 +6319,8 @@ gc_rebuild_tasks_db_from_json() {
 docker_compose() {
   local project_name="${GC_DOCKER_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-}}"
   if [[ -z "$project_name" ]]; then
-    local base="$(basename "${PROJECT_ROOT:-$PWD}")"
+    local base
+    base="$(basename "${PROJECT_ROOT:-$PWD}")"
     project_name="$(slugify_name "$base")"
   fi
   local compose_verbose_flag=""
@@ -6451,7 +6459,8 @@ gc_pick_port() {
   local label="$1"
   local default="$2"
   shift 2
-  local service_key="$(slugify_name "$label")"
+  local service_key
+  service_key="$(slugify_name "$label")"
   [[ -n "$service_key" ]] || service_key="$label"
   local existing_port=""
   existing_port="$(gc_port_for_service "$service_key" 2>/dev/null || true)"
@@ -7187,12 +7196,14 @@ gc_refresh_stack_inspect_containers() {
     return 1
   fi
 
-  python3 - <<'PY' <<<"${inspect_json}"
+  INSPECT_JSON="${inspect_json}" python3 - <<'PY'
 import json
 import sys
+import os
 
+raw = os.environ.get("INSPECT_JSON", "")
 try:
-    data = json.load(sys.stdin)
+    data = json.loads(raw)
 except Exception as exc:
     print(f"Unable to parse docker inspect output: {exc}")
     sys.exit(1)
@@ -7308,8 +7319,10 @@ has_pattern() { LC_ALL=C grep -E -i -m 1 -q -- "$1" "$2" 2>/dev/null; }
 classify_file() {
   local path="$1"
   local name="${path##*/}"
-  local lower="$(to_lower "$name")"
-  local path_norm="$(to_lower "$path")"
+  local lower
+  lower="$(to_lower "$name")"
+  local path_norm
+  path_norm="$(to_lower "$path")"
   local ext="${lower##*.}"
   local type="" conf=0
 
@@ -7737,7 +7750,8 @@ copy_template_tree() {
     mkdir -p "$dest/$rel"
   done
   find "$src" -type f | while IFS= read -r file; do
-    local base="$(basename "$file")"
+    local base
+    base="$(basename "$file")"
     [[ "$base" == '.DS_Store' ]] && continue
     local rel="${file#$src/}"
     local target="$dest/$rel"
@@ -7809,25 +7823,29 @@ cmd_generate() {
       gc_set_env_var DB_HOST_PORT "$GC_DB_HOST_PORT"
       gc_set_env_var MYSQL_HOST_PORT "$GC_DB_HOST_PORT"
       gc_set_env_var GC_DB_HOST_PORT "$GC_DB_HOST_PORT"
-      local api_host_port="$(gc_pick_port "API" 3000 GC_API_HOST_PORT API_HOST_PORT)"
+      local api_host_port
+      api_host_port="$(gc_pick_port "API" 3000 GC_API_HOST_PORT API_HOST_PORT)"
       GC_API_HOST_PORT="$api_host_port"
       API_HOST_PORT="$GC_API_HOST_PORT"
       gc_set_env_var API_HOST_PORT "$API_HOST_PORT"
       gc_set_env_var GC_API_HOST_PORT "$GC_API_HOST_PORT"
       gc_reserve_port api "$GC_API_HOST_PORT"
-      local web_host_port="$(gc_pick_port "Web" 5173 GC_WEB_HOST_PORT WEB_HOST_PORT)"
+      local web_host_port
+      web_host_port="$(gc_pick_port "Web" 5173 GC_WEB_HOST_PORT WEB_HOST_PORT)"
       GC_WEB_HOST_PORT="$web_host_port"
       WEB_HOST_PORT="$GC_WEB_HOST_PORT"
       gc_set_env_var WEB_HOST_PORT "$WEB_HOST_PORT"
       gc_set_env_var GC_WEB_HOST_PORT "$GC_WEB_HOST_PORT"
       gc_reserve_port web "$GC_WEB_HOST_PORT"
-      local admin_host_port="$(gc_pick_port "Admin" 5174 GC_ADMIN_HOST_PORT ADMIN_HOST_PORT)"
+      local admin_host_port
+      admin_host_port="$(gc_pick_port "Admin" 5174 GC_ADMIN_HOST_PORT ADMIN_HOST_PORT)"
       GC_ADMIN_HOST_PORT="$admin_host_port"
       ADMIN_HOST_PORT="$GC_ADMIN_HOST_PORT"
       gc_set_env_var ADMIN_HOST_PORT "$ADMIN_HOST_PORT"
       gc_set_env_var GC_ADMIN_HOST_PORT "$GC_ADMIN_HOST_PORT"
       gc_reserve_port admin "$GC_ADMIN_HOST_PORT"
-      local proxy_host_port="$(gc_pick_port "Proxy" 8080 GC_PROXY_HOST_PORT PROXY_HOST_PORT)"
+      local proxy_host_port
+      proxy_host_port="$(gc_pick_port "Proxy" 8080 GC_PROXY_HOST_PORT PROXY_HOST_PORT)"
       GC_PROXY_HOST_PORT="$proxy_host_port"
       PROXY_HOST_PORT="$GC_PROXY_HOST_PORT"
       gc_set_env_var PROXY_HOST_PORT "$PROXY_HOST_PORT"
@@ -8662,8 +8680,10 @@ PY
     local name="$1"; shift
     local label="$1"; shift
     local -a cmd=("$@")
-    local timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    local stamp="$(date -u +"%Y%m%d-%H%M%S")"
+    local timestamp
+    timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    local stamp
+    stamp="$(date -u +"%Y%m%d-%H%M%S")"
     local log_file="${logs_dir}/${stamp}-${name}.log"
     SECONDS=0
     set +e
@@ -9126,6 +9146,7 @@ PROMPT
   if command -v "$CODEX_BIN" >/dev/null 2>&1; then
     info "Codex ${task} → model=${CODEX_MODEL}"
     local fallback_model="${CODEX_FALLBACK_MODEL:-gpt-5-codex}"
+    # shellcheck disable=SC2034  # local function assigned below for lexical scoping
     local run_codex_model
     run_codex_model() {
       local model="$1"
@@ -9327,7 +9348,6 @@ ensure_node_runtime() {
   local root_dir="${1:-$PROJECT_ROOT}"
   local target_version="20.10.0"
   local runtime_root="${PLAN_DIR}/.runtime"
-  local archive_dir="node-v${target_version}"
 
   # If current node already satisfies v20.x with sufficient minor, skip.
   if command -v node >/dev/null 2>&1; then
@@ -9346,8 +9366,10 @@ ensure_node_runtime() {
 
   mkdir -p "$runtime_root"
 
-  local os_name="$(uname -s)"
-  local arch_name="$(uname -m)"
+  local os_name
+  os_name="$(uname -s)"
+  local arch_name
+  arch_name="$(uname -m)"
   local os_tag="" arch_tag="" ext="tar.xz"
 
   case "$os_name" in

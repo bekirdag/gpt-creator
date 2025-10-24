@@ -21,10 +21,9 @@ fs_ensure_dir() {
   # Usage: fs_ensure_dir <dir> [mode]
   local dir="$1" mode="${2:-}"
   [[ -z "${dir}" ]] && { echo "fs_ensure_dir: dir required" >&2; return 2; }
+  mkdir -p -- "${dir}"
   if [[ -n "${mode}" ]]; then
-    mkdir -p -m "${mode}" -- "${dir}"
-  else
-    mkdir -p -- "${dir}"
+    chmod "${mode}" -- "${dir}"
   fi
   [[ -d "${dir}" ]]
 }

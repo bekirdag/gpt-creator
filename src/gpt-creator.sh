@@ -102,9 +102,19 @@ gc::_find_all_by_patterns() {
   local root="$1"; shift
   local -a patterns=("$@")
   shopt -s nocaseglob nullglob
+  local -a expr=()
+  local pat
+  for pat in "${patterns[@]}"; do
+    expr+=(-iname "$pat" -o)
+  done
+  if ((${#expr[@]} > 0)); then
+    unset 'expr[-1]'
+  else
+    expr=(-name '*')
+  fi
   while IFS= read -r -d '' f; do
     echo "$f"
-  done < <(find "$root" -type f \( $(printf -- '-iname %q -o ' "${patterns[@]}" | sed 's/ -o $//') \) -print0 2>/dev/null)
+  done < <(find "$root" -type f \( "${expr[@]}" \) -print0 2>/dev/null)
 }
 
 gc::discover() {

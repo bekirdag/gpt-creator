@@ -77,8 +77,9 @@ semver_compare() {
   local a; a="$(_semver_parse "${va}")" || { echo "NaN" >&2; return 2; }
   local b; b="$(_semver_parse "${vb}")" || { echo "NaN" >&2; return 2; }
   local A=() B=()
-  IFS=$'\t' read -r A0 A1 A2 A3 A4 <<< "${a}"
-  IFS=$'\t' read -r B0 B1 B2 B3 B4 <<< "${b}"
+  local _ignore
+  IFS=$'\t' read -r A0 A1 A2 A3 _ignore <<< "${a}"
+  IFS=$'\t' read -r B0 B1 B2 B3 _ignore <<< "${b}"
 
   # Numeric compare on major/minor/patch
   for i in 0 1 2; do
@@ -108,14 +109,14 @@ semver_le() { local c; c="$(semver_compare "$1" "$2")"; [[ "${c}" == "-1" || "${
 semver_bump() {
   # Usage: semver_bump (major|minor|patch) <version>
   local kind="$1" v="$2"
-  local major minor patch pre build
-  IFS=$'\t' read -r major minor patch pre build < <(_semver_parse "${v}") || {
+  local major minor patch build
+  IFS=$'\t' read -r major minor patch _ build < <(_semver_parse "${v}") || {
     echo "semver_bump: invalid version: ${v}" >&2; return 2; }
 
   case "${kind}" in
-    major) ((major++)); minor=0; patch=0; pre= ;;
-    minor) ((minor++)); patch=0; pre= ;;
-    patch) ((patch++)); pre= ;;
+    major) ((major++)); minor=0; patch=0 ;;
+    minor) ((minor++)); patch=0 ;;
+    patch) ((patch++)) ;;
     *) echo "semver_bump: kind must be major|minor|patch" >&2; return 2;;
   esac
 

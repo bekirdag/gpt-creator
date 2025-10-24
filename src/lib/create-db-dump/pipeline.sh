@@ -99,6 +99,7 @@ cddb::init() {
   CDDB_PROJECT_ROOT="${1:?project root required}"
   CDDB_MODEL="${2:-${CODEX_MODEL:-gpt-5-codex}}"
   CDDB_DRY_RUN="${3:-0}"
+  # shellcheck disable=SC2034  # reserved for future force re-run behavior
   CDDB_FORCE="${4:-0}"
 
   CDDB_PROJECT_ROOT="$(cddb::abs_path "$CDDB_PROJECT_ROOT")"

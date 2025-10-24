@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_DEFAULTS="${ROOT_DIR}/config/defaults.sh"
+# shellcheck source=../config/defaults.sh
 [[ -f "$CONFIG_DEFAULTS" ]] && source "$CONFIG_DEFAULTS"
 
 API_URL="${1:-${GC_DEFAULT_API_URL:-http://localhost:3000/api/v1}}"

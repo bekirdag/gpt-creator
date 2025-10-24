@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
+# shellcheck disable=SC2034
 # colors.sh — minimal ANSI color helpers (auto‑disable on non‑TTY or NO_COLOR)
 # Usage:
 #   source "${BASH_SOURCE[0]%/*}/colors.sh"

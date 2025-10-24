@@ -47,7 +47,15 @@ need() { command -v "$1" >/dev/null 2>&1 || { bad "Missing dependency: $1"; exit
 need curl
 need jq
 
-urlencode() { local LC_ALL=C; python3 - <<'PY' "$1"; from urllib.parse import quote; import sys; print(quote(sys.argv[1])); PY
+urlencode() {
+  local LC_ALL=C
+  local value="${1:-}"
+  python3 - "$value" <<'PY'
+import sys
+from urllib.parse import quote
+
+print(quote(sys.argv[1] if len(sys.argv) > 1 else ""))
+PY
 }
 
 fetch() {

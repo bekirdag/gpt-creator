@@ -11,7 +11,9 @@ _path_trace() { [[ "${GC_TRACE}" == "1" ]] && printf '[path] %s\n' "$*" >&2 || t
 # Join path segments (skips empty, handles slashes)
 path_join() {
   # Usage: path_join <segment...>
-  local IFS=/ out= seg
+  local IFS='/'
+  local out=""
+  local seg
   for seg in "$@"; do
     [[ -z "${seg}" ]] && continue
     # Remove duplicate slashes on both sides

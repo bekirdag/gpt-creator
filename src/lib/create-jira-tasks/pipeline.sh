@@ -10,7 +10,6 @@ GC_LIB_CREATE_JIRA_TASKS_PIPELINE_SH=1
 set -o errtrace
 
 CJT_DOC_FILES=()
-CJT_SDS_SOURCE=""
 CJT_SDS_CHUNKS_DIR=""
 CJT_SDS_CHUNKS_LIST=""
 CJT_PDR_PATH=""
@@ -1178,12 +1177,10 @@ cjt::build_context_files() {
       sds_clean_path="$(mktemp "$cleaned_dir/sds_XXXXXX")"
       cjt::sanitize_doc_to "$sds_candidate" "$sds_clean_path"
     fi
-    CJT_SDS_SOURCE="$sds_candidate"
     CJT_SDS_CHUNKS_DIR="$CJT_PIPELINE_DIR/sds-chunks"
     CJT_SDS_CHUNKS_LIST="$CJT_SDS_CHUNKS_DIR/list.txt"
     cjt::chunk_doc_by_headings "$sds_clean_path" "$CJT_SDS_CHUNKS_DIR" "$CJT_SDS_CHUNKS_LIST"
   else
-    CJT_SDS_SOURCE=""
     CJT_SDS_CHUNKS_DIR=""
     CJT_SDS_CHUNKS_LIST=""
   fi
@@ -1867,7 +1864,8 @@ cjt::generate_stories() {
   local epic_id
   while IFS= read -r epic_id; do
     [[ -n "$epic_id" ]] || continue
-    local slug="$(cjt::slugify "$epic_id")"
+    local slug
+    slug="$(cjt::slugify "$epic_id")"
     local prompt_file="$CJT_PROMPTS_DIR/story_${slug}.prompt.md"
     local raw_file="$CJT_OUTPUT_DIR/story_${slug}.raw.txt"
     local json_file="$CJT_JSON_DIR/story_${slug}.json"

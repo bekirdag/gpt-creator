@@ -44,11 +44,13 @@ _find_with_ignores() {
   else
     # POSIX find with explicit prunes
     local prune_expr=()
-    for p in "${_find_prunes[@]}"; do prune_expr+=( -name "$p" -prune -o ); done
-    # shellcheck disable=SC2068
-    eval set -- "$@"  # pass-through patterns/flags
-    # Build: find root ( -name prune -prune -o ) \( rest \) -print
-    find "${root}" \( ${prune_expr[@]:-} -false \) -o \( "$@" -print \)
+    for p in "${_find_prunes[@]}"; do prune_expr+=(-name "$p" -prune -o); done
+    prune_expr+=(-false)
+    local -a args=("$@")
+    if ((${#args[@]} == 0)); then
+      args=(-type f)
+    fi
+    find "${root}" \( "${prune_expr[@]}" \) -o \( "${args[@]}" -print \)
   fi
 }
 

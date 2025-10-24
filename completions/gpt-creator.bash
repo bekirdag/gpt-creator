@@ -44,7 +44,6 @@ _gpt_creator()
       case "$prev" in
         --project) COMPREPLY=( $(compgen -d -- "$cur") ); return 0;;
         --jira) COMPREPLY=( $(compgen -f -- "$cur") ); return 0;;
-        --context-mode) COMPREPLY=( $(compgen -W "digest raw" -- "$cur") ); return 0;;
       esac
       case "$cmd" in
         create-pdr)
@@ -102,7 +101,7 @@ _gpt_creator()
           COMPREPLY=( $(compgen -W "--project --range --head --tail --max-lines --diff --refresh ${global_opts}" -- "$cur") $(compgen -f -- "$cur") )
           ;;
         work-on-tasks)
-          COMPREPLY=( $(compgen -W "--project --story --from-story --from-task --fresh-from --task --fresh --force --no-verify --keep-artifacts --memory-cycle --batch-size --sleep-between --context-lines --context-none --context-mode --context-file-lines --context-skip --prompt-compact --prompt-expanded --context-doc-snippets --no-context-doc-snippets --sample-lines --idle-timeout ${global_opts}" -- "$cur") )
+          COMPREPLY=( $(compgen -W "--project --story --from-story --from-task --fresh-from --task --fresh --force --no-verify --keep-artifacts --memory-cycle --batch-size --sleep-between --context-lines --context-none --context-file-lines --context-skip --prompt-compact --prompt-expanded --context-doc-snippets --no-context-doc-snippets --sample-lines --idle-timeout ${global_opts}" -- "$cur") )
           ;;
         generate)
           COMPREPLY=( $(compgen -W "api web admin db docker all ${global_opts}" -- "$cur") )

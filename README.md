@@ -336,7 +336,7 @@ gpt-creator work-on-tasks --project /path/to/project
 - Use `--story ST-123` (or slug) to jump to a specific story and `--no-verify` to skip the automatic `verify all` invocation after a successful run.
 - Cleans prompt/output artifacts after each successful task to keep memory usage low; pass `--keep-artifacts` if you need to retain the raw Codex exchange for auditing.
 - Control resource usage with batching/pacing flags: `--batch-size 10` pauses after 10 tasks (resume with the same command) and `--sleep-between 2` inserts a short delay between tasks.
-- Tame prompt size with `--context-lines N` (defaults to 400) to include only the tail of the shared context, `--context-mode digest|raw` to switch between the new hashed digest (default) and the legacy literal tail, `--context-file-lines 120` to clip each staged document, or `--context-skip "*.css"` / `--context-none` to drop noisy artifacts altogether.
+- Tame prompt size with `--context-lines N` (defaults to 400) to include only the tail of the shared context, `--context-file-lines 120` to clip each staged document, or `--context-skip "*.css"` / `--context-none` to drop noisy artifacts altogether; the CLI automatically falls back to a literal tail when the digest cannot be generated.
 - Prompts default to the compact instruction/schema block; use `--prompt-expanded` to restore the legacy verbose guidance.
 - Sample payloads now default to a short digest; raise `--sample-lines N` to stream the first N minified chunks when you truly need the raw body.
 - Surface targeted excerpts from referenced docs/endpoints with `--context-doc-snippets`; the CLI now condenses matches into short summaries with hashes so prompts stay lean.

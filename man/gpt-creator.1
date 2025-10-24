@@ -59,7 +59,7 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 [\-\-project DIR] [\-\-root DIR] [\-\-type epics|stories] [\-\-item-children ID] [\-\-progress] [\-\-task-details ID]
 .br
 .B gpt-creator work-on-tasks
-[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-force] [\-\-no-verify] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC] [\-\-context-lines NUM] [\-\-context-none] [\-\-context-mode MODE] [\-\-context-file-lines NUM] [\-\-context-skip GLOB] [\-\-prompt-compact] [\-\-prompt-expanded] [\-\-context-doc-snippets] [\-\-sample-lines NUM]
+[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-force] [\-\-no-verify] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC] [\-\-context-lines NUM] [\-\-context-none] [\-\-context-file-lines NUM] [\-\-context-skip GLOB] [\-\-prompt-compact] [\-\-prompt-expanded] [\-\-context-doc-snippets] [\-\-sample-lines NUM]
 .br
 .B gpt-creator reports
 [\-\-project DIR] [list|backlog|auto|show|work] [\-\-open] [\-\-branch NAME] [\-\-no-push] [\-\-prompt-only] [\-\-reporter NAME] [slug]
@@ -186,7 +186,6 @@ Artifacts (prompt/output pairs) are removed after each successful task to limit 
 Use \fB--batch-size\fR to pause after a fixed number of tasks and \fB--sleep-between\fR to insert delays between Codex runs when conserving resources.
 Codex invocations are also capped by the \fBGC_CODEX_EXEC_MAX_DURATION\fR watchdog (default 900 seconds) to prevent runaway loops; set it to 0 when you explicitly need longer manual sessions.
 \fB--context-lines\fR controls how many lines from the shared context appendix are appended to each prompt (default 400) and \fB--context-none\fR omits that appendix entirely for minimal prompts.
-\fB--context-mode\fR selects the appendix strategy: \fIdigest\fR (default) summarises staged files into short hashed excerpts, while \fIraw\fR streams the literal tail produced by \fB--context-lines\fR.
 \fB--context-file-lines\fR clips each staged document before inclusion, while \fB--context-skip\fR accepts repeatable glob patterns to drop noisy files (for example, \fB--context-skip '*.css'\fR).
 \fB--prompt-compact\fR keeps the default compact instruction/schema block, while \fB--prompt-expanded\fR restores the legacy verbose guidance if you need the older behaviour.
 \fB--context-doc-snippets\fR resolves known document references/endpoints to staged files and injects compact hashed summaries in place of broad shared-context dumps.

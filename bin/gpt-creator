@@ -228,19 +228,48 @@ cmd_show_file() {
         shift 2
         ;;
       --range)
-        range_spec="$2"
+        if [[ $# -lt 2 ]]; then
+          die "--range requires an argument in the form START:END (e.g. 120:160)"
+        fi
+        local next_range="$2"
+        if [[ -z "$next_range" || "$next_range" == --* ]]; then
+          die "--range requires an argument in the form START:END (e.g. 120:160)"
+        fi
+        range_spec="$next_range"
         shift 2
         ;;
       --head)
-        head_lines="$2"
+        if [[ $# -lt 2 ]]; then
+          die "--head requires a positive line count"
+        fi
+        local next_head="$2"
+        if [[ -z "$next_head" || "$next_head" == --* ]]; then
+          die "--head requires a positive line count"
+        fi
+        warn "Tip: prefer --range start:end or --tail N for targeted snippets; --head is retained for compatibility."
+        head_lines="$next_head"
         shift 2
         ;;
       --tail)
-        tail_lines="$2"
+        if [[ $# -lt 2 ]]; then
+          die "--tail requires a positive line count"
+        fi
+        local next_tail="$2"
+        if [[ -z "$next_tail" || "$next_tail" == --* ]]; then
+          die "--tail requires a positive line count"
+        fi
+        tail_lines="$next_tail"
         shift 2
         ;;
       --max-lines)
-        max_lines="$2"
+        if [[ $# -lt 2 ]]; then
+          die "--max-lines requires a positive line count"
+        fi
+        local next_max="$2"
+        if [[ -z "$next_max" || "$next_max" == --* ]]; then
+          die "--max-lines requires a positive line count"
+        fi
+        max_lines="$next_max"
         shift 2
         ;;
       --refresh|--force)
@@ -260,7 +289,7 @@ Display a cached snippet of PATH without repeatedly streaming large files.
 Options:
   --project DIR       Project root (defaults to current PROJECT_ROOT)
   --range A:B         Show inclusive line range A..B (1-based)
-  --head N            Show first N lines
+  --head N            Show first N lines (legacy; prefer --range/--tail for precise snippets)
   --tail N            Show last N lines
   --max-lines N       Default line count when no range/head/tail is provided (default: 400)
   --diff              Show a unified diff against the cached snapshot (if any)
@@ -291,6 +320,17 @@ EOHELP
   project_abs="$(abs_path "$project")"
   local resolved_path
   resolved_path="$(abs_path "$target_path")"
+
+  if [[ ! -f "$resolved_path" && "$target_path" != /* ]]; then
+    local staging_root
+    staging_root="$(abs_path "${project_abs}/.gpt-creator/staging")"
+    local staging_candidate="${staging_root}/${target_path#./}"
+    staging_candidate="$(abs_path "$staging_candidate")"
+    if [[ "$staging_candidate" == "${staging_root}"/* && -f "$staging_candidate" ]]; then
+      resolved_path="$staging_candidate"
+    fi
+  fi
+
   [[ -f "$resolved_path" ]] || die "File not found: ${target_path}"
 
   [[ -z "$max_lines" || "$max_lines" =~ ^[0-9]+$ ]] || die "--max-lines must be numeric"
@@ -368,7 +408,7 @@ def load_lines(file_path: Path):
 
 def select_snippet(lines, total):
     if total == 0:
-        return [], 1, 0
+        return [], 1, 0, False
 
     if range_spec:
         raw = range_spec
@@ -391,7 +431,8 @@ def select_snippet(lines, total):
         if end_line > total:
             end_line = total
         snippet = lines[start_line - 1: end_line]
-        return snippet, start_line, end_line
+        truncated = (end_line - start_line + 1) < total
+        return snippet, start_line, end_line, truncated
 
     if head_lines:
         try:
@@ -402,7 +443,8 @@ def select_snippet(lines, total):
             count = max_lines
         snippet = lines[:count]
         end_line = min(total, count)
-        return snippet, 1, end_line
+        truncated = end_line < total
+        return snippet, 1, end_line, truncated
 
     if tail_lines:
         try:
@@ -413,11 +455,13 @@ def select_snippet(lines, total):
             count = max_lines
         snippet = lines[-count:] if count < total else lines[:]
         start_line = total - len(snippet) + 1
-        return snippet, start_line, total
+        truncated = len(snippet) < total
+        return snippet, start_line, total, truncated
 
     snippet = lines[:min(total, max_lines)]
     end_line = len(snippet)
-    return snippet, 1, end_line
+    truncated = end_line < total
+    return snippet, 1, end_line, truncated
 
 def write_cache(payload):
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -450,10 +494,17 @@ if existing and not refresh and not diff_mode:
         sys.exit(0)
 
 lines, total_lines = load_lines(path)
-snippet_lines, start_line, end_line = select_snippet(lines, total_lines)
+snippet_lines, start_line, end_line, truncated_display = select_snippet(lines, total_lines)
 snippet_text = "\n".join(snippet_lines)
 snippet_hash = hashlib.sha256(snippet_text.encode("utf-8", "replace")).hexdigest()[:12]
 timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+display_note = ""
+if truncated_display and total_lines:
+    display_note = (
+        f"display truncated (showing lines {start_line}-{end_line} of {total_lines}); "
+        "use --range START:END or read the file directly for additional context."
+    )
 
 cache_payload = {
     "path": str(path),
@@ -467,6 +518,7 @@ cache_payload = {
     "mtime_ns": file_stat.st_mtime_ns,
     "size": file_stat.st_size,
     "updated_at": timestamp,
+    "truncated": bool(truncated_display),
 }
 
 if diff_mode and existing:
@@ -494,7 +546,13 @@ if diff_mode and existing:
     write_cache(cache_payload)
     sys.exit(0)
 
-print(format_header(start_line, end_line, total_lines, snippet_hash))
+print(format_header(start_line, end_line, total_lines, snippet_hash, note=display_note))
+if truncated_display:
+    print(
+        f"! Display truncated to lines {start_line}-{end_line} of {total_lines}. "
+        f"Run `gpt-creator show-file {rel_path} --range START:END` with bounds covering the desired lines "
+        "or read the file directly for the remaining content."
+    )
 if snippet_text:
     print(snippet_text)
 else:
@@ -2298,1003 +2356,31 @@ gc_record_codex_usage() {
     return 1
   }
 
-  if python3 - <<'PY' "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" "${GC_COMMAND_FAILURE_CACHE:-}" "${GC_COMMAND_STREAM_CACHE:-}" "${GC_COMMAND_FILE_CACHE:-}" "${GC_COMMAND_SCAN_CACHE:-}" >"$tmp_output"
-import base64
-import hashlib
-import json
-import os
-import pathlib
-import re
-import shlex
-import sys
-from typing import Optional
+  local usage_script_py
+  usage_script_py="$(mktemp "${TMPDIR:-/tmp}/gc-usage-script-XXXXXX.py")" || {
+    warn "Failed to prepare Codex usage recorder."
+    rm -f "$tmp_output" || true
+    return 1
+  }
 
-log_path = pathlib.Path(sys.argv[1])
-usage_path = pathlib.Path(sys.argv[2])
-timestamp = sys.argv[3]
-task = sys.argv[4] or None
-model = sys.argv[5] or None
-prompt_file = sys.argv[6] or None
-exit_code = int(sys.argv[7])
-cmd_cache_arg = sys.argv[8] if len(sys.argv) > 8 else ""
-cmd_cache_path = pathlib.Path(cmd_cache_arg) if cmd_cache_arg else None
-stream_cache_arg = sys.argv[9] if len(sys.argv) > 9 else ""
-stream_cache_path = pathlib.Path(stream_cache_arg) if stream_cache_arg else None
-file_cache_arg = sys.argv[10] if len(sys.argv) > 10 else ""
-file_cache_path = pathlib.Path(file_cache_arg) if file_cache_arg else None
-scan_cache_arg = sys.argv[11] if len(sys.argv) > 11 else ""
-scan_cache_path = pathlib.Path(scan_cache_arg) if scan_cache_arg else None
+  local usage_source="${CLI_ROOT}/scripts/record_codex_usage.py"
+  if [[ ! -f "$usage_source" ]]; then
+    warn "Codex usage recorder missing at ${usage_source}"
+    rm -f "$tmp_output" "$usage_script_py" || true
+    return 1
+  fi
 
-if log_path.exists():
-    raw_text = log_path.read_text(encoding="utf-8", errors="ignore")
-else:
-    raw_text = ""
+  if ! cp "$usage_source" "$usage_script_py"; then
+    warn "Failed to copy Codex usage recorder."
+    rm -f "$tmp_output" "$usage_script_py" || true
+    return 1
+  fi
 
-fields = {}
-def parse_number(text: str) -> int:
-    cleaned = (text or "").strip()
-    if not cleaned:
-        raise ValueError("empty")
-    cleaned = cleaned.strip("[]{}()")
-    cleaned = cleaned.lstrip("≈~<>≤≥=")
-    cleaned = cleaned.replace(",", "").replace("_", "").replace(" ", "")
-    if not cleaned:
-        raise ValueError("empty")
-    suffix = ""
-    if cleaned and cleaned[-1].lower() in ("k", "m", "b", "g", "t"):
-        suffix = cleaned[-1].lower()
-        cleaned = cleaned[:-1]
-    if not cleaned:
-        raise ValueError("empty")
-    number_match = re.match(r"^[-+]?(?:\d+|\d*\.\d+)$", cleaned)
-    if not number_match:
-        raise ValueError("unparsable")
-    value = float(cleaned)
-    multipliers = {
-        "": 1,
-        "k": 1_000,
-        "m": 1_000_000,
-        "b": 1_000_000_000,
-        "g": 1_000_000_000,
-        "t": 1_000_000_000_000,
-    }
-    factor = multipliers.get(suffix, 1)
-    return int(round(value * factor))
 
-def capture(field: str, value: str) -> None:
-    if not value:
-        return
-    try:
-        fields[field] = parse_number(value)
-    except Exception:
-        pass
-
-number_pattern = r'((?:\d[\d,._]*|\d*\.\d+)(?:[kKmMbBgGtT]?))'
-line_patterns = [
-    ("total_tokens", re.compile(r'tokens[\s_\-]*used[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
-    ("total_tokens", re.compile(r'tokens[\s_\-]*consumed[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
-    ("total_tokens", re.compile(r'total[\s_\-]*tokens?(?:\s*(?:used|consumed))?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
-    ("prompt_tokens", re.compile(r'prompt[\s_\-]*tokens?(?:\s*(?:used|consumed))?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
-    ("completion_tokens", re.compile(r'completion[\s_\-]*tokens?(?:\s*(?:used|consumed))?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
-    ("cached_tokens", re.compile(r'cached[\s_\-]*tokens?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
-    ("prompt_tokens", re.compile(r'input[\s_\-]*tokens?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
-    ("completion_tokens", re.compile(r'output[\s_\-]*tokens?["\']?[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
-    ("prompt_tokens", re.compile(r'\bprompt\s*=\s*' + number_pattern, re.IGNORECASE)),
-    ("completion_tokens", re.compile(r'\bcompletion\s*=\s*' + number_pattern, re.IGNORECASE)),
-    ("total_tokens", re.compile(r'\btotal\s*=\s*' + number_pattern, re.IGNORECASE)),
-    ("cached_tokens", re.compile(r'\bcached\s*=\s*' + number_pattern, re.IGNORECASE)),
-]
-
-for line in raw_text.splitlines():
-    if not line:
-        continue
-    for field, pattern in line_patterns:
-        for match in pattern.finditer(line):
-            capture(field, match.group(1))
-
-if "total_tokens" not in fields:
-    prompt_val = fields.get("prompt_tokens")
-    completion_val = fields.get("completion_tokens")
-    if prompt_val is not None or completion_val is not None:
-        total = (prompt_val or 0) + (completion_val or 0)
-        fields["total_tokens"] = total
-
-record = {
-    "timestamp": timestamp,
-    "task": task,
-    "model": model,
-    "prompt_file": prompt_file,
-    "exit_code": exit_code,
-    "usage_captured": bool(fields),
-}
-
-for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "billable_units", "request_units"):
-    if key in fields:
-        record[key] = fields[key]
-
-limit_needles = [
-    "usage limit",
-    "usage-limit",
-    "usage cap",
-    "usage-cap",
-    "quota exceeded",
-    "quota has been reached",
-    "exceeded your current quota",
-    "exceeded your quota",
-    "quota reached",
-    "credit balance is too low",
-    "billing hard limit",
-    "hard usage limit",
-    "usage credits exhausted",
-]
-
-limit_message = None
-if raw_text:
-    for line in raw_text.splitlines():
-        lower = line.lower()
-        if not lower.strip():
-            continue
-        if any(needle in lower for needle in limit_needles):
-            limit_message = line.strip()
-            break
-
-if limit_message:
-    record["limit_detected"] = True
-    record["limit_message"] = limit_message
-
-command_failure_lines = []
-command_stream_lines = []
-command_file_lines = []
-command_scan_lines = []
-command_guard_lines = []
-guard_entries = []
-failure_remediation_notes = {}
-
-cached_failure_cache = {}
-cached_failure_counts = {}
-cached_failure_details = {}
-if cmd_cache_path:
-    try:
-        cache_raw = cmd_cache_path.read_text(encoding="utf-8")
-        cached_failure_cache = json.loads(cache_raw) if cache_raw.strip() else {}
-        if not isinstance(cached_failure_cache, dict):
-            cached_failure_cache = {}
-    except Exception:
-        cached_failure_cache = {}
-
-if cached_failure_cache:
-    for value in cached_failure_cache.values():
-        if not isinstance(value, dict):
-            continue
-        command_text = value.get("command")
-        if not isinstance(command_text, str):
-            continue
-        try:
-            count = int(value.get("count") or 0)
-        except Exception:
-            count = 0
-        if count < 0:
-            count = 0
-        cached_failure_counts[command_text] = count
-        cached_failure_details.setdefault(command_text, value)
-if raw_text:
-    lines_list = raw_text.splitlines()
-    total_lines = len(lines_list)
-    exec_pattern = re.compile(
-        r"exec\s+[^\s]+\s+-lc\s+(?:'(?P<sqcmd>[^']*)'|\"(?P<dqcmd>[^\"]*)\"|(?P<plain>\S+))(?:\s+in\s+(?P<cwd>\S+))?"
-    )
-    result_pattern = re.compile(
-        r"^\[(?P<ts>[^]]+)\]\s+[^\s]+\s+-lc\s+(?:(?P<sq>'(?P<sqcmd>[^']*)')|(?P<dq>\"(?P<dqcmd>[^\"]*)\")|(?P<plain>\S+))\s+(?P<outcome>succeeded|exited)\s*(?P<rest>.*)$"
-    )
-    timestamp_pattern = re.compile(r"^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\]")
-    line_timestamp_pattern = re.compile(r"^\[(?P<ts>[^]]+)\]")
-    project_root_hint = os.getenv("PROJECT_ROOT", "")
-    try:
-        project_root_path = pathlib.Path(project_root_hint).resolve() if project_root_hint else None
-    except (OSError, RuntimeError, ValueError):
-        project_root_path = None
-def normalise_candidate_path(raw: str, cwd: str) -> Optional[pathlib.Path]:
-    candidate = (raw or "").strip()
-    if not candidate:
-        return None
-        candidate = candidate.split("|", 1)[0]
-        candidate = candidate.split(">", 1)[0]
-        candidate = candidate.split("<", 1)[0]
-        candidate = candidate.split(";", 1)[0]
-        candidate = candidate.strip()
-        if candidate.startswith(("'", '"')) and candidate.endswith(candidate[0]) and len(candidate) >= 2:
-            candidate = candidate[1:-1].strip()
-        if not candidate:
-            return None
-        candidate = os.path.expanduser(candidate)
-        if os.path.isabs(candidate):
-            path_obj = pathlib.Path(candidate)
-        else:
-            base = pathlib.Path(cwd) if cwd else project_root_path
-            if base:
-                path_obj = base / candidate
-            else:
-                path_obj = pathlib.Path(candidate)
-        try:
-            resolved = path_obj.resolve(strict=False)
-        except (OSError, RuntimeError):
-            resolved = path_obj
-        if not resolved.exists() or not resolved.is_file():
-            return None
-        return resolved
-
-    def build_file_info(path_obj: pathlib.Path, start: Optional[int], end: Optional[int], mode: str) -> Optional[dict]:
-        try:
-            stat = path_obj.stat()
-        except OSError:
-            return None
-        mtime_ns = getattr(stat, "st_mtime_ns", None)
-        if mtime_ns is None:
-            mtime_ns = int(stat.st_mtime * 1_000_000_000)
-        size = int(stat.st_size)
-        rel_path = str(path_obj)
-        if project_root_path:
-            try:
-                rel_path = str(path_obj.relative_to(project_root_path))
-            except ValueError:
-                rel_path = str(path_obj)
-        max_chars = 2000
-        max_lines = 80
-        excerpt_lines: list[str] = []
-        if start is not None and end is not None:
-            lower = max(1, min(start, end))
-            upper = max(lower, max(start, end))
-            try:
-                with path_obj.open("r", encoding="utf-8", errors="replace") as handle:
-                    for idx, line in enumerate(handle, start=1):
-                        if idx < lower:
-                            continue
-                        if idx > upper:
-                            break
-                        excerpt_lines.append(line.rstrip("\n"))
-                        if len(excerpt_lines) >= max_lines:
-                            break
-            except OSError:
-                excerpt_lines = []
-            summary = f"{rel_path} lines {lower}-{upper}"
-            range_value = [lower, upper]
-        else:
-            try:
-                with path_obj.open("r", encoding="utf-8", errors="replace") as handle:
-                    for _, line in zip(range(max_lines), handle):
-                        excerpt_lines.append(line.rstrip("\n"))
-            except OSError:
-                excerpt_lines = []
-            summary = f"{rel_path} (sample)"
-            range_value = None
-        excerpt_text = "\n".join(excerpt_lines)
-        if len(excerpt_text) > max_chars:
-            excerpt_text = excerpt_text[: max_chars - 3].rstrip() + "..."
-        return {
-            "path": str(path_obj),
-            "rel_path": rel_path,
-            "range": range_value,
-            "mode": mode,
-            "excerpt": excerpt_text,
-            "mtime_ns": int(mtime_ns),
-            "size": size,
-            "summary": summary,
-        }
-
-    sed_chunk_pattern = re.compile(
-        r"^sed\s+-n\s+['\"]?(?P<start>\d+)\s*,\s*(?P<end>\d+)[pP]['\"]?\s+(?P<path>[^|;]+)"
-    )
-    cat_pattern = re.compile(r"^cat\s+(?P<path>[^>|;&]+)$")
-
-    def parse_file_read(command: str, cwd: str) -> Optional[dict]:
-        command = (command or "").strip()
-        if not command:
-            return None
-        sed_match = sed_chunk_pattern.match(command)
-        if sed_match:
-            path_obj = normalise_candidate_path(sed_match.group("path"), cwd)
-            if not path_obj:
-                return None
-            try:
-                start_val = int(sed_match.group("start"))
-                end_val = int(sed_match.group("end"))
-            except (TypeError, ValueError):
-                return None
-            return build_file_info(path_obj, start_val, end_val, "sed")
-        cat_match = cat_pattern.match(command)
-        if cat_match:
-            path_obj = normalise_candidate_path(cat_match.group("path"), cwd)
-            if not path_obj:
-                return None
-            return build_file_info(path_obj, None, None, "cat")
-        return None
-
-    failures = {}
-    command_sequence = []
-    i = 0
-    while i < total_lines:
-        line = lines_list[i]
-        exec_match = exec_pattern.search(line)
-        if exec_match:
-            raw_cmd = (
-                exec_match.group("sqcmd")
-                or exec_match.group("dqcmd")
-                or exec_match.group("plain")
-                or ""
-            )
-            command_text = raw_cmd.strip()
-            command_cwd = exec_match.group("cwd") or ""
-            ts_match = line_timestamp_pattern.match(line)
-            command_timestamp = ts_match.group("ts") if ts_match else ""
-            current_entry = None
-            if command_text:
-                current_entry = {
-                    "command": command_text,
-                    "timestamp": command_timestamp,
-                    "cwd": command_cwd,
-                }
-                command_sequence.append(current_entry)
-            j = i + 1
-            while j < total_lines:
-                result_line = lines_list[j]
-                result_match = result_pattern.match(result_line)
-                if result_match:
-                    outcome = result_match.group("outcome")
-                    exit_value = 0
-                    if outcome == "exited":
-                        rest_text = result_match.group("rest") or ""
-                        code_match = re.search(r"(-?\d+)", rest_text)
-                        if code_match:
-                            try:
-                                exit_value = int(code_match.group(1))
-                            except Exception:
-                                exit_value = 1
-                        else:
-                            exit_value = 1
-                    output_lines = []
-                    k = j + 1
-                    while k < total_lines and not timestamp_pattern.match(lines_list[k]):
-                        output_lines.append(lines_list[k])
-                        k += 1
-                    summary_text = "\n".join(output_lines).strip()
-                    stored_lines = output_lines[:80]
-                    truncated_flag = len(output_lines) > len(stored_lines)
-                    preview_text = "\n".join(stored_lines).strip()
-                    if len(preview_text) > 2000:
-                        preview_text = preview_text[:1997] + "..."
-                        truncated_flag = True
-                    if current_entry is not None:
-                        current_entry["output_lines"] = stored_lines
-                        current_entry["output_line_count"] = len(output_lines)
-                        current_entry["output_truncated"] = truncated_flag
-                        current_entry["output"] = preview_text
-                    if exit_value != 0:
-                        trimmed_summary = summary_text
-                        if trimmed_summary.count("\n") > 30:
-                            summary_rows = trimmed_summary.splitlines()
-                            trimmed_summary = "\n".join(summary_rows[:30])
-                            trimmed_summary += "\n... (output truncated) ..."
-                        if len(trimmed_summary) > 1800:
-                            trimmed_summary = trimmed_summary[:1797] + "..."
-                        digest_source = f"{project_root_hint}\n{command_text}\n{exit_value}\n{trimmed_summary}"
-                        digest = hashlib.sha256(digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
-                        entry = failures.get(digest)
-                        if entry:
-                            entry["count"] += 1
-                        else:
-                            entry = {
-                                "command": command_text,
-                                "exit": exit_value,
-                                "summary": trimmed_summary,
-                                "count": 1,
-                                "digest": digest,
-                            }
-                        failures[digest] = entry
-                    i = k - 1
-                    break
-                elif timestamp_pattern.match(result_line):
-                    i = j - 1
-                    break
-                else:
-                    j += 1
-        i += 1
-
-    sed_chunk_pattern = re.compile(
-        r"^sed\s+-n\s+['\"]?(?P<start>\d+)\s*,\s*(?P<end>\d+)[pP]['\"]?\s+(?P<path>[^|;]+)"
-    )
-
-    def parse_sed_chunk(command: str):
-        match = sed_chunk_pattern.match(command)
-        if not match:
-            return None
-        try:
-            start = int(match.group("start"))
-            end = int(match.group("end"))
-        except Exception:
-            return None
-        path = match.group("path").strip()
-        path = path.split("|", 1)[0].strip()
-        path = path.split(";", 1)[0].strip()
-        if path.startswith(("'", '"')) and path.endswith(path[0]) and len(path) >= 2:
-            path = path[1:-1]
-        if not path:
-            return None
-        return {"file": path, "start": start, "end": end}
-
-    build_artifact_dirs = {"dist", "dist-tests", "build", "coverage", "out", "tmp", ".next", "node_modules", "public-build"}
-
-    def is_build_artifact_path(rel_path: str) -> bool:
-        if not rel_path:
-            return False
-        normalized = rel_path.replace("\\", "/").strip("/")
-        if not normalized:
-            return False
-        parts = [part for part in normalized.split("/") if part]
-        for idx, part in enumerate(parts):
-            if part in build_artifact_dirs:
-                if part == "dist" and idx > 0 and parts[idx - 1] == "src":
-                    continue
-                return True
-        return False
-
-    def finalize_sequence(seq, results):
-        if not seq:
-            return
-        coverage_lines = seq["coverage_end"] - seq["coverage_start"] + 1
-        if seq["count"] >= 2 and coverage_lines >= 180:
-            seq["coverage_lines"] = coverage_lines
-            results.append(seq)
-
-    stream_sequences = []
-    current_seq = None
-    gap_threshold = 40
-    for entry in command_sequence:
-        command_text = entry.get("command") or ""
-        workdir_path = resolve_workdir(entry.get("cwd") or "", project_root_path)
-        pnpm_issues = []
-        if command_text:
-            try:
-                parts = shlex.split(command_text)
-            except ValueError:
-                parts = command_text.split()
-            if parts and parts[0] == "pnpm":
-                task_token = ""
-                idx = 1
-                skip_next = False
-                while idx < len(parts):
-                    token = parts[idx]
-                    if skip_next:
-                        skip_next = False
-                        idx += 1
-                        continue
-                    if token in {"-C", "--dir", "--filter", "-F"}:
-                        skip_next = True
-                        idx += 1
-                        continue
-                    if token.startswith("-"):
-                        idx += 1
-                        continue
-                    task_token = token
-                    idx += 1
-                    break
-                if task_token == "run" and idx < len(parts):
-                    task_token = parts[idx]
-                pnpm_task = task_token
-                if pnpm_task in {"test", "build"}:
-                    modules_paths = [
-                        workdir_path / "node_modules",
-                        workdir_path / "node_modules" / ".pnpm",
-                    ]
-                    if project_root_path:
-                        modules_paths.extend([
-                            project_root_path / "node_modules",
-                            project_root_path / "node_modules" / ".pnpm",
-                        ])
-                    modules_present = any(path.exists() for path in modules_paths)
-                    if not modules_present:
-                        pnpm_issues.append("node_modules missing; run `pnpm install` before invoking pnpm test/build.")
-                    # Check for cached failures of the same command.
-                    failure_entry = cached_failure_details.get(command_text)
-                    if failure_entry:
-                        try:
-                            prev_count = int(failure_entry.get("count") or 0)
-                        except Exception:
-                            prev_count = 0
-                        if prev_count > 0:
-                            summary = (failure_entry.get("last_summary") or failure_entry.get("summary") or "").strip()
-                            pnpm_issues.append(
-                                f"Command previously failed {prev_count} time(s){': ' + summary if summary else ''}"
-                            )
-                    # Check for failed pnpm install
-                    for value in cached_failure_cache.values():
-                        if not isinstance(value, dict):
-                            continue
-                        cmd_text = value.get("command")
-                        if isinstance(cmd_text, str) and cmd_text.strip().startswith("pnpm install"):
-                            try:
-                                install_fail_count = int(value.get("count") or 0)
-                            except Exception:
-                                install_fail_count = 0
-                            if install_fail_count > 0:
-                                install_summary = (value.get("last_summary") or value.get("summary") or "").strip()
-                                pnpm_issues.append(
-                                    f"`pnpm install` previously failed {install_fail_count} time(s){': ' + install_summary if install_summary else ''}"
-                                )
-                            break
-                if pnpm_issues:
-                    digest_source = f"{project_root_hint}\n{command_text}\n{entry.get('cwd') or ''}"
-                    guard_digest = hashlib.sha256(digest_source.encode('utf-8', 'ignore')).hexdigest()[:12]
-                    encoded_command = base64.b64encode(command_text.encode('utf-8')).decode('ascii') if command_text else ""
-                    guard_message = ' '.join(pnpm_issues)
-                    encoded_message = base64.b64encode(guard_message.encode('utf-8')).decode('ascii') if guard_message else ""
-                    command_guard_lines.append(
-                        f"CMDGUARD	{guard_digest}	0	{len(pnpm_issues)}	{encoded_command}	{encoded_message}"
-                    )
-                    guard_entries.append({
-                        "command": command_text,
-                        "issues": list(pnpm_issues),
-                    })
-        parsed = parse_sed_chunk(command_text)
-        if not parsed:
-            if current_seq:
-                finalize_sequence(current_seq, stream_sequences)
-                current_seq = None
-            continue
-        start = min(parsed["start"], parsed["end"])
-        end = max(parsed["start"], parsed["end"])
-        length = max(0, end - start + 1)
-        if length <= 0:
-            if current_seq:
-                finalize_sequence(current_seq, stream_sequences)
-                current_seq = None
-            continue
-        if current_seq and current_seq["file"] == parsed["file"]:
-            prev = current_seq["entries"][-1]
-            gap = start - prev["end"]
-            if gap <= gap_threshold or start <= prev["end"]:
-                current_seq["entries"].append(
-                    {"start": start, "end": end, "command": entry["command"], "length": length}
-                )
-                current_seq["coverage_start"] = min(current_seq["coverage_start"], start)
-                current_seq["coverage_end"] = max(current_seq["coverage_end"], end)
-                current_seq["total_lines"] += length
-                current_seq["count"] += 1
-                continue
-            finalize_sequence(current_seq, stream_sequences)
-        current_seq = {
-            "file": parsed["file"],
-            "entries": [{"start": start, "end": end, "command": entry["command"], "length": length}],
-            "coverage_start": start,
-            "coverage_end": end,
-            "total_lines": length,
-            "count": 1,
-        }
-    if current_seq:
-        finalize_sequence(current_seq, stream_sequences)
-
-    file_cache_data = {}
-    if file_cache_path:
-        try:
-            contents = file_cache_path.read_text(encoding="utf-8")
-            file_cache_data = json.loads(contents) if contents.strip() else {}
-            if not isinstance(file_cache_data, dict):
-                file_cache_data = {}
-        except Exception:
-            file_cache_data = {}
-
-    for entry in command_sequence:
-        parsed_read = parse_file_read(entry.get("command"), entry.get("cwd") or "")
-        if not parsed_read:
-            continue
-        digest_source_parts = [
-            parsed_read.get("path", ""),
-            parsed_read.get("mode", ""),
-            str(parsed_read.get("range") or "full"),
-            str(parsed_read.get("mtime_ns") or 0),
-        ]
-        digest_source = "::".join(digest_source_parts)
-        digest = hashlib.sha256(digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
-        existing_entry = None
-        if file_cache_data:
-            existing_entry = file_cache_data.get(digest)
-        prev_count = 0
-        repeat_flag = False
-        if isinstance(existing_entry, dict):
-            try:
-                prev_count = int(existing_entry.get("count") or 0)
-            except Exception:
-                prev_count = 0
-            repeat_flag = prev_count > 0
-        new_count = prev_count + 1
-        record_entry = existing_entry or {}
-        if not record_entry.get("first_seen"):
-            record_entry["first_seen"] = timestamp
-        record_entry["last_seen"] = timestamp
-        record_entry["path"] = parsed_read.get("path")
-        record_entry["rel_path"] = parsed_read.get("rel_path")
-        record_entry["range"] = parsed_read.get("range")
-        record_entry["mode"] = parsed_read.get("mode")
-        record_entry["count"] = new_count
-        record_entry["mtime_ns"] = parsed_read.get("mtime_ns")
-        record_entry["size"] = parsed_read.get("size")
-        record_entry["summary"] = parsed_read.get("summary")
-        record_entry["excerpt"] = parsed_read.get("excerpt")
-        record_entry["last_task"] = task
-        rel_hint = record_entry.get("rel_path") or parsed_read.get("rel_path") or ""
-        abs_hint = record_entry.get("path") or parsed_read.get("path") or ""
-        build_artifact = False
-        if rel_hint and is_build_artifact_path(rel_hint):
-            build_artifact = True
-        elif abs_hint:
-            try:
-                abs_path_obj = pathlib.Path(abs_hint)
-                if project_root_path:
-                    try:
-                        rel_from_root = abs_path_obj.resolve().relative_to(project_root_path)
-                        if is_build_artifact_path(str(rel_from_root)):
-                            build_artifact = True
-                    except Exception:
-                        if is_build_artifact_path(str(abs_path_obj)):
-                            build_artifact = True
-                else:
-                    if is_build_artifact_path(str(abs_path_obj)):
-                        build_artifact = True
-            except Exception:
-                build_artifact = False
-        if build_artifact:
-            record_entry["category"] = "build-artifact"
-            parsed_read["category"] = "build-artifact"
-            parsed_read["excerpt"] = ""
-            record_entry["excerpt"] = ""
-        file_cache_data[digest] = record_entry
-        summary_text = parsed_read.get("summary") or ""
-        excerpt_text = parsed_read.get("excerpt") or ""
-        encoded_summary = base64.b64encode(summary_text.encode("utf-8")).decode("ascii")
-        encoded_excerpt = base64.b64encode(excerpt_text.encode("utf-8")).decode("ascii") if excerpt_text else ""
-        repeat_flag_int = 1 if repeat_flag else 0
-        command_file_lines.append(
-            f"CMDFILE\t{digest}\t{repeat_flag_int}\t{new_count}\t{encoded_summary}\t{encoded_excerpt}"
-        )
-
-    scan_cache_data = {}
-    if scan_cache_path:
-        try:
-            contents = scan_cache_path.read_text(encoding="utf-8")
-            scan_cache_data = json.loads(contents) if contents.strip() else {}
-            if not isinstance(scan_cache_data, dict):
-                scan_cache_data = {}
-        except Exception:
-            scan_cache_data = {}
-
-    for entry in command_sequence:
-        classification = classify_directory_crawl(entry.get("command") or "")
-        if not classification:
-            continue
-        digest_source = f"{project_root_hint}\n{entry.get('command') or ''}\n{entry.get('cwd') or ''}"
-        digest = hashlib.sha256(digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
-        prev_count = 0
-        repeat_flag = False
-        existing_entry = None
-        if scan_cache_data:
-            existing_entry = scan_cache_data.get(digest)
-            if isinstance(existing_entry, dict):
-                try:
-                    prev_count = int(existing_entry.get("count") or 0)
-                except Exception:
-                    prev_count = 0
-                repeat_flag = prev_count > 0
-            else:
-                existing_entry = None
-        new_count = prev_count + 1
-        record_entry = existing_entry or {}
-        if not record_entry.get("first_seen"):
-            record_entry["first_seen"] = timestamp
-        record_entry["last_seen"] = timestamp
-        command_text = entry.get("command") or ""
-        record_entry["command"] = command_text
-        cwd_raw = entry.get("cwd") or ""
-        record_entry["cwd"] = cwd_raw
-        cwd_display = cwd_raw
-        if project_root_path:
-            try:
-                resolved_cwd = resolve_workdir(cwd_raw, project_root_path)
-            except Exception:
-                resolved_cwd = None
-            if resolved_cwd:
-                try:
-                    rel_cwd = resolved_cwd.relative_to(project_root_path)
-                    cwd_display = "." if str(rel_cwd) in {"", "."} else str(rel_cwd)
-                except Exception:
-                    try:
-                        cwd_display = str(resolved_cwd)
-                    except Exception:
-                        cwd_display = cwd_raw
-        record_entry["cwd_display"] = cwd_display
-        record_entry["count"] = new_count
-        record_entry["message"] = classification
-        output_lines = entry.get("output_lines") or []
-        try:
-            line_count = int(entry.get("output_line_count") or len(output_lines))
-        except Exception:
-            line_count = len(output_lines)
-        truncated_flag = bool(entry.get("output_truncated"))
-        if output_lines:
-            max_preview_lines = 12
-            preview_lines = []
-            for raw_line in output_lines[:max_preview_lines]:
-                preview_lines.append((raw_line or "").strip())
-            record_entry["lines"] = preview_lines
-            record_entry["line_count"] = line_count
-            record_entry["truncated"] = int(truncated_flag or len(output_lines) > max_preview_lines)
-            preview_text = (entry.get("output") or "\n".join(preview_lines)).strip()
-            if len(preview_text) > 480:
-                preview_text = preview_text[:477] + "..."
-                record_entry["truncated"] = 1
-            record_entry["preview"] = preview_text
-        else:
-            if "lines" not in record_entry:
-                record_entry["lines"] = []
-            if "line_count" not in record_entry or line_count:
-                record_entry["line_count"] = line_count
-            if truncated_flag:
-                record_entry["truncated"] = 1
-            if "preview" not in record_entry:
-                record_entry["preview"] = ""
-        scan_cache_data[digest] = record_entry
-        encoded_command = base64.b64encode(command_text.encode("utf-8")).decode("ascii") if command_text else ""
-        encoded_message = base64.b64encode(classification.encode("utf-8")).decode("ascii")
-        repeat_flag_int = 1 if repeat_flag else 0
-        command_scan_lines.append(
-            f"CMDSCAN\t{digest}\t{repeat_flag_int}\t{new_count}\t{encoded_command}\t{encoded_message}"
-        )
-
-    if scan_cache_path:
-        if len(scan_cache_data) > 80:
-            sorted_items = sorted(
-                scan_cache_data.items(),
-                key=lambda item: item[1].get("last_seen", ""),
-                reverse=True,
-            )
-            scan_cache_data = dict(sorted_items[:80])
-        try:
-            scan_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            scan_cache_path.write_text(json.dumps(scan_cache_data, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-
-    def remediation_message(command_text, failure_count=1, exit_code=None):
-        cmd = (command_text or "").strip()
-        lower = cmd.lower()
-        base = "Investigate the failure output above and fix the root cause."
-        if "pnpm" in lower and "build" in lower:
-            base = "Review the pnpm build errors and update the source code or configuration."
-        elif "pnpm" in lower and "test" in lower:
-            base = "Fix the failing tests or prerequisites before running this test command again."
-        elif "pnpm" in lower and "install" in lower:
-            base = "Resolve the installation issue (dependency or network) before retrying `pnpm install`."
-        elif "pnpm" in lower:
-            base = "Resolve the pnpm command failure before rerunning."
-        elif "npm" in lower and "run" in lower:
-            base = "Fix the npm script failure before rerunning the command." 
-        elif lower.startswith("go test") or " go test" in lower:
-            base = "Correct the Go test failure before re-running `go test`."
-        elif "pytest" in lower:
-            base = "Fix the pytest errors before rerunning the tests."
-        elif "make " in lower:
-            base = "Address the make target failure before rerunning."
-        if failure_count and failure_count > 1:
-            suffix = f" It has already failed {failure_count} time(s); do not rerun until the fix is applied and documented."
-        else:
-            suffix = " Do not rerun until the fix is applied and documented."
-        return base + suffix
-
-    if failures:
-        cache_data = dict(cached_failure_cache)
-        for digest, entry in failures.items():
-            summary_line = entry.get("summary") or ""
-            summary_line = re.sub(r'\s+\n', '\n', summary_line)
-            summary_line = re.sub(r'\n\s+', '\n', summary_line).strip()
-            entry["summary"] = summary_line
-            if cmd_cache_path:
-                existing = cache_data.get(digest)
-                if isinstance(existing, dict):
-                    prev_count = int(existing.get("count", 0))
-                    existing["count"] = prev_count + entry["count"]
-                    existing["last_seen"] = timestamp
-                    existing["last_summary"] = summary_line
-                    existing["command"] = entry["command"]
-                    existing["exit"] = entry["exit"]
-                    if "first_seen" not in existing:
-                        existing["first_seen"] = timestamp
-                    entry["repeat"] = prev_count > 0
-                    entry["total_failures"] = existing["count"]
-                else:
-                    cache_data[digest] = {
-                        "command": entry["command"],
-                        "exit": entry["exit"],
-                        "summary": summary_line,
-                        "count": entry["count"],
-                        "first_seen": timestamp,
-                        "last_seen": timestamp,
-                        "last_summary": summary_line,
-                    }
-                    entry["repeat"] = False
-                    entry["total_failures"] = entry["count"]
-            else:
-                entry["repeat"] = False
-                entry["total_failures"] = entry["count"]
-
-        if cmd_cache_path:
-            if len(cache_data) > 50:
-                sorted_items = sorted(
-                    cache_data.items(),
-                    key=lambda item: item[1].get("last_seen", ""),
-                    reverse=True,
-                )
-                cache_data = dict(sorted_items[:50])
-            try:
-                cmd_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cmd_cache_path.write_text(json.dumps(cache_data, indent=2), encoding="utf-8")
-            except Exception:
-                pass
-
-        guard_failure_commands = set()
-        for entry in failures.values():
-            summary_single = entry.get("summary") or ""
-            summary_single = re.sub(r"\s+", " ", summary_single).strip()
-            if len(summary_single) > 240:
-                summary_single = summary_single[:237] + "..."
-            encoded_command = base64.b64encode(entry["command"].encode("utf-8")).decode("ascii")
-            encoded_summary = (
-                base64.b64encode(summary_single.encode("utf-8")).decode("ascii") if summary_single else ""
-            )
-            repeat_flag = 1 if entry.get("repeat") else 0
-            total_failures = entry.get("total_failures", entry["count"])
-            remediation_note = remediation_message(entry.get("command"), total_failures, entry.get("exit"))
-            command_text_clean = (entry.get("command") or "").strip()
-            if command_text_clean:
-                failure_remediation_notes[command_text_clean] = remediation_note
-                if command_text_clean not in guard_failure_commands:
-                    issues = [remediation_note]
-                    if summary_single:
-                        issues.append(f"Last failure: {summary_single}")
-                    guard_digest_source = f"{project_root_hint}\n{command_text_clean}\nremediation"
-                    guard_digest = hashlib.sha256(guard_digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
-                    encoded_guard_command = base64.b64encode(command_text_clean.encode("utf-8")).decode("ascii")
-                    encoded_guard_message = base64.b64encode("; ".join(issues).encode("utf-8")).decode("ascii")
-                    repeat_flag_guard = 1 if total_failures and total_failures > 1 else 0
-                    command_guard_lines.append(
-                        f"CMDGUARD\t{guard_digest}\t{repeat_flag_guard}\t{len(issues)}\t{encoded_guard_command}\t{encoded_guard_message}"
-                    )
-                    guard_entries.append({
-                        "command": command_text_clean,
-                        "issues": issues,
-                    })
-                    guard_failure_commands.add(command_text_clean)
-            command_failure_lines.append(
-                f"CMDFAIL\t{repeat_flag}\t{total_failures}\t{entry['exit']}\t{entry['digest']}\t{encoded_command}\t{encoded_summary}"
-            )
-
-    if stream_sequences:
-        stream_cache_data = {}
-        if stream_cache_path:
-            try:
-                contents = stream_cache_path.read_text(encoding="utf-8")
-                stream_cache_data = json.loads(contents) if contents.strip() else {}
-                if not isinstance(stream_cache_data, dict):
-                    stream_cache_data = {}
-            except Exception:
-                stream_cache_data = {}
-        for seq in stream_sequences:
-            coverage_start = seq["coverage_start"]
-            coverage_end = seq["coverage_end"]
-            coverage_lines = seq["coverage_lines"]
-            command_examples = [item["command"] for item in seq["entries"][:3]]
-            summary_text = (
-                f"{seq['file']}: sequential sed chunks {coverage_start}-{coverage_end} covering ~{coverage_lines} lines via {seq['count']} commands."
-            )
-            if command_examples:
-                summary_text += f" Example: {command_examples[0]}"
-                if len(command_examples) > 1:
-                    summary_text += f" → {command_examples[1]}"
-            advice_text = (
-                f"Switch to targeted search (e.g. rg -n '<term>' {seq['file']} -C20) or "
-                f"use gpt-creator show-file {seq['file']} --range {coverage_start}:{min(coverage_end, coverage_start + 200)} "
-                "to inspect slices without streaming entire files."
-            )
-            digest_source = f"{project_root_hint}\n{seq['file']}\n{coverage_start}-{coverage_end}"
-            digest = hashlib.sha256(digest_source.encode("utf-8", "ignore")).hexdigest()[:12]
-            prev_count = 0
-            repeat_flag = False
-            existing_entry = None
-            if stream_cache_path:
-                existing_entry = stream_cache_data.get(digest)
-                if isinstance(existing_entry, dict):
-                    try:
-                        prev_count = int(existing_entry.get("count", 0))
-                    except Exception:
-                        prev_count = 0
-                    repeat_flag = prev_count > 0
-                else:
-                    existing_entry = None
-            new_count = prev_count + 1
-            if stream_cache_path:
-                record_entry = existing_entry or {}
-                if not record_entry.get("first_seen"):
-                    record_entry["first_seen"] = timestamp
-                record_entry["last_seen"] = timestamp
-                record_entry["file"] = seq["file"]
-                record_entry["coverage"] = [coverage_start, coverage_end]
-                record_entry["count"] = new_count
-                record_entry["summary"] = summary_text
-                record_entry["advice"] = advice_text
-                record_entry["commands"] = command_examples
-                stream_cache_data[digest] = record_entry
-            encoded_summary = base64.b64encode(summary_text.encode("utf-8")).decode("ascii")
-            encoded_advice = base64.b64encode(advice_text.encode("utf-8")).decode("ascii") if advice_text else ""
-            repeat_flag_int = 1 if repeat_flag else 0
-            command_stream_lines.append(
-                f"CMDSTREAM\t{digest}\t{repeat_flag_int}\t{new_count}\t{encoded_summary}\t{encoded_advice}"
-            )
-        if stream_cache_path:
-            if len(stream_cache_data) > 50:
-                sorted_items = sorted(
-                    stream_cache_data.items(),
-                    key=lambda item: item[1].get("last_seen", ""),
-                    reverse=True,
-                )
-                stream_cache_data = dict(sorted_items[:50])
-            try:
-                stream_cache_path.parent.mkdir(parents=True, exist_ok=True)
-                stream_cache_path.write_text(json.dumps(stream_cache_data, indent=2), encoding="utf-8")
-            except Exception:
-                pass
-
-    if file_cache_path:
-        if len(file_cache_data) > 120:
-            sorted_items = sorted(
-                file_cache_data.items(),
-                key=lambda item: item[1].get("last_seen", ""),
-                reverse=True,
-            )
-            file_cache_data = dict(sorted_items[:120])
-        try:
-            file_cache_path.parent.mkdir(parents=True, exist_ok=True)
-            file_cache_path.write_text(json.dumps(file_cache_data, indent=2), encoding="utf-8")
-        except Exception:
-            pass
-
-usage_path.parent.mkdir(parents=True, exist_ok=True)
-with usage_path.open("a", encoding="utf-8") as fh:
-    fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
-    fh.write("\n")
-
-for entry_line in command_failure_lines:
-    print(entry_line)
-
-for entry_line in command_stream_lines:
-    print(entry_line)
-
-for entry_line in command_scan_lines:
-    print(entry_line)
-
-for entry_line in command_guard_lines:
-    print(entry_line)
-
-for entry_line in command_file_lines:
-    print(entry_line)
-
-if fields:
-    prompt_value = int(fields.get("prompt_tokens") or 0)
-    completion_value = int(fields.get("completion_tokens") or 0)
-    total_value = int(fields.get("total_tokens") or (prompt_value + completion_value))
-    print(f"USAGE\t{prompt_value}\t{completion_value}\t{total_value}")
-
-if limit_message:
-    print(f"LIMIT_DETECTED\t{limit_message}")
-PY
+  if python3 "$usage_script_py" "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" "${GC_COMMAND_FAILURE_CACHE:-}" "${GC_COMMAND_STREAM_CACHE:-}" "${GC_COMMAND_FILE_CACHE:-}" "${GC_COMMAND_SCAN_CACHE:-}" >"$tmp_output"
   then
     py_output="$(<"$tmp_output")"
+    rm -f "$usage_script_py" || true
     rm -f "$tmp_output" || true
     if [[ -n "$py_output" ]]; then
       while IFS= read -r line; do
@@ -3499,6 +2585,7 @@ PY
     return 0
   else
     rm -f "$tmp_output" || true
+    rm -f "$usage_script_py" || true
     warn "Failed to record Codex usage for task=${task} model=${model}."
     return 1
   fi
@@ -4880,15 +3967,32 @@ except Exception:
     sys.exit(0)
 
 entries = {}
+in_found_section = False
+found_indent = None
 for line in raw.splitlines():
+    if not line.strip():
+        continue
+    if line.lstrip().startswith("#"):
+        continue
     stripped = line.strip()
-    if not stripped.startswith("- "):
+    indent = len(line) - len(line.lstrip())
+    if stripped == "found:" and indent == 0:
+        in_found_section = True
+        found_indent = None
         continue
-    payload = stripped[2:]
-    if ":" not in payload:
-        continue
-    key, value = payload.split(":", 1)
-    entries[key.strip()] = value.strip()
+    if in_found_section:
+        if found_indent is None:
+            if indent <= 0:
+                in_found_section = False
+                continue
+            found_indent = indent
+        if indent < found_indent or not stripped:
+            in_found_section = False
+            continue
+        if ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        entries[key.strip()] = value.strip()
 
 if not required:
     required = ["pdr", "sds", "rfp", "jira", "ui_pages", "openapi", "sql"]
@@ -4904,6 +4008,115 @@ for key in required:
         sys.exit(0)
 
 sys.exit(1)
+PY
+}
+
+gc_discovery_fill_defaults() {
+  local discovery_file="${1:-}"
+  shift || true
+  local -a required_keys=("$@")
+  [[ -n "$discovery_file" && -f "$discovery_file" ]] || return 1
+  python3 - "$discovery_file" "${required_keys[@]}" <<'PY'
+import os
+import pathlib
+import sys
+
+file_path = pathlib.Path(sys.argv[1])
+required = sys.argv[2:]
+if not required:
+    required = ["pdr", "sds", "rfp", "jira", "ui_pages", "openapi", "sql"]
+
+raw_lines = file_path.read_text(encoding="utf-8").splitlines()
+header = []
+if raw_lines and raw_lines[0].strip() == "---":
+    header = ["---"]
+    content_lines = raw_lines[1:]
+else:
+    content_lines = raw_lines[:]
+
+entries = {}
+order = []
+seen = set()
+in_found = False
+base_indent = None
+for line in content_lines:
+    stripped = line.strip()
+    if not stripped:
+        continue
+    if stripped == "found:" and line.lstrip() == stripped:
+        in_found = True
+        base_indent = None
+        continue
+    if in_found:
+        indent = len(line) - len(line.lstrip())
+        if base_indent is None:
+            if indent <= 0:
+                in_found = False
+                continue
+            base_indent = indent
+        if indent < base_indent:
+            in_found = False
+            continue
+        if ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        entries[key] = value
+        if key not in seen:
+            order.append(key)
+            seen.add(key)
+
+for key in required:
+    if key not in entries or not entries[key].strip():
+        entries[key] = ""
+        if key not in seen:
+            order.append(key)
+            seen.add(key)
+
+for key in entries:
+    if key not in seen:
+        order.append(key)
+        seen.add(key)
+
+input_dir = pathlib.Path(os.environ.get("INPUT_DIR", file_path.parent))
+candidate_map = {
+    "pdr": ["pdr.md", "../docs/PDR.md", "../docs/pdr.md"],
+    "sds": ["sds.md", "../docs/sds.md"],
+    "rfp": ["rfp.md", "../docs/rfp.md"],
+    "jira": ["jira.md", "../docs/jira.md"],
+    "ui_pages": ["ui-pages.md", "../docs/ui_pages.md", "../docs/ui-pages.md", "../docs/website_ui_pages.md"],
+    "openapi": ["openapi.yaml", "openapi.yml", "openapi.json", "../openapi.yaml", "../openapi.yml", "../openapi.json"],
+    "sql": ["sql", "../sql"],
+}
+
+def resolve_candidate(base: pathlib.Path, rel: str):
+    candidate = (base / rel).resolve()
+    if candidate.exists():
+        return candidate
+    return None
+
+for key in required:
+    value = entries.get(key, "").strip()
+    if value and value.lower() != "n/a":
+        continue
+    resolved = None
+    for rel in candidate_map.get(key, []):
+        candidate = resolve_candidate(input_dir, rel)
+        if candidate is not None:
+            resolved = candidate
+            break
+    if resolved is not None:
+        entries[key] = str(resolved)
+    else:
+        entries[key] = "n/a"
+
+out_lines = header[:]
+out_lines.append("found:")
+for key in order:
+    out_lines.append(f"  {key}: {entries.get(key, 'n/a')}")
+
+file_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
 PY
 }
 
@@ -4924,6 +4137,11 @@ gc_refresh_discovery_if_needed() {
       ok "Discovery manifest refreshed."
     else
       warn "Discovery manifest still incomplete after refresh; check project docs."
+      if gc_discovery_fill_defaults "$discovery_file" "${required[@]}"; then
+        if ! gc_discovery_is_stale "$discovery_file" "${required[@]}"; then
+          ok "Discovery manifest supplemented with placeholder entries."
+        fi
+      fi
     fi
   fi
 }
@@ -5074,7 +4292,7 @@ if current_name is not None:
     sections.append((current_name, current_lines))
 
 output: list[str] = []
-output.append("Hint: use --context-mode raw to include the literal tail.")
+output.append("Tip: use gpt-creator show-file <path> --range start:end to inspect additional context.")
 remaining = max(limit - len(output), 10)
 
 if not sections:
@@ -5090,7 +4308,7 @@ duplicate_count = 0
 
 for index, (name, section_lines) in enumerate(sections, 1):
     if remaining <= 0:
-        output.append("… (context digest truncated; raise --context-lines or switch to raw)")
+        output.append("… (context digest truncated for display; raise --context-lines or open the context file directly for the remainder)")
         break
 
     digest_src = "\n".join(section_lines).encode("utf-8", "replace")
@@ -5106,7 +4324,7 @@ for index, (name, section_lines) in enumerate(sections, 1):
     output.append(heading)
     remaining -= 1
     if remaining <= 0:
-        output.append("… (context digest truncated; raise --context-lines or switch to raw)")
+        output.append("… (context digest truncated for display; raise --context-lines or open the context file directly for the remainder)")
         break
 
     remaining_sections = len(sections) - index
@@ -5135,7 +4353,7 @@ for index, (name, section_lines) in enumerate(sections, 1):
 
     for sample in sample_lines:
         if remaining <= 0:
-            output.append("… (context digest truncated; raise --context-lines or switch to raw)")
+            output.append("… (context digest truncated for display; raise --context-lines or open the context file directly for the remainder)")
             break
         output.append(sample)
         remaining -= 1
@@ -7386,10 +6604,73 @@ cmd_scan() {
   done
   ensure_ctx "$root"
 
-  info "Scanning ${PROJECT_ROOT} for project artifacts…"
+  local -a scan_dirs=()
+  if [[ -n "${GC_SCAN_ROOTS:-}" ]]; then
+    local IFS=',:'
+    read -ra scan_tokens <<<"${GC_SCAN_ROOTS}"
+    for token in "${scan_tokens[@]}"; do
+      token="${token//[[:space:]]/}"
+      [[ -z "$token" ]] && continue
+      if [[ -d "$PROJECT_ROOT/$token" ]]; then
+        scan_dirs+=("$PROJECT_ROOT/$token")
+      elif [[ -d "$token" ]]; then
+        scan_dirs+=("$(abs_path "$token")")
+      fi
+    done
+  fi
+  if [[ ${#scan_dirs[@]} -eq 0 ]]; then
+    local -a defaults=(apps docs db src packages qa tests ops)
+    for candidate in "${defaults[@]}"; do
+      if [[ -d "$PROJECT_ROOT/$candidate" ]]; then
+        scan_dirs+=("$PROJECT_ROOT/$candidate")
+      fi
+    done
+    if [[ ${#scan_dirs[@]} -eq 0 ]]; then
+      scan_dirs=("$PROJECT_ROOT")
+    fi
+  fi
+
+  local -a prune_dirs=(
+    ".git"
+    "node_modules"
+    ".pnpm-store"
+    "dist"
+    "build"
+    ".venv"
+    ".gpt-creator"
+    "tmp"
+    "Library"
+    "ansible"
+    "docker.bak"
+    "vendor"
+    ".cache"
+  )
+  if [[ -n "${GC_SCAN_PRUNE_DIRS:-}" ]]; then
+    local IFS=',:'
+    read -ra prune_tokens <<<"${GC_SCAN_PRUNE_DIRS}"
+    for token in "${prune_tokens[@]}"; do
+      token="${token//[[:space:]]/}"
+      [[ -n "$token" ]] && prune_dirs+=("$token")
+    done
+  fi
+
+  info "Scanning project artifacts under: ${scan_dirs[*]}"
   local manifest="${GC_DIR}/scan.tsv"
   local tmp="${manifest}.tmp"
   printf "type\tconfidence\tpath\n" > "$tmp"
+
+  local -a find_prune_expr=()
+  if [[ ${#prune_dirs[@]} -gt 0 ]]; then
+    find_prune_expr+=( "(" )
+    for dir in "${prune_dirs[@]}"; do
+      find_prune_expr+=( -name "$dir" -o )
+    done
+    unset 'find_prune_expr[${#find_prune_expr[@]}-1]'
+    find_prune_expr+=( ")" -prune -o )
+  fi
+
+  local -a find_args=("${scan_dirs[@]}")
+  find_args+=( "${find_prune_expr[@]}" -type f -print0 )
 
   while IFS= read -r -d '' f; do
     local hit
@@ -7399,8 +6680,7 @@ cmd_scan() {
       IFS='|' read -r type conf <<<"$hit"
       printf "%s\t%.2f\t%s\n" "$type" "$conf" "$f" >> "$tmp"
     fi
-  done < <(find "$PROJECT_ROOT" \
-      \( -name '.git' -o -name 'node_modules' -o -name 'dist' -o -name 'build' -o -name '.venv' -o -name '.gpt-creator' \) -prune -o -type f -print0)
+  done < <(find "${find_args[@]}")
 
   mv "$tmp" "$manifest"
 
@@ -7541,9 +6821,31 @@ for entry in artifacts:
     summary.write('    path: %s\n' % entry.get('path'))
 (input_dir / '..' / 'discovery.yaml').resolve().write_text(summary.getvalue())
 
+focus_targets = []
+core_types = {"pdr", "sds", "rfp", "jira", "openapi", "ui_pages", "sql"}
+seen_focus = set()
+for entry in provenance:
+    dest = entry.get('destination')
+    if not dest:
+        continue
+    t = entry.get('type')
+    dest_rel = str(pathlib.Path(dest).as_posix())
+    if t in core_types and dest_rel not in seen_focus:
+        focus_targets.append(dest_rel)
+        seen_focus.add(dest_rel)
+if not focus_targets:
+    for entry in provenance:
+        dest = entry.get('destination')
+        if dest:
+            dest_rel = str(pathlib.Path(dest).as_posix())
+            if dest_rel not in seen_focus:
+                focus_targets.append(dest_rel)
+                seen_focus.add(dest_rel)
+
 prov = {
     'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-    'entries': provenance
+    'entries': provenance,
+    'focus': focus_targets,
 }
 (plan_dir / 'provenance.json').write_text(json.dumps(prov, indent=2))
 PY
@@ -8457,21 +7759,21 @@ cmd_verify() {
 
   case "$kind" in
     program_filters) kind="program-filters" ;;
-    program-filters|acceptance|openapi|a11y|lighthouse|consent|nfr|all) ;;
+    program-filters|acceptance|openapi|a11y|lighthouse|consent|telemetry|nfr|all) ;;
     *) die "Unknown verify target: ${kind}";;
   esac
 
   local -a check_names
   case "$kind" in
     acceptance) check_names=(acceptance) ;;
-    openapi|a11y|lighthouse|consent|program-filters)
+    openapi|a11y|lighthouse|consent|program-filters|telemetry)
       check_names=("$kind")
       ;;
     nfr)
-      check_names=(openapi a11y lighthouse consent program-filters)
+      check_names=(openapi a11y lighthouse consent program-filters telemetry)
       ;;
     all)
-      check_names=(acceptance openapi a11y lighthouse consent program-filters)
+      check_names=(acceptance openapi a11y lighthouse consent program-filters telemetry)
       ;;
   esac
 
@@ -8486,7 +7788,7 @@ cmd_verify() {
     python_available=1
     python_bin="$(command -v python3)"
   fi
-  local check_order="acceptance,openapi,lighthouse,a11y,consent,program-filters"
+  local check_order="acceptance,openapi,lighthouse,a11y,consent,program-filters,telemetry"
 
   local pass=0 fail=0 skip=0
 
@@ -8755,6 +8057,10 @@ PY
         run_check "program-filters" "Program Filters" \
           bash "$verify_root/check-program-filters.sh" "${api_base}"
         ;;
+      telemetry)
+        run_check "telemetry" "Telemetry" \
+          bash "$verify_root/check-telemetry.sh"
+        ;;
     esac
   done
 
@@ -8796,6 +8102,26 @@ stdin_path = sys.argv[2] if len(sys.argv) > 2 else ""
 log_path = sys.argv[3] if len(sys.argv) > 3 else ""
 cmd = sys.argv[4:]
 max_duration = to_int(os.environ.get("GC_CODEX_EXEC_MAX_DURATION", "0"))
+idle_ping_interval = to_int(os.environ.get("GC_CODEX_IDLE_PING_INTERVAL", "180"))
+idle_ping_max = to_int(os.environ.get("GC_CODEX_IDLE_PING_MAX", "3"))
+idle_ping_count = 0
+next_idle_ping = idle_ping_interval if idle_ping_interval > 0 else 0
+
+def describe_command(args):
+    if not args:
+        return "command"
+    first = os.path.basename(args[0])
+    tail = []
+    for token in args[1:3]:
+        if token.strip():
+            tail.append(token)
+    if tail:
+        first = f"{first} {' '.join(tail)}"
+    if len(args) > 3:
+        first += " …"
+    return first
+
+cmd_label = describe_command(cmd)
 
 if not cmd:
     sys.exit(1)
@@ -8999,6 +8325,8 @@ if not proc.stdout:
 
 fd = proc.stdout.fileno()
 
+interrupted = False
+
 try:
     while True:
         now = time.monotonic()
@@ -9009,6 +8337,26 @@ try:
             break
         if timeout:
             idle_for = now - last_activity
+            if (
+                idle_ping_interval
+                and idle_ping_max
+                and next_idle_ping
+                and idle_ping_count < idle_ping_max
+                and idle_for >= next_idle_ping
+                and not abort_now
+            ):
+                idle_ping_count += 1
+                elapsed_sec = int(elapsed)
+                idle_sec = int(idle_for)
+                emit(
+                    f"[gc] Waiting on {cmd_label}: no output for {idle_sec}s (elapsed {elapsed_sec}s)\n"
+                )
+                last_activity = time.monotonic()
+                idle_for = 0.0
+                if idle_ping_count < idle_ping_max:
+                    next_idle_ping = idle_ping_interval
+                else:
+                    next_idle_ping = 0
             if idle_for >= timeout:
                 timed_out = True
                 timeout_type = "idle"
@@ -9024,6 +8372,9 @@ try:
                 text = chunk.decode("utf-8", errors="replace")
                 process_text(text)
                 last_activity = time.monotonic()
+                if idle_ping_interval:
+                    idle_ping_count = 0
+                    next_idle_ping = idle_ping_interval if idle_ping_interval > 0 else 0
                 if abort_now:
                     break
             else:
@@ -9040,11 +8391,31 @@ try:
                 break
             text = chunk.decode("utf-8", errors="replace")
             process_text(text)
+            if idle_ping_interval:
+                idle_ping_count = 0
+                next_idle_ping = idle_ping_interval if idle_ping_interval > 0 else 0
             if abort_now:
                 break
 except KeyboardInterrupt:
-    proc.terminate()
-    raise
+    interrupted = True
+    abort_now = True
+    try:
+        if preexec:
+            os.killpg(proc.pid, signal.SIGINT)
+        else:
+            proc.send_signal(signal.SIGINT)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(5)
+    except subprocess.TimeoutExpired:
+        try:
+            if preexec:
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            pass
 finally:
     if stdin:
         stdin.close()
@@ -9091,6 +8462,12 @@ if timed_out:
         log.flush()
         log.close()
     sys.exit(124)
+elif interrupted:
+    if log:
+        log.flush()
+        log.close()
+    emit("\n[gc] Command interrupted by user (KeyboardInterrupt)\n")
+    sys.exit(130)
 
 exit_code = proc.poll()
 if exit_code is None:
@@ -9445,51 +8822,18 @@ ensure_node_dependencies() {
     return
   fi
 
-  local installer_desc=""
-  local -a installer_cmd=()
-
-  if [[ -f "$root_dir/pnpm-lock.yaml" || -f "$root_dir/pnpm-workspace.yaml" ]]; then
-    if command -v pnpm >/dev/null 2>&1; then
-      installer_desc="pnpm workspace"
-      installer_cmd=(pnpm install --frozen-lockfile)
-    fi
-  fi
-
-  if [[ ${#installer_cmd[@]} -eq 0 && -f "$root_dir/package.json" ]]; then
-    if command -v pnpm >/dev/null 2>&1; then
-      installer_desc="pnpm"
-      installer_cmd=(pnpm install)
-    elif command -v npm >/dev/null 2>&1; then
-      installer_desc="npm"
-      installer_cmd=(npm install)
-    fi
-  fi
-
-  if [[ ${#installer_cmd[@]} -eq 0 ]]; then
+  local bootstrap_script="${PROJECT_ROOT}/scripts/bootstrap_dependencies.sh"
+  if [[ ! -x "$bootstrap_script" ]]; then
+    warn "Dependency bootstrap script missing at ${bootstrap_script}; skipping automatic install."
     return
   fi
 
-  local log_file="/tmp/gc_deps_install.log"
-
-  info "Ensuring Node.js dependencies via ${installer_desc}"
-  local install_status=1
-  if [[ ${installer_cmd[0]} == pnpm ]]; then
-    if (cd "$root_dir" && CI=1 PNPM_IGNORE_NODE_VERSION=1 "${installer_cmd[@]}" >"$log_file" 2>&1); then
-      install_status=0
-    fi
-  else
-    if (cd "$root_dir" && "${installer_cmd[@]}" >"$log_file" 2>&1); then
-      install_status=0
-    fi
-  fi
-
-  if (( install_status == 0 )); then
-    mkdir -p "$(dirname "$sentinel")"
+  if "$bootstrap_script" "$root_dir"; then
     touch "$sentinel"
-    ok "Dependencies installed"
-  else
-    warn "Dependency installation via ${installer_desc} failed; inspect ${log_file}. Continuing anyway."
+    return
   fi
+
+  die "Dependency bootstrap failed; see the bootstrap log for details."
 }
 
 gc_apply_codex_changes() {
@@ -9576,18 +8920,28 @@ else:
                 raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
                 raw_dump.parent.mkdir(parents=True, exist_ok=True)
                 raw_dump.write_text(raw, encoding='utf-8')
+                fragment_dump = output_path.with_suffix(output_path.suffix + '.fragment.json')
+                fragment_dump.parent.mkdir(parents=True, exist_ok=True)
+                fragment_dump.write_text(fragment, encoding='utf-8')
                 rel_dump = raw_dump
                 try:
                     rel_dump = raw_dump.relative_to(project_root)
                 except ValueError:
                     rel_dump = raw_dump
+                rel_fragment = fragment_dump
+                try:
+                    rel_fragment = fragment_dump.relative_to(project_root)
+                except ValueError:
+                    rel_fragment = fragment_dump
                 payload = {
                     'plan': [],
                     'changes': [],
                     'commands': [],
                     'notes': [
-                        f"Codex output could not be parsed as JSON; review {rel_dump}."
+                        f"Codex output could not be parsed as JSON; review {rel_dump}.",
+                        f"Invalid JSON fragment saved at {rel_fragment}."
                     ],
+                    'invalid_json_path': str(rel_fragment),
                 }
                 print('STATUS parse-error')
                 print(f"RAW {rel_dump}")
@@ -12143,15 +11497,14 @@ lines.append("")
 
 lines.append("## Instructions")
 if compact_mode:
-    lines.append('- Respond with JSON only: {"plan":[], "changes":[], "commands":[], "notes":[]}.')
-    lines.append("- Keep plan bullets brief; record blockers or follow-ups in `notes`.")
+    lines.append('- Respond with JSON only: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
+    lines.append("- Set a narrow `focus` before any commands: your first reply must populate it with 1-3 paths or symbols and you must update it before touching new areas.")
+    lines.append("- Keep plan bullets brief and tied to that focus; split big deliverables into smaller steps and route extra ideas to `notes`.")
     lines.append("- Keep internal narration tight (≤3 short sentences) and focused on the current task.")
     lines.append("- Apply repository changes directly and confirm acceptance criteria (note gaps in `notes`).")
     lines.append("- Prefer pnpm for scripts; mention commands that cannot run because of network limits.")
-    lines.append("- Limit the plan to at most three short steps and keep every step focused on this deliverable; send unrelated workstreams to `notes` as follow-ups.")
-    lines.append("- Declare your target files/symbols in a `focus` array before running any shell commands; update both the plan and `focus` before touching new areas.")
-    lines.append("- Use `gpt-creator show-file <path> [--range/--head/--tail]` to inspect sources; it caches views and supports `--diff`/`--refresh` instead of re-streaming large files.")
-    lines.append("- Track file views; if you begin paging with sequential sed/cat ranges, pivot to `rg -n <pattern> <path> -C20` or `gpt-creator show-file <path> --range start:end` instead of streaming the file.")
+    lines.append("- Avoid repo-wide listings/searches; jump straight to relevant files and use `gpt-creator show-file <path> --range start:end` (or --head/--tail) for slices instead of streaming whole files.")
+    lines.append("- Track file views; if you begin paging with sequential sed/cat ranges, pivot to targeted `gpt-creator show-file <path> --range` or `rg -n <pattern> <path> -C20`.")
     lines.append("- When a cached excerpt below covers the context you need, cite it instead of re-running cat/sed; refresh only if the file changed.")
     lines.append("- Before running `pnpm test` or `pnpm build`, confirm dependencies are installed and prior pnpm commands succeeded; fix failures before retrying.")
     lines.append("- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; capture the remediation steps instead of rerunning immediately.")
@@ -12168,18 +11521,17 @@ if compact_mode:
     lines.append("- Use unified diffs or full file bodies inside the `changes` array.")
     lines.append("- Omit keys with no content; no markdown fences or extra prose.")
 else:
-    lines.append("- Draft a short plan before modifying files.")
+    lines.append('- Draft a short plan and respond with JSON only: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
+    lines.append("- Set a narrow `focus` before any commands; populate it with 1-3 paths or symbols and update it before touching new areas.")
+    lines.append("- Keep plan steps small and tied to that focus; move additional work or future ideas to `notes`.")
     lines.append("- Apply changes directly in the repository; commits are not required.")
-    lines.append("- Respond with structured JSON described below — no markdown fencing or prose outside the JSON.")
     lines.append("- Verify acceptance criteria before finishing.")
     lines.append("- If blocked, explain why and suggest next steps inside the JSON response.")
     lines.append("- Prefer pnpm for install/build scripts; avoid npm/yarn unless explicitly required.")
-    lines.append("- Limit the plan to three or fewer steps dedicated to this deliverable; capture other ideas or future work in `notes`.")
     lines.append("- Keep internal narration tight (≤3 short sentences) and focused on the current task.")
-    lines.append("- After writing the plan, add a `focus` array listing the exact files/symbols you will touch. Update the plan and `focus` before exploring new areas.")
-    lines.append("- Use `gpt-creator show-file <path>` (with `--diff`/`--refresh` as needed) instead of re-reading the same file segments directly.")
-    lines.append("- Track file reads; when you find yourself chaining `sed` or `cat` ranges across the same file, switch to `rg -n <pattern> <path> -C20` or `gpt-creator show-file <path> --range start:end` for focused context.")
-    lines.append("- Reuse cached excerpts listed below rather than repeating cat/sed; only re-read files when you know the content changed.")
+    lines.append("- Avoid repo-wide listings/searches; jump straight to relevant files and use `gpt-creator show-file <path> --range start:end` (or --head/--tail) for context slices instead of streaming whole files.")
+    lines.append("- Track file reads; if you begin paging with sequential sed/cat ranges, switch to targeted `gpt-creator show-file <path> --range` or `rg -n <pattern> <path> -C20`.")
+    lines.append("- Reuse cached excerpts below rather than repeating cat/sed; only re-read files when you know the content changed.")
     lines.append("- Before running `pnpm test` or `pnpm build`, verify dependencies (`pnpm install`) and resolve any previous pnpm failures first.")
     lines.append("- Review `Known Command Failures` and `Command Guard Alerts`; plan remediation before retrying any listed command.")
     lines.append("- Assume limited network access; note any commands that cannot run for that reason instead of failing silently.")
@@ -12360,7 +11712,6 @@ gc_note_requires_followup() {
 cmd_work_on_tasks() {
   local root="" resume=1 story_filter="" start_task_ref="" no_verify=0 keep_artifacts=0 memory_cycle=0 force_reset=0
   local batch_size=0 sleep_between=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=1
-  local context_mode="digest"
   local -a context_skip_patterns=()
   local token_limit="${GC_CODEX_MAX_TOKENS_PER_TASK:-0}"
   local token_limit_override=0
@@ -12412,10 +11763,6 @@ cmd_work_on_tasks() {
       --context-none)
         context_lines=0
         shift
-        ;;
-      --context-mode)
-        context_mode="${2:-}"
-        shift 2
         ;;
       --context-file-lines)
         context_file_lines="${2:-}"
@@ -12476,7 +11823,6 @@ Options:
   --sleep-between SEC  Sleep SEC seconds between tasks (default: 0)
   --context-lines NUM  Include the last NUM lines of shared context in each prompt (default: 400)
   --context-none       Skip attaching shared context to task prompts
-  --context-mode MODE  Choose 'digest' (default) to summarise context or 'raw' for the literal tail
   --context-file-lines NUM
                         Limit each shared-context file to NUM lines before summarising (default: 200)
   --context-skip GLOB  Ignore matching files when building shared context (repeatable)
@@ -12534,11 +11880,6 @@ EOHELP
   token_limit=$((token_limit))
   idle_timeout=$((idle_timeout))
   (( sample_lines >= 0 )) || die "--sample-lines must be zero or positive (got ${sample_lines})"
-  context_mode="${context_mode,,}"
-  case "$context_mode" in
-    digest|raw) ;;
-    *) die "Invalid --context-mode value: ${context_mode}" ;;
-  esac
   export GC_CODEX_MAX_TOKENS_PER_TASK="$token_limit"
   if (( token_limit > 0 )); then
     info "Per-task Codex token guard active → ${token_limit} tokens."
@@ -12665,34 +12006,23 @@ EOHELP
   local ctx_file="${run_dir}/context.md"
   gc_build_context_file "$ctx_file" "$STAGING_DIR"
   local context_tail=""
+  local context_tail_mode="none"
   export GC_CONTEXT_TAIL_LIMIT="$context_lines"
-  export GC_CONTEXT_TAIL_MODE="$context_mode"
   if (( context_lines > 0 )); then
-    case "$context_mode" in
-      digest)
-        context_tail="${run_dir}/context_digest.md"
-        if ! gc_build_context_digest "$ctx_file" "$context_tail" "$context_lines"; then
-          warn "Failed to build context digest; falling back to raw tail."
-          context_mode="raw"
-          export GC_CONTEXT_TAIL_MODE="raw"
-        fi
-        if [[ "$context_mode" == "raw" ]]; then
-          context_tail="${run_dir}/context_tail.md"
-          if ! tail -n "$context_lines" "$ctx_file" >"$context_tail" 2>/dev/null; then
-            cp "$ctx_file" "$context_tail"
-          fi
-        fi
-        ;;
-      raw)
-        context_tail="${run_dir}/context_tail.md"
-        if ! tail -n "$context_lines" "$ctx_file" >"$context_tail" 2>/dev/null; then
-          cp "$ctx_file" "$context_tail"
-        fi
-        ;;
-    esac
+    context_tail_mode="digest"
+    context_tail="${run_dir}/context_digest.md"
+    if ! gc_build_context_digest "$ctx_file" "$context_tail" "$context_lines"; then
+      warn "Failed to build context digest; falling back to raw tail."
+      context_tail_mode="raw"
+      context_tail="${run_dir}/context_tail.md"
+      if ! tail -n "$context_lines" "$ctx_file" >"$context_tail" 2>/dev/null; then
+        cp "$ctx_file" "$context_tail"
+      fi
+    fi
   fi
+  GC_CONTEXT_TAIL_MODE="$context_tail_mode"
+  export GC_CONTEXT_TAIL_MODE
 
-  local context_tail_mode="$context_mode"
   local context_lines_current="$context_lines"
   local context_file_lines_current="$context_file_lines"
   local context_lines_min=0

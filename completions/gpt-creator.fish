@@ -123,7 +123,6 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l batch-
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l sleep-between -r -d "Pause seconds between tasks"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l context-lines -r -d "Tail only the last N lines of shared context"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l context-none -d "Skip attaching shared context to prompts"
-complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l context-mode -r -d "Shared context strategy (digest|raw)" -a "digest raw"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l context-file-lines -r -d "Limit each shared-context file to N lines"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l context-skip -r -d "Glob pattern to exclude from shared context"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l prompt-compact -d "Use a compact instruction/schema block in prompts"

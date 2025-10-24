@@ -1284,7 +1284,7 @@ gc_migrate_progress_artifacts() {
 # Manual command helper to sweep legacy artifacts
 cmd_sweep_artifacts() {
   local -a projects=()
-  local arg project_path prev_skip
+  local arg project_path
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project|-p)
@@ -6379,7 +6379,7 @@ gc_start_created_containers() {
   local compose_file="$1"
   shift || true
   local -a services=("$@")
-  local service container state started any_started=0
+  local service container state any_started=0
 
   for service in "${services[@]}"; do
     container="$(gc_container_name "$service")"
@@ -6390,7 +6390,6 @@ gc_start_created_containers() {
     if [[ "$state" == "created" ]]; then
       info "Container ${container} stuck in 'created'; attempting manual start"
       if docker start "$container" >/dev/null 2>&1; then
-        started=1
         any_started=1
       else
         warn "Failed to start ${container}; attempting compose start fallback"

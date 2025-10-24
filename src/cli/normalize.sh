@@ -9,7 +9,6 @@ if [[ -f "${__DIR__}/../constants.sh" ]]; then
   # shellcheck source=../constants.sh
   source "${__DIR__}/../constants.sh"
 else
-  GC_TOOL_NAME="gpt-creator"
   GC_RUNTIME_SUBDIR=".gpt-creator"
 fi
 

@@ -1,4 +1,5 @@
 # shellcheck shell=bash
+# shellcheck disable=SC2034
 # gpt-creator — constants & defaults
 
 # ---- Project identity ----

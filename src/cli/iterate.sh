@@ -157,7 +157,6 @@ fi
 i=0
 for entry in "${TASKS[@]}"; do
   ((i++)) || true
-  line="${entry%%|*}"
   title="${entry#*|}"
   slug="$(echo "$title" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9 -_' | tr ' ' '-' | cut -c1-80)"
   PROMPT="$RUN_DIR/task_${i}_${slug}.prompt.md"

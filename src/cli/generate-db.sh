@@ -11,7 +11,6 @@ if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
   source "${ROOT_DIR}/src/constants.sh"
 else
-  CLI_NAME="gpt-creator"
   CODEX_MODEL="${CODEX_MODEL:-gpt-5-high}"
   log(){ printf "[generate-db] %s\n" "$*"; }
   die(){ printf "[generate-db][ERROR] %s\n" "$*" >&2; exit 1; }

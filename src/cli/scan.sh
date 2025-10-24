@@ -12,7 +12,6 @@ else
   # Fallback defaults if constants.sh is not present (keeps script portable)
   GC_TOOL_NAME="gpt-creator"
   GC_RUNTIME_SUBDIR=".gpt-creator"
-  GC_LOG_PREFIX="gptc"
   GC_EXCLUDES=(-name ".git" -prune -o -name "node_modules" -prune -o -name "dist" -prune -o -name "build" -prune -o -name ".venv" -prune)
 fi
 

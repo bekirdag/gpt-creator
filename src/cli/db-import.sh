@@ -67,7 +67,12 @@ if [[ -z "${SQL_FILE}" ]]; then
     gc_cli_die "No SQL file found. Provide with --file or place under ./staging/sql or ./input"
   fi
   # Pick the most recent
-  IFS=$'\n' sorted=($(printf "%s\n" "${candidates[@]}" | xargs -I{} bash -lc 'printf "%s\t%s\n" "$(stat -f %m "{}" 2>/dev/null || stat -c %Y "{}")" "{}"' | sort -nr | cut -f2-))
+  mapfile -t sorted < <(
+    printf '%s\n' "${candidates[@]}" \
+      | xargs -I{} bash -lc 'printf "%s\t%s\n" "$(stat -f %m "{}" 2>/dev/null || stat -c %Y "{}")" "{}"' \
+      | sort -nr \
+      | cut -f2-
+  )
   SQL_FILE="${sorted[0]}"
   gc_cli_log "Auto-discovered SQL file: $SQL_FILE"
 fi

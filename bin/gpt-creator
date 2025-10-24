@@ -12340,14 +12340,7 @@ cmd_work_on_tasks() {
   local root="" resume=1 story_filter="" start_task_ref="" no_verify=0 keep_artifacts=0 memory_cycle=0 force_reset=0
   local batch_size=0 sleep_between=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=1
   local context_mode="digest"
-  local -a context_mode_flags=()
-  local -a context_mode_choice_flag=()
-  local -a context_file_flag=()
-  local -a context_skip_flags=()
   local -a context_skip_patterns=()
-  local -a prompt_mode_flag=()
-  local -a sample_lines_flag=()
-  local -a doc_snippets_flag=()
   local token_limit="${GC_CODEX_MAX_TOKENS_PER_TASK:-0}"
   local token_limit_override=0
   local idle_timeout="${GC_WORK_ON_TASKS_IDLE_TIMEOUT:-0}"
@@ -12393,52 +12386,42 @@ cmd_work_on_tasks() {
       --sleep-between) sleep_between="${2:-0}"; shift 2;;
       --context-lines)
         context_lines="${2:-}"
-        context_mode_flags=(--context-lines "$context_lines")
         shift 2
         ;;
       --context-none)
         context_lines=0
-        context_mode_flags=(--context-none)
         shift
         ;;
       --context-mode)
         context_mode="${2:-}"
-        context_mode_choice_flag=(--context-mode "$context_mode")
         shift 2
         ;;
       --context-file-lines)
         context_file_lines="${2:-}"
-        context_file_flag=(--context-file-lines "$context_file_lines")
         shift 2
         ;;
       --context-skip)
         context_skip_patterns+=("$2")
-        context_skip_flags+=(--context-skip "$2")
         shift 2
         ;;
       --prompt-compact)
         prompt_compact=1
-        prompt_mode_flag=(--prompt-compact)
         shift
         ;;
       --prompt-expanded)
         prompt_compact=0
-        prompt_mode_flag=(--prompt-expanded)
         shift
         ;;
       --context-doc-snippets|--doc-snippets)
         doc_snippets=1
-        doc_snippets_flag=(--context-doc-snippets)
         shift
         ;;
       --no-context-doc-snippets|--no-doc-snippets)
         doc_snippets=0
-        doc_snippets_flag=()
         shift
         ;;
       --sample-lines)
         sample_lines="${2:-}"
-        sample_lines_flag=(--sample-lines "$sample_lines")
         shift 2
         ;;
       --token-limit)
@@ -12645,7 +12628,8 @@ EOHELP
 
   export GC_PROMPT_SAMPLE_LINES="$sample_lines"
 
-  local run_stamp="$(date +%Y%m%d_%H%M%S)"
+  local run_stamp
+  run_stamp="$(date +%Y%m%d_%H%M%S)"
   local run_dir="${runs_dir}/${run_stamp}"
   local run_log_dir="${work_logs_root}/${run_stamp}"
   mkdir -p "$run_dir" "$run_log_dir"
@@ -12929,7 +12913,6 @@ EOHELP
       gc_touch_progress
       local prompt_augmented=0
       local keep_output=$keep_artifacts
-      local parse_error_final=0
       local break_after_update=0
       local task_result_status="in-progress"
       local task_needs_review=0
@@ -13053,7 +13036,6 @@ REM
               task_result_status="on-hold"
               task_notes+=("Codex output remained invalid JSON after retries; inspect ${output_path}.")
               codex_ok=1
-              parse_error_final=1
               break_after_update=1
             fi
           fi
@@ -13801,8 +13783,10 @@ PY
   if [[ -s "$order_file" ]]; then
     while IFS= read -r prompt_path; do
       [[ -z "$prompt_path" ]] && continue
-      local base_name="$(basename "$prompt_path" .md)"
-      local output_path="${prompt_path%.md}.output.md"
+      local base_name
+      base_name="$(basename "$prompt_path" .md)"
+      local output_path
+      output_path="${prompt_path%.md}.output.md"
       info "Running Codex for ${base_name}"
       codex_call "$base_name" --prompt "$prompt_path" --output "$output_path" || warn "Codex task ${base_name} returned non-zero"
     done < "$order_file"
@@ -15114,10 +15098,6 @@ cmd_bootstrap() {
       --rfp)
         rfp_path="${2:?--rfp requires a file path}"
         shift 2
-        ;;
-      --fresh)
-        fresh=1
-        shift
         ;;
       --fresh)
         fresh=1

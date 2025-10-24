@@ -43,7 +43,6 @@ Examples:
 EOF
 }
 
-PROJECT_DIR_SET=0
 SERVICE=""
 FOLLOW=0
 TAIL=300
@@ -51,7 +50,7 @@ SINCE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -p|--project-dir) PROJECT_DIR="$2"; shift 2; PROJECT_DIR_SET=1;;
+    -p|--project-dir) PROJECT_DIR="$2"; shift 2;;
     -s|--service) SERVICE="$2"; shift 2;;
     --since) SINCE="$2"; shift 2;;
     -n|--tail) TAIL="$2"; shift 2;;

@@ -35,15 +35,20 @@ temp/
 .gpt-creator/
 **/.gpt-creator/logs/
 **/.gpt-creator/tmp/
+**/.gpt-creator/tmp/**
 **/.gpt-creator/tmp/view-cache/
 **/.gpt-creator/scan.tsv
 **/.gpt-creator/scan.tsv.*
-**/.gpt-creator/staging/docs/
+**/.gpt-creator/staging/
+**/.gpt-creator/staging/**
 
 # Docker (local volumes/artifacts)
 docker/.data/
 docker-data/
 .docker/
+
+# Admin app build artifacts
+apps/admin/dist-tests/
 
 # IDE / OS
 .DS_Store

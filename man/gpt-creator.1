@@ -184,6 +184,7 @@ Sweep legacy Codex work artifacts (for example \fItmp_*.json\fR, \fIfinal_*.json
 Drive Codex over tasks sourced from the SQLite backlog, apply returned JSON diff/file instructions automatically, and persist task/story status back into the database for precise resume support.
 Artifacts (prompt/output pairs) are removed after each successful task to limit memory use unless \fB--keep-artifacts\fR is supplied.
 Use \fB--batch-size\fR to pause after a fixed number of tasks and \fB--sleep-between\fR to insert delays between Codex runs when conserving resources.
+Codex invocations are also capped by the \fBGC_CODEX_EXEC_MAX_DURATION\fR watchdog (default 900 seconds) to prevent runaway loops; set it to 0 when you explicitly need longer manual sessions.
 \fB--context-lines\fR controls how many lines from the shared context appendix are appended to each prompt (default 400) and \fB--context-none\fR omits that appendix entirely for minimal prompts.
 \fB--context-mode\fR selects the appendix strategy: \fIdigest\fR (default) summarises staged files into short hashed excerpts, while \fIraw\fR streams the literal tail produced by \fB--context-lines\fR.
 \fB--context-file-lines\fR clips each staged document before inclusion, while \fB--context-skip\fR accepts repeatable glob patterns to drop noisy files (for example, \fB--context-skip '*.css'\fR).
@@ -235,6 +236,15 @@ Override reporter name stored in new issue reports (defaults to git \fIuser.name
 .TP
 .B GC_REPORT_DIGESTS_PATH
 Override the JSON allowlist of trusted CLI SHA-256 digests checked by \fBgpt-creator reports audit\fR (defaults to \fIconfig/release-digests.json\fR).
+.TP
+.B GC_CODEX_EXEC_MAX_DURATION
+Hard runtime watchdog (in seconds) for each Codex invocation (default 900; set to 0 to disable).
+.TP
+.B GC_CODEX_DIFF_REPEAT_LIMIT
+Maximum number of identical `turn diff` emissions tolerated before Codex is aborted (default 6; set to 0 to disable).
+.TP
+.B GC_CODEX_MAX_TURNS
+Maximum Codex tool invocations per task (default 180; set to 0 to disable).
 .TP
 .B GC_REPORT_ASSIGNEE
 Override the assignee recorded when Codex starts working on a report (defaults to \fBGC_REPORTER\fR).

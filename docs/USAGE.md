@@ -30,6 +30,9 @@ Common flow:
 1) `create-project` (runs everything) or hand‑run: scan → normalize → plan → generate → db → run → verify.
 2) Snapshot Jira markdown with `create-tasks`, then execute the backlog via `work-on-tasks`. The legacy `iterate` command is deprecated.
    - Use `--batch-size` to pause after a fixed number of tasks and `--sleep-between` to insert delays if Codex runs are exhausting local resources.
+   - Each Codex run inherits a hard runtime guard (default 900s) controlled by `GC_CODEX_EXEC_MAX_DURATION`; set it to `0` to disable the watchdog for long-running manual sessions.
+   - Repeated Codex diffs are capped by `GC_CODEX_DIFF_REPEAT_LIMIT` (default 6) so infinite answer loops stop automatically; raise or set to `0` if you really need more attempts.
+   - Overall Codex turn count is limited by `GC_CODEX_MAX_TURNS` (default 180) so a task that keeps executing tools without making progress will be aborted; set it higher or `0` to disable if you need more iterations.
    - The CLI will try to install workspace dependencies automatically (preferring pnpm) before running tasks, reporting any failure to `/tmp/gc_deps_install.log`.
   - `create-tasks` now emits `.gpt-creator/staging/plan/tasks/tasks.db` (SQLite) with epics, stories, and tasks; reruns preserve task status unless `--force` is provided.
   - `backlog` prints structured summaries: run it bare (or `--type epics`) for an epic table, `--type stories` to list every story, `--item-children <slug>` to inspect an epic/story, `--task-details <id>` for a single task, and `--progress` for a percentage bar. Pass `--project` (or legacy `--root`) to target another workspace.

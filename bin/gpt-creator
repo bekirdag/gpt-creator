@@ -3607,10 +3607,10 @@ gc_bootstrap_run_step() {
     return 0
   fi
   if "$@"; then
-    gc_bootstrap_mark_step "$step" done
+    gc_bootstrap_mark_step "$step" "done"
     return 0
   else
-    gc_bootstrap_mark_step "$step" failed
+    gc_bootstrap_mark_step "$step" "failed"
     return 1
   fi
 }
@@ -15167,9 +15167,9 @@ USAGE
     info "Step 'template' already completed; skipping."
   else
     if gc_apply_project_template "$PROJECT_ROOT" "$template_request"; then
-      gc_bootstrap_mark_step template done
+      gc_bootstrap_mark_step template "done"
     else
-      gc_bootstrap_mark_step template failed
+      gc_bootstrap_mark_step template "failed"
       die "Project template application failed"
     fi
   fi
@@ -15180,7 +15180,7 @@ USAGE
     if gc_bootstrap_step_is_done stage-rfp; then
       if [[ ! -f "$staged_rfp" || ! -f "$staged_docs_rfp" ]]; then
         info "Restaging RFP (previous artifacts missing)."
-        gc_bootstrap_mark_step stage-rfp reset
+        gc_bootstrap_mark_step stage-rfp "reset"
       fi
     fi
     if ! gc_bootstrap_step_is_done stage-rfp; then
@@ -15188,7 +15188,7 @@ USAGE
       cp "$rfp_path" "$staged_rfp"
       mkdir -p "${STAGING_DIR}/docs"
       cp "$rfp_path" "${STAGING_DIR}/docs/rfp.md"
-      gc_bootstrap_mark_step stage-rfp done
+      gc_bootstrap_mark_step stage-rfp "done"
       info "Staged RFP → ${staged_rfp}"
     else
       info "Step 'stage-rfp' already completed; skipping."
@@ -15211,11 +15211,11 @@ USAGE
   else
     if ! gc_bootstrap_have_rfp; then
       warn "No RFP found in staging; skipping create-pdr. Provide --rfp or add .gpt-creator/staging/docs/rfp.md to enable this step."
-      gc_bootstrap_mark_step create-pdr done
+      gc_bootstrap_mark_step create-pdr "done"
     elif bash "$CLI_ROOT/src/cli/create-pdr.sh" --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step create-pdr done
+      gc_bootstrap_mark_step create-pdr "done"
     else
-      gc_bootstrap_mark_step create-pdr failed
+      gc_bootstrap_mark_step create-pdr "failed"
       die "create-pdr failed"
     fi
   fi
@@ -15225,9 +15225,9 @@ USAGE
     info "Step 'create-sds' already completed; skipping."
   else
     if bash "$CLI_ROOT/src/cli/create-sds.sh" --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step create-sds done
+      gc_bootstrap_mark_step create-sds "done"
     else
-      gc_bootstrap_mark_step create-sds failed
+      gc_bootstrap_mark_step create-sds "failed"
       die "create-sds failed"
     fi
   fi
@@ -15237,9 +15237,9 @@ USAGE
     info "Step 'create-db-dump' already completed; skipping."
   else
     if bash "$CLI_ROOT/src/cli/create-db-dump.sh" --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step create-db-dump done
+      gc_bootstrap_mark_step create-db-dump "done"
     else
-      gc_bootstrap_mark_step create-db-dump failed
+      gc_bootstrap_mark_step create-db-dump "failed"
       die "create-db-dump failed"
     fi
   fi
@@ -15247,9 +15247,9 @@ USAGE
   info "[6/11] Mining Jira tasks"
   if ! gc_bootstrap_step_is_done create-jira-tasks; then
     if cmd_create_jira_tasks --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step create-jira-tasks done
+      gc_bootstrap_mark_step create-jira-tasks "done"
     else
-      gc_bootstrap_mark_step create-jira-tasks failed
+      gc_bootstrap_mark_step create-jira-tasks "failed"
       die "create-jira-tasks failed"
     fi
   else
@@ -15259,9 +15259,9 @@ USAGE
   info "[7/11] Planning build"
   if ! gc_bootstrap_step_is_done plan; then
     if cmd_plan --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step plan done
+      gc_bootstrap_mark_step plan "done"
     else
-      gc_bootstrap_mark_step plan failed
+      gc_bootstrap_mark_step plan "failed"
       die "plan step failed"
     fi
   else
@@ -15271,9 +15271,9 @@ USAGE
   if ! gc_bootstrap_step_is_done generate; then
     info "[8/11] Generating stack code"
     if cmd_generate all --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step generate done
+      gc_bootstrap_mark_step generate "done"
     else
-      gc_bootstrap_mark_step generate failed
+      gc_bootstrap_mark_step generate "failed"
       die "generate step failed"
     fi
   else
@@ -15283,9 +15283,9 @@ USAGE
   info "[9/11] Provisioning infrastructure"
   if ! gc_bootstrap_step_is_done db-provision; then
     if cmd_db provision --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step db-provision done
+      gc_bootstrap_mark_step db-provision "done"
     else
-      gc_bootstrap_mark_step db-provision failed
+      gc_bootstrap_mark_step db-provision "failed"
       die "Database provision failed"
     fi
   else
@@ -15295,9 +15295,9 @@ USAGE
   info "[10/11] Starting stack"
   if ! gc_bootstrap_step_is_done run-up; then
     if cmd_run up --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step run-up done
+      gc_bootstrap_mark_step run-up "done"
     else
-      gc_bootstrap_mark_step run-up failed
+      gc_bootstrap_mark_step run-up "failed"
       die "Stack start failed"
     fi
   else
@@ -15306,9 +15306,9 @@ USAGE
 
   if ! gc_bootstrap_step_is_done verify; then
     if cmd_verify acceptance --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step verify done
+      gc_bootstrap_mark_step verify "done"
     else
-      gc_bootstrap_mark_step verify failed
+      gc_bootstrap_mark_step verify "failed"
       die "Acceptance verification failed"
     fi
   else

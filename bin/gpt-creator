@@ -8906,7 +8906,7 @@ buffer = ""
 
 def process_line(line: str):
     global capturing_diff, diff_header, diff_lines
-    nonlocal abort_now
+    nonlocal abort_now, turn_count, abort_reason, timed_out, timeout_type
     stripped = line.rstrip("\n")
     lowered = stripped.lower()
     if turn_limit:
@@ -8914,7 +8914,6 @@ def process_line(line: str):
         if turn_pos != -1:
             prev_char = lowered[turn_pos - 1] if turn_pos > 0 else ""
             if turn_pos == 0 or prev_char in {"", " ", "\t", "]"}:
-                nonlocal turn_count, abort_reason, timed_out, timeout_type
                 turn_count += 1
                 if turn_count >= turn_limit and not abort_now:
                     abort_now = True

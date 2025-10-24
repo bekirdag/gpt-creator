@@ -8862,7 +8862,7 @@ def is_diff_line(line: str) -> bool:
 
 def flush_diff():
     global capturing_diff, diff_header, diff_lines, diff_counter
-    nonlocal abort_now, abort_reason, abort_repeat_count, timed_out, timeout_type
+    global abort_now, abort_reason, abort_repeat_count, timed_out, timeout_type
     if not diff_header:
         capturing_diff = False
         diff_lines = []
@@ -8906,7 +8906,7 @@ buffer = ""
 
 def process_line(line: str):
     global capturing_diff, diff_header, diff_lines
-    nonlocal abort_now, turn_count, abort_reason, timed_out, timeout_type
+    global abort_now, turn_count, abort_reason, timed_out, timeout_type
     stripped = line.rstrip("\n")
     lowered = stripped.lower()
     if turn_limit:
@@ -8938,7 +8938,7 @@ def process_line(line: str):
 
 def process_text(text: str):
     global buffer
-    nonlocal abort_now
+    global abort_now
     buffer += text
     while True:
         if "\n" in buffer:

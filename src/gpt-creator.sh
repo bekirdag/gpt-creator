@@ -134,6 +134,129 @@ gc::discover() {
   gc::_set_found_doc openapi "$({ gc::_find_first_by_patterns "$project_root" "${GC_OPENAPI_PATTERNS[@]}" | head -n1 || true; })"
   gc::_set_found_doc sql "$({ gc::_find_first_by_patterns "$project_root" "${GC_SQL_PATTERNS[@]}" | head -n1 || true; })"
 
+  if command -v python3 >/dev/null 2>&1; then
+    local work_dir registry_path
+    work_dir="$(gc::ensure_workspace "$project_root")"
+    registry_path="$work_dir/staging/plan/tasks/tasks.db"
+    if [[ -f "$registry_path" ]]; then
+      local key
+      for key in pdr sds rfp jira ui_pages openapi sql; do
+        local current
+        current="$(gc::_get_found_doc "$key")"
+        if [[ -n "$current" ]]; then
+          continue
+        fi
+        local fallback
+        fallback="$(python3 - "$registry_path" "$key" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+registry = Path(sys.argv[1])
+key = sys.argv[2]
+
+doc_type_map = {
+    "pdr": "pdr",
+    "sds": "sds",
+    "rfp": "rfp",
+    "jira": "jira",
+    "ui_pages": "ui",
+    "openapi": "openapi",
+    "sql": "sql",
+}
+
+search_terms_map = {
+    "pdr": ["pdr", "product"],
+    "sds": ["sds", "system", "design-spec"],
+    "rfp": ["rfp", "proposal"],
+    "jira": ["jira"],
+    "ui_pages": ["ui-pages", "ui_pages", "ui pages", "ui"],
+    "openapi": ["openapi", "swagger"],
+    "sql": [".sql", "dump"],
+}
+
+def pick(row):
+    if row is None:
+        return ""
+    value = row["resolved_path"]
+    if not value:
+        return ""
+    try:
+        return str(Path(value).resolve())
+    except Exception:
+        return str(Path(value))
+
+doc_type = doc_type_map.get(key)
+
+try:
+    conn = sqlite3.connect(str(registry))
+    conn.row_factory = sqlite3.Row
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+resolved = ""
+try:
+    if doc_type:
+        row = conn.execute(
+            """
+            SELECT COALESCE(staging_path, source_path) AS resolved_path
+            FROM documentation
+            WHERE status = 'active' AND doc_type = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (doc_type,),
+        ).fetchone()
+        resolved = pick(row)
+    if not resolved and doc_type:
+        row = conn.execute(
+            """
+            SELECT COALESCE(staging_path, source_path) AS resolved_path
+            FROM documentation
+            WHERE status = 'active' AND tags_json LIKE ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (f'%"{doc_type}"%',),
+        ).fetchone()
+        resolved = pick(row)
+    if not resolved:
+        for term in search_terms_map.get(key, []):
+            term = term.lower()
+            row = conn.execute(
+                """
+                SELECT COALESCE(staging_path, source_path) AS resolved_path
+                FROM documentation
+                WHERE status = 'active'
+                  AND (
+                    LOWER(COALESCE(rel_path, '')) LIKE ?
+                    OR LOWER(COALESCE(file_name, '')) LIKE ?
+                  )
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (f"%{term}%", f"%{term}%"),
+            ).fetchone()
+            resolved = pick(row)
+            if resolved:
+                break
+finally:
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+print(resolved)
+PY
+)"
+        if [[ -n "$fallback" ]]; then
+          gc::_set_found_doc "$key" "$fallback"
+        fi
+      done
+    fi
+  fi
+
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     GC_FOUND_MMD+=("$f")

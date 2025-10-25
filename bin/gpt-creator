@@ -4021,6 +4021,7 @@ gc_discovery_fill_defaults() {
   python3 - "$discovery_file" "${required_keys[@]}" <<'PY'
 import os
 import pathlib
+import sqlite3
 import sys
 
 file_path = pathlib.Path(sys.argv[1])
@@ -4200,31 +4201,82 @@ def resolve_registry_entry(key: str):
     except Exception:
         return None
     try:
+        def pick(row):
+            if not row:
+                return None
+            candidate = row["resolved_path"]
+            if not candidate:
+                return None
+            try:
+                return pathlib.Path(candidate).resolve()
+            except Exception:
+                return pathlib.Path(candidate)
+
         row = conn.execute(
             """
             SELECT
               COALESCE(staging_path, source_path) AS resolved_path
             FROM documentation
-            WHERE doc_type = ?
-              AND status = 'active'
+            WHERE status = 'active'
+              AND doc_type = ?
             ORDER BY updated_at DESC
             LIMIT 1
             """,
             (doc_type,),
         ).fetchone()
+        resolved = pick(row)
+        if resolved is None:
+            row = conn.execute(
+                """
+                SELECT
+                  COALESCE(staging_path, source_path) AS resolved_path
+                FROM documentation
+                WHERE status = 'active'
+                  AND tags_json LIKE ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (f'%"{doc_type}"%',),
+            ).fetchone()
+            resolved = pick(row)
+        if resolved is None:
+            search_terms = {
+                "pdr": ["pdr", "product"],
+                "sds": ["sds", "system", "design-spec"],
+                "rfp": ["rfp", "proposal"],
+                "jira": ["jira"],
+                "ui_pages": ["ui-pages", "ui_pages", "ui pages", "ui"],
+                "openapi": ["openapi", "swagger"],
+                "sql": [".sql", "dump"],
+            }.get(key, [])
+            lowered_terms = [term.lower() for term in search_terms]
+            for term in lowered_terms:
+                row = conn.execute(
+                    """
+                    SELECT
+                      COALESCE(staging_path, source_path) AS resolved_path
+                    FROM documentation
+                    WHERE status = 'active'
+                      AND (
+                        LOWER(COALESCE(rel_path, '')) LIKE ?
+                        OR LOWER(COALESCE(file_name, '')) LIKE ?
+                      )
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (f"%{term}%", f"%{term}%"),
+                ).fetchone()
+                resolved = pick(row)
+                if resolved is not None:
+                    break
     except Exception:
-        row = None
+        resolved = None
     finally:
         try:
             conn.close()
         except Exception:
             pass
-    if row and row["resolved_path"]:
-        try:
-            return pathlib.Path(row["resolved_path"]).resolve()
-        except Exception:
-            return pathlib.Path(row["resolved_path"])
-    return None
+    return resolved
 
 for key in required:
     value = entries.get(key, "").strip()
@@ -4439,6 +4491,8 @@ duplicate_examples: list[str] = []
 duplicate_count = 0
 
 for index, (name, section_lines) in enumerate(sections, 1):
+    if name.lower().endswith("discovery.yaml") or name.lower().endswith("discovery.yml"):
+        continue
     if remaining <= 0:
         output.append("… (context digest truncated for display; raise --context-lines or open the context file directly for the remainder)")
         break

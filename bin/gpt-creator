@@ -1061,6 +1061,7 @@ gc_user_config_root() {
   python3 - <<'PY'
 import os
 import pathlib
+import sqlite3
 import sys
 
 def user_config_dir():
@@ -4177,6 +4178,54 @@ def resolve_candidate(base_key: str, relative: str):
         return resolved
     return None
 
+def resolve_registry_entry(key: str):
+    doc_type_map = {
+        "pdr": "pdr",
+        "sds": "sds",
+        "rfp": "rfp",
+        "jira": "jira",
+        "ui_pages": "ui",
+        "openapi": "openapi",
+        "sql": "sql",
+    }
+    doc_type = doc_type_map.get(key)
+    if not doc_type:
+        return None
+    registry_path = staging_root / "plan" / "tasks" / "tasks.db"
+    if not registry_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(registry_path))
+        conn.row_factory = sqlite3.Row
+    except Exception:
+        return None
+    try:
+        row = conn.execute(
+            """
+            SELECT
+              COALESCE(staging_path, source_path) AS resolved_path
+            FROM documentation
+            WHERE doc_type = ?
+              AND status = 'active'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (doc_type,),
+        ).fetchone()
+    except Exception:
+        row = None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    if row and row["resolved_path"]:
+        try:
+            return pathlib.Path(row["resolved_path"]).resolve()
+        except Exception:
+            return pathlib.Path(row["resolved_path"])
+    return None
+
 for key in required:
     value = entries.get(key, "").strip()
     if value and value.lower() != "n/a":
@@ -4187,6 +4236,8 @@ for key in required:
         if candidate is not None:
             resolved = candidate
             break
+    if resolved is None:
+        resolved = resolve_registry_entry(key)
     if resolved is not None:
         entries[key] = str(resolved)
     else:

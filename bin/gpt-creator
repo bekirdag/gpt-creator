@@ -4080,8 +4080,24 @@ for key in entries:
         order.append(key)
         seen.add(key)
 
-input_dir = pathlib.Path(os.environ.get("INPUT_DIR", file_path.parent)).resolve()
-if not input_dir.exists():
+env_input = os.environ.get("INPUT_DIR")
+input_dir = None
+input_candidates = []
+if env_input:
+    input_candidates.append(pathlib.Path(env_input))
+input_candidates.append(file_path.parent / "inputs")
+input_candidates.append(file_path.parent)
+
+for candidate in input_candidates:
+    try:
+        resolved = pathlib.Path(candidate).resolve()
+    except Exception:
+        continue
+    if resolved.exists():
+        input_dir = resolved
+        break
+
+if input_dir is None:
     input_dir = file_path.parent.resolve()
 
 staging_root = input_dir.parent if input_dir.name == "inputs" else input_dir
@@ -10436,6 +10452,34 @@ if TASK_INDEX < 0 or TASK_INDEX >= len(task_rows):
 
 task = task_rows[TASK_INDEX]
 documentation_db_path = os.getenv("GC_DOCUMENTATION_DB_PATH", "").strip()
+doc_catalog_path_env = os.getenv("GC_DOC_CATALOG_PATH", "").strip()
+try:
+    doc_library_path_obj = Path(STAGING_DIR) / "doc-library.md"
+except Exception:
+    doc_library_path_obj = Path("doc-library.md")
+try:
+    doc_index_path_obj = Path(STAGING_DIR) / "doc-index.md"
+except Exception:
+    doc_index_path_obj = Path("doc-index.md")
+try:
+    doc_library_path_str = str(doc_library_path_obj.resolve())
+except Exception:
+    doc_library_path_str = str(doc_library_path_obj)
+try:
+    doc_index_path_str = str(doc_index_path_obj.resolve())
+except Exception:
+    doc_index_path_str = str(doc_index_path_obj)
+vector_index_path_str = ""
+if documentation_db_path:
+    try:
+        vector_index_path_str = str(
+            (Path(documentation_db_path).resolve().parent / "documentation-vector-index.sqlite").resolve()
+        )
+    except Exception:
+        try:
+            vector_index_path_str = str((Path(documentation_db_path).parent / "documentation-vector-index.sqlite"))
+        except Exception:
+            vector_index_path_str = ""
 
 def parse_json_list(value):
     if not value:
@@ -10596,6 +10640,17 @@ if documentation_db_path:
     lines.append("- Use it to locate PDR/SDS/RFP/OpenAPI/SQL dumps, diagrams, and samples before making changes.")
     lines.append("- After modifying a document, update the registry (e.g. `python3 src/lib/doc_registry.py register --runtime-dir .gpt-creator …`) so change history stays accurate.")
     lines.append("- Capture relevant doc references from the registry in your summary so the team can follow up.")
+    lines.append("- Deep-dive docs: `docs/document-catalog-indexing.md`, `docs/document-catalog-metadata.md`, and `docs/document-catalog-pipeline.md` explain indexing, metadata, and pipelines powering these caches.")
+    if doc_library_path_str:
+        lines.append(f"- Library overview: `{doc_library_path_str}` — review via `gpt-creator show-file {doc_library_path_str} --range START:END` for tags and owners.")
+    if doc_index_path_str:
+        lines.append(f"- Headings index: `{doc_index_path_str}` lists section anchors; jump straight to the right slice before loading full docs.")
+    if doc_catalog_path_env:
+        lines.append(f"- JSON catalog (doc/snippet map) at `{doc_catalog_path_env}` supports scripted lookups while keeping prompts lean.")
+    example_query = "sqlite3 \"$GC_DOCUMENTATION_DB_PATH\" \"SELECT doc_id,surface FROM documentation_search WHERE documentation_search MATCH 'lockout' LIMIT 5;\""
+    lines.append(f"- Keyword search via `documentation_search` FTS (e.g. `{example_query}`).")
+    if vector_index_path_str:
+        lines.append(f"- Semantic index lives at `{vector_index_path_str}`; refresh with `python3 src/lib/doc_indexer.py --runtime-dir .gpt-creator` after major doc edits.")
     lines.append("")
 lines.append("## Story")
 

@@ -200,6 +200,166 @@ def detect_tags(rel_path: str) -> List[str]:
     return tags
 
 
+def _safe_int(value, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _headings_from_metadata(metadata: Optional[dict]) -> List[DocHeading]:
+    if not metadata:
+        return []
+    payload = metadata.get("headings")
+    if not isinstance(payload, list):
+        return []
+    headings: List[DocHeading] = []
+    for item in payload:
+        if len(headings) >= MAX_HEADINGS:
+            break
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        line = _safe_int(item.get("line"), 0)
+        level = max(1, _safe_int(item.get("level"), 1))
+        headings.append(DocHeading(title=title, line=line, level=level))
+    return headings
+
+
+def _resolve_registry_db_path(staging_dir: Path) -> Path:
+    if staging_dir.name == "staging":
+        return staging_dir / "plan" / "tasks" / "tasks.db"
+    return staging_dir / "staging" / "plan" / "tasks" / "tasks.db"
+
+
+def _load_doc_registry_class():
+    try:
+        from .doc_registry import DocRegistry  # type: ignore
+
+        return DocRegistry
+    except Exception:
+        try:
+            from doc_registry import DocRegistry  # type: ignore
+
+            return DocRegistry
+        except Exception:
+            return None
+
+
+def _doc_entry_from_registry_row(
+    row: dict,
+    project_root: Path,
+    staging_dir: Path,
+) -> Optional[DocEntry]:
+    doc_id = row.get("doc_id")
+    staging_path = row.get("staging_path")
+    source_path = row.get("source_path")
+    rel_path_raw = row.get("rel_path")
+    path_candidates: List[Path] = []
+    for raw in (staging_path, source_path):
+        if raw:
+            path_candidates.append(Path(str(raw)))
+    if rel_path_raw:
+        rel_candidate = Path(str(rel_path_raw))
+        if not rel_candidate.is_absolute():
+            rel_candidate = project_root / rel_candidate
+        path_candidates.append(rel_candidate)
+    path_obj: Optional[Path] = None
+    for candidate in path_candidates:
+        try:
+            if candidate.exists():
+                path_obj = candidate
+                break
+        except OSError:
+            continue
+    if path_obj is None and path_candidates:
+        path_obj = path_candidates[0]
+    if path_obj is None:
+        return None
+    try:
+        resolved_path = path_obj.resolve()
+    except OSError:
+        resolved_path = path_obj
+
+    text = read_limited_text(resolved_path)
+    headings = extract_headings(resolved_path, text) if text else []
+    if not headings:
+        metadata = row.get("metadata") if isinstance(row, dict) else None
+        headings = _headings_from_metadata(metadata)
+    rel = relative_path(resolved_path, [project_root, staging_dir])
+
+    tags_raw = row.get("tags") or []
+    if isinstance(tags_raw, list):
+        tags_iter = tags_raw
+    else:
+        tags_iter = [tags_raw]
+    tags_set = {str(tag).strip() for tag in tags_iter if tag}
+    for detected in detect_tags(rel):
+        tags_set.add(detected)
+    tags = sorted(tags_set) if tags_set else []
+
+    size_bytes = row.get("size_bytes")
+    if size_bytes is None and resolved_path.exists():
+        try:
+            size_bytes = resolved_path.stat().st_size
+        except OSError:
+            size_bytes = None
+    size_val = _safe_int(size_bytes, 0)
+
+    mtime_ns = row.get("mtime_ns")
+    if mtime_ns is None and resolved_path.exists():
+        try:
+            stat = resolved_path.stat()
+            mtime_ns = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
+        except OSError:
+            mtime_ns = None
+    mtime_val = _safe_int(mtime_ns, 0)
+
+    sha256 = (row.get("sha256") or "").strip()
+    if not sha256 and resolved_path.exists():
+        sha256 = file_sha256(resolved_path)
+
+    title = str(row.get("title") or "").strip()
+    if not title:
+        title = title_from_headings(resolved_path, headings)
+
+    final_doc_id = doc_id or stable_doc_id(resolved_path)
+
+    return DocEntry(
+        doc_id=final_doc_id,
+        path=resolved_path,
+        rel_path=rel,
+        size=size_val,
+        mtime_ns=mtime_val,
+        sha256=sha256,
+        title=title,
+        tags=tags,
+        headings=headings,
+    )
+
+
+def _collect_documents_from_registry(project_root: Path, staging_dir: Path) -> List[DocEntry]:
+    DocRegistryCls = _load_doc_registry_class()
+    if DocRegistryCls is None:
+        return []
+    db_path = _resolve_registry_db_path(staging_dir)
+    try:
+        registry = DocRegistryCls(db_path)
+        rows = registry.fetch_all()
+    except Exception:
+        return []
+    documents: List[DocEntry] = []
+    for row in rows:
+        entry = _doc_entry_from_registry_row(row, project_root, staging_dir)
+        if entry is not None:
+            documents.append(entry)
+    return sorted(documents, key=lambda item: item.rel_path.lower())
+
+
 def stable_doc_id(path: Path) -> str:
     try:
         resolved = path.resolve(strict=False)
@@ -471,6 +631,10 @@ def build_sections(
 
 
 def collect_documents(project_root: Path, staging_dir: Path) -> List[DocEntry]:
+    registry_documents = _collect_documents_from_registry(project_root, staging_dir)
+    if registry_documents:
+        return registry_documents
+
     roots = candidate_directories(staging_dir)
     docs: List[DocEntry] = []
     for root in roots:

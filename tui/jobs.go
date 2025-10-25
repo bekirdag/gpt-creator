@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"os/exec"
 	"sync"
@@ -163,8 +164,18 @@ func runJob(state *jobState, ch chan<- jobMsg) {
 	go func() {
 		defer wg.Done()
 		scanner := bufio.NewScanner(ptmx)
+		// Allow large log lines from Codex without stalling the reader.
+		const maxLogLineSize = 8 * 1024 * 1024
+		scanner.Buffer(make([]byte, 0, 64*1024), maxLogLineSize)
 		for scanner.Scan() {
 			ch <- jobLogMsg{Title: req.title, Line: scanner.Text(), ID: state.id}
+		}
+		if err := scanner.Err(); err != nil {
+			ch <- jobLogMsg{
+				Title: req.title,
+				Line:  fmt.Sprintf("[gpt-creator] error reading job output: %v", err),
+				ID:    state.id,
+			}
 		}
 	}()
 

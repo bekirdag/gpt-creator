@@ -33,6 +33,8 @@ GC_REPORTS_ACTIVITY_FILE=""
 GC_REPORTS_IDLE_SENTINEL=""
 GC_REPORTS_WATCHDOG_PID=""
 GC_FILTERED_ARGS=()
+GC_LAST_AUTO_COMMIT_HASH=""
+GC_LAST_AUTO_COMMIT_STATUS=""
 
 # Ensure docker compose commands have adequate timeouts unless caller overrides
 if [[ -n "${GC_DOCKER_COMPOSE_TIMEOUT:-}" ]]; then
@@ -8270,6 +8272,7 @@ gc_exec_with_timeout() {
   python3 - "$timeout" "$stdin_file" "$log_file" "${cmd[@]}" <<'PY'
 import hashlib
 import os
+import re
 import select
 import signal
 import subprocess
@@ -8341,6 +8344,15 @@ abort_repeat_count = 0
 turn_limit = to_int(os.environ.get("GC_CODEX_MAX_TURNS", "0"))
 turn_count = 0
 
+def normalize_diff_for_digest(diff_text: str) -> str:
+    lines = []
+    for raw_line in diff_text.splitlines():
+        if raw_line.startswith("index "):
+            continue
+        line = re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", raw_line)
+        lines.append(line)
+    return "\n".join(lines)
+
 def ensure_diff_dir():
     global diff_dir
     if diff_dir is None and log_path:
@@ -8399,7 +8411,9 @@ def flush_diff():
         diff_lines = []
         return
     diff_text = "".join(diff_lines)
-    digest = hashlib.sha256(diff_text.encode("utf-8")).hexdigest()[:12]
+    normalized_diff = normalize_diff_for_digest(diff_text)
+    digest_source = normalized_diff if normalized_diff.strip() else diff_text
+    digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:12]
     count = diff_repeat_counts.get(digest, 0) + 1
     diff_repeat_counts[digest] = count
     diff_dir_path = ensure_diff_dir()
@@ -12422,6 +12436,100 @@ EOHELP
     return 0
   }
 
+  gc_auto_commit_task() {
+    local commit_message="${1:-}"
+    shift || true
+    local -a raw_paths=("$@")
+    GC_LAST_AUTO_COMMIT_HASH=""
+    GC_LAST_AUTO_COMMIT_STATUS="skipped"
+
+    if [[ -z "${PROJECT_ROOT:-}" ]]; then
+      info "    Auto-commit skipped: project root unavailable."
+      return 0
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+      info "    Auto-commit skipped: git command not found."
+      return 0
+    fi
+    if ! git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      info "    Auto-commit skipped: not a git repository."
+      return 0
+    fi
+
+    local -a stage_paths=()
+    local -A seen_stage_paths=()
+    local raw path
+    for raw in "${raw_paths[@]}"; do
+      path="$raw"
+      path="${path%% (*}"
+      while [[ "$path" == " "* ]]; do
+        path="${path# }"
+      done
+      while [[ "$path" == *" " ]]; do
+        path="${path% }"
+      done
+      if [[ "$path" == "$PROJECT_ROOT/"* ]]; then
+        path="${path#$PROJECT_ROOT/}"
+      fi
+      [[ -n "$path" ]] || continue
+      if [[ -z "${seen_stage_paths[$path]:-}" ]]; then
+        stage_paths+=("$path")
+        seen_stage_paths[$path]=1
+      fi
+    done
+
+    if (( ${#stage_paths[@]} == 0 )); then
+      info "    Auto-commit skipped: no paths to stage."
+      GC_LAST_AUTO_COMMIT_STATUS="clean"
+      return 0
+    fi
+
+    local sanitized_message="$commit_message"
+    if command -v python3 >/dev/null 2>&1; then
+      sanitized_message="$(python3 - "$commit_message" <<'PY'
+import sys
+msg = sys.argv[1]
+msg = ' '.join(msg.replace('\r', ' ').replace('\n', ' ').split())
+print((msg[:69] + '...') if len(msg) > 72 else msg)
+PY
+      )" || sanitized_message="$commit_message"
+    else
+      sanitized_message="${sanitized_message//$'\r'/ }"
+      sanitized_message="${sanitized_message//$'\n'/ }"
+    fi
+
+    local add_output
+    if ! add_output="$(git -C "$PROJECT_ROOT" add -- "${stage_paths[@]}" 2>&1)"; then
+      warn "    Auto-commit staging failed: ${add_output}"
+      GC_LAST_AUTO_COMMIT_STATUS="failed"
+      return 0
+    fi
+
+    if git -C "$PROJECT_ROOT" diff --cached --quiet --exit-code; then
+      info "    Auto-commit skipped: staged state clean."
+      GC_LAST_AUTO_COMMIT_STATUS="clean"
+      return 0
+    fi
+
+    local commit_output
+    if ! commit_output="$(git -C "$PROJECT_ROOT" commit -m "$sanitized_message" 2>&1)"; then
+      warn "    Auto-commit failed: ${commit_output}"
+      GC_LAST_AUTO_COMMIT_STATUS="failed"
+      return 0
+    fi
+
+    local commit_hash
+    commit_hash="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)" || commit_hash=""
+    GC_LAST_AUTO_COMMIT_HASH="$commit_hash"
+    GC_LAST_AUTO_COMMIT_STATUS="committed"
+    if [[ -n "$commit_hash" ]]; then
+      info "    Auto-commit ${commit_hash:0:7}: ${sanitized_message}"
+    else
+      info "    Auto-commit created: ${sanitized_message}"
+    fi
+    return 0
+  }
+
   gc_touch_progress
 
   local processed_total=0
@@ -12917,6 +13025,28 @@ REM
         else
           warn "  Failed to record throughput metrics for task ${task_number}."
         fi
+      fi
+
+      if [[ "$task_result_status" == "complete" && $task_changes_applied -gt 0 ]]; then
+        local -a commit_targets=("${task_written_paths[@]}")
+        commit_targets+=("${task_patched_paths[@]}")
+        local commit_label="${banner_task_id}: ${task_title:-Task ${task_number}}"
+        gc_auto_commit_task "$commit_label" "${commit_targets[@]}"
+        case "${GC_LAST_AUTO_COMMIT_STATUS:-skipped}" in
+          committed)
+            local note_message="${commit_label//$'\n'/ }"
+            note_message="${note_message//$'\r'/ }"
+            if [[ -n "${GC_LAST_AUTO_COMMIT_HASH:-}" ]]; then
+              task_notes+=("Auto-commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} — ${note_message}")
+            else
+              task_notes+=("Auto-commit recorded — ${note_message}")
+            fi
+            ;;
+          failed)
+            task_notes+=("Auto-commit failed; inspect git status and commit manually.")
+            manual_followups=1
+            ;;
+        esac
       fi
 
       local timestamp_utc

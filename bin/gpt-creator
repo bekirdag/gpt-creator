@@ -2344,6 +2344,10 @@ gc_record_codex_usage() {
   GC_LAST_CODEX_PROMPT_TOKENS=0
   GC_LAST_CODEX_COMPLETION_TOKENS=0
   GC_LAST_CODEX_TOTAL_TOKENS=0
+  GC_LAST_CODEX_STDOUT_TAIL_HASH="none"
+  GC_LAST_CODEX_STDOUT_TAIL_BASE64=""
+  GC_LAST_CODEX_TURN_DIFF_HASH=""
+  GC_LAST_CODEX_TURN_DIFF_BLOCKS=0
 
   [[ -n "$log_file" && -f "$log_file" ]] || return 0
 
@@ -2582,6 +2586,56 @@ gc_record_codex_usage() {
         GC_CODEX_USAGE_LIMIT_REACHED=1
         if [[ -z "${GC_CODEX_USAGE_LIMIT_MESSAGE:-}" ]]; then
           GC_CODEX_USAGE_LIMIT_MESSAGE="Codex tokens ${GC_LAST_CODEX_TOTAL_TOKENS} exceeded per-task limit ${limit_value}."
+        fi
+      fi
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+      local tail_info=""
+      tail_info="$(python3 - "$log_file" <<'PY'
+import base64
+import hashlib
+import os
+import re
+import sys
+
+path = sys.argv[1]
+slice_bytes = int(os.environ.get("GC_DIFF_GUARD_STDOUT_SLICE", "2048") or "2048")
+try:
+    with open(path, "rb") as handle:
+        data = handle.read()
+except Exception:
+    print("none")
+    print("")
+    print("")
+    print("0")
+    raise SystemExit(0)
+
+tail = data[-slice_bytes:] if slice_bytes > 0 else data
+tail_hash = hashlib.sha1(tail).hexdigest() if tail else "none"
+try:
+    tail_text = tail.decode("utf-8", errors="replace")
+except Exception:
+    tail_text = ""
+tail_b64 = base64.b64encode(tail_text.encode("utf-8")).decode("ascii") if tail_text else ""
+
+turn_blocks = re.findall(r'(?m)^\\[.*?\\] turn diff:(?:\\n.*?)(?=\\n\\[|\\Z)', tail_text)
+last_block = turn_blocks[-1] if turn_blocks else ""
+turn_hash = hashlib.sha1(last_block.encode("utf-8")).hexdigest() if last_block else ""
+
+print(tail_hash)
+print(tail_b64)
+print(turn_hash)
+print(str(len(turn_blocks)))
+PY
+)" || tail_info=""
+      if [[ -n "$tail_info" ]]; then
+        local tail_hash tail_b64 turn_hash turn_blocks
+        IFS=$'\n' read -r tail_hash tail_b64 turn_hash turn_blocks <<<"$tail_info"
+        [[ -n "$tail_hash" ]] && GC_LAST_CODEX_STDOUT_TAIL_HASH="$tail_hash"
+        [[ -n "$tail_b64" ]] && GC_LAST_CODEX_STDOUT_TAIL_BASE64="$tail_b64"
+        [[ -n "$turn_hash" ]] && GC_LAST_CODEX_TURN_DIFF_HASH="$turn_hash"
+        if [[ "$turn_blocks" =~ ^[0-9]+$ ]]; then
+          GC_LAST_CODEX_TURN_DIFF_BLOCKS="$turn_blocks"
         fi
       fi
     fi
@@ -8278,6 +8332,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 def to_int(value: str) -> int:
@@ -8338,6 +8393,9 @@ diff_header = ""
 diff_lines = []
 diff_repeat_limit = to_int(os.environ.get("GC_CODEX_DIFF_REPEAT_LIMIT", "6"))
 diff_repeat_counts = {}
+diff_recent = deque(maxlen=max(5, diff_repeat_limit if diff_repeat_limit > 0 else 5))
+last_diff_digest = None
+last_diff_streak = 0
 abort_now = False
 abort_reason = ""
 abort_repeat_count = 0
@@ -8406,6 +8464,7 @@ def is_diff_line(line: str) -> bool:
 def flush_diff():
     global capturing_diff, diff_header, diff_lines, diff_counter
     global abort_now, abort_reason, abort_repeat_count, timed_out, timeout_type
+    global diff_recent, last_diff_digest, last_diff_streak
     if not diff_header:
         capturing_diff = False
         diff_lines = []
@@ -8416,6 +8475,18 @@ def flush_diff():
     digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:12]
     count = diff_repeat_counts.get(digest, 0) + 1
     diff_repeat_counts[digest] = count
+    if last_diff_digest == digest:
+        last_diff_streak = last_diff_streak + 1
+    else:
+        last_diff_digest = digest
+        last_diff_streak = 1
+    diff_recent.append(digest)
+    recent_occurrences = diff_recent.count(digest)
+    oscillates = False
+    if len(diff_recent) >= 3:
+        a, b, c = diff_recent[-3], diff_recent[-2], diff_recent[-1]
+        if a == c and a != b:
+            oscillates = True
     diff_dir_path = ensure_diff_dir()
     base_dir = diff_dir_path.parent if diff_dir_path is not None else os.getcwd()
     base_dir_str = str(base_dir)
@@ -8437,12 +8508,25 @@ def flush_diff():
         else:
             diff_cache[digest] = None
             emit(f"{diff_header.strip()} (diff of {len(diff_text)} bytes captured)\n")
-    if diff_repeat_limit and count >= diff_repeat_limit and not abort_now:
-        abort_now = True
-        timed_out = True
-        timeout_type = "diff-repeat"
-        abort_repeat_count = count
-        abort_reason = f"turn diff repeated {count} times"
+    if diff_repeat_limit and diff_repeat_limit > 0 and not abort_now:
+        triggered = False
+        if last_diff_streak >= diff_repeat_limit:
+            abort_reason = f"turn diff repeated {last_diff_streak} times consecutively"
+            abort_repeat_count = last_diff_streak
+            timeout_type = "diff-repeat"
+            triggered = True
+        elif len(diff_recent) >= diff_repeat_limit and recent_occurrences >= diff_repeat_limit:
+            abort_reason = f"turn diff repeated {recent_occurrences} times within last {len(diff_recent)} turns"
+            abort_repeat_count = recent_occurrences
+            timeout_type = "diff-repeat"
+            triggered = True
+        elif oscillates:
+            abort_reason = "turn diff oscillation detected (A→B→A pattern)"
+            timeout_type = "diff-oscillation"
+            triggered = True
+        if triggered:
+            abort_now = True
+            timed_out = True
     capturing_diff = False
     diff_header = ""
     diff_lines.clear()
@@ -8654,6 +8738,8 @@ if timed_out:
     elif timeout_type == "diff-repeat":
         limit_msg = diff_repeat_limit if diff_repeat_limit else abort_repeat_count
         emit(f"\n[gc] Command emitted the same diff {abort_repeat_count or limit_msg} times; aborting to prevent an infinite loop\n")
+    elif timeout_type == "diff-oscillation":
+        emit("\n[gc] Command diff output oscillated between patterns (A→B→A); aborting to prevent an infinite loop\n")
     elif timeout_type == "turn-limit":
         emit(f"\n[gc] Command exceeded the maximum of {turn_limit} Codex turns; aborting to prevent an infinite loop\n")
     else:
@@ -8661,7 +8747,12 @@ if timed_out:
     if log:
         log.flush()
         log.close()
-    sys.exit(124)
+    if timeout_type in {"diff-repeat", "diff-oscillation"}:
+        sys.exit(125)
+    elif timeout_type == "turn-limit":
+        sys.exit(126)
+    else:
+        sys.exit(124)
 elif interrupted:
     if log:
         log.flush()
@@ -9322,7 +9413,10 @@ for entry in raw_changes:
 
 written = []
 patched = []
+noop_entries = []
 manual_notes = []
+actual_changes = 0
+change_bytes = {}
 
 def rewrite_patch_paths(diff_text: str) -> str:
     mapping = {
@@ -9418,14 +9512,26 @@ for change in changes:
                 f"Skipped writing {rel_path} because that path already exists as a directory."
             )
             continue
+        try:
+            rel_path = str(dest.relative_to(project_root))
+        except ValueError:
+            rel_path = str(dest)
+        if dest.exists():
+            existing = dest.read_text(encoding='utf-8')
+            if existing == content:
+                noop_entries.append(rel_path + ' (unchanged)')
+                continue
         dest.write_text(content, encoding='utf-8')
-        written.append(str(dest.relative_to(project_root)))
+        written.append(rel_path)
+        change_bytes[rel_path] = len(content.encode('utf-8'))
+        actual_changes += 1
     elif ctype == 'patch':
         diff = change.get('diff')
         if not diff:
             raise ValueError(f"Patch change for {path} missing diff")
         diff = rewrite_patch_paths(diff)
         diff = ensure_diff_headers(diff, path)
+        diff_bytes = len(diff.encode('utf-8'))
         if not diff.endswith('\n'):
             diff += '\n'
         proc = subprocess.run(
@@ -9450,6 +9556,8 @@ for change in changes:
 
             if three_way.returncode == 0:
                 patched.append(path + ' (3way)')
+                change_bytes[path] = diff_bytes
+                actual_changes += 1
                 continue
 
             git_err += three_way.stderr.decode('utf-8')
@@ -9473,7 +9581,7 @@ for change in changes:
                     check=False,
                 )
                 if already.returncode == 0:
-                    patched.append(path + ' (already applied)')
+                    noop_entries.append(path + ' (already applied)')
                     continue
 
                 new_content = None
@@ -9511,10 +9619,12 @@ for change in changes:
                         if dest.exists():
                             existing = dest.read_text(encoding='utf-8')
                             if existing == new_content:
-                                patched.append(path + ' (already exists)')
+                                noop_entries.append(path + ' (already exists)')
                                 continue
                         dest.write_text(new_content, encoding='utf-8')
                         patched.append(path + ' (reconstructed)')
+                        change_bytes[path] = len(new_content.encode('utf-8'))
+                        actual_changes += 1
                         continue
 
                 if new_content is None:
@@ -9529,6 +9639,8 @@ for change in changes:
                         )
                         if proc_noctx.returncode == 0:
                             patched.append(path + ' (partial apply)')
+                            change_bytes[path] = diff_bytes
+                            actual_changes += 1
                             continue
                         else:
                             git_err += proc_noctx.stderr.decode('utf-8')
@@ -9548,22 +9660,35 @@ for change in changes:
                 sys.stderr.write(fallback.stderr.decode('utf-8'))
                 continue
             patched.append(path + ' (patch)')
+            change_bytes[path] = diff_bytes
+            actual_changes += 1
         else:
             patched.append(path)
+            change_bytes[path] = diff_bytes
+            actual_changes += 1
     else:
         raise ValueError(f"Unknown change type: {ctype}")
 
 summary = {
     'written': written,
     'patched': patched,
+    'noop': noop_entries,
     'commands': payload.get('commands') or [],
     'notes': (payload.get('notes') or []) + manual_notes,
 }
+if actual_changes > 0:
+    print('STATUS ok')
+else:
+    print('STATUS noop')
 print('APPLIED')
 for path in written:
     print(f"WRITE {path}")
 for path in patched:
     print(f"PATCH {path}")
+for path, size in change_bytes.items():
+    print(f"SIZE {path}\t{size}")
+for path in noop_entries:
+    print(f"NOOP {path}")
 for cmd in summary['commands']:
     print(f"CMD {cmd}")
 for note in summary['notes']:
@@ -12052,6 +12177,7 @@ cmd_work_on_tasks() {
   local idle_timeout="${GC_WORK_ON_TASKS_IDLE_TIMEOUT:-0}"
   local throughput_checkpoint_interval=300
   local throughput_next_checkpoint=0
+  local diff_repeat_limit_override=""
 
   local codex_timeout_default=600
   local codex_timeout_value="${GC_CODEX_EXEC_TIMEOUT:-}"
@@ -12069,6 +12195,12 @@ cmd_work_on_tasks() {
     GC_CODEX_EXEC_TIMEOUT="$codex_timeout_default"
   fi
   local codex_timeout_seconds="${GC_CODEX_EXEC_TIMEOUT}"
+
+  local loop_guard_triggered=0
+  local loop_guard_exit_code="${GC_LOOP_GUARD_EXIT_CODE:-72}"
+  if ! [[ "$loop_guard_exit_code" =~ ^[0-9]+$ ]]; then
+    loop_guard_exit_code=72
+  fi
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -12131,6 +12263,13 @@ cmd_work_on_tasks() {
         token_limit_override=1
         shift 2
         ;;
+      --diff-repeat-limit)
+        diff_repeat_limit_override="${2:-}"
+        [[ -n "$diff_repeat_limit_override" ]] || die "--diff-repeat-limit requires a value"
+        [[ "$diff_repeat_limit_override" =~ ^[0-9]+$ ]] || die "Invalid --diff-repeat-limit value: ${diff_repeat_limit_override}"
+        export GC_CODEX_DIFF_REPEAT_LIMIT="$diff_repeat_limit_override"
+        shift 2
+        ;;
       --idle-timeout)
         idle_timeout="${2:-}"
         shift 2
@@ -12168,6 +12307,8 @@ Options:
                         Disable doc-snippet mode and include staged docs verbatim
   --sample-lines NUM   Include at most NUM chunks of minified sample payloads (default: 0; increase to view raw content)
   --token-limit NUM    Stop after a task exceeds NUM Codex tokens (default: 0 → unlimited)
+  --diff-repeat-limit NUM
+                        Override Codex diff repeat guard threshold (default: GC_CODEX_DIFF_REPEAT_LIMIT or 6)
   --idle-timeout SEC   Abort the run if no forward progress occurs for SEC seconds (default: 0 → disabled)
 EOHELP
         return 0
@@ -12221,6 +12362,41 @@ EOHELP
   if (( idle_timeout > 0 )); then
     info "Idle watchdog active → ${idle_timeout}s without progress."
   fi
+  if [[ -n "$diff_repeat_limit_override" ]]; then
+    info "Codex diff repeat guard limit → ${diff_repeat_limit_override} diff(s)."
+  fi
+
+  local diff_guard_stall_limit="${GC_DIFF_GUARD_STALL_LIMIT:-1}"
+  local diff_guard_token_threshold="${GC_DIFF_GUARD_TOKEN_THRESHOLD:-12}"
+  local diff_guard_stdout_slice="${GC_DIFF_GUARD_STDOUT_SLICE:-2048}"
+  local diff_guard_file_cooldown="${GC_DIFF_GUARD_FILE_COOLDOWN:-2}"
+  local diff_guard_file_min_bytes="${GC_DIFF_GUARD_FILE_MIN_BYTES:-120}"
+  local diff_guard_turn_repeat_limit="${GC_DIFF_GUARD_TURN_REPEAT_LIMIT:-3}"
+  local diff_guard_history_limit="${GC_DIFF_GUARD_HISTORY_LIMIT:-200}"
+  if ! [[ "$diff_guard_stall_limit" =~ ^-?[0-9]+$ ]]; then
+    diff_guard_stall_limit=1
+  fi
+  if ! [[ "$diff_guard_token_threshold" =~ ^[0-9]+$ ]]; then
+    diff_guard_token_threshold=12
+  fi
+  if ! [[ "$diff_guard_stdout_slice" =~ ^[0-9]+$ ]]; then
+    diff_guard_stdout_slice=2048
+  fi
+  if ! [[ "$diff_guard_file_cooldown" =~ ^[0-9]+$ ]]; then
+    diff_guard_file_cooldown=2
+  fi
+  if ! [[ "$diff_guard_file_min_bytes" =~ ^[0-9]+$ ]]; then
+    diff_guard_file_min_bytes=120
+  fi
+  if ! [[ "$diff_guard_turn_repeat_limit" =~ ^[0-9]+$ ]]; then
+    diff_guard_turn_repeat_limit=3
+  fi
+  if ! [[ "$diff_guard_history_limit" =~ ^[0-9]+$ ]]; then
+    diff_guard_history_limit=200
+  fi
+  export GC_DIFF_GUARD_STDOUT_SLICE="$diff_guard_stdout_slice"
+  local diff_guard_history=""
+  local diff_guard_global_attempt=0
 
   if [[ -n "$start_task_ref" && $resume -eq 0 ]]; then
     info "--fresh ignored when --from-task is provided; resuming from the specified task instead."
@@ -12530,6 +12706,35 @@ PY
     return 0
   }
 
+  gc_diff_fingerprint() {
+    if [[ -z "${PROJECT_ROOT:-}" ]]; then
+      printf 'no-project-%s\n' "$RANDOM$RANDOM$$"
+      return 0
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+      printf 'nogit-%s\n' "$RANDOM$RANDOM$$"
+      return 0
+    fi
+    local diff_payload
+    if ! diff_payload="$( (git -C "$PROJECT_ROOT" diff --shortstat --no-ext-diff || true; printf '\n'; git -C "$PROJECT_ROOT" diff --numstat --no-ext-diff || true; printf '\n'; git -C "$PROJECT_ROOT" diff --name-only --no-ext-diff || true) 2>/dev/null )"; then
+      printf 'diff-error-%s\n' "$RANDOM$RANDOM$$"
+      return 0
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+      printf '%s' "$diff_payload" | python3 - <<'PY'
+import hashlib, sys
+data = sys.stdin.read().encode('utf-8')
+print(hashlib.sha1(data).hexdigest())
+PY
+    elif command -v shasum >/dev/null 2>&1; then
+      printf '%s' "$diff_payload" | shasum -a 1 2>/dev/null | awk '{print $1}'
+    elif command -v sha1sum >/dev/null 2>&1; then
+      printf '%s' "$diff_payload" | sha1sum 2>/dev/null | awk '{print $1}'
+    else
+      printf 'hash-%s\n' "$(printf '%s' "$diff_payload" | wc -c | awk '{print $1}')"
+    fi
+  }
+
   gc_touch_progress
 
   local processed_total=0
@@ -12704,6 +12909,17 @@ PY
       local apply_status="pending"
       local task_report_path="${report_dir}/task_${task_number}.log"
       local task_log_archive_path="${story_log_dir}/task_${task_number}.log"
+      local task_change_sizes=""
+      local diff_last_transition=""
+      local diff_prev_after_sig=""
+      local diff_prev_prev_after_sig=""
+      local diff_stall_count=0
+      local turn_diff_prev_hash=""
+      local turn_diff_repeat_count=0
+      local diff_guard_enabled=1
+      if (( diff_guard_stall_limit <= 0 && diff_guard_file_cooldown <= 0 && diff_guard_turn_repeat_limit <= 0 )); then
+        diff_guard_enabled=0
+      fi
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
       export GC_ACTIVE_TASK_DB="$tasks_db"
       export GC_ACTIVE_TASK_SLUG="$slug"
@@ -12718,7 +12934,14 @@ PY
 
       while (( attempt < max_attempts )); do
         (( ++attempt ))
+        (( ++diff_guard_global_attempt ))
+        local diff_guard_current_step="$diff_guard_global_attempt"
         gc_touch_progress
+        local diff_before=""
+        task_change_sizes=""
+        if (( diff_guard_enabled )); then
+          diff_before="$(gc_diff_fingerprint)"
+        fi
         if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
           local attempt_tokens="${GC_CODEX_CALL_TOKEN_ACCUM:-${GC_LAST_CODEX_TOTAL_TOKENS:-0}}"
           if [[ "$attempt_tokens" =~ ^[0-9]+$ ]]; then
@@ -12777,6 +13000,21 @@ PY
                 any_changes=1
                 task_changes_applied=1
                 task_patched_paths+=("$patched_path")
+                ;;
+              SIZE\ *)
+                local size_entry="${change_line#SIZE }"
+                local size_path="${size_entry%%$'\t'*}"
+                local size_bytes="${size_entry#*$'\t'}"
+                if [[ -z "$size_path" || "$size_path" == "$size_bytes" ]]; then
+                  size_bytes="${size_entry##* }"
+                  size_path="${size_entry%% *}"
+                fi
+                task_change_sizes+="${size_path}"$'\t'"${size_bytes}"$'\n'
+                ;;
+              NOOP\ *)
+                local noop_path="${change_line#NOOP }"
+                warn "    No-op: ${noop_path}"
+                task_notes+=("Codex proposed change already applied: ${noop_path}")
                 ;;
               CMD\ *)
                 local suggested_cmd="${change_line#CMD }"
@@ -12851,6 +13089,143 @@ REM
             fi
           fi
 
+          local stdout_hash="${GC_LAST_CODEX_STDOUT_TAIL_HASH:-none}"
+          local stdout_base64="${GC_LAST_CODEX_STDOUT_TAIL_BASE64:-}"
+          local turn_hash="${GC_LAST_CODEX_TURN_DIFF_HASH:-}"
+          local turn_blocks="${GC_LAST_CODEX_TURN_DIFF_BLOCKS:-0}"
+          local diff_after=""
+          if (( diff_guard_enabled )); then
+            diff_after="$(gc_diff_fingerprint)"
+          fi
+          local after_signature="${diff_after:-}:${stdout_hash}"
+          local attempt_tokens_value=0
+          if [[ "$attempt_tokens" =~ ^[0-9]+$ ]]; then
+            attempt_tokens_value=$((attempt_tokens))
+          fi
+          local progress_sig="${diff_before:-}:${diff_after:-}:${stdout_hash}:${attempt_tokens_value}"
+          local guard_reason=""
+          if (( diff_guard_enabled )); then
+            if (( attempt_tokens_value <= diff_guard_token_threshold )) && [[ "$progress_sig" == "$diff_last_transition" ]]; then
+              diff_stall_count=$((diff_stall_count + 1))
+            else
+              diff_stall_count=0
+            fi
+            if (( diff_guard_stall_limit > 0 )) && (( diff_stall_count >= diff_guard_stall_limit )); then
+              guard_reason="no-progress"
+            fi
+          fi
+          if [[ -z "$guard_reason" && -n "$diff_prev_prev_after_sig" && "$after_signature" == "$diff_prev_prev_after_sig" && "$diff_prev_after_sig" != "$after_signature" ]]; then
+            guard_reason="oscillation"
+          fi
+          if (( diff_guard_enabled )) && [[ -z "$guard_reason" ]]; then
+            if [[ -n "$turn_hash" && "$turn_blocks" -gt 0 ]]; then
+              if [[ "$turn_hash" == "$turn_diff_prev_hash" ]]; then
+                turn_diff_repeat_count=$((turn_diff_repeat_count + 1))
+              else
+                turn_diff_repeat_count=1
+              fi
+            else
+              turn_diff_repeat_count=0
+            fi
+            turn_diff_prev_hash="$turn_hash"
+            if [[ -n "$turn_hash" ]] && (( turn_diff_repeat_limit > 0 )) && (( turn_diff_repeat_count >= turn_diff_repeat_limit )); then
+              guard_reason="turn-diff"
+            fi
+          fi
+          if [[ -z "$guard_reason" ]] && (( diff_guard_file_cooldown > 0 )) && [[ -n "$task_change_sizes" ]]; then
+            while IFS=$'	' read -r base_path size_bytes; do
+              [[ -z "$base_path" ]] && continue
+              if ! [[ "$size_bytes" =~ ^[0-9]+$ ]]; then
+                continue
+              fi
+              local change_size=$((size_bytes))
+              if (( change_size >= diff_guard_file_min_bytes )); then
+                continue
+              fi
+              local last_step=""
+              while IFS=$'	' read -r hist_path hist_step hist_bytes; do
+                [[ -z "$hist_path" ]] && continue
+                if [[ "$hist_path" == "$base_path" ]]; then
+                  last_step="$hist_step"
+                  break
+                fi
+              done <<<"$diff_guard_history"
+              if [[ -n "$last_step" ]]; then
+                local step_delta=$((diff_guard_current_step - last_step))
+                if (( step_delta <= diff_guard_file_cooldown )); then
+                  guard_reason="file-cooldown:${base_path}"
+                  break
+                fi
+              fi
+            done <<<"$task_change_sizes"
+          fi
+          if (( diff_guard_enabled )); then
+            diff_prev_prev_after_sig="$diff_prev_after_sig"
+            diff_prev_after_sig="$after_signature"
+            diff_last_transition="$progress_sig"
+          fi
+          if [[ -n "$task_change_sizes" ]]; then
+            local new_history=""
+            while IFS=$'\t' read -r size_path size_bytes; do
+              [[ -z "$size_path" ]] && continue
+              new_history+="${size_path}"$'\t'"${diff_guard_current_step}"$'\t'"${size_bytes}"$'\n'
+            done <<<"$task_change_sizes"
+            if [[ -n "$new_history" ]]; then
+              diff_guard_history="${new_history}${diff_guard_history}"
+              diff_guard_history="$(printf '%s' "$diff_guard_history" | head -n "$diff_guard_history_limit")"
+            fi
+          fi
+          if [[ -n "$guard_reason" ]]; then
+            warn "    Loop guard (${guard_reason}) detected; halting task."
+            task_needs_review=1
+            manual_followups=1
+            keep_output=1
+            task_result_status="on-hold"
+            apply_status="loop-guard"
+            codex_ok=1
+            break_after_update=1
+            story_failed=1
+            loop_guard_triggered=1
+            work_failed=1
+            local guard_log="${story_run_dir}/loop_guard_${task_number}_${attempt}.log"
+            {
+              printf 'LOOP_GUARD_TRIPPED\n'
+              printf 'reason: %s\n' "$guard_reason"
+              printf 'timestamp: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              printf 'attempt_tokens: %s\n' "$attempt_tokens_value"
+              printf 'diff_before: %s\n' "${diff_before:-}"
+              printf 'diff_after: %s\n' "${diff_after:-}"
+              printf 'stdout_hash: %s\n' "$stdout_hash"
+              printf 'turn_hash: %s\n' "$turn_hash"
+              printf 'turn_blocks: %s\n' "$turn_blocks"
+              printf '\n-- git diff --stat --\n'
+              git -C "$PROJECT_ROOT" diff --stat || true
+              printf '\n-- git diff --numstat --\n'
+              git -C "$PROJECT_ROOT" diff --numstat || true
+              printf '\n-- stdout tail (latest %s bytes) --\n' "$diff_guard_stdout_slice"
+              if [[ -n "$stdout_base64" ]]; then
+                if command -v python3 >/dev/null 2>&1; then
+                  python3 - <<'PY' "$stdout_base64"
+import base64, sys, textwrap
+data = base64.b64decode(sys.argv[1])
+print(data.decode('utf-8', errors='replace'))
+PY
+                else
+                  printf '(python3 unavailable to decode base64 tail)\n'
+                fi
+              else
+                printf '(unavailable)\n'
+              fi
+            } >"$guard_log" 2>&1 || true
+            local guard_rel="$guard_log"
+            if [[ -n "$PROJECT_ROOT" ]]; then
+              guard_rel="${guard_rel#$PROJECT_ROOT/}"
+            fi
+            task_notes+=("Loop guard tripped (${guard_reason}); see ${guard_rel}.")
+            task_notes+=("LOOP_GUARD_TRIPPED exit=${loop_guard_exit_code}")
+            break
+          fi
+
           if (( keep_output == 0 )); then
             rm -f "$prompt_path" "$output_path"
           fi
@@ -12889,6 +13264,34 @@ REM
             task_notes+=("Codex produced no output for ${codex_timeout_seconds}s; rerun work-on-tasks to continue from this task.")
             codex_ok=1
             break_after_update=1
+            work_failed=1
+            break
+          elif (( codex_status == 125 )); then
+            warn "  Codex loop guard detected repeated diffs/oscillation; halting task."
+            task_result_status="on-hold"
+            task_needs_review=1
+            manual_followups=1
+            keep_output=1
+            task_notes+=("Codex loop guard triggered (repeated diffs); inspect Codex log for details.")
+            apply_status="loop-guard"
+            codex_ok=1
+            break_after_update=1
+            story_failed=1
+            loop_guard_triggered=1
+            work_failed=1
+            break
+          elif (( codex_status == 126 )); then
+            warn "  Codex turn limit reached for ${call_name}; stopping task."
+            task_result_status="on-hold"
+            task_needs_review=1
+            manual_followups=1
+            keep_output=1
+            task_notes+=("Codex turn limit reached; adjust focus or retry after inspecting Codex log.")
+            apply_status="loop-guard"
+            codex_ok=1
+            break_after_update=1
+            story_failed=1
+            loop_guard_triggered=1
             work_failed=1
             break
           fi
@@ -13455,6 +13858,11 @@ PY
 
   if (( usage_limit_triggered )); then
     warn "Codex usage limit detected; halt further work until additional quota is available."
+  fi
+
+  if (( loop_guard_triggered )); then
+    warn "LOOP_GUARD_TRIPPED: work-on-tasks halted to avoid infinite loop."
+    return "$loop_guard_exit_code"
   fi
 
   if [[ $work_failed -eq 0 ]]; then

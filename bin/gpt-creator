@@ -1434,6 +1434,7 @@ ensure_ctx() {
   ART_DIR="${GC_DIR}/artifacts"
   TMP_DIR="${GC_DIR}/tmp"
   mkdir -p "$GC_DIR" "$STAGING_DIR" "$INPUT_DIR" "$PLAN_DIR" "$LOG_DIR" "$ART_DIR" "$TMP_DIR"
+  export INPUT_DIR
   gc_migrate_progress_artifacts "$PROJECT_ROOT"
   gc_configure_tmpdir "$PROJECT_ROOT"
   gc_create_env_if_missing

@@ -4080,21 +4080,85 @@ for key in entries:
         order.append(key)
         seen.add(key)
 
-input_dir = pathlib.Path(os.environ.get("INPUT_DIR", file_path.parent))
-candidate_map = {
-    "pdr": ["pdr.md", "../docs/PDR.md", "../docs/pdr.md"],
-    "sds": ["sds.md", "../docs/sds.md"],
-    "rfp": ["rfp.md", "../docs/rfp.md"],
-    "jira": ["jira.md", "../docs/jira.md"],
-    "ui_pages": ["ui-pages.md", "../docs/ui_pages.md", "../docs/ui-pages.md", "../docs/website_ui_pages.md"],
-    "openapi": ["openapi.yaml", "openapi.yml", "openapi.json", "../openapi.yaml", "../openapi.yml", "../openapi.json"],
-    "sql": ["sql", "../sql"],
+input_dir = pathlib.Path(os.environ.get("INPUT_DIR", file_path.parent)).resolve()
+if not input_dir.exists():
+    input_dir = file_path.parent.resolve()
+
+staging_root = input_dir.parent if input_dir.name == "inputs" else input_dir
+project_root = staging_root.parent if staging_root.name == "staging" else staging_root
+
+locations = {
+    "input_dir": input_dir,
+    "staging_root": staging_root,
+    "staging_docs": staging_root / "docs",
+    "staging_openapi": staging_root / "openapi",
+    "staging_sql": staging_root / "sql",
+    "project_root": project_root,
+    "project_docs": project_root / "docs",
+    "project_openapi": project_root / "openapi",
+    "project_sql": project_root / "sql",
 }
 
-def resolve_candidate(base: pathlib.Path, rel: str):
-    candidate = (base / rel).resolve()
-    if candidate.exists():
-        return candidate
+candidate_map = {
+    "pdr": [
+        ("input_dir", "pdr.md"),
+        ("staging_docs", "pdr.md"),
+        ("staging_docs", "PDR.md"),
+        ("project_docs", "pdr.md"),
+        ("project_docs", "PDR.md"),
+    ],
+    "sds": [
+        ("input_dir", "sds.md"),
+        ("staging_docs", "sds.md"),
+        ("project_docs", "sds.md"),
+    ],
+    "rfp": [
+        ("input_dir", "rfp.md"),
+        ("staging_docs", "rfp.md"),
+        ("project_docs", "rfp.md"),
+    ],
+    "jira": [
+        ("input_dir", "jira.md"),
+        ("staging_docs", "jira.md"),
+        ("project_docs", "jira.md"),
+    ],
+    "ui_pages": [
+        ("input_dir", "ui-pages.md"),
+        ("input_dir", "ui_pages.md"),
+        ("staging_docs", "ui-pages.md"),
+        ("staging_docs", "ui_pages.md"),
+        ("project_docs", "ui-pages.md"),
+        ("project_docs", "ui_pages.md"),
+    ],
+    "openapi": [
+        ("input_dir", "openapi.yaml"),
+        ("input_dir", "openapi.yml"),
+        ("input_dir", "openapi.json"),
+        ("staging_openapi", "openapi.yaml"),
+        ("staging_openapi", "openapi.yml"),
+        ("staging_openapi", "openapi.json"),
+        ("project_openapi", "openapi.yaml"),
+        ("project_openapi", "openapi.yml"),
+        ("project_openapi", "openapi.json"),
+    ],
+    "sql": [
+        ("input_dir", "sql"),
+        ("staging_sql", ""),
+        ("project_sql", ""),
+    ],
+}
+
+def resolve_candidate(base_key: str, relative: str):
+    base = locations.get(base_key)
+    if base is None:
+        return None
+    path = base / relative if relative else base
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    if resolved.exists():
+        return resolved
     return None
 
 for key in required:
@@ -4102,8 +4166,8 @@ for key in required:
     if value and value.lower() != "n/a":
         continue
     resolved = None
-    for rel in candidate_map.get(key, []):
-        candidate = resolve_candidate(input_dir, rel)
+    for base_key, rel in candidate_map.get(key, []):
+        candidate = resolve_candidate(base_key, rel)
         if candidate is not None:
             resolved = candidate
             break
@@ -10371,6 +10435,7 @@ if TASK_INDEX < 0 or TASK_INDEX >= len(task_rows):
     raise SystemExit(2)
 
 task = task_rows[TASK_INDEX]
+documentation_db_path = os.getenv("GC_DOCUMENTATION_DB_PATH", "").strip()
 
 def parse_json_list(value):
     if not value:
@@ -10525,6 +10590,13 @@ lines.append(f"# You are Codex (model: {MODEL_NAME})")
 lines.append("")
 lines.append(f"You are assisting the {project_display} delivery team. Implement the task precisely using the repository at: {repo_path}")
 lines.append("")
+if documentation_db_path:
+    lines.append("## Documentation Registry")
+    lines.append(f"- Central catalogue lives in `{documentation_db_path}` (tables `documentation` and `documentation_changes`).")
+    lines.append("- Use it to locate PDR/SDS/RFP/OpenAPI/SQL dumps, diagrams, and samples before making changes.")
+    lines.append("- After modifying a document, update the registry (e.g. `python3 src/lib/doc_registry.py register --runtime-dir .gpt-creator …`) so change history stays accurate.")
+    lines.append("- Capture relevant doc references from the registry in your summary so the team can follow up.")
+    lines.append("")
 lines.append("## Story")
 
 epic_id = clean(story_row['epic_key'])
@@ -11025,6 +11097,91 @@ if doc_catalog_path:
             pass
 documents_store = doc_catalog_data.setdefault("documents", {})
 snippet_store = doc_catalog_data.setdefault("snippets", {})
+documentation_db_path = os.getenv("GC_DOCUMENTATION_DB_PATH", "").strip()
+doc_catalog_entries_from_db = False
+if documentation_db_path:
+    registry_rows = []
+    try:
+        registry_conn = sqlite3.connect(documentation_db_path)
+        registry_conn.row_factory = sqlite3.Row
+        registry_cur = registry_conn.cursor()
+        registry_cur.execute(
+            """
+            SELECT
+              doc_id,
+              doc_type,
+              COALESCE(staging_path, source_path) AS resolved_path,
+              rel_path,
+              title,
+              size_bytes,
+              mtime_ns,
+              sha256,
+              tags_json,
+              metadata_json
+            FROM documentation
+            WHERE status = 'active'
+            ORDER BY doc_type, COALESCE(rel_path, file_name, resolved_path)
+            """
+        )
+        registry_rows = registry_cur.fetchall()
+    except Exception:
+        registry_rows = []
+    finally:
+        try:
+            registry_conn.close()
+        except Exception:
+            pass
+    for row in registry_rows:
+        path_value = (row["resolved_path"] or "").strip()
+        rel_path = (row["rel_path"] or path_value or "").strip()
+        metadata_raw = row["metadata_json"]
+        headings_payload = []
+        if metadata_raw:
+            try:
+                metadata_obj = json.loads(metadata_raw)
+                candidate_headings = metadata_obj.get("headings")
+                if isinstance(candidate_headings, list):
+                    headings_payload = candidate_headings
+            except Exception:
+                pass
+        snippet_text = ""
+        candidate_path = Path(path_value) if path_value else None
+        doc_entry_payload = {
+            "doc_id": row["doc_id"],
+            "rel_path": rel_path,
+            "headings": headings_payload,
+            "mtime_ns": row["mtime_ns"] or 0,
+            "size": row["size_bytes"] or 0,
+        }
+        if candidate_path and candidate_path.exists():
+            snippet_text = _load_doc_snippet(candidate_path, doc_entry_payload)
+            if not headings_payload:
+                fallback = _build_doc_entry(candidate_path)
+                if fallback:
+                    headings_payload = fallback.get("headings", [])
+                    doc_entry_payload["headings"] = headings_payload
+                    snippet_text = _load_doc_snippet(candidate_path, doc_entry_payload)
+        preview_headings = []
+        for heading in headings_payload[:12]:
+            if isinstance(heading, dict):
+                title = heading.get("title") or ""
+                line = heading.get("line")
+                if line:
+                    preview_headings.append(f"{title} (line {line})")
+                else:
+                    preview_headings.append(title)
+            else:
+                preview_headings.append(str(heading))
+        doc_catalog_entries.append(
+            {
+                "doc_id": row["doc_id"],
+                "rel_path": rel_path,
+                "headings": preview_headings,
+                "snippet": snippet_text,
+            }
+        )
+    if doc_catalog_entries:
+        doc_catalog_entries_from_db = True
 
 def _relative_path_for_prompt(path_obj: Path) -> str:
     for base in filter(None, [project_root_path, staging_root]):
@@ -11133,7 +11290,7 @@ def _load_doc_snippet(path_obj: Path, doc_entry: dict) -> str:
     doc_catalog_changed["value"] = True
     return snippet_text
 
-if doc_snippets_enabled and (staging_root or project_root_path):
+if (not doc_catalog_entries_from_db) and doc_snippets_enabled and (staging_root or project_root_path):
     seen_paths = set()
     references = _split_items(document_reference)
     endpoints_list = _split_items(endpoints_text)
@@ -11905,6 +12062,7 @@ EOHELP
   local tasks_dir="${PLAN_DIR}/tasks"
   local tasks_db="${tasks_dir}/tasks.db"
   mkdir -p "$tasks_dir"
+  export GC_DOCUMENTATION_DB_PATH="$tasks_db"
 
   if ! gc_tasks_db_has_rows "$tasks_db"; then
     die "Task database missing or empty. Run 'gpt-creator create-tasks' (or create-jira-tasks + migrate-tasks) before work-on-tasks."

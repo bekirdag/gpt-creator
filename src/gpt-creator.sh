@@ -179,20 +179,90 @@ gc::normalize_to_staging() {
   local project_root="$1"
   local work_dir; work_dir="$(gc::ensure_workspace "$project_root")"
   local stage="$work_dir/staging"
+  local doc_registry_cli="$GC_LIB_DIR/lib/doc_registry.py"
+  local doc_registry_ready=0
+  if command -v python3 >/dev/null 2>&1 && [[ -f "$doc_registry_cli" ]]; then
+    doc_registry_ready=1
+  fi
   gc::discover "$project_root" "$stage/discovery.yaml"
 
   # docs
   local doc_path
   doc_path="$(gc::_get_found_doc pdr)"
-  [[ -n "$doc_path" ]] && install -m 0644 "$doc_path" "$stage/docs/pdr.md"
+  if [[ -n "$doc_path" ]]; then
+    install -m 0644 "$doc_path" "$stage/docs/pdr.md"
+    if (( doc_registry_ready )); then
+      python3 "$doc_registry_cli" register \
+        --runtime-dir "$work_dir" \
+        --doc-type "pdr" \
+        --source-path "$doc_path" \
+        --staging-path "$stage/docs/pdr.md" \
+        --rel-path "docs/pdr.md" \
+        --tags '["pdr","primary"]' \
+        --context "normalize" \
+        --compute-hash >/dev/null || gc::warn "Documentation registry update failed for docs/pdr.md"
+    fi
+  fi
   doc_path="$(gc::_get_found_doc sds)"
-  [[ -n "$doc_path" ]] && install -m 0644 "$doc_path" "$stage/docs/sds.md"
+  if [[ -n "$doc_path" ]]; then
+    install -m 0644 "$doc_path" "$stage/docs/sds.md"
+    if (( doc_registry_ready )); then
+      python3 "$doc_registry_cli" register \
+        --runtime-dir "$work_dir" \
+        --doc-type "sds" \
+        --source-path "$doc_path" \
+        --staging-path "$stage/docs/sds.md" \
+        --rel-path "docs/sds.md" \
+        --tags '["sds","primary"]' \
+        --context "normalize" \
+        --compute-hash >/dev/null || gc::warn "Documentation registry update failed for docs/sds.md"
+    fi
+  fi
   doc_path="$(gc::_get_found_doc rfp)"
-  [[ -n "$doc_path" ]] && install -m 0644 "$doc_path" "$stage/docs/rfp.md"
+  if [[ -n "$doc_path" ]]; then
+    install -m 0644 "$doc_path" "$stage/docs/rfp.md"
+    if (( doc_registry_ready )); then
+      python3 "$doc_registry_cli" register \
+        --runtime-dir "$work_dir" \
+        --doc-type "rfp" \
+        --source-path "$doc_path" \
+        --staging-path "$stage/docs/rfp.md" \
+        --rel-path "docs/rfp.md" \
+        --tags '["rfp"]' \
+        --context "normalize" \
+        --compute-hash >/dev/null || gc::warn "Documentation registry update failed for docs/rfp.md"
+    fi
+  fi
   doc_path="$(gc::_get_found_doc jira)"
-  [[ -n "$doc_path" ]] && install -m 0644 "$doc_path" "$stage/docs/jira.md"
+  if [[ -n "$doc_path" ]]; then
+    install -m 0644 "$doc_path" "$stage/docs/jira.md"
+    if (( doc_registry_ready )); then
+      python3 "$doc_registry_cli" register \
+        --runtime-dir "$work_dir" \
+        --doc-type "jira" \
+        --source-path "$doc_path" \
+        --staging-path "$stage/docs/jira.md" \
+        --rel-path "docs/jira.md" \
+        --tags '["jira"]' \
+        --context "normalize" \
+        --compute-hash >/dev/null || gc::warn "Documentation registry update failed for docs/jira.md"
+    fi
+  fi
   doc_path="$(gc::_get_found_doc ui_pages)"
-  [[ -n "$doc_path" ]] && install -m 0644 "$doc_path" "$stage/docs/ui-pages.md"
+  if [[ -n "$doc_path" ]]; then
+    install -m 0644 "$doc_path" "$stage/docs/ui-pages.md"
+    if (( doc_registry_ready )); then
+      python3 "$doc_registry_cli" register \
+        --runtime-dir "$work_dir" \
+        --doc-type "ui" \
+        --source-path "$doc_path" \
+        --staging-path "$stage/docs/ui-pages.md" \
+        --rel-path "docs/ui-pages.md" \
+        --tags '["ui","pages"]' \
+        --context "normalize" \
+        --compute-hash >/dev/null || gc::warn "Documentation registry update failed for docs/ui-pages.md"
+    fi
+  fi
 
   # openapi
   local openapi_path
@@ -200,17 +270,45 @@ gc::normalize_to_staging() {
   if [[ -n "$openapi_path" ]]; then
     local ext
     ext="${openapi_path##*.}"
+    local openapi_dest=""
     case "$ext" in
-      yml|yaml) install -m 0644 "$openapi_path" "$stage/openapi/openapi.yaml" ;;
-      json)     install -m 0644 "$openapi_path" "$stage/openapi/openapi.json" ;;
-      *)        install -m 0644 "$openapi_path" "$stage/openapi/openapi.src"  ;;
+      yml|yaml) openapi_dest="$stage/openapi/openapi.yaml" ;;
+      json)     openapi_dest="$stage/openapi/openapi.json" ;;
+      *)        openapi_dest="$stage/openapi/openapi.src" ;;
     esac
+    install -m 0644 "$openapi_path" "$openapi_dest"
+    if (( doc_registry_ready )); then
+      local openapi_rel
+      openapi_rel="${openapi_dest##$stage/}"
+      python3 "$doc_registry_cli" register \
+        --runtime-dir "$work_dir" \
+        --doc-type "openapi" \
+        --source-path "$openapi_path" \
+        --staging-path "$openapi_dest" \
+        --rel-path "$openapi_rel" \
+        --tags '["openapi","api"]' \
+        --context "normalize" \
+        --compute-hash >/dev/null || gc::warn "Documentation registry update failed for ${openapi_rel}"
+    fi
   fi
 
   # sql
   local sql_path
   sql_path="$(gc::_get_found_doc sql)"
-  [[ -n "$sql_path" ]] && install -m 0644 "$sql_path" "$stage/sql/dump.sql"
+  if [[ -n "$sql_path" ]]; then
+    install -m 0644 "$sql_path" "$stage/sql/dump.sql"
+    if (( doc_registry_ready )); then
+      python3 "$doc_registry_cli" register \
+        --runtime-dir "$work_dir" \
+        --doc-type "sql" \
+        --source-path "$sql_path" \
+        --staging-path "$stage/sql/dump.sql" \
+        --rel-path "sql/dump.sql" \
+        --tags '["sql","database"]' \
+        --context "normalize" \
+        --compute-hash >/dev/null || gc::warn "Documentation registry update failed for sql/dump.sql"
+    fi
+  fi
 
   # diagrams
   local f

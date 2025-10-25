@@ -199,4 +199,62 @@ if [[ -d "${PROJECT_DIR}/page_samples/website_pages" ]]; then add "page_samples_
 if [[ -d "${PROJECT_DIR}/page_samples/backoffice_pages" ]]; then add "page_samples_backoffice_dir" "${PROJECT_DIR}/page_samples/backoffice_pages"; fi
 
 log "Discovery written to ${OUT_TSV}"
+
+DOC_REGISTRY_TOOL="${__DIR__}/../lib/doc_registry.py"
+if command -v python3 >/dev/null 2>&1 && [[ -f "$DOC_REGISTRY_TOOL" ]]; then
+  if python3 "$DOC_REGISTRY_TOOL" sync-scan \
+    --project-root "$PROJECT_DIR" \
+    --runtime-dir "$RUNTIME_DIR" \
+    --scan-tsv "$OUT_TSV"; then
+    log "Documentation registry refreshed."
+  else
+    log "Documentation registry update skipped (sync failed)."
+  fi
+else
+  log "python3 or doc registry tool not available; skipping registry sync."
+fi
+
+DOC_CATALOG_TOOL="${__DIR__}/../lib/doc_catalog.py"
+if command -v python3 >/dev/null 2>&1 && [[ -f "$DOC_CATALOG_TOOL" ]]; then
+  CATALOG_JSON="${STAGING_DIR}/doc-catalog.json"
+  CATALOG_LIBRARY="${STAGING_DIR}/doc-library.md"
+  CATALOG_INDEX="${STAGING_DIR}/doc-index.md"
+  if python3 "$DOC_CATALOG_TOOL" \
+    --project-root "$PROJECT_DIR" \
+    --staging-dir "$STAGING_DIR" \
+    --out-json "$CATALOG_JSON" \
+    --out-library "$CATALOG_LIBRARY" \
+    --out-index "$CATALOG_INDEX"; then
+    log "Documentation catalog rebuilt."
+  else
+    log "Documentation catalog build failed."
+  fi
+else
+  log "python3 or doc catalog tool not available; skipping catalog build."
+fi
+
+DOC_PIPELINE_TOOL="${__DIR__}/../lib/doc_pipeline.py"
+if command -v python3 >/dev/null 2>&1 && [[ -f "$DOC_PIPELINE_TOOL" ]]; then
+  if python3 "$DOC_PIPELINE_TOOL" \
+    --project-root "$PROJECT_DIR" \
+    --runtime-dir "$RUNTIME_DIR"; then
+    log "Documentation summaries refreshed."
+  else
+    log "Documentation summaries refresh failed."
+  fi
+else
+  log "python3 or doc pipeline tool not available; skipping summaries."
+fi
+
+DOC_INDEXER_TOOL="${__DIR__}/../lib/doc_indexer.py"
+if command -v python3 >/dev/null 2>&1 && [[ -f "$DOC_INDEXER_TOOL" ]]; then
+  if python3 "$DOC_INDEXER_TOOL" --runtime-dir "$RUNTIME_DIR"; then
+    log "Documentation indexes rebuilt."
+  else
+    log "Documentation indexing failed."
+  fi
+else
+  log "python3 or doc indexer tool not available; skipping indexing."
+fi
+
 echo "${OUT_TSV}"

@@ -16,10 +16,12 @@ import json
 import os
 import re
 import sys
+from bisect import bisect_left
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
 
 
 ALLOWED_EXTS = {
@@ -78,6 +80,7 @@ SKIP_DIR_PARTS = {
 MAX_HEADINGS = 80
 MAX_PREVIEW_LINES = 12
 MAX_SCAN_BYTES = 1_000_000  # 1 MB per file (sufficient for headings)
+TOKEN_PATTERN = re.compile(r"\S+")
 
 
 @dataclass
@@ -94,6 +97,7 @@ class DocEntry:
     rel_path: str
     size: int
     mtime_ns: int
+    sha256: str
     title: str
     tags: List[str] = field(default_factory=list)
     headings: List[DocHeading] = field(default_factory=list)
@@ -104,6 +108,7 @@ class DocEntry:
             "rel_path": self.rel_path,
             "size": self.size,
             "mtime_ns": self.mtime_ns,
+            "sha256": self.sha256,
             "title": self.title,
             "tags": self.tags,
             "headings": [
@@ -127,6 +132,19 @@ def human_size(value: int) -> str:
 
 def iso_ts_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
 
 
 def candidate_directories(staging_dir: Path) -> List[Path]:
@@ -191,6 +209,44 @@ def stable_doc_id(path: Path) -> str:
     return "DOC-" + digest[:8].upper()
 
 
+def stable_section_id(doc_id: str, title: str, line: int) -> str:
+    basis = f"{doc_id}:{line}:{title}".encode("utf-8", "replace")
+    digest = hashlib.sha256(basis).hexdigest()[:12].upper()
+    return f"SEC-{digest}"
+
+
+def slugify_anchor(title: str, existing: Dict[str, int]) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    if not slug:
+        slug = "section"
+    count = existing.get(slug, 0)
+    existing[slug] = count + 1
+    if count:
+        slug = f"{slug}-{count}"
+    return slug
+
+
+def build_token_index(text: str) -> List[int]:
+    return [match.start() for match in TOKEN_PATTERN.finditer(text)]
+
+
+def token_index_at_offset(starts: List[int], offset: int) -> int:
+    if not starts:
+        return 0
+    if offset <= 0:
+        return 0
+    return bisect_left(starts, offset, lo=0, hi=len(starts))
+
+
+def build_line_offsets(text: str) -> List[int]:
+    offsets: List[int] = []
+    pos = 0
+    for line in text.splitlines(True):
+        offsets.append(pos)
+        pos += len(line)
+    return offsets
+
+
 def read_limited_text(path: Path) -> str:
     try:
         with path.open("rb") as handle:
@@ -201,6 +257,22 @@ def read_limited_text(path: Path) -> str:
         return chunk.decode("utf-8", "replace")
     except UnicodeDecodeError:
         return chunk.decode("latin-1", "replace")
+
+
+def read_full_text_bytes(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return b""
+
+
+def decode_text(data: bytes) -> str:
+    if not data:
+        return ""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("utf-8", "replace")
 
 
 def extract_markdown_headings(text: str) -> List[DocHeading]:
@@ -311,6 +383,93 @@ def relative_path(path: Path, roots: Iterable[Path]) -> str:
     return str(path)
 
 
+def build_sections(
+    entry: DocEntry,
+    section_cls,
+    *,
+    now_ts: str,
+) -> List:
+    data = read_full_text_bytes(entry.path)
+    text = decode_text(data)
+    char_offsets = build_line_offsets(text)
+    byte_offsets: List[int] = []
+    byte_pos = 0
+    for line_bytes in data.splitlines(True):
+        byte_offsets.append(byte_pos)
+        byte_pos += len(line_bytes)
+    total_chars = len(text)
+    total_bytes = len(data)
+    line_char_map = {idx + 1: offset for idx, offset in enumerate(char_offsets)}
+    line_byte_map = {idx + 1: offset for idx, offset in enumerate(byte_offsets)}
+    line_char_map[len(char_offsets) + 1] = total_chars
+    line_byte_map[len(byte_offsets) + 1] = total_bytes
+    sections: List = []
+    token_starts = build_token_index(text)
+    root_id = stable_section_id(entry.doc_id, "root", 0)
+    sections.append(
+        section_cls(
+            section_id=root_id,
+            doc_id=entry.doc_id,
+            parent_section_id=None,
+            order_index=0,
+            title=entry.title or entry.rel_path,
+            anchor="root",
+            byte_start=0 if total_bytes else None,
+            byte_end=total_bytes if total_bytes else None,
+            token_start=0,
+            token_end=len(token_starts),
+            summary=None,
+            last_synced_at=now_ts,
+            source_version=entry.sha256,
+        )
+    )
+    if not entry.headings:
+        return sections
+    anchor_counts: Dict[str, int] = {"root": 1}
+    child_counts: Dict[str, int] = defaultdict(int)
+    stack: List[tuple[int, str]] = [(0, root_id)]
+    sorted_headings = sorted(entry.headings, key=lambda item: (item.line, item.level))
+    for idx, heading in enumerate(sorted_headings):
+        level = max(1, heading.level)
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        parent_id = stack[-1][1] if stack else root_id
+        child_index = child_counts[parent_id]
+        child_counts[parent_id] = child_index + 1
+        section_id = stable_section_id(entry.doc_id, heading.title, heading.line)
+        anchor = slugify_anchor(heading.title, anchor_counts)
+        next_line = (
+            sorted_headings[idx + 1].line
+            if idx + 1 < len(sorted_headings)
+            else len(char_offsets) + 1
+        )
+        char_start = line_char_map.get(heading.line, 0)
+        char_end = line_char_map.get(next_line, total_chars)
+        byte_start = line_byte_map.get(heading.line)
+        byte_end = line_byte_map.get(next_line, total_bytes)
+        token_start = token_index_at_offset(token_starts, char_start)
+        token_end = token_index_at_offset(token_starts, char_end)
+        sections.append(
+            section_cls(
+                section_id=section_id,
+                doc_id=entry.doc_id,
+                parent_section_id=parent_id,
+                order_index=child_index,
+                title=heading.title,
+                anchor=anchor,
+                byte_start=byte_start,
+                byte_end=byte_end,
+                token_start=token_start,
+                token_end=token_end,
+                summary=None,
+                last_synced_at=now_ts,
+                source_version=entry.sha256,
+            )
+        )
+        stack.append((level, section_id))
+    return sections
+
+
 def collect_documents(project_root: Path, staging_dir: Path) -> List[DocEntry]:
     roots = candidate_directories(staging_dir)
     docs: List[DocEntry] = []
@@ -340,12 +499,14 @@ def collect_documents(project_root: Path, staging_dir: Path) -> List[DocEntry]:
             except OSError:
                 size = 0
                 mtime_ns = 0
+            sha_hash = file_sha256(path)
             entry = DocEntry(
                 doc_id=stable_doc_id(path),
                 path=path,
                 rel_path=rel,
                 size=size,
                 mtime_ns=mtime_ns,
+                sha256=sha_hash,
                 title=title_from_headings(path, headings),
                 tags=detect_tags(rel),
                 headings=list(headings)[:MAX_HEADINGS],
@@ -470,6 +631,76 @@ def write_index_markdown(
     out_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
+DOC_TYPE_ORDER = [
+    "pdr",
+    "sds",
+    "rfp",
+    "openapi",
+    "sql",
+    "jira",
+    "ui",
+    "diagram",
+    "sample",
+    "seed",
+]
+
+
+def infer_doc_type(entry: DocEntry) -> str:
+    for candidate in DOC_TYPE_ORDER:
+        if candidate in entry.tags:
+            return candidate
+    return entry.tags[0] if entry.tags else "document"
+
+
+def sync_registry(staging_dir: Path, documents: Sequence[DocEntry]) -> None:
+    try:
+        from .doc_registry import DocRegistry, DocumentInput, SectionInput
+    except Exception:
+        try:
+            from doc_registry import DocRegistry, DocumentInput, SectionInput  # type: ignore
+        except Exception:
+            return
+    runtime_dir = staging_dir.parent
+    db_path = runtime_dir / "staging" / "plan" / "tasks" / "tasks.db"
+    try:
+        registry = DocRegistry(db_path)
+    except Exception:
+        return
+    payloads: List[DocumentInput] = []
+    sections_map: Dict[str, List[SectionInput]] = {}
+    for entry in documents:
+        doc_type = infer_doc_type(entry)
+        headings_payload = [
+            {"title": h.title, "line": h.line, "level": h.level} for h in entry.headings
+        ]
+        metadata = {
+            "catalog_doc_id": entry.doc_id,
+            "headings": headings_payload,
+        }
+        payloads.append(
+            DocumentInput(
+                doc_type=doc_type,
+                staging_path=str(entry.path),
+                rel_path=entry.rel_path,
+                title=entry.title,
+                size_bytes=entry.size,
+                mtime_ns=entry.mtime_ns,
+                sha256=entry.sha256,
+                tags=entry.tags,
+                metadata=metadata,
+                context="doc-catalog",
+                doc_id=entry.doc_id,
+            )
+        )
+        now_ts = iso_ts_now()
+        sections = build_sections(entry, SectionInput, now_ts=now_ts)
+        sections_map[entry.doc_id] = sections
+    if payloads:
+        registry.bulk_upsert(payloads)
+    if sections_map:
+        registry.replace_sections_bulk(sections_map)
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build documentation catalog for staged files.")
     parser.add_argument("--project-root", required=True, help="Absolute path to the project root.")
@@ -489,6 +720,7 @@ def main(argv: Sequence[str]) -> int:
     persist_catalog(catalog_path, documents)
     write_library_markdown(Path(args.out_library).expanduser(), documents)
     write_index_markdown(Path(args.out_index).expanduser(), documents)
+    sync_registry(staging_dir, documents)
     return 0
 
 

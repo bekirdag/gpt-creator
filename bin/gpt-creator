@@ -11815,11 +11815,13 @@ lines.append("")
 
 lines.append("## Instructions")
 if compact_mode:
-    lines.append('- Respond with JSON only: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
-    lines.append("- Set a narrow `focus` before any commands: your first reply must populate it with 1-3 paths or symbols and you must update it before touching new areas.")
-    lines.append("- Keep plan bullets brief and tied to that focus; split big deliverables into smaller steps and route extra ideas to `notes`.")
+    lines.append('- Return a JSON object: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
+    lines.append("- Populate `plan` with the concrete steps you will take for this task.")
+    lines.append("- List the files or symbols you edit in `focus`; you may include diffs in the same reply.")
+    lines.append("- Provide actual code edits through `changes` (unified diffs or full file bodies).")
+    lines.append("- Record shell commands you executed or recommend in `commands`.")
+    lines.append("- Use `notes` for blockers, follow-up actions, or verification reminders.")
     lines.append("- Keep internal narration tight (≤3 short sentences) and focused on the current task.")
-    lines.append("- Apply repository changes directly and confirm acceptance criteria (note gaps in `notes`).")
     lines.append("- Prefer pnpm for scripts; mention commands that cannot run because of network limits.")
     lines.append("- Avoid repo-wide listings/searches; jump straight to relevant files and use `gpt-creator show-file <path> --range start:end` (or --head/--tail) for slices instead of streaming whole files.")
     lines.append("- Track file views; if you begin paging with sequential sed/cat ranges, pivot to targeted `gpt-creator show-file <path> --range` or `rg -n <pattern> <path> -C20`.")
@@ -11839,12 +11841,12 @@ if compact_mode:
     lines.append("- Use unified diffs or full file bodies inside the `changes` array.")
     lines.append("- Omit keys with no content; no markdown fences or extra prose.")
 else:
-    lines.append('- Draft a short plan and respond with JSON only: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
-    lines.append("- Set a narrow `focus` before any commands; populate it with 1-3 paths or symbols and update it before touching new areas.")
-    lines.append("- Keep plan steps small and tied to that focus; move additional work or future ideas to `notes`.")
-    lines.append("- Apply changes directly in the repository; commits are not required.")
-    lines.append("- Verify acceptance criteria before finishing.")
-    lines.append("- If blocked, explain why and suggest next steps inside the JSON response.")
+    lines.append('- Return a JSON object: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
+    lines.append("- Populate `plan` with concise steps that lead to the fix or feature.")
+    lines.append("- List touched files or symbols in `focus`; include diffs in the same response.")
+    lines.append("- Supply code updates through `changes` using unified diffs or full file bodies; do not omit required edits.")
+    lines.append("- Record executed or recommended shell commands in `commands`.")
+    lines.append("- Use `notes` for blockers, verification needs, or follow-up actions.")
     lines.append("- Prefer pnpm for install/build scripts; avoid npm/yarn unless explicitly required.")
     lines.append("- Keep internal narration tight (≤3 short sentences) and focused on the current task.")
     lines.append("- Avoid repo-wide listings/searches; jump straight to relevant files and use `gpt-creator show-file <path> --range start:end` (or --head/--tail) for context slices instead of streaming whole files.")
@@ -12581,7 +12583,7 @@ EOHELP
       local attempt=0
       local max_attempts=2
       gc_touch_progress
-      local prompt_augmented=0
+      local prompt_augmented=0 prompt_change_reminder=0
       local keep_output=$keep_artifacts
       local break_after_update=0
       local task_result_status="in-progress"
@@ -12683,6 +12685,37 @@ EOHELP
                 ;;
             esac
           done <<<"$apply_output"
+
+          if (( task_changes_applied == 0 )); then
+            if (( attempt < max_attempts )); then
+              warn "  Codex response contained no file changes; retrying (attempt $((attempt + 1)) of ${max_attempts})."
+              if (( prompt_change_reminder == 0 )); then
+                cat >>"$prompt_path" <<'REM'
+
+## Reminder
+- Provide valid unified diffs or file writes in the `changes` array for every edit; planning alone is insufficient.
+- Only conclude once the required modifications are present in the `changes` payload.
+REM
+                prompt_change_reminder=1
+              fi
+              task_changes_applied=0
+              apply_status="pending"
+              task_commands=()
+              task_written_paths=()
+              task_patched_paths=()
+              continue
+            fi
+            warn "  Codex produced no actionable changes; marking task on-hold."
+            task_needs_review=1
+            manual_followups=1
+            keep_output=1
+            task_result_status="on-hold"
+            apply_status="no-changes"
+            task_notes+=("Codex returned no diffs or file writes; rerun work-on-tasks to finish this task.")
+            codex_ok=1
+            break_after_update=1
+            break
+          fi
 
           if [[ "$apply_status" == "parse-error" ]]; then
             if (( attempt < max_attempts )); then

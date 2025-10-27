@@ -88,6 +88,7 @@ gc_configure_tmpdir() {
     GC_TMP_DIR="$dir"
     TMPDIR="$dir"
     export GC_TMP_DIR TMPDIR
+    mkdir -p "${base}/tmp" 2>/dev/null || true
   else
     if [[ -n "${GC_TMP_DIR:-}" ]]; then
       :
@@ -236,18 +237,75 @@ gc_trim_prompt_file() {
   python3 - "$prompt_file" "$max_tokens" <<'PY'
 import sys
 from pathlib import Path
+
+MAX_TOKENS = 60000
+RESERVED_FOR_REPLY = 4000
+DIGEST_KEEP_CHARS = 2000
+APPROX_CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens(text: str) -> int:
+    return (len(text) + APPROX_CHARS_PER_TOKEN - 1) // APPROX_CHARS_PER_TOKEN
+
+
 path = Path(sys.argv[1])
 limit = int(sys.argv[2])
-if limit <= 0 or not path.exists():
+if not path.exists():
     raise SystemExit(0)
+
 text = path.read_text(encoding="utf-8", errors="ignore")
-char_limit = limit * 4
-if len(text) <= char_limit:
+original_text = text
+modified = False
+
+if limit <= 0:
+    limit = MAX_TOKENS - RESERVED_FOR_REPLY
+
+hard_cap_tokens = min(limit, MAX_TOKENS - RESERVED_FOR_REPLY)
+if hard_cap_tokens <= 0:
+    hard_cap_tokens = MAX_TOKENS - RESERVED_FOR_REPLY
+char_limit = hard_cap_tokens * APPROX_CHARS_PER_TOKEN
+
+if estimate_tokens(text) + RESERVED_FOR_REPLY <= MAX_TOKENS and len(text) <= char_limit:
     raise SystemExit(0)
-trimmed = text[:char_limit].rstrip()
-notice = f"\n\n[prompt trimmed automatically at ~{limit} tokens]"
-path.write_text(trimmed + notice + "\n", encoding="utf-8")
-print(f"[prompt-trim] prompt truncated to ~{limit} tokens (char limit {char_limit})")
+
+digest_marker = "## Shared Context Digest"
+if digest_marker in text:
+    head, tail = text.split(digest_marker, 1)
+    digest_end = tail.find("\n## ")
+    if digest_end == -1:
+        digest_end = len(tail)
+    digest_body = tail[:digest_end]
+    remainder = tail[digest_end:]
+    if len(digest_body) > DIGEST_KEEP_CHARS:
+        digest_body = digest_body[:DIGEST_KEEP_CHARS].rstrip()
+        notice = "\n\n[shared-context trimmed automatically to respect token budget]"
+        separator = "" if not remainder or remainder.startswith("\n") else "\n"
+        tail = digest_body + notice + separator + remainder
+        text = head + digest_marker + "\n" + tail
+        modified = True
+
+    if estimate_tokens(text) + RESERVED_FOR_REPLY <= MAX_TOKENS and len(text) <= char_limit:
+        if modified and text != original_text:
+            path.write_text(text, encoding="utf-8")
+            print("[prompt-trim] shared context digest trimmed for token budget")
+        raise SystemExit(0)
+
+max_char_budget = min(char_limit, (MAX_TOKENS - RESERVED_FOR_REPLY) * APPROX_CHARS_PER_TOKEN)
+if len(text) > max_char_budget:
+    text = text[:max_char_budget].rstrip()
+    text += "\n\n[prompt trimmed automatically to respect token budget]\n"
+    modified = True
+
+if estimate_tokens(text) + RESERVED_FOR_REPLY > MAX_TOKENS:
+    allowed_chars = (MAX_TOKENS - RESERVED_FOR_REPLY) * APPROX_CHARS_PER_TOKEN
+    if len(text) > allowed_chars:
+        text = text[:allowed_chars].rstrip()
+        text += "\n\n[prompt trimmed automatically to respect model budget]\n"
+        modified = True
+
+if modified and text != original_text:
+    path.write_text(text, encoding="utf-8")
+    print(f"[prompt-trim] prompt trimmed to stay within token budget (<= {hard_cap_tokens} tokens)")
 PY
 }
 
@@ -2775,7 +2833,6 @@ gc_record_codex_usage() {
 import base64
 import hashlib
 import os
-import re
 import sys
 
 path = sys.argv[1]
@@ -2798,14 +2855,39 @@ except Exception:
     tail_text = ""
 tail_b64 = base64.b64encode(tail_text.encode("utf-8")).decode("ascii") if tail_text else ""
 
-turn_blocks = re.findall(r'(?m)^\\[.*?\\] turn diff:(?:\\n.*?)(?=\\n\\[|\\Z)', tail_text)
-last_block = turn_blocks[-1] if turn_blocks else ""
+def _extract_last_turn_diff(s: str):
+    lines = s.splitlines()
+    blocks = []
+    buf = []
+    in_block = False
+    for ln in lines:
+        if ln.startswith('[') and ' turn diff:' in ln:
+            if in_block and buf:
+                blocks.append('\n'.join(buf))
+                buf = []
+            buf = [ln]
+            in_block = True
+            continue
+        if in_block and ln.startswith('['):
+            if buf:
+                blocks.append('\n'.join(buf))
+            buf = []
+            in_block = False
+        if in_block:
+            buf.append(ln)
+    if in_block and buf:
+        blocks.append('\n'.join(buf))
+    if blocks:
+        return blocks[-1], len(blocks)
+    return "", 0
+
+last_block, block_count = _extract_last_turn_diff(tail_text)
 turn_hash = hashlib.sha1(last_block.encode("utf-8")).hexdigest() if last_block else ""
 
 print(tail_hash)
 print(tail_b64)
 print(turn_hash)
-print(str(len(turn_blocks)))
+print(str(block_count))
 PY
 )" || tail_info=""
       if [[ -n "$tail_info" ]]; then
@@ -9325,6 +9407,40 @@ from typing import Optional
 _original_re_compile = re.compile
 _original_re__compile = getattr(re, "_compile", None)
 invalid_regex_patterns = []
+START_PATCH_MARKER = "apply_patch <<'PATCH'"
+END_PATCH_MARKER = "PATCH"
+
+
+def _scan_apply_patch_blocks(text: str, start: str = START_PATCH_MARKER, end: str = END_PATCH_MARKER):
+    results = []
+    search_from = 0
+    while True:
+        start_idx = text.find(start, search_from)
+        if start_idx == -1:
+            break
+        content_start = start_idx + len(start)
+        if content_start < len(text) and text[content_start] == "\n":
+            content_start += 1
+        end_idx = text.find(end, content_start)
+        if end_idx == -1:
+            break
+        results.append(text[content_start:end_idx])
+        search_from = end_idx + len(end)
+    return results
+
+
+def _extract_apply_patch_blocks(text: str):
+    try:
+        pattern = re.compile(
+            re.escape(START_PATCH_MARKER) + r"\n(.*?)\n" + re.escape(END_PATCH_MARKER),
+            flags=re.S,
+        )
+        blocks = pattern.findall(text)
+    except re.error:
+        blocks = []
+    if not blocks:
+        blocks = _scan_apply_patch_blocks(text)
+    return [block.strip("\n") for block in blocks if block.strip()]
 
 
 def compile_safe(pattern: str, flags: int = 0):
@@ -9372,77 +9488,117 @@ if '```' in raw:
 start = raw.find('{')
 end = raw.rfind('}')
 if start == -1 or end == -1 or end <= start:
-    raise SystemExit("JSON not found in Codex output")
-
-fragment = raw[start:end+1]
-prefix = raw[:start].strip()
-suffix = raw[end+1:].strip()
-has_extra_text = bool(prefix) or bool(suffix)
-
-if has_extra_text:
-    raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
-    raw_dump.parent.mkdir(parents=True, exist_ok=True)
-    raw_dump.write_text(raw, encoding='utf-8')
-    rel_dump = raw_dump
-    try:
-        rel_dump = raw_dump.relative_to(project_root)
-    except ValueError:
-        rel_dump = raw_dump
-    payload = {
-        'plan': [],
-        'changes': [],
-        'commands': [],
-        'notes': [
-            f"Codex output contained extra text outside the JSON envelope; review {rel_dump}."
-        ],
-    }
-    print('STATUS parse-error')
-    print(f"RAW {rel_dump}")
-else:
-    fragment = re.sub(r'\\"(?=[}\]\n])', r'\\""', fragment)
-
-    while True:
-        try:
-            payload = json.loads(fragment)
-            break
-        except json.JSONDecodeError as exc:
-            if 'Invalid \\escape' in exc.msg:
-                fragment = fragment[:exc.pos] + '\\' + fragment[exc.pos:]
+    blocks = _extract_apply_patch_blocks(raw)
+    if blocks:
+        inferred_focus = []
+        changes_from_blocks = []
+        for block in blocks:
+            block_text = block.strip("\n")
+            if not block_text:
                 continue
-            decoder = json.JSONDecoder(strict=False)
+            if not block_text.endswith('\n'):
+                block_text += '\n'
+            changes_from_blocks.append({
+                'type': 'patch',
+                'diff': block_text,
+            })
+            candidate = None
+            for line in block_text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith('+++ b/'):
+                    candidate = stripped[6:].strip()
+                    if candidate and candidate != '/dev/null':
+                        break
+                elif stripped.startswith('diff --git '):
+                    parts = stripped.split()
+                    if len(parts) >= 4:
+                        candidate = parts[3][2:].strip()
+                        if candidate and candidate != '/dev/null':
+                            break
+            if candidate and candidate not in inferred_focus:
+                inferred_focus.append(candidate)
+        if not changes_from_blocks:
+            raise SystemExit("JSON not found in Codex output")
+        focus_values = inferred_focus or ['(auto) apply_patch']
+        payload = {
+            'plan': [],
+            'focus': focus_values,
+            'changes': changes_from_blocks,
+            'commands': [],
+            'notes': ["Auto-recovered legacy apply_patch output; prefer JSON responses."],
+        }
+    else:
+        raise SystemExit("JSON not found in Codex output")
+else:
+    fragment = raw[start:end+1]
+    prefix = raw[:start].strip()
+    suffix = raw[end+1:].strip()
+    has_extra_text = bool(prefix) or bool(suffix)
+
+    if has_extra_text:
+        raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
+        raw_dump.parent.mkdir(parents=True, exist_ok=True)
+        raw_dump.write_text(raw, encoding='utf-8')
+        rel_dump = raw_dump
+        try:
+            rel_dump = raw_dump.relative_to(project_root)
+        except ValueError:
+            rel_dump = raw_dump
+        payload = {
+            'plan': [],
+            'changes': [],
+            'commands': [],
+            'notes': [
+                f"Codex output contained extra text outside the JSON envelope; review {rel_dump}."
+            ],
+        }
+        print('STATUS parse-error')
+        print(f"RAW {rel_dump}")
+    else:
+        fragment = re.sub(r'\\"(?=[}\]\n])', r'\\""', fragment)
+
+        while True:
             try:
-                payload = decoder.decode(fragment)
+                payload = json.loads(fragment)
                 break
-            except json.JSONDecodeError:
-                raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
-                raw_dump.parent.mkdir(parents=True, exist_ok=True)
-                raw_dump.write_text(raw, encoding='utf-8')
-                fragment_dump = output_path.with_suffix(output_path.suffix + '.fragment.json')
-                fragment_dump.parent.mkdir(parents=True, exist_ok=True)
-                fragment_dump.write_text(fragment, encoding='utf-8')
-                rel_dump = raw_dump
+            except json.JSONDecodeError as exc:
+                if 'Invalid \\escape' in exc.msg:
+                    fragment = fragment[:exc.pos] + '\\' + fragment[exc.pos:]
+                    continue
+                decoder = json.JSONDecoder(strict=False)
                 try:
-                    rel_dump = raw_dump.relative_to(project_root)
-                except ValueError:
+                    payload = decoder.decode(fragment)
+                    break
+                except json.JSONDecodeError:
+                    raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
+                    raw_dump.parent.mkdir(parents=True, exist_ok=True)
+                    raw_dump.write_text(raw, encoding='utf-8')
+                    fragment_dump = output_path.with_suffix(output_path.suffix + '.fragment.json')
+                    fragment_dump.parent.mkdir(parents=True, exist_ok=True)
+                    fragment_dump.write_text(fragment, encoding='utf-8')
                     rel_dump = raw_dump
-                rel_fragment = fragment_dump
-                try:
-                    rel_fragment = fragment_dump.relative_to(project_root)
-                except ValueError:
+                    try:
+                        rel_dump = raw_dump.relative_to(project_root)
+                    except ValueError:
+                        rel_dump = raw_dump
                     rel_fragment = fragment_dump
-                payload = {
-                    'plan': [],
-                    'changes': [],
-                    'commands': [],
-                    'notes': [
-                        f"Codex output could not be parsed as JSON; review {rel_dump}.",
-                        f"Invalid JSON fragment saved at {rel_fragment}."
-                    ],
-                    'invalid_json_path': str(rel_fragment),
-                }
-                print('STATUS parse-error')
-                print(f"RAW {rel_dump}")
-                break
+                    try:
+                        rel_fragment = fragment_dump.relative_to(project_root)
+                    except ValueError:
+                        rel_fragment = fragment_dump
+                    payload = {
+                        'plan': [],
+                        'changes': [],
+                        'commands': [],
+                        'notes': [
+                            f"Codex output could not be parsed as JSON; review {rel_dump}.",
+                            f"Invalid JSON fragment saved at {rel_fragment}."
+                        ],
+                        'invalid_json_path': str(rel_fragment),
+                    }
+                    print('STATUS parse-error')
+                    print(f"RAW {rel_dump}")
+                    break
 
 def _normalize_focus(items):
     normalized = []
@@ -13289,12 +13445,12 @@ PY
             break
           fi
           if [[ "$apply_output" == "no-output" || "$apply_output" == "empty-output" ]]; then
-            warn "  Codex produced no actionable JSON for ${call_name}; manual review required."
-            task_needs_review=1
-            manual_followups=1
-            keep_output=1
-            task_result_status="on-hold"
-            task_notes+=("Codex response lacked actionable changes.")
+            warn "  Codex produced no actionable JSON for ${call_name}; skipping task."
+            task_needs_review=0
+            manual_followups=0
+            keep_output=0
+            task_result_status="skipped-no-changes"
+            task_notes+=("No actionable changes; auto-skip.")
             codex_ok=1
             break
           fi
@@ -13371,13 +13527,13 @@ REM
               task_patched_paths=()
               continue
             fi
-            warn "  Codex produced no actionable changes; marking task on-hold."
-            task_needs_review=1
-            manual_followups=1
-            keep_output=1
-            task_result_status="on-hold"
+            warn "  Codex produced no actionable changes; skipping task."
+            task_needs_review=0
+            manual_followups=0
+            keep_output=0
+            task_result_status="skipped-no-changes"
             apply_status="no-changes"
-            task_notes+=("Codex returned no diffs or file writes; rerun work-on-tasks to finish this task.")
+            task_notes+=("No actionable changes; auto-skip.")
             codex_ok=1
             break_after_update=1
             break

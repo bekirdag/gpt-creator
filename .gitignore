@@ -32,7 +32,7 @@ temp/
 .cache/
 .gomodcache/
 .gocache/
-.gpt-creator/
+
 **/.gpt-creator/logs/
 **/.gpt-creator/tmp/
 **/.gpt-creator/tmp/**

@@ -5,6 +5,9 @@
 
 set -Eeuo pipefail
 
+mkdir -p "${PWD}/.gpt-creator/shims" 2>/dev/null || true
+export BASH_ENV="${BASH_ENV:-$PWD/.gpt-creator/shims/bash_env.sh}"
+
 if [[ -t 1 && $# -eq 0 && -z "${GC_SKIP_TUI_AUTO:-}" ]]; then
   export GC_SKIP_TUI_AUTO=1
   exec "$0" tui

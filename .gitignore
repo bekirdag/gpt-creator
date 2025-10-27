@@ -37,10 +37,13 @@ temp/
 **/.gpt-creator/tmp/
 **/.gpt-creator/tmp/**
 **/.gpt-creator/tmp/view-cache/
+.gpt-creator/tmp/*
+!.gpt-creator/tmp/.gitkeep
 **/.gpt-creator/scan.tsv
 **/.gpt-creator/scan.tsv.*
 **/.gpt-creator/staging/
 **/.gpt-creator/staging/**
+apps/**/dist-tests/
 
 # Docker (local volumes/artifacts)
 docker/.data/

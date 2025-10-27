@@ -137,6 +137,22 @@ fi
 export GC_COMMAND_SCAN_CACHE
 GC_COMMAND_SCAN_WARN_DIGESTS=""
 GC_COMMAND_GUARD_WARN_DIGESTS=""
+GC_CODEX_USAGE_LIMIT_CONFIRMED=0
+
+if [[ -n "${GC_SCAN_DEDUP_EPOCH:-}" && "${GC_SCAN_DEDUP_EPOCH}" =~ ^[0-9]+$ ]]; then
+  :
+else
+  GC_SCAN_DEDUP_EPOCH=0
+fi
+export GC_SCAN_DEDUP_EPOCH
+
+gc_note_mutation() {
+  if ! [[ "${GC_SCAN_DEDUP_EPOCH:-}" =~ ^[0-9]+$ ]]; then
+    GC_SCAN_DEDUP_EPOCH=0
+  fi
+  GC_SCAN_DEDUP_EPOCH=$((GC_SCAN_DEDUP_EPOCH + 1))
+  export GC_SCAN_DEDUP_EPOCH
+}
 
 gc_env_file() { echo "${PROJECT_ROOT:-$PWD}/.env"; }
 
@@ -145,6 +161,90 @@ gc_random_string() {
 import secrets, string
 alphabet = string.ascii_letters + string.digits
 print(''.join(secrets.choice(alphabet) for _ in range(32)))
+PY
+}
+
+gc_usage_limit_is_provider_signal() {
+  local message="${1:-}"
+  local lower="${message,,}"
+  if [[ "$lower" == *"429"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"insufficient_quota"* || "$lower" == *"insufficient quota"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"rate_limit_exceeded"* || "$lower" == *"rate limit exceeded"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+gc_bootstrap_docs_registry() {
+  local db_path="${1:-}"
+  [[ -n "$db_path" ]] || return 0
+
+  local repo_root="${PROJECT_ROOT:-$PWD}"
+  local candidate_config="${repo_root}/config/bootstrap_docs_catalog.sql"
+  local candidate_legacy="${repo_root}/.gpt-creator/staging/plan/tasks/bootstrap_docs_catalog.sql"
+  local sql_file_default=""
+  if [[ -f "$candidate_config" ]]; then
+    sql_file_default="$candidate_config"
+  elif [[ -f "$candidate_legacy" ]]; then
+    sql_file_default="$candidate_legacy"
+  else
+    sql_file_default="$candidate_config"
+  fi
+  local sql_file="${GC_DOCUMENTATION_BOOTSTRAP_SQL:-$sql_file_default}"
+  [[ -f "$sql_file" ]] || return 0
+
+  local sqlite_bin="${SQLITE_BIN:-sqlite3}"
+  if ! command -v "$sqlite_bin" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local db_dir
+  db_dir="$(dirname "$db_path")"
+  mkdir -p "$db_dir"
+
+  "$sqlite_bin" "$db_path" ".read $sql_file" >/dev/null 2>&1 || true
+}
+
+gc_parse_int() {
+  local value="$1"
+  local fallback="$2"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$value"
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+
+gc_trim_prompt_file() {
+  local prompt_file="$1"
+  local max_tokens_raw="${GC_MAX_PROMPT_TOKENS:-8000}"
+  [[ -f "$prompt_file" ]] || return 0
+  if ! [[ "$max_tokens_raw" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  local max_tokens=$((max_tokens_raw))
+  if (( max_tokens <= 0 )); then
+    return 0
+  fi
+  python3 - "$prompt_file" "$max_tokens" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+limit = int(sys.argv[2])
+if limit <= 0 or not path.exists():
+    raise SystemExit(0)
+text = path.read_text(encoding="utf-8", errors="ignore")
+char_limit = limit * 4
+if len(text) <= char_limit:
+    raise SystemExit(0)
+trimmed = text[:char_limit].rstrip()
+notice = f"\n\n[prompt trimmed automatically at ~{limit} tokens]"
+path.write_text(trimmed + notice + "\n", encoding="utf-8")
+print(f"[prompt-trim] prompt truncated to ~{limit} tokens (char limit {char_limit})")
 PY
 }
 
@@ -363,6 +463,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -402,6 +503,22 @@ mode_string = "|".join(mode_descriptor)
 cache_key_raw = f"{path}::{mode_string}"
 cache_key = hashlib.sha256(cache_key_raw.encode("utf-8", "replace")).hexdigest()
 cache_path = cache_dir / f"{cache_key}.json"
+
+dedup_ttl_env = os.environ.get("GC_SCAN_DEDUP_TTL", "120").strip()
+try:
+    dedup_ttl = float(dedup_ttl_env or 0)
+except Exception:
+    dedup_ttl = 0.0
+dedup_enabled = (
+    dedup_ttl > 0
+    and os.environ.get("GC_DISABLE_SCAN_DEDUP", "0") != "1"
+    and (".gpt-creator/staging/" in str(path)
+         or ".gpt-creator/plan/" in str(path)
+         or ".gpt-creator/work/" in str(path))
+)
+dedup_path = None
+dedup_hit = False
+dedup_dir = None
 
 def load_lines(file_path: Path):
     text = file_path.read_text(encoding="utf-8", errors="replace")
@@ -483,9 +600,53 @@ if cache_path.exists():
     except Exception:
         existing = None
 
+dedup_record = None
+if dedup_enabled:
+    dedup_dir = cache_dir / "_dedup"
+    dedup_dir.mkdir(parents=True, exist_ok=True)
+    dedup_path = dedup_dir / f"{cache_key}.json"
+    if refresh:
+        try:
+            dedup_record = (
+                json.loads(dedup_path.read_text(encoding="utf-8"))
+                if dedup_path.exists()
+                else None
+            )
+        except Exception:
+            dedup_record = None
+        if dedup_record:
+            try:
+                last_ts = float(dedup_record.get("ts", 0.0))
+            except Exception:
+                last_ts = 0.0
+            prev_mtime = int(dedup_record.get("mtime_ns", -1))
+            prev_size = int(dedup_record.get("size", -1))
+            if (
+                last_ts > 0
+                and (time.time() - last_ts) < dedup_ttl
+                and prev_mtime == getattr(file_stat, "st_mtime_ns", None)
+                and prev_size == file_stat.st_size
+            ):
+                refresh = False
+                dedup_hit = True
+                print(
+                    f"[scan-dedup] skip (unchanged, ttl={int(dedup_ttl)}s): {rel_path}",
+                    file=sys.stdout,
+                )
+
 if existing and not refresh and not diff_mode:
     if (existing.get("mtime_ns") == file_stat.st_mtime_ns and
             existing.get("size") == file_stat.st_size):
+        if dedup_enabled and dedup_path:
+            dedup_payload = {
+                "ts": time.time(),
+                "mtime_ns": file_stat.st_mtime_ns,
+                "size": file_stat.st_size,
+            }
+            try:
+                dedup_path.write_text(json.dumps(dedup_payload))
+            except Exception:
+                pass
         start_line = existing.get("start_line", 1)
         end_line = existing.get("end_line", start_line - 1)
         total_lines = existing.get("total_lines", "?")
@@ -561,6 +722,16 @@ else:
     print("(no content in selected range)")
 
 write_cache(cache_payload)
+if dedup_enabled and dedup_path:
+    dedup_payload = {
+        "ts": time.time(),
+        "mtime_ns": file_stat.st_mtime_ns,
+        "size": file_stat.st_size,
+    }
+    try:
+        dedup_path.write_text(json.dumps(dedup_payload))
+    except Exception:
+        pass
 PY
 }
 
@@ -2396,10 +2567,15 @@ gc_record_codex_usage() {
         case "$line" in
           LIMIT_DETECTED$'\t'*)
             GC_CODEX_USAGE_LIMIT_REACHED=1
+            GC_CODEX_USAGE_LIMIT_CONFIRMED=0
             GC_CODEX_USAGE_LIMIT_MESSAGE="${line#LIMIT_DETECTED$'\t'}"
+            if gc_usage_limit_is_provider_signal "${GC_CODEX_USAGE_LIMIT_MESSAGE}"; then
+              GC_CODEX_USAGE_LIMIT_CONFIRMED=1
+            fi
             ;;
           LIMIT_DETECTED)
             GC_CODEX_USAGE_LIMIT_REACHED=1
+            GC_CODEX_USAGE_LIMIT_CONFIRMED=0
             GC_CODEX_USAGE_LIMIT_MESSAGE=""
             ;;
           USAGE$'\t'*)
@@ -2584,6 +2760,7 @@ gc_record_codex_usage() {
       limit_value=$((limit_value))
       if (( limit_value > 0 && GC_LAST_CODEX_TOTAL_TOKENS > limit_value )); then
         GC_CODEX_USAGE_LIMIT_REACHED=1
+        GC_CODEX_USAGE_LIMIT_CONFIRMED=1
         if [[ -z "${GC_CODEX_USAGE_LIMIT_MESSAGE:-}" ]]; then
           GC_CODEX_USAGE_LIMIT_MESSAGE="Codex tokens ${GC_LAST_CODEX_TOTAL_TOKENS} exceeded per-task limit ${limit_value}."
         fi
@@ -8805,7 +8982,11 @@ PROMPT
     fi
   fi
 
-  if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
+  if [[ -n "$prompt_file" && -f "$prompt_file" ]]; then
+    gc_trim_prompt_file "$prompt_file"
+  fi
+
+  if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" && "${GC_CODEX_USAGE_LIMIT_CONFIRMED:-0}" == "1" ]]; then
     warn "Codex usage limit previously reached; skipping ${task}."
     return 95
   fi
@@ -9137,6 +9318,28 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
+
+_original_re_compile = re.compile
+_original_re__compile = getattr(re, "_compile", None)
+invalid_regex_patterns = []
+
+
+def compile_safe(pattern: str, flags: int = 0):
+    try:
+        if _original_re__compile is not None:
+            return _original_re__compile(pattern, flags)
+        return _original_re_compile(pattern, flags)
+    except re.error:
+        invalid_regex_patterns.append(pattern)
+        escaped = re.escape(pattern)
+        if _original_re__compile is not None:
+            return _original_re__compile(escaped, flags)
+        return _original_re_compile(escaped, flags)
+
+
+re.compile = compile_safe
+if _original_re__compile is not None:
+    re._compile = compile_safe
 
 output_path = Path(sys.argv[1])
 project_root = Path(sys.argv[2])
@@ -9654,10 +9857,42 @@ for change in changes:
                     relative_manual = manual_patch.relative_to(project_root)
                 except ValueError:
                     pass
-                manual_notes.append(f"Patch for {path} could not be applied automatically. Review and apply {relative_manual} manually.")
-                patched.append(path + ' (manual)')
-                sys.stderr.write(git_err)
-                sys.stderr.write(fallback.stderr.decode('utf-8'))
+
+                applied_via_helper = False
+                helper = project_root / "scripts" / "auto_apply_patch.sh"
+                if helper.exists() and helper.is_file():
+                    try:
+                        result = subprocess.run(
+                            [str(helper), str(manual_patch)],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        if result.stdout:
+                            sys.stdout.write(result.stdout)
+                        if result.stderr:
+                            sys.stderr.write(result.stderr)
+                        if result.returncode == 0:
+                            applied_via_helper = True
+                        elif result.returncode == 3:
+                            manual_notes.append(
+                                f"Patch for {path} hit conflicts even after auto_apply_patch; see {relative_manual}."
+                            )
+                    except Exception:
+                        applied_via_helper = False
+
+                if applied_via_helper:
+                    manual_notes.append(
+                        f"Patch for {path} required manual context merge but was auto-applied via scripts/auto_apply_patch.sh."
+                    )
+                    patched.append(path + ' (auto)')
+                else:
+                    manual_notes.append(
+                        f"Patch for {path} could not be applied automatically. Review and apply {relative_manual} manually."
+                    )
+                    patched.append(path + ' (manual)')
+                    sys.stderr.write(git_err)
+                    sys.stderr.write(fallback.stderr.decode('utf-8'))
                 continue
             patched.append(path + ' (patch)')
             change_bytes[path] = diff_bytes
@@ -9668,6 +9903,20 @@ for change in changes:
             actual_changes += 1
     else:
         raise ValueError(f"Unknown change type: {ctype}")
+
+if invalid_regex_patterns:
+    logged_patterns = []
+    for raw_pattern in invalid_regex_patterns:
+        text_pattern = str(raw_pattern)
+        if text_pattern in logged_patterns:
+            continue
+        logged_patterns.append(text_pattern)
+        snippet = text_pattern.replace("\n", "\\n")
+        if len(snippet) > 120:
+            snippet = snippet[:117] + "..."
+        manual_notes.append(
+            f"Regex pattern {snippet!r} was invalid; treated as a literal text match instead."
+        )
 
 summary = {
     'written': written,
@@ -12355,6 +12604,47 @@ EOHELP
   token_limit=$((token_limit))
   idle_timeout=$((idle_timeout))
   (( sample_lines >= 0 )) || die "--sample-lines must be zero or positive (got ${sample_lines})"
+
+  local token_budget_raw="${GC_TOKENS_PER_TASK_BUDGET-}"
+  local token_budget=0
+  if [[ -n "${token_budget_raw:-}" ]]; then
+    token_budget="$(gc_parse_int "$token_budget_raw" "$token_limit")"
+  else
+    if (( token_limit > 0 )); then
+      token_budget="$token_limit"
+    else
+      token_budget=60000
+    fi
+  fi
+  token_budget=$((token_budget))
+  if (( token_budget < 0 )); then
+    token_budget=0
+  fi
+  token_limit="$token_budget"
+
+  local token_soft_ratio_raw="${GC_TOKENS_SOFT_RATIO:-0.9}"
+  local token_soft_threshold=0
+  if (( token_limit > 0 )); then
+    token_soft_threshold=$(python3 - "$token_limit" "$token_soft_ratio_raw" <<'PY'
+import sys
+budget = int(sys.argv[1])
+try:
+    ratio = float(sys.argv[2])
+except Exception:
+    ratio = 0.9
+if ratio <= 0:
+    print(0)
+else:
+    if ratio > 1:
+        ratio = 1.0
+    print(int(budget * ratio))
+PY
+    ) || token_soft_threshold=0
+  fi
+
+  local token_min_headroom="$(gc_parse_int "${GC_TOKENS_MIN_HEADROOM:-3000}" 3000)"
+  local token_next_estimate="$(gc_parse_int "${GC_TOKENS_NEXT_STEP_ESTIMATE:-5000}" 5000)"
+
   export GC_CODEX_MAX_TOKENS_PER_TASK="$token_limit"
   if (( token_limit > 0 )); then
     info "Per-task Codex token guard active → ${token_limit} tokens."
@@ -12415,6 +12705,7 @@ EOHELP
   local tasks_db="${tasks_dir}/tasks.db"
   mkdir -p "$tasks_dir"
   export GC_DOCUMENTATION_DB_PATH="$tasks_db"
+  gc_bootstrap_docs_registry "$tasks_db"
 
   if ! gc_tasks_db_has_rows "$tasks_db"; then
     die "Task database missing or empty. Run 'gpt-creator create-tasks' (or create-jira-tasks + migrate-tasks) before work-on-tasks."
@@ -12920,6 +13211,8 @@ PY
       if (( diff_guard_stall_limit <= 0 && diff_guard_file_cooldown <= 0 && diff_guard_turn_repeat_limit <= 0 )); then
         diff_guard_enabled=0
       fi
+      local token_soft_warned=0
+      local token_budget_hit=0
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
       export GC_ACTIVE_TASK_DB="$tasks_db"
       export GC_ACTIVE_TASK_SLUG="$slug"
@@ -12937,6 +13230,30 @@ PY
         (( ++diff_guard_global_attempt ))
         local diff_guard_current_step="$diff_guard_global_attempt"
         gc_touch_progress
+        if (( token_budget > 0 )); then
+          local token_budget_remaining=$(( token_budget - task_tokens_total ))
+          if (( token_soft_threshold > 0 )) && (( token_soft_warned == 0 )) && (( task_tokens_total >= token_soft_threshold )); then
+            local token_usage_pct=0
+            if (( token_budget > 0 )); then
+              token_usage_pct=$(( (task_tokens_total * 100) / token_budget ))
+            fi
+            warn "  Token usage ${task_tokens_total}/${token_budget} (~${token_usage_pct}%%); nearing per-task budget."
+            token_soft_warned=1
+          fi
+          local token_required=$token_min_headroom
+          if (( token_next_estimate > token_required )); then
+            token_required=$token_next_estimate
+          fi
+          if (( token_budget_remaining <= token_required )); then
+            warn "  Token budget hit; stopping this task early → Status: SKIPPED_FOR_BUDGET."
+            task_result_status="skipped_for_budget"
+            task_notes+=("Stopped early due to token cap; trim scope or raise GC_TOKENS_PER_TASK_BUDGET.")
+            codex_ok=1
+            token_budget_hit=1
+            break_after_update=1
+            break
+          fi
+        fi
         local diff_before=""
         task_change_sizes=""
         if (( diff_guard_enabled )); then
@@ -13089,6 +13406,10 @@ REM
             fi
           fi
 
+          if (( task_changes_applied > 0 )); then
+            gc_note_mutation
+          fi
+
           local stdout_hash="${GC_LAST_CODEX_STDOUT_TAIL_HASH:-none}"
           local stdout_base64="${GC_LAST_CODEX_STDOUT_TAIL_BASE64:-}"
           local turn_hash="${GC_LAST_CODEX_TURN_DIFF_HASH:-}"
@@ -13237,15 +13558,44 @@ PY
             task_tokens_total=$((task_tokens_total + attempt_tokens))
           fi
           if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
-            warn "  Codex usage limit reached for ${call_name}; halting further tasks."
-            if [[ -n "${GC_CODEX_USAGE_LIMIT_MESSAGE:-}" ]]; then
-              warn "    ${GC_CODEX_USAGE_LIMIT_MESSAGE}"
+            local limit_message="${GC_CODEX_USAGE_LIMIT_MESSAGE:-}"
+            local tokens_this_task="$task_tokens_total"
+            if ! [[ "$tokens_this_task" =~ ^[0-9]+$ ]]; then
+              tokens_this_task=0
+            fi
+            local usage_limit_confirmed="${GC_CODEX_USAGE_LIMIT_CONFIRMED:-0}"
+
+            if (( tokens_this_task == 0 )); then
+              warn "  Quota suspicion but tokens=0 for ${call_name} — continuing (soft gate)."
+              if [[ -n "$limit_message" ]]; then
+                warn "    $limit_message"
+              fi
+              GC_CODEX_USAGE_LIMIT_REACHED=0
+              GC_CODEX_USAGE_LIMIT_MESSAGE=""
+              GC_CODEX_USAGE_LIMIT_CONFIRMED=0
+              continue
+            fi
+
+            if (( usage_limit_confirmed == 0 )); then
+              warn "  Codex quota warning for ${call_name} not confirmed by provider — continuing."
+              if [[ -n "$limit_message" ]]; then
+                warn "    $limit_message"
+              fi
+              GC_CODEX_USAGE_LIMIT_REACHED=0
+              GC_CODEX_USAGE_LIMIT_MESSAGE=""
+              GC_CODEX_USAGE_LIMIT_CONFIRMED=0
+              continue
+            fi
+
+            warn "  Codex usage limit confirmed by provider — stopping this run."
+            if [[ -n "$limit_message" ]]; then
+              warn "    $limit_message"
             fi
             task_result_status="blocked"
             task_needs_review=1
             manual_followups=1
             keep_output=1
-            local limit_note="${GC_CODEX_USAGE_LIMIT_MESSAGE:-Codex usage limit reached; wait for quota reset before rerunning work-on-tasks.}"
+            local limit_note="${limit_message:-Codex usage limit confirmed by provider; wait for quota reset before rerunning work-on-tasks.}"
             task_notes+=("$limit_note")
             codex_ok=1
             usage_limit_triggered=1
@@ -13857,7 +14207,7 @@ PY
   fi
 
   if (( usage_limit_triggered )); then
-    warn "Codex usage limit detected; halt further work until additional quota is available."
+    warn "Codex usage limit confirmed by provider; halt further work until additional quota is available."
   fi
 
   if (( loop_guard_triggered )); then

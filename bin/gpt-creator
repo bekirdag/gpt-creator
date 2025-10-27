@@ -309,6 +309,67 @@ if modified and text != original_text:
 PY
 }
 
+gc_trim_prompt_file_lean() {
+  local prompt_file="$1"
+  [[ -f "$prompt_file" ]] || return 0
+  python3 - <<'PY' "$prompt_file"
+import os
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    raise SystemExit(0)
+
+max_files = int(os.environ.get("CODEX_CONTEXT_MAX_FILES", "8") or 8)
+slice_lines = int(os.environ.get("CODEX_CONTEXT_SLICE_LINES", "80") or 80)
+digest_lines = int(os.environ.get("CODEX_SHARED_DIGEST_LINES", "150") or 150)
+max_chars = int(os.environ.get("CODEX_LEAN_CHAR_LIMIT", "20000") or 20000)
+
+text = path.read_text(encoding="utf-8", errors="ignore")
+original = text
+sections = text.split("\n### ")
+head = sections[0]
+entries = []
+for raw in sections[1:]:
+    title, body = (raw.split("\n", 1) + [""])[:2] if "\n" in raw else (raw, "")
+    entries.append((title.strip(), body))
+
+trimmed_sections = []
+notes = []
+for idx, (title, body) in enumerate(entries):
+    if idx >= max_files:
+        notes.append(f"shared context trimmed: dropped section '{title}' (beyond max files {max_files}).")
+        continue
+    lines = body.splitlines()
+    limit = digest_lines if "shared context digest" in title.lower() else slice_lines
+    if len(lines) > limit:
+        notes.append(f"shared context trimmed: '{title}' reduced to {limit} lines (was {len(lines)}).")
+    trimmed_body = "\n".join(lines[:limit]).rstrip()
+    if trimmed_body:
+        trimmed_sections.append(f"### {title}\n{trimmed_body}\n")
+    else:
+        trimmed_sections.append(f"### {title}\n")
+
+result = head.rstrip()
+if trimmed_sections:
+    result = result + "\n" + "\n".join(trimmed_sections)
+
+if len(result) > max_chars:
+    notes.append(f"prompt truncated to {max_chars} characters for lean retry (was {len(result)}).")
+    result = result[:max_chars].rstrip()
+
+if notes:
+    result = result.rstrip() + "\n\n[lean-mode prompt reduction applied]\n"
+
+if result != original:
+    path.write_text(result, encoding="utf-8")
+    print("[prompt-lean] prompt reduced for lean retry:")
+    for note in notes:
+        print(f"  - {note}")
+PY
+}
+
 gc_write_env_var() {
   local target="$1" key="$2" value="$3"
   python3 - <<'PY' "$target" "$key" "$value"
@@ -13373,6 +13434,7 @@ PY
         diff_guard_enabled=0
       fi
       local token_soft_warned=0
+      local token_lean_attempted=0
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
       export GC_ACTIVE_TASK_DB="$tasks_db"
       export GC_ACTIVE_TASK_SLUG="$slug"
@@ -13405,9 +13467,17 @@ PY
             token_required=$token_next_estimate
           fi
           if (( token_budget_remaining <= token_required )); then
-            warn "  Token budget hit; stopping this task early → Status: SKIPPED_FOR_BUDGET."
-            task_result_status="skipped_for_budget"
-            task_notes+=("Stopped early due to token cap; trim scope or raise GC_TOKENS_PER_TASK_BUDGET.")
+            if (( token_lean_attempted == 0 )); then
+              warn "  Token budget nearly exhausted; pruning prompt for lean retry."
+              gc_trim_prompt_file_lean "$prompt_path"
+              token_lean_attempted=1
+              task_notes+=("Lean retry initiated after trimming prompt context for token budget.")
+              (( attempt-- ))
+              continue
+            fi
+            warn "  Token budget hit; stopping this task early → Status: BLOCKED_BUDGET."
+            task_result_status="blocked-budget"
+            task_notes+=("Token budget exhausted after lean retry; trim scope or increase CODEX_MAX_PROMPT_TOKENS.")
             codex_ok=1
             break_after_update=1
             break
@@ -13914,7 +13984,7 @@ PY
 
       local story_status_hint="in-progress"
       case "$task_result_status" in
-        blocked) story_status_hint="blocked" ;;
+        blocked|blocked-budget) story_status_hint="blocked" ;;
         on-hold) story_status_hint="on-hold" ;;
       esac
 
@@ -14085,7 +14155,7 @@ PY
         on-hold)
           warn "  Task ${task_number} (${task_id:-no-id}) marked ${task_result_status}; review ${report_entry_display}."
           ;;
-        blocked)
+        blocked|blocked-budget)
           warn "  Task ${task_number} (${task_id:-no-id}) blocked; see ${report_entry_display}."
           ;;
         *)
@@ -14098,6 +14168,7 @@ PY
         task_status_display="COMPLETED"
       else
         task_status_display="${task_status_display//-/ }"
+        task_status_display="${task_status_display//_/ }"
         task_status_display="$(printf '%s' "$task_status_display" | tr '[:lower:]' '[:upper:]')"
       fi
 
@@ -14113,7 +14184,7 @@ PY
       (( ++processed_total ))
       (( ++iteration_processed ))
 
-      if [[ "$task_result_status" == "blocked" ]]; then
+      if [[ "$task_result_status" == "blocked" || "$task_result_status" == "blocked-budget" ]]; then
         story_failed=1
         break
       fi

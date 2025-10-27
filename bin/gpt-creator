@@ -12642,8 +12642,10 @@ PY
     ) || token_soft_threshold=0
   fi
 
-  local token_min_headroom="$(gc_parse_int "${GC_TOKENS_MIN_HEADROOM:-3000}" 3000)"
-  local token_next_estimate="$(gc_parse_int "${GC_TOKENS_NEXT_STEP_ESTIMATE:-5000}" 5000)"
+  local token_min_headroom
+  token_min_headroom="$(gc_parse_int "${GC_TOKENS_MIN_HEADROOM:-3000}" 3000)"
+  local token_next_estimate
+  token_next_estimate="$(gc_parse_int "${GC_TOKENS_NEXT_STEP_ESTIMATE:-5000}" 5000)"
 
   export GC_CODEX_MAX_TOKENS_PER_TASK="$token_limit"
   if (( token_limit > 0 )); then
@@ -13012,9 +13014,9 @@ PY
       return 0
     fi
     if command -v python3 >/dev/null 2>&1; then
-      printf '%s' "$diff_payload" | python3 - <<'PY'
+      python3 - "$diff_payload" <<'PY'
 import hashlib, sys
-data = sys.stdin.read().encode('utf-8')
+data = sys.argv[1].encode('utf-8', 'replace')
 print(hashlib.sha1(data).hexdigest())
 PY
     elif command -v shasum >/dev/null 2>&1; then
@@ -13212,7 +13214,6 @@ PY
         diff_guard_enabled=0
       fi
       local token_soft_warned=0
-      local token_budget_hit=0
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
       export GC_ACTIVE_TASK_DB="$tasks_db"
       export GC_ACTIVE_TASK_SLUG="$slug"
@@ -13249,7 +13250,6 @@ PY
             task_result_status="skipped_for_budget"
             task_notes+=("Stopped early due to token cap; trim scope or raise GC_TOKENS_PER_TASK_BUDGET.")
             codex_ok=1
-            token_budget_hit=1
             break_after_update=1
             break
           fi
@@ -13449,7 +13449,7 @@ REM
               turn_diff_repeat_count=0
             fi
             turn_diff_prev_hash="$turn_hash"
-            if [[ -n "$turn_hash" ]] && (( turn_diff_repeat_limit > 0 )) && (( turn_diff_repeat_count >= turn_diff_repeat_limit )); then
+            if [[ -n "$turn_hash" ]] && (( diff_guard_turn_repeat_limit > 0 )) && (( turn_diff_repeat_count >= diff_guard_turn_repeat_limit )); then
               guard_reason="turn-diff"
             fi
           fi
@@ -13464,7 +13464,7 @@ REM
                 continue
               fi
               local last_step=""
-              while IFS=$'	' read -r hist_path hist_step hist_bytes; do
+              while IFS=$'	' read -r hist_path hist_step _hist_bytes; do
                 [[ -z "$hist_path" ]] && continue
                 if [[ "$hist_path" == "$base_path" ]]; then
                   last_step="$hist_step"
@@ -13800,6 +13800,15 @@ PY
             manual_followups=1
             ;;
         esac
+      fi
+
+      if [[ "$task_result_status" == "complete" ]]; then
+        local finalize_script="${PROJECT_ROOT}/scripts/auto_finalize_task.sh"
+        if [[ -x "$finalize_script" ]]; then
+          if ! bash "$finalize_script"; then
+            warn "  Auto finalize failed; inspect git status."
+          fi
+        fi
       fi
 
       local timestamp_utc

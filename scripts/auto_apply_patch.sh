@@ -30,11 +30,11 @@ try_apply() {
 }
 
 if try_apply; then
-  ok=1
+  :
 elif try_apply -p1; then
-  ok=1
+  :
 elif try_apply -p2; then
-  ok=1
+  :
 else
   git apply --reject --whitespace=fix "$PATCH" || true
   if git ls-files -o --exclude-standard | grep -q '\.rej$'; then

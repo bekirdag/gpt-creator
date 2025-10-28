@@ -11620,6 +11620,38 @@ import sys
 from pathlib import Path
 from typing import Optional, List, Tuple, Set, Dict
 
+
+def _resolve_display_path(path_obj: Path) -> Path:
+    try:
+        return path_obj.resolve()
+    except Exception:
+        return path_obj
+
+
+def _select_display_path(candidates: List[Path]) -> str:
+    filtered = [candidate for candidate in candidates if candidate is not None]
+    for candidate in filtered:
+        resolved = _resolve_display_path(candidate)
+        if resolved.exists():
+            return str(resolved)
+    if filtered:
+        return str(_resolve_display_path(filtered[-1]))
+    return ""
+
+
+def _first_existing_path(candidates: List[Path]) -> Optional[Path]:
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if resolved.exists():
+            return resolved
+    return None
+
+
 DB_PATH, STORY_SLUG, TASK_INDEX, PROMPT_PATH, CONTEXT_TAIL_PATH, MODEL_NAME, PROJECT_ROOT, STAGING_DIR = sys.argv[1:9]
 TASK_INDEX = int(TASK_INDEX)
 
@@ -11803,35 +11835,6 @@ def format_duration(seconds_value):
         parts.append(f"{sec}s")
     return " ".join(parts)
 
-
-def _resolve_display_path(path_obj: Path) -> Path:
-    try:
-        return path_obj.resolve()
-    except Exception:
-        return path_obj
-
-
-def _select_display_path(candidates: List[Path]) -> str:
-    filtered = [candidate for candidate in candidates if candidate is not None]
-    for candidate in filtered:
-        resolved = _resolve_display_path(candidate)
-        if resolved.exists():
-            return str(resolved)
-    if filtered:
-        return str(_resolve_display_path(filtered[-1]))
-    return ""
-
-def _first_existing_path(candidates: List[Path]) -> Optional[Path]:
-    for candidate in candidates:
-        if candidate is None:
-            continue
-        try:
-            resolved = candidate.resolve()
-        except Exception:
-            resolved = candidate
-        if resolved.exists():
-            return resolved
-    return None
 
 DEFAULT_WORK_PROMPT = """## work-on-tasks Prompt
 - Load the task details and acceptance criteria from the context section.

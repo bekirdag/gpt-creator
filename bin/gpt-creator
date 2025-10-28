@@ -7094,14 +7094,14 @@ PY
     local root="${PROJECT_ROOT:-$PWD}"
     [[ -n "$story_slug" ]] || story_slug="story"
     [[ -n "$task_id" ]] || task_id="task"
-    local checkpoint_dir="${root}/docs/qa/evidence/${story_slug}/${task_id}"
+    local checkpoint_dir="${root}/.gpt-creator/logs/empty-apply/${story_slug}/${task_id}"
     local checkpoint_file="${checkpoint_dir}/checkpoint.md"
     mkdir -p "$checkpoint_dir" || return 1
     if [[ ! -f "$checkpoint_file" ]]; then
       cat >"$checkpoint_file" <<EOF
 # Checkpoint — ${story_slug}/${task_id}
 
-Generated automatically because the agent response contained no actionable `changes`.
+Generated automatically because the agent response contained no actionable 'changes'.
 
 - Timestamp: $(date -u +%FT%TZ)
 - Runner: gc-empty-apply-fallback
@@ -7110,7 +7110,6 @@ Generated automatically because the agent response contained no actionable `chan
 - Review the raw agent output under .gpt-creator/staging/plan/work/runs for detailed context.
 EOF
     fi
-    git -C "$root" add "$checkpoint_file" >/dev/null 2>&1 || true
     python3 - <<'PY' "$checkpoint_file" "$root"
 import sys
 from pathlib import Path
@@ -7376,35 +7375,16 @@ PY
             local checkpoint_rel=""
             if (( empty_checkpoint_created == 0 )) && checkpoint_rel="$(gc_create_empty_apply_checkpoint "$checkpoint_story" "$checkpoint_task")"; then
               empty_checkpoint_created=1
-              info "    Created checkpoint evidence ${checkpoint_rel} because Codex returned no output."
-              local checkpoint_abs="${PROJECT_ROOT:-$PWD}/${checkpoint_rel}"
-              local checkpoint_size
-              checkpoint_size="$(python3 - <<'PY' "$checkpoint_abs"
-import sys
-from pathlib import Path
-path = Path(sys.argv[1])
-print(path.stat().st_size if path.exists() else 0)
-PY
-)"
-              task_change_sizes+="${checkpoint_rel}"$'\t'"${checkpoint_size}"$'\n'
-              task_written_paths+=("$checkpoint_rel")
-              task_notes+=("Auto-generated checkpoint evidence ${checkpoint_rel} because the Codex reply was empty.")
-              task_changes_applied=1
-              any_changes=1
-              apply_status="ok"
-              task_needs_review=0
-              manual_followups=0
-              keep_output=0
-              task_result_status="complete"
-              codex_ok=1
-              break
+              info "    Recorded empty-apply checkpoint ${checkpoint_rel} (no repository changes)."
+              task_notes+=("Codex returned no output; recorded checkpoint ${checkpoint_rel} for follow-up.")
             fi
-            warn "  Codex produced no output for ${call_name}; manual review required."
-            task_needs_review=1
-            manual_followups=1
-            keep_output=1
-            task_result_status="on-hold"
-            task_notes+=("Codex produced no output; manual review required.")
+            warn "  Codex produced no output for ${call_name}; marking task as skipped."
+            task_needs_review=0
+            manual_followups=0
+            keep_output=0
+            task_result_status="skipped-no-changes"
+            apply_status="no-changes"
+            task_notes+=("Codex returned no output; no changes applied.")
             codex_ok=1
             break
           fi
@@ -7490,22 +7470,8 @@ PY
               local checkpoint_rel=""
               if checkpoint_rel="$(gc_create_empty_apply_checkpoint "$checkpoint_story" "$checkpoint_task")"; then
                 empty_checkpoint_created=1
-                info "    Created checkpoint evidence ${checkpoint_rel} to avoid empty apply."
-                local checkpoint_abs="${PROJECT_ROOT:-$PWD}/${checkpoint_rel}"
-                local checkpoint_size
-                checkpoint_size="$(python3 - <<'PY' "$checkpoint_abs"
-import sys
-from pathlib import Path
-path = Path(sys.argv[1])
-print(path.stat().st_size if path.exists() else 0)
-PY
-)"
-                task_change_sizes+="${checkpoint_rel}"$'\t'"${checkpoint_size}"$'\n'
-                task_written_paths+=("$checkpoint_rel")
-                task_notes+=("Auto-generated checkpoint evidence ${checkpoint_rel} because the agent returned no actionable changes.")
-                task_changes_applied=1
-                any_changes=1
-                apply_status="ok"
+                info "    Recorded empty-apply checkpoint ${checkpoint_rel} (no repository changes)."
+                task_notes+=("Agent returned no actionable changes; recorded checkpoint ${checkpoint_rel} for follow-up.")
               fi
             fi
             if (( task_changes_applied == 0 )); then

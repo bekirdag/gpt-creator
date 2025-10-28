@@ -37,7 +37,9 @@ GC_REPORTS_IDLE_SENTINEL=""
 GC_REPORTS_WATCHDOG_PID=""
 # shellcheck disable=SC2034
 GC_FILTERED_ARGS=()
+# shellcheck disable=SC2034
 GC_LAST_AUTO_COMMIT_HASH=""
+# shellcheck disable=SC2034
 GC_LAST_AUTO_COMMIT_STATUS=""
 # Ensure docker compose commands have adequate timeouts unless caller overrides
 if [[ -n "${GC_DOCKER_COMPOSE_TIMEOUT:-}" ]]; then
@@ -2265,6 +2267,7 @@ gc_record_codex_usage() {
       if (( limit_value > 0 && GC_LAST_CODEX_TOTAL_TOKENS > limit_value )); then
         # shellcheck disable=SC2034
         GC_CODEX_USAGE_LIMIT_REACHED=1
+        # shellcheck disable=SC2034
         GC_CODEX_USAGE_LIMIT_CONFIRMED=1
         if [[ -z "${GC_CODEX_USAGE_LIMIT_MESSAGE:-}" ]]; then
           GC_CODEX_USAGE_LIMIT_MESSAGE="Codex tokens ${GC_LAST_CODEX_TOTAL_TOKENS} exceeded per-task limit ${limit_value}."

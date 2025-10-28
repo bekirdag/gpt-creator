@@ -11920,6 +11920,80 @@ DB_PATH, STORY_SLUG, TASK_INDEX, PROMPT_PATH, CONTEXT_TAIL_PATH, MODEL_NAME, PRO
 TASK_INDEX = int(TASK_INDEX)
 
 
+def _build_doc_entry(path_obj: Path):
+    try:
+        stat = path_obj.stat()
+    except OSError:
+        return None
+    mtime_ns = getattr(stat, "st_mtime_ns", None)
+    if mtime_ns is None:
+        mtime_ns = int(stat.st_mtime * 1_000_000_000)
+    size = int(stat.st_size)
+    try:
+        resolved_str = str(path_obj.resolve())
+    except Exception:
+        resolved_str = str(path_obj)
+    doc_id = "DOC-" + hashlib.sha256(resolved_str.encode("utf-8", "replace")).hexdigest()[:8].upper()
+    existing = documents_store.get(doc_id)
+    if isinstance(existing, dict):
+        try:
+            existing_mtime = int(existing.get("mtime_ns", 0))
+        except Exception:
+            existing_mtime = -1
+        try:
+            existing_size = int(existing.get("size", -1))
+        except Exception:
+            existing_size = -1
+        if existing_mtime == int(mtime_ns) and existing_size == size:
+            entry = existing.copy()
+            entry["doc_id"] = doc_id
+            entry["rel_path"] = entry.get("rel_path") or _relative_path_for_prompt(path_obj)
+            return entry
+    headings = []
+    try:
+        with path_obj.open("r", encoding="utf-8", errors="replace") as handle:
+            for lineno, line in enumerate(handle, start=1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                title = None
+                level = None
+                suffix = path_obj.suffix.lower()
+                if suffix in {".md", ".markdown"}:
+                    match = re.match(r"^(#{1,4})\\s+(.*)$", stripped)
+                    if match:
+                        level = len(match.group(1))
+                        title = match.group(2).strip()
+                if title is None:
+                    match = re.match(r"^((?:\\d+\\.)+\\d*|\\d+|[A-Z][.)]|[IVXLCM]+\\.)\\s+(.*)$", stripped)
+                    if match:
+                        title = match.group(2).strip()
+                        level = level or 2
+                if title:
+                    headings.append({
+                        "title": title,
+                        "line": lineno,
+                        "level": int(level or 1),
+                    })
+                if len(headings) >= 80:
+                    break
+    except Exception:
+        headings = []
+    entry = {
+        "doc_id": doc_id,
+        "path": str(path_obj),
+        "rel_path": _relative_path_for_prompt(path_obj),
+        "mtime_ns": int(mtime_ns),
+        "size": size,
+        "headings": headings,
+    }
+    documents_store[doc_id] = {
+        key: value for key, value in entry.items() if key != "doc_id"
+    }
+    doc_catalog_changed["value"] = True
+    return entry
+
+
 def _load_doc_snippet(path_obj: Path, doc_entry: dict) -> str:
     doc_id = doc_entry.get("doc_id")
     if not doc_id:
@@ -12934,79 +13008,6 @@ def _relative_path_for_prompt(path_obj: Path) -> str:
         except ValueError:
             continue
     return str(path_obj)
-
-def _build_doc_entry(path_obj: Path):
-    try:
-        stat = path_obj.stat()
-    except OSError:
-        return None
-    mtime_ns = getattr(stat, "st_mtime_ns", None)
-    if mtime_ns is None:
-        mtime_ns = int(stat.st_mtime * 1_000_000_000)
-    size = int(stat.st_size)
-    try:
-        resolved_str = str(path_obj.resolve())
-    except Exception:
-        resolved_str = str(path_obj)
-    doc_id = "DOC-" + hashlib.sha256(resolved_str.encode("utf-8", "replace")).hexdigest()[:8].upper()
-    existing = documents_store.get(doc_id)
-    if isinstance(existing, dict):
-        try:
-            existing_mtime = int(existing.get("mtime_ns", 0))
-        except Exception:
-            existing_mtime = -1
-        try:
-            existing_size = int(existing.get("size", -1))
-        except Exception:
-            existing_size = -1
-        if existing_mtime == int(mtime_ns) and existing_size == size:
-            entry = existing.copy()
-            entry["doc_id"] = doc_id
-            entry["rel_path"] = entry.get("rel_path") or _relative_path_for_prompt(path_obj)
-            return entry
-    headings = []
-    try:
-        with path_obj.open("r", encoding="utf-8", errors="replace") as handle:
-            for lineno, line in enumerate(handle, start=1):
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                title = None
-                level = None
-                suffix = path_obj.suffix.lower()
-                if suffix in {".md", ".markdown"}:
-                    match = re.match(r"^(#{1,4})\s+(.*)$", stripped)
-                    if match:
-                        level = len(match.group(1))
-                        title = match.group(2).strip()
-                if title is None:
-                    match = re.match(r"^((?:\d+\.)+\d*|\d+|[A-Z][.)]|[IVXLCM]+\.)\s+(.*)$", stripped)
-                    if match:
-                        title = match.group(2).strip()
-                        level = level or 2
-                if title:
-                    headings.append({
-                        "title": title,
-                        "line": lineno,
-                        "level": int(level or 1),
-                    })
-                if len(headings) >= 80:
-                    break
-    except Exception:
-        headings = []
-    entry = {
-        "doc_id": doc_id,
-        "path": str(path_obj),
-        "rel_path": _relative_path_for_prompt(path_obj),
-        "mtime_ns": int(mtime_ns),
-        "size": size,
-        "headings": headings,
-    }
-    documents_store[doc_id] = {
-        key: value for key, value in entry.items() if key != "doc_id"
-    }
-    doc_catalog_changed["value"] = True
-    return entry
 
 if (not doc_catalog_entries_from_db) and doc_snippets_enabled and (staging_root or project_root_path):
     seen_paths = set()

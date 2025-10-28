@@ -35,9 +35,11 @@ GC_REPORTS_STORE_DIR=""
 GC_REPORTS_ACTIVITY_FILE=""
 GC_REPORTS_IDLE_SENTINEL=""
 GC_REPORTS_WATCHDOG_PID=""
+# shellcheck disable=SC2034
 GC_FILTERED_ARGS=()
 GC_LAST_AUTO_COMMIT_HASH=""
 GC_LAST_AUTO_COMMIT_STATUS=""
+# shellcheck enable=SC2034
 
 # Ensure docker compose commands have adequate timeouts unless caller overrides
 if [[ -n "${GC_DOCKER_COMPOSE_TIMEOUT:-}" ]]; then
@@ -51,7 +53,9 @@ export COMPOSE_HTTP_TIMEOUT DOCKER_CLIENT_TIMEOUT
 : "${GC_DOCKER_HEALTH_TIMEOUT:=10}"
 : "${GC_DOCKER_HEALTH_INTERVAL:=1}"
 : "${GC_PNPM_VERSION:=10.17.1}"
+# shellcheck disable=SC2034
 GC_CODEX_EXEC_TIMEOUT_INITIAL="${GC_CODEX_EXEC_TIMEOUT-}"
+# shellcheck enable=SC2034
 : "${GC_CODEX_EXEC_TIMEOUT:=0}"
 : "${GC_CODEX_EXEC_MAX_DURATION:=900}"
 : "${GC_CODEX_MAX_TURNS:=180}"
@@ -2101,8 +2105,8 @@ gc_record_codex_usage() {
             ;;
           CMDFAIL$'\t'*)
             local rest="${line#CMDFAIL$'\t'}"
-            local repeat_flag total_fail exit_status digest encoded_command encoded_summary
-            IFS=$'\t' read -r repeat_flag total_fail exit_status digest encoded_command encoded_summary <<<"$rest"
+            local repeat_flag total_fail _ digest encoded_command encoded_summary
+            IFS=$'\t' read -r repeat_flag total_fail _ digest encoded_command encoded_summary <<<"$rest"
             local command_text summary_text
             command_text="$(gc_decode_base64 "${encoded_command:-}")"
             summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
@@ -2262,8 +2266,8 @@ gc_record_codex_usage() {
     if [[ "$limit_value" =~ ^[0-9]+$ ]]; then
       limit_value=$((limit_value))
       if (( limit_value > 0 && GC_LAST_CODEX_TOTAL_TOKENS > limit_value )); then
-        GC_CODEX_USAGE_LIMIT_REACHED=1
-        GC_CODEX_USAGE_LIMIT_CONFIRMED=1
+        GC_CODEX_USAGE_LIMIT_REACHED=1 # shellcheck disable=SC2034
+        GC_CODEX_USAGE_LIMIT_CONFIRMED=1 # shellcheck disable=SC2034
         if [[ -z "${GC_CODEX_USAGE_LIMIT_MESSAGE:-}" ]]; then
           GC_CODEX_USAGE_LIMIT_MESSAGE="Codex tokens ${GC_LAST_CODEX_TOTAL_TOKENS} exceeded per-task limit ${limit_value}."
         fi
@@ -2280,11 +2284,11 @@ gc_record_codex_usage() {
       if [[ -n "$tail_info" ]]; then
         local tail_hash tail_b64 turn_hash turn_blocks
         IFS=$'\n' read -r tail_hash tail_b64 turn_hash turn_blocks <<<"$tail_info"
-        [[ -n "$tail_hash" ]] && GC_LAST_CODEX_STDOUT_TAIL_HASH="$tail_hash"
-        [[ -n "$tail_b64" ]] && GC_LAST_CODEX_STDOUT_TAIL_BASE64="$tail_b64"
-        [[ -n "$turn_hash" ]] && GC_LAST_CODEX_TURN_DIFF_HASH="$turn_hash"
+        [[ -n "$tail_hash" ]] && GC_LAST_CODEX_STDOUT_TAIL_HASH="$tail_hash" # shellcheck disable=SC2034
+        [[ -n "$tail_b64" ]] && GC_LAST_CODEX_STDOUT_TAIL_BASE64="$tail_b64" # shellcheck disable=SC2034
+        [[ -n "$turn_hash" ]] && GC_LAST_CODEX_TURN_DIFF_HASH="$turn_hash" # shellcheck disable=SC2034
         if [[ "$turn_blocks" =~ ^[0-9]+$ ]]; then
-          GC_LAST_CODEX_TURN_DIFF_BLOCKS="$turn_blocks"
+          GC_LAST_CODEX_TURN_DIFF_BLOCKS="$turn_blocks" # shellcheck disable=SC2034
         fi
       fi
     fi
@@ -3349,7 +3353,6 @@ gc_refresh_stack_collect_sql() {
   local helper_path
   helper_path="$(gc_clone_python_tool "refresh_stack_collect_sql.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   python3 "$helper_path" "$root"
-}
 }
 
 gc_refresh_stack_exec_mysql() {

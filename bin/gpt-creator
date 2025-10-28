@@ -14159,8 +14159,11 @@ PY
       if [[ "$path" == *.rej ]]; then
         continue
       fi
+      if [[ "$path" == tmp/* ]]; then
+        continue
+      fi
       case "$path" in
-        .gpt-creator/staging/plan/work/runs/*|.gpt-creator/work/*|.gpt-creator/logs/*|.gpt-creator/cache/*|tmp/*|tmp/**)
+        .gpt-creator/staging/plan/work/runs/*|.gpt-creator/work/*|.gpt-creator/logs/*|.gpt-creator/cache/*)
           continue
           ;;
       esac

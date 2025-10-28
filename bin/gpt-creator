@@ -39,7 +39,7 @@ GC_REPORTS_WATCHDOG_PID=""
 GC_FILTERED_ARGS=()
 GC_LAST_AUTO_COMMIT_HASH=""
 GC_LAST_AUTO_COMMIT_STATUS=""
-# shellcheck enable=SC2034
+
 
 # Ensure docker compose commands have adequate timeouts unless caller overrides
 if [[ -n "${GC_DOCKER_COMPOSE_TIMEOUT:-}" ]]; then

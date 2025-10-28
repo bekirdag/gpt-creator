@@ -9,14 +9,17 @@ whenever `gpt-creator scan` runs.
 from __future__ import annotations
 
 import argparse
-import json
 import re
-import sqlite3
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence
+
+try:
+    from .doc_registry import DocRegistry, ExcerptInput, SummaryInput  # type: ignore
+except Exception:  # pragma: no cover
+    from doc_registry import DocRegistry, ExcerptInput, SummaryInput  # type: ignore
 
 STOPWORDS = {
     "the",
@@ -103,27 +106,13 @@ def _generate_keywords(text: str, tags: Sequence[str], limit: int = 12) -> List[
     return keywords[:limit]
 
 
-def _load_sections(conn: sqlite3.Connection, doc_id: str) -> List[sqlite3.Row]:
-    return list(
-        conn.execute(
-            """
-            SELECT section_id, parent_section_id, title, order_index
-            FROM documentation_sections
-            WHERE doc_id = ?
-            ORDER BY order_index
-            """,
-            (doc_id,),
-        )
-    )
-
-
-def _extract_key_points(sections: Sequence[sqlite3.Row], limit: int = 5) -> List[str]:
+def _extract_key_points(sections: Sequence[Dict[str, object]], limit: int = 5) -> List[str]:
     points: List[str] = []
     for row in sections:
-        title = (row["title"] or "").strip()
+        title = (row.get("title") or "").strip()
         if not title:
             continue
-        if row["parent_section_id"] is None:
+        if row.get("parent_section_id") is None:
             # Skip synthetic root.
             continue
         points.append(title)
@@ -144,147 +133,65 @@ def _select_excerpts(paragraphs: Sequence[str], limit: int = 5) -> List[str]:
     return excerpts
 
 
-def _ensure_tables(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS documentation_summaries (
-          doc_id TEXT PRIMARY KEY,
-          summary_short TEXT,
-          summary_long TEXT,
-          key_points_json TEXT,
-          keywords_json TEXT,
-          embedding_id TEXT,
-          last_generated_at TEXT,
-          generator_source TEXT,
-          source_version TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS documentation_excerpts (
-          excerpt_id TEXT PRIMARY KEY,
-          doc_id TEXT NOT NULL,
-          section_id TEXT,
-          content TEXT NOT NULL,
-          justification TEXT,
-          token_length INTEGER,
-          embedding_id TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          source_version TEXT
-        )
-        """
-    )
-
-
 def run_pipeline(project_root: Path, runtime_dir: Path) -> None:
     db_path = _runtime_db_path(runtime_dir)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.row_factory = sqlite3.Row
-        _ensure_tables(conn)
-        docs = conn.execute(
-            """
-            SELECT doc_id, source_path, staging_path, title, tags_json, sha256
-            FROM documentation
-            WHERE status = 'active'
-            """
-        ).fetchall()
-        now = _iso_now()
-        for doc in docs:
-            doc_id = doc["doc_id"]
-            tags = []
-            if doc["tags_json"]:
-                try:
-                    tags = json.loads(doc["tags_json"])
-                except Exception:
-                    tags = []
-            text = _read_text([doc["staging_path"], doc["source_path"]])
-            clean_text = text.strip()
-            if not clean_text:
-                continue
-            paragraphs = _paragraphs(clean_text)
-            preview = " ".join(paragraphs[:3]) if paragraphs else clean_text
-            summary_short = _truncate(clean_text.replace("\n", " "), 300)
-            summary_long = _truncate(preview.replace("\n", " "), 1200)
+    registry = DocRegistry(db_path)
+    docs = registry.fetch_all()
+    doc_ids = [doc["doc_id"] for doc in docs]
+    sections_map = registry.fetch_sections(doc_ids)
+    now = _iso_now()
+    summary_payloads: List[SummaryInput] = []
+    excerpt_payloads: Dict[str, List[ExcerptInput]] = {}
 
-            sections = _load_sections(conn, doc_id)
-            key_points = _extract_key_points(sections)
-            keywords = _generate_keywords(clean_text, tags)
+    for doc in docs:
+        doc_id = doc["doc_id"]
+        text = _read_text([doc.get("staging_path"), doc.get("source_path")])
+        clean_text = text.strip()
+        if not clean_text:
+            continue
+        paragraphs = _paragraphs(clean_text)
+        preview = " ".join(paragraphs[:3]) if paragraphs else clean_text
+        summary_short = _truncate(clean_text.replace("\n", " "), 300)
+        summary_long = _truncate(preview.replace("\n", " "), 1200)
+        sections = sections_map.get(doc_id, [])
+        key_points = _extract_key_points(sections)
+        tags = doc.get("tags") or []
+        keywords = _generate_keywords(clean_text, tags)
+        source_version = doc.get("sha256")
 
-            conn.execute(
-                """
-                INSERT INTO documentation_summaries (
-                  doc_id,
-                  summary_short,
-                  summary_long,
-                  key_points_json,
-                  keywords_json,
-                  embedding_id,
-                  last_generated_at,
-                  generator_source,
-                  source_version
-                )
-                VALUES (?, ?, ?, ?, ?, NULL, ?, 'heuristic', ?)
-                ON CONFLICT(doc_id) DO UPDATE SET
-                  summary_short = excluded.summary_short,
-                  summary_long = excluded.summary_long,
-                  key_points_json = excluded.key_points_json,
-                  keywords_json = excluded.keywords_json,
-                  last_generated_at = excluded.last_generated_at,
-                  generator_source = excluded.generator_source,
-                  source_version = excluded.source_version,
-                  embedding_id = CASE
-                    WHEN documentation_summaries.source_version != excluded.source_version THEN NULL
-                    ELSE documentation_summaries.embedding_id
-                  END
-                """,
-                (
-                    doc_id,
-                    summary_short,
-                    summary_long,
-                    json.dumps(key_points, ensure_ascii=False),
-                    json.dumps(keywords, ensure_ascii=False),
-                    now,
-                    doc["sha256"],
-                ),
+        summary_payloads.append(
+            SummaryInput(
+                doc_id=doc_id,
+                summary_short=summary_short,
+                summary_long=summary_long,
+                key_points=key_points,
+                keywords=keywords,
+                embedding_id=None,
+                last_generated_at=now,
+                generator_source="heuristic",
+                source_version=source_version,
             )
+        )
 
-            conn.execute(
-                "DELETE FROM documentation_excerpts WHERE doc_id = ?",
-                (doc_id,),
+        excerpts = _select_excerpts(paragraphs)
+        excerpt_payloads[doc_id] = [
+            ExcerptInput(
+                excerpt_id=str(uuid.uuid4()),
+                doc_id=doc_id,
+                section_id=None,
+                content=content,
+                justification=None,
+                token_length=_estimate_tokens(content),
+                embedding_id=None,
+                created_at=now,
+                updated_at=now,
+                source_version=source_version,
             )
-            excerpts = _select_excerpts(paragraphs)
-            for content in excerpts:
-                excerpt_id = str(uuid.uuid4())
-                conn.execute(
-                    """
-                    INSERT INTO documentation_excerpts (
-                      excerpt_id,
-                      doc_id,
-                      section_id,
-                      content,
-                      justification,
-                      token_length,
-                      embedding_id,
-                      created_at,
-                      updated_at,
-                      source_version
-                    )
-                    VALUES (?, ?, NULL, ?, NULL, ?, NULL, ?, ?, ?)
-                    """,
-                    (
-                        excerpt_id,
-                        doc_id,
-                        content,
-                        _estimate_tokens(content),
-                        now,
-                        now,
-                        doc["sha256"],
-                    ),
-                )
-        conn.commit()
+            for content in excerpts
+        ]
+
+    registry.upsert_summaries(summary_payloads)
+    registry.replace_excerpts_bulk(excerpt_payloads)
 
 
 def _build_parser() -> argparse.ArgumentParser:

@@ -6,6 +6,7 @@ if ! ROOT_DIR="$(cd "${ROOT_DIR}" && pwd)"; then
   echo "[build] Failed to resolve project root: ${1:-.}" >&2
   exit 1
 fi
+CLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 log() {
   printf "[build] %s\n" "$*" >&2
@@ -27,26 +28,47 @@ ci_best_effort="${CI_BUILD_BEST_EFFORT:-0}"
 
 cd "$ROOT_DIR"
 
+gc_clone_python_tool() {
+  local script_name="${1:?python script name required}"
+  local root="${2:-$ROOT_DIR}"
+  local cli_root="${CLI_ROOT:-$ROOT_DIR}"
+
+  if [[ -z "$root" ]]; then
+    log "Unable to determine project root while preparing ${script_name}"
+    return 1
+  fi
+
+  local source_path="${cli_root}/scripts/python/${script_name}"
+  if [[ ! -f "$source_path" ]]; then
+    log "Python helper missing at ${source_path}"
+    return 1
+  fi
+
+  local target_dir="${root}/${GC_WORK_DIR_NAME:-.gpt-creator}/shims/python"
+  local target_path="${target_dir}/${script_name}"
+  if [[ ! -d "$target_dir" ]]; then
+    mkdir -p "$target_dir" || {
+      log "Failed to create ${target_dir}"
+      return 1
+    }
+  fi
+  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
+    cp "$source_path" "$target_path" || {
+      log "Failed to copy ${script_name} helper"
+      return 1
+    }
+  fi
+  printf '%s\n' "$target_path"
+}
+
 has_package_script() {
   local script="$1"
   if [[ ! -f package.json ]]; then
     return 1
   fi
-  python3 - <<'PY' "$script" 2>/dev/null
-import json
-import sys
-
-script_name = sys.argv[1]
-try:
-    with open("package.json", "r", encoding="utf-8") as handle:
-        pkg = json.load(handle)
-    scripts = pkg.get("scripts") or {}
-    if script_name in scripts and scripts[script_name]:
-        sys.exit(0)
-except Exception:
-    pass
-sys.exit(1)
-PY
+  local helper_path
+  helper_path="$(gc_clone_python_tool "has_package_script.py" "$ROOT_DIR")" || return 1
+  python3 "$helper_path" "$script"
 }
 
 if [[ -x "scripts/build.sh.local" ]]; then

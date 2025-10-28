@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CLI_ROOT="$ROOT_DIR"
 
 # Load shared constants if present
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then
@@ -19,35 +20,42 @@ fi
 : "${GC_STAGING_DIR:=${GC_STATE_DIR}/staging}"
 : "${GC_DOCKER_DIR:=${PROJECT_DIR}/docker}"
 : "${GC_COMPOSE_FILE:=${GC_DOCKER_DIR}/docker-compose.yml}"
+: "${GC_WORK_DIR_NAME:=.gpt-creator}"
 
 info(){ printf "[%s] %s\n" "$GC_NAME" "$*"; }
 warn(){ printf "\033[33m[%s][WARN]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 err(){  printf "\033[31m[%s][ERROR]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 
-humanize_name() {
-  python3 - <<'PY' "${1:-}"
-import pathlib
-import re
-import sys
+gc_clone_python_tool() {
+  local script_name="${1:?python script name required}"
+  local root="${2:-${PROJECT_DIR:-$ROOT_DIR}}"
+  local cli_root="${GC_ROOT:-${CLI_ROOT:-$ROOT_DIR}}"
 
-raw = sys.argv[1] if len(sys.argv) > 1 else ''
-if raw:
-    raw = pathlib.Path(raw).name
-raw = re.sub(r'[_\-]+', ' ', raw).strip()
-if not raw:
-    print('Project')
-else:
-    words = []
-    for token in raw.split():
-        if len(token) <= 3:
-            words.append(token.upper())
-        elif token.isupper():
-            words.append(token)
-        else:
-            words.append(token.capitalize())
-    print(' '.join(words))
-PY
+  if [[ -z "$root" ]]; then
+    die "Unable to determine project root while preparing ${script_name}"
+  fi
+
+  local source_path="${cli_root}/scripts/python/${script_name}"
+  if [[ ! -f "$source_path" ]]; then
+    die "Python helper missing at ${source_path}"
+  fi
+
+  local target_dir="${root}/${GC_WORK_DIR_NAME}/shims/python"
+  local target_path="${target_dir}/${script_name}"
+  if [[ ! -d "$target_dir" ]]; then
+    mkdir -p "$target_dir" || die "Failed to create ${target_dir}"
+  fi
+  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
+    cp "$source_path" "$target_path" || die "Failed to copy ${script_name} helper"
+  fi
+  printf '%s\n' "$target_path"
+}
+
+humanize_name() {
+  local helper_path
+  helper_path="$(gc_clone_python_tool "humanize_name.py" "${PROJECT_DIR:-$ROOT_DIR}")" || return 1
+  python3 "$helper_path" "${1:-}"
 }
 
 if [[ -n "${GC_PROJECT_TITLE:-}" ]]; then

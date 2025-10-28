@@ -15,6 +15,39 @@ CJT_SDS_CHUNKS_LIST=""
 CJT_PDR_PATH=""
 CJT_SQL_PATH=""
 
+cjt::clone_python_tool() {
+  local script_name="${1:?python script name required}"
+  local project_root="${2:-${CJT_PROJECT_ROOT:-${PROJECT_DIR:-$PWD}}}"
+
+  if declare -f gc_clone_python_tool >/dev/null 2>&1; then
+    gc_clone_python_tool "$script_name" "$project_root"
+    return
+  fi
+
+  local cli_root
+  if [[ -n "${CJT_ROOT_DIR:-}" ]]; then
+    cli_root="$CJT_ROOT_DIR"
+  else
+    cli_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+  fi
+
+  local source_path="${cli_root}/scripts/python/${script_name}"
+  if [[ ! -f "$source_path" ]]; then
+    cjt::die "Python helper missing at ${source_path}"
+  fi
+
+  local work_dir_name="${GC_WORK_DIR_NAME:-.gpt-creator}"
+  local target_dir="${project_root%/}/${work_dir_name}/shims/python"
+  local target_path="${target_dir}/${script_name}"
+  if [[ ! -d "$target_dir" ]]; then
+    mkdir -p "$target_dir" || cjt::die "Failed to create ${target_dir}"
+  fi
+  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
+    cp "$source_path" "$target_path" || cjt::die "Failed to copy ${script_name} helper"
+  fi
+  printf '%s\n' "$target_path"
+}
+
 cjt::log()   { printf '\033[36m[create-jira-tasks]\033[0m %s\n' "$*"; }
 cjt::warn()  { printf '\033[33m[create-jira-tasks][WARN]\033[0m %s\n' "$*"; }
 cjt::err()   { printf '\033[31m[create-jira-tasks][ERROR]\033[0m %s\n' "$*" >&2; }
@@ -39,147 +72,51 @@ JSON
 
 cjt::state_stage_is_completed() {
   local stage="$1"
-  python3 - "$CJT_STATE_FILE" "$stage" <<'PY'
-import json, sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-stage = sys.argv[2]
-data = json.loads(path.read_text(encoding='utf-8'))
-status = (data.get(stage) or {}).get('status')
-sys.exit(0 if status == 'completed' else 1)
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "state_stage_is_completed.py")" || return 1
+  python3 "$helper_path" "$CJT_STATE_FILE" "$stage"
 }
 
 cjt::state_mark_stage_completed() {
   local stage="$1"
-  python3 - "$CJT_STATE_FILE" "$stage" <<'PY'
-import json, sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-stage = sys.argv[2]
-data = json.loads(path.read_text(encoding='utf-8'))
-section = data.setdefault(stage, {})
-section['status'] = 'completed'
-path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "state_mark_stage_completed.py")" || return 1
+  python3 "$helper_path" "$CJT_STATE_FILE" "$stage"
 }
 
 cjt::state_mark_stage_pending() {
   local stage="$1"
-  python3 - "$CJT_STATE_FILE" "$stage" <<'PY'
-import json, sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-stage = sys.argv[2]
-data = json.loads(path.read_text(encoding='utf-8'))
-section = data.setdefault(stage, {})
-if section.get('status') != 'pending':
-    section['status'] = 'pending'
-    path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "state_mark_stage_pending.py")" || return 1
+  python3 "$helper_path" "$CJT_STATE_FILE" "$stage"
 }
 
 cjt::state_story_is_completed() {
   local section="$1" slug="$2" file_path="$3"
-  python3 - "$CJT_STATE_FILE" "$section" "$slug" "$file_path" <<'PY'
-import json, sys
-from pathlib import Path
-
-state_path = Path(sys.argv[1])
-section = sys.argv[2]
-slug = sys.argv[3]
-target = Path(sys.argv[4])
-data = json.loads(state_path.read_text(encoding='utf-8'))
-completed = set(data.get(section, {}).get('completed', []))
-if slug in completed and not target.exists():
-    completed.discard(slug)
-    sect = data.setdefault(section, {})
-    sect['completed'] = sorted(completed)
-    sect['status'] = 'pending'
-    state_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-    sys.exit(1)
-if slug in completed:
-    sys.exit(0)
-sect = data.setdefault(section, {})
-if sect.get('status') == 'completed':
-    sect['status'] = 'pending'
-    state_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-sys.exit(1)
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "state_story_is_completed.py")" || return 1
+  python3 "$helper_path" "$CJT_STATE_FILE" "$section" "$slug" "$file_path"
 }
 
 cjt::state_mark_story_completed() {
   local section="$1" slug="$2"
-  python3 - "$CJT_STATE_FILE" "$section" "$slug" <<'PY'
-import json, sys
-from pathlib import Path
-
-state_path = Path(sys.argv[1])
-section = sys.argv[2]
-slug = sys.argv[3]
-data = json.loads(state_path.read_text(encoding='utf-8'))
-completed = set(data.setdefault(section, {}).setdefault('completed', []))
-completed.add(slug)
-data[section]['completed'] = sorted(completed)
-state_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "state_mark_story_completed.py")" || return 1
+  python3 "$helper_path" "$CJT_STATE_FILE" "$section" "$slug"
 }
 
 cjt::state_get_refine_progress() {
   local slug="$1" total="$2"
-  python3 - "$CJT_STATE_FILE" "$slug" "$total" <<'PY'
-import json, sys
-from pathlib import Path
-
-state_path = Path(sys.argv[1])
-slug = sys.argv[2]
-total = int(sys.argv[3])
-data = json.loads(state_path.read_text(encoding='utf-8'))
-stories = data.setdefault('refine', {}).setdefault('stories', {})
-record = stories.get(slug)
-if not record:
-    print(0)
-    sys.exit(0)
-if record.get('status') == 'done':
-    print('done')
-    sys.exit(0)
-next_task = int(record.get('next_task', 0))
-if next_task >= total:
-    record['status'] = 'done'
-    record.pop('next_task', None)
-    stories[slug] = record
-    state_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-    print('done')
-else:
-    print(next_task)
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "state_get_refine_progress.py")" || return 1
+  python3 "$helper_path" "$CJT_STATE_FILE" "$slug" "$total"
 }
 
 cjt::state_update_refine_progress() {
   local slug="$1" next_task="$2" total="$3"
-  python3 - "$CJT_STATE_FILE" "$slug" "$next_task" "$total" <<'PY'
-import json, sys
-from pathlib import Path
-
-state_path = Path(sys.argv[1])
-slug = sys.argv[2]
-next_task = int(sys.argv[3])
-total = int(sys.argv[4])
-data = json.loads(state_path.read_text(encoding='utf-8'))
-stories = data.setdefault('refine', {}).setdefault('stories', {})
-record = stories.setdefault(slug, {})
-if next_task >= total:
-    record['status'] = 'done'
-    record.pop('next_task', None)
-else:
-    record['status'] = 'in-progress'
-    record['next_task'] = next_task
-stories[slug] = record
-state_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "state_update_refine_progress.py")" || return 1
+  python3 "$helper_path" "$CJT_STATE_FILE" "$slug" "$next_task" "$total"
 }
 
 cjt::abs_path() {
@@ -187,11 +124,9 @@ cjt::abs_path() {
   if command -v realpath >/dev/null 2>&1; then
     realpath "$path"
   else
-    python3 - <<'PY' "$path"
-import pathlib, sys
-target = pathlib.Path(sys.argv[1] or '.')
-print(target.expanduser().resolve())
-PY
+    local helper_path
+    helper_path="$(cjt::clone_python_tool "abs_path.py")" || return 1
+    python3 "$helper_path" "$path"
   fi
 }
 
@@ -205,32 +140,11 @@ cjt::slugify() {
 
 cjt::derive_project_title() {
   local input="${1:-}"
-  python3 - <<'PY' "$input"
-import pathlib
-import re
-import sys
-
-raw = sys.argv[1] if len(sys.argv) > 1 else ''
-if raw:
-    path = pathlib.Path(raw)
-    if path.exists():
-        raw = path.name
-raw = re.sub(r'[_\-]+', ' ', raw)
-raw = re.sub(r'\s+', ' ', raw).strip()
-if not raw:
-    print("Project")
-else:
-    words = []
-    for token in raw.split():
-        if len(token) <= 3:
-            words.append(token.upper())
-        elif token.isupper():
-            words.append(token)
-        else:
-            words.append(token.capitalize())
-    print(' '.join(words))
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "derive_project_title.py")" || return 1
+  python3 "$helper_path" "$input"
 }
+
 
 cjt::init() {
   CJT_PROJECT_ROOT="${1:?project root required}"
@@ -357,144 +271,18 @@ cjt::collect_source_files() {
 cjt::sanitize_doc_to() {
   local source_path="${1:?source path required}"
   local dest_path="${2:?dest path required}"
-  python3 - "$source_path" "$dest_path" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-source = Path(sys.argv[1])
-dest = Path(sys.argv[2])
-try:
-    text = source.read_text(encoding='utf-8', errors='ignore')
-except Exception:
-    dest.write_text('', encoding='utf-8')
-    raise SystemExit(0)
-
-text = text.replace('\r\n', '\n').replace('\r', '\n')
-
-if text.startswith('---\n'):
-    end_idx = text.find('\n---', 4)
-    if 0 <= end_idx <= 5000:
-        text = text[end_idx + 4 :]
-
-CODE_BLOCK_MAX_LINES = 120
-CODE_BLOCK_MAX_CHARS = 4000
-
-lines = text.split('\n')
-cleaned = []
-code_lines = []
-in_code_block = False
-code_fence = ''
-code_header = ''
-skipping_toc = False
-toc_seen = False
-
-def flush_code_block() -> None:
-    if not code_lines:
-        return
-    body = '\n'.join(code_lines)
-    if CODE_BLOCK_MAX_LINES > 0:
-        body_lines = body.splitlines()
-        if len(body_lines) > CODE_BLOCK_MAX_LINES:
-            body_lines = body_lines[:CODE_BLOCK_MAX_LINES]
-            body_lines.append('... (code block truncated)')
-        body = '\n'.join(body_lines)
-    if CODE_BLOCK_MAX_CHARS > 0 and len(body) > CODE_BLOCK_MAX_CHARS:
-        body = body[:CODE_BLOCK_MAX_CHARS].rstrip() + '\n... (code block truncated)'
-    cleaned.append(code_header or '```')
-    cleaned.append(body)
-    cleaned.append(code_header or '```')
-
-for raw_line in lines:
-    line = raw_line.replace('\t', '  ')
-    stripped = line.strip()
-    lower = stripped.lower()
-
-    if in_code_block:
-        if stripped.startswith(code_fence):
-            flush_code_block()
-            code_lines = []
-            in_code_block = False
-            code_fence = ''
-            code_header = ''
-        else:
-            code_lines.append(raw_line)
-        continue
-
-    if stripped.startswith('<!--') and stripped.endswith('-->'):
-        continue
-    if stripped.startswith('<!--'):
-        continue
-    if stripped.endswith('-->'):
-        continue
-
-    if stripped.startswith('```') or stripped.startswith('~~~'):
-        in_code_block = True
-        code_fence = stripped[:3]
-        code_header = stripped if len(stripped) > 3 else code_fence
-        code_lines = []
-        continue
-
-    if skipping_toc:
-        if not stripped or stripped.startswith('#'):
-            skipping_toc = False
-        elif re.match(r'^(\s*[-*+]\s|\s*\d+\.\s)', stripped) or '(#' in stripped:
-            continue
-        else:
-            skipping_toc = False
-
-    if re.match(r'^#{1,6}\s+(table of contents|contents)\b', lower):
-        skipping_toc = True
-        toc_seen = True
-        continue
-    if not toc_seen and stripped.startswith('- [') and '(#' in stripped:
-        continue
-
-    if not stripped:
-        if cleaned and cleaned[-1] == '':
-            continue
-        cleaned.append('')
-        continue
-
-    if len(stripped) > 800:
-        continue
-
-    if re.fullmatch(r'[-=_*]{4,}', stripped):
-        continue
-
-    cleaned.append(stripped)
-
-if in_code_block and code_lines:
-    flush_code_block()
-
-clean_text = '\n'.join(cleaned).strip()
-clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
-dest.write_text(clean_text + ('\n' if clean_text else ''), encoding='utf-8')
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "sanitize_doc_to.py")" || return 1
+  python3 "$helper_path" "$source_path" "$dest_path"
 }
 
 cjt::append_file_with_char_limit() {
   local source_path="${1:?source path required}"
   local dest_path="${2:?destination path required}"
   local max_chars="${3:-0}"
-  python3 - "$source_path" "$dest_path" "$max_chars" <<'PY'
-import sys
-from pathlib import Path
-
-src = Path(sys.argv[1])
-dest = Path(sys.argv[2])
-max_chars = int(sys.argv[3])
-if not src.exists():
-    text = ''
-else:
-    text = src.read_text(encoding='utf-8', errors='ignore')
-if max_chars > 0 and len(text) > max_chars:
-    text = text[:max_chars].rstrip() + "\n... (truncated; see source for full details)\n"
-if text and not text.endswith('\n'):
-    text += '\n'
-with dest.open('a', encoding='utf-8') as fh:
-    fh.write(text)
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "append_file_with_char_limit.py")" || return 1
+  python3 "$helper_path" "$source_path" "$dest_path" "$max_chars"
 }
 
 cjt::append_file_with_line_limit() {
@@ -502,318 +290,39 @@ cjt::append_file_with_line_limit() {
   local dest_path="${2:?destination path required}"
   local max_lines="${3:-0}"
   local max_chars="${4:-0}"
-  python3 - "$source_path" "$dest_path" "$max_lines" "$max_chars" <<'PY'
-import sys
-from pathlib import Path
-
-src = Path(sys.argv[1])
-dest = Path(sys.argv[2])
-max_lines = int(sys.argv[3])
-max_chars = int(sys.argv[4])
-if not src.exists():
-    text = ''
-else:
-    text = src.read_text(encoding='utf-8', errors='ignore')
-lines = text.splitlines()
-truncated = False
-if max_lines > 0 and len(lines) > max_lines:
-    lines = lines[:max_lines]
-    truncated = True
-snippet = '\n'.join(lines)
-if max_chars > 0 and len(snippet) > max_chars:
-    snippet = snippet[:max_chars].rstrip()
-    truncated = True
-if snippet and not snippet.endswith('\n'):
-    snippet += '\n'
-with dest.open('a', encoding='utf-8') as fh:
-    fh.write(snippet)
-    if truncated:
-        fh.write("... (truncated; see consolidated context for more)\n\n")
-    elif snippet:
-        fh.write('\n')
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "append_file_with_line_limit.py")" || return 1
+  python3 "$helper_path" "$source_path" "$dest_path" "$max_lines" "$max_chars"
 }
+
+
 
 cjt::filter_context_boilerplate() {
   local source_path="${1:?source path required}"
   local dest_path="${2:?destination path required}"
   local cache_path="${3:?cache path required}"
-  python3 - "$source_path" "$dest_path" "$cache_path" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-source = Path(sys.argv[1])
-dest = Path(sys.argv[2])
-cache_path = Path(sys.argv[3])
-
-if not source.exists():
-    dest.write_text('', encoding='utf-8')
-    raise SystemExit(0)
-
-try:
-    text = source.read_text(encoding='utf-8', errors='ignore')
-except Exception:
-    dest.write_text('', encoding='utf-8')
-    raise SystemExit(0)
-
-seen = set()
-if cache_path.exists():
-    try:
-        seen = {
-            line.strip()
-            for line in cache_path.read_text(encoding='utf-8', errors='ignore').splitlines()
-            if line.strip()
-        }
-    except Exception:
-        seen = set()
-
-def iter_paragraphs(blob: str):
-    lines = []
-    for raw_line in blob.splitlines():
-        if raw_line.strip():
-            lines.append(raw_line)
-        else:
-            if lines:
-                yield lines
-                lines = []
-    if lines:
-        yield lines
-
-def signature(lines):
-    if not lines:
-        return None
-    first_line = lines[0].lstrip()
-    if first_line.startswith('#'):
-        return None
-    normalized = ' '.join(part.strip().lower() for part in lines if part.strip())
-    normalized = re.sub(r'\s+', ' ', normalized).strip()
-    if len(normalized) < 60:
-        return None
-    return normalized[:480]
-
-paragraphs = list(iter_paragraphs(text))
-filtered = []
-added_signatures = set()
-
-for lines in paragraphs:
-    sig = signature(lines)
-    if sig and sig in seen:
-        continue
-    filtered.append('\n'.join(lines).strip())
-    if sig:
-        seen.add(sig)
-        added_signatures.add(sig)
-
-if not filtered and paragraphs:
-    fallback = '\n'.join(paragraphs[0]).strip()
-    if fallback:
-        filtered.append(fallback)
-        sig = signature(paragraphs[0])
-        if sig:
-            seen.add(sig)
-            added_signatures.add(sig)
-
-output = '\n\n'.join(filtered).strip()
-if output:
-    output += '\n'
-dest.write_text(output, encoding='utf-8')
-
-if seen:
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text('\n'.join(sorted(seen)) + '\n', encoding='utf-8')
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "filter_context_boilerplate.py")" || return 1
+  python3 "$helper_path" "$source_path" "$dest_path" "$cache_path"
 }
+
+
 
 cjt::chunk_doc_by_headings() {
   local source_file="${1:?source file required}"
   local chunk_dir="${2:?chunk directory required}"
   local out_list="${3:?chunk list file required}"
-  python3 - <<'PY' "$source_file" "$chunk_dir" "$out_list"
-import re
-import sys
-from pathlib import Path
-
-
-def main(source_path: Path, chunk_dir: Path, out_list: Path) -> None:
-    text = source_path.read_text(encoding='utf-8', errors='ignore')
-    lines = text.splitlines()
-
-    chunk_dir.mkdir(parents=True, exist_ok=True)
-    chunks = []
-
-    heading_re = re.compile(r'^(#+)\s*(.+)$')
-    current = []
-    current_heading = 'Introduction'
-    current_label = ''
-    index = 0
-
-    def flush() -> None:
-        nonlocal index, current
-        nonlocal current_heading, current_label
-        if not current:
-            return
-        index += 1
-        chunk_path = chunk_dir / f"chunk_{index:03d}.md"
-        chunk_path.write_text('\n'.join(current).strip() + '\n', encoding='utf-8')
-        chunks.append((str(chunk_path), current_label, current_heading))
-        current = []
-
-    for line in lines:
-        match = heading_re.match(line)
-        if match:
-            flush()
-            heading_text = match.group(2).strip()
-            label_match = re.match(r'((?:\d+\.)*\d+)', heading_text)
-            current_label = label_match.group(1) if label_match else ''
-            current_heading = heading_text
-            current = [line]
-        else:
-            current.append(line)
-
-    flush()
-
-    if not chunks:
-        chunk_path = chunk_dir / "chunk_001.md"
-        chunk_path.write_text(text, encoding='utf-8')
-        chunks.append((str(chunk_path), '', 'Full Document'))
-
-    out_lines = ["|".join(part.replace('\n', ' ').strip() for part in chunk) for chunk in chunks]
-    out_list.write_text('\n'.join(out_lines) + ('\n' if out_lines else ''), encoding='utf-8')
-
-
-if __name__ == '__main__':
-    main(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]))
-
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "chunk_doc_by_headings.py")" || return 1
+  python3 "$helper_path" "$source_file" "$chunk_dir" "$out_list"
 }
 
 cjt::build_epic_context_summary() {
   local source_path="${1:?source context required}"
   local dest_path="${2:?destination path required}"
-  python3 - "$source_path" "$dest_path" <<'PY'
-import os
-import re
-import sys
-from pathlib import Path
-
-source = Path(sys.argv[1])
-dest = Path(sys.argv[2])
-
-def parse_int(name: str, default: int) -> int:
-    try:
-        value = int(os.environ.get(name, default))
-    except Exception:
-        return default
-    return value
-
-section_limit = parse_int("CJT_EPIC_CONTEXT_SECTION_LIMIT", 6)
-snippet_char_limit = parse_int("CJT_EPIC_CONTEXT_SECTION_CHAR_LIMIT", 900)
-total_char_limit = parse_int("CJT_EPIC_CONTEXT_TOTAL_CHAR_LIMIT", 4500)
-
-if not source.exists():
-    dest.write_text("", encoding="utf-8")
-    raise SystemExit(0)
-
-raw = source.read_text(encoding="utf-8", errors="ignore")
-lines = raw.splitlines()
-
-sections = []
-current_title = None
-current_lines = []
-
-for line in lines:
-    if line.startswith("## "):
-        if current_title is not None:
-            body = "\n".join(current_lines).strip()
-            if body:
-                sections.append((current_title, body))
-        current_title = line[3:].strip() or "Section"
-        current_lines = []
-        continue
-    if line.startswith("# "):
-        continue
-    if current_title is None:
-        continue
-    current_lines.append(line)
-
-if current_title is not None:
-    body = "\n".join(current_lines).strip()
-    if body:
-        sections.append((current_title, body))
-
-filtered_sections = []
-for title, body in sections:
-    lowered = title.strip().lower()
-    if lowered.startswith("documentation library") or lowered.startswith("documentation table of contents"):
-        continue
-    filtered_sections.append((title, body))
-sections = filtered_sections
-
-if not sections:
-    trimmed = raw.strip()
-    if total_char_limit > 0 and len(trimmed) > total_char_limit:
-        trimmed = trimmed[: total_char_limit].rstrip() + "\n... (truncated; consult consolidated context for full details)"
-    dest.write_text(trimmed + ("\n" if trimmed else ""), encoding="utf-8")
-    raise SystemExit(0)
-
-stopwords = {
-    "the", "and", "for", "with", "from", "that", "this", "system", "user", "story",
-    "should", "will", "must", "allow", "support", "able", "data", "api", "admin",
-    "project", "documentation", "context", "section"
-}
-token_re = re.compile(r"[a-z0-9][a-z0-9\-_/]{2,}")
-
-scored = []
-for index, (title, body) in enumerate(sections):
-    tokens = {token.strip("-_/") for token in token_re.findall(body.lower()) if len(token) > 3}
-    keywords = {token for token in tokens if token and token not in stopwords}
-    unique_score = len(keywords)
-    length_score = min(len(body), 2000)
-    scored.append((unique_score, length_score, index, title, body))
-
-scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
-
-selected = []
-total_chars = 0
-remaining_sections = len(scored) if section_limit <= 0 else min(section_limit, len(scored))
-
-for unique_score, length_score, index, title, body in scored:
-    if remaining_sections == 0:
-        break
-    snippet = body
-    if snippet_char_limit > 0 and len(snippet) > snippet_char_limit:
-        snippet = snippet[:snippet_char_limit].rstrip() + "\n... (truncated; consult consolidated context for full details)"
-    snippet_len = len(snippet)
-    if total_char_limit > 0 and total_chars + snippet_len > total_char_limit:
-        allowance = total_char_limit - total_chars
-        if allowance <= 0:
-            break
-        snippet = snippet[:allowance].rstrip()
-        if snippet:
-            snippet += "\n... (truncated; consult consolidated context for full details)"
-            snippet_len = len(snippet)
-        else:
-            break
-    selected.append((title, snippet))
-    total_chars += snippet_len
-    remaining_sections -= 1
-
-if not selected:
-    fallback = scored[0][4]
-    if total_char_limit > 0 and len(fallback) > total_char_limit:
-        fallback = fallback[: total_char_limit].rstrip() + "\n... (truncated; consult consolidated context for full details)"
-    dest.write_text(fallback + ("\n" if fallback else ""), encoding="utf-8")
-    raise SystemExit(0)
-
-lines_out = []
-for title, snippet in selected:
-    lines_out.append(f"### {title}")
-    lines_out.append(snippet)
-    lines_out.append("")
-
-dest.write_text("\n".join(lines_out), encoding="utf-8")
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "build_epic_context_summary.py")" || return 1
+  python3 "$helper_path" "$source_path" "$dest_path"
 }
 
 cjt::render_context_snippet() {
@@ -822,277 +331,9 @@ cjt::render_context_snippet() {
   local catalog_path="${3:-}"
   local library_path="${4:-}"
   local index_path="${5:-}"
-  python3 - "$manifest_path" "$output_path" "$catalog_path" "$library_path" "$index_path" <<'PY'
-import json
-import os
-import sys
-from pathlib import Path
-from typing import Dict, List, Tuple
-
-manifest_path = Path(sys.argv[1])
-output_path = Path(sys.argv[2])
-catalog_path = Path(sys.argv[3]).expanduser() if len(sys.argv) > 3 and sys.argv[3] else None
-library_path = Path(sys.argv[4]).expanduser() if len(sys.argv) > 4 and sys.argv[4] else None
-index_path = Path(sys.argv[5]).expanduser() if len(sys.argv) > 5 and sys.argv[5] else None
-
-def parse_int(env: str, default: int) -> int:
-    try:
-        return int(os.environ.get(env, default))
-    except Exception:
-        return default
-
-DOC_LIBRARY_LINES = parse_int("CJT_DOC_LIBRARY_SECTION_LINES", 48)
-DOC_LIBRARY_CHAR_LIMIT = parse_int("CJT_DOC_LIBRARY_SECTION_CHAR_LIMIT", 2200)
-DOC_INDEX_LINES = parse_int("CJT_DOC_INDEX_SECTION_LINES", 72)
-DOC_INDEX_CHAR_LIMIT = parse_int("CJT_DOC_INDEX_SECTION_CHAR_LIMIT", 2600)
-DOC_HEADINGS_LIMIT = parse_int("CJT_DOC_HEADINGS_LIMIT", 8)
-DOC_EXCERPT_CHAR_LIMIT = parse_int("CJT_DOC_EXCERPT_CHAR_LIMIT", 900)
-DOC_EXCERPT_PARAGRAPH_LIMIT = parse_int("CJT_DOC_EXCERPT_PARAGRAPH_LIMIT", 5)
-
-# Support legacy environment knobs for snippet sizing.
-legacy_lines = os.environ.get("CJT_CONTEXT_SNIPPET_LINES")
-if legacy_lines and "CJT_DOC_EXCERPT_PARAGRAPH_LIMIT" not in os.environ:
-    try:
-        DOC_EXCERPT_PARAGRAPH_LIMIT = int(legacy_lines)
-    except Exception:
-        pass
-legacy_chars = os.environ.get("CJT_CONTEXT_SNIPPET_CHAR_LIMIT")
-if legacy_chars and "CJT_DOC_EXCERPT_CHAR_LIMIT" not in os.environ:
-    try:
-        DOC_EXCERPT_CHAR_LIMIT = int(legacy_chars)
-    except Exception:
-        pass
-
-def limited_section(path: Path, max_lines: int, max_chars: int, notice: str) -> List[str]:
-    if not path or not path.exists():
-        return []
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except Exception:
-        return []
-    lines = raw.splitlines()
-    truncated = False
-    if max_lines > 0 and len(lines) > max_lines:
-        lines = lines[:max_lines]
-        truncated = True
-    joined = "\n".join(lines)
-    if max_chars > 0 and len(joined) > max_chars:
-        joined = joined[:max_chars].rstrip()
-        truncated = True
-    section_lines = joined.splitlines()
-    if truncated and notice:
-        section_lines.append(notice)
-    return section_lines
-
-def normalise_key(text: str) -> str:
-    return text.replace("\\", "/").strip().lower()
-
-def build_excerpt(text: str) -> Tuple[str, bool]:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    blocks: List[str] = []
-    current: List[str] = []
-    for raw_line in text.split("\n"):
-        stripped = raw_line.strip()
-        if stripped:
-            current.append(stripped)
-        elif current:
-            blocks.append(" ".join(current))
-            current = []
-    if current:
-        blocks.append(" ".join(current))
-    if not blocks:
-        fallback = " ".join(text.split())
-        if DOC_EXCERPT_CHAR_LIMIT > 0 and len(fallback) > DOC_EXCERPT_CHAR_LIMIT:
-            return fallback[:DOC_EXCERPT_CHAR_LIMIT].rstrip() + "…", True
-        return fallback, False
-    excerpt_parts: List[str] = []
-    total_chars = 0
-    truncated = False
-    for block in blocks:
-        if not block:
-            continue
-        candidate = block
-        block_len = len(candidate)
-        if DOC_EXCERPT_CHAR_LIMIT > 0 and total_chars + block_len > DOC_EXCERPT_CHAR_LIMIT:
-            allowance = DOC_EXCERPT_CHAR_LIMIT - total_chars
-            if allowance > 0:
-                candidate = candidate[:allowance].rstrip()
-                if candidate:
-                    candidate += "…"
-                    excerpt_parts.append(candidate)
-            truncated = True
-            break
-        excerpt_parts.append(candidate)
-        total_chars += block_len
-        if DOC_EXCERPT_PARAGRAPH_LIMIT > 0 and len(excerpt_parts) >= DOC_EXCERPT_PARAGRAPH_LIMIT:
-            truncated = True
-            break
-    if not excerpt_parts:
-        return "", truncated
-    return "\n".join(excerpt_parts), truncated
-
-def load_manifest(path: Path) -> List[Tuple[str, str]]:
-    entries: List[Tuple[str, str]] = []
-    if not path.exists():
-        return entries
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        if not raw_line.strip():
-            continue
-        if "\t" in raw_line:
-            original, cleaned = raw_line.split("\t", 1)
-        else:
-            original, cleaned = raw_line, ""
-        entries.append((original.strip(), cleaned.strip()))
-    return entries
-
-manifest_entries = load_manifest(manifest_path)
-
-meta_lookup: Dict[str, Dict] = {}
-if catalog_path and catalog_path.exists():
-    try:
-        catalog_raw = catalog_path.read_text(encoding="utf-8")
-        catalog_data = json.loads(catalog_raw) if catalog_raw.strip() else {}
-    except Exception:
-        catalog_data = {}
-    documents = catalog_data.get("documents", {})
-    for doc_id, payload in documents.items():
-        if not isinstance(payload, dict):
-            continue
-        meta = {
-            "doc_id": doc_id,
-            "path": str(payload.get("path") or ""),
-            "rel_path": str(payload.get("rel_path") or ""),
-            "title": str(payload.get("title") or ""),
-            "tags": list(payload.get("tags") or []),
-            "headings": list(payload.get("headings") or []),
-        }
-        for key in [
-            meta["path"],
-            meta["rel_path"],
-            Path(meta["path"]).name if meta["path"] else "",
-            Path(meta["rel_path"]).name if meta["rel_path"] else "",
-        ]:
-            if not key:
-                continue
-            meta_lookup.setdefault(normalise_key(key), meta)
-        try:
-            resolved = str(Path(meta["path"]).resolve())
-            if resolved:
-                meta_lookup.setdefault(normalise_key(resolved), meta)
-        except Exception:
-            pass
-
-def lookup_metadata(original_path: str) -> Dict:
-    if not original_path:
-        return {}
-    key = normalise_key(original_path)
-    if key in meta_lookup:
-        return meta_lookup[key]
-    try:
-        resolved = normalise_key(str(Path(original_path).resolve()))
-        if resolved in meta_lookup:
-            return meta_lookup[resolved]
-    except Exception:
-        pass
-    name_key = normalise_key(Path(original_path).name)
-    return meta_lookup.get(name_key, {})
-
-lines: List[str] = []
-lines.append("# Context Excerpt")
-lines.append("Documentation catalog snapshot with trimmed excerpts sourced from the doc-library and table of contents.")
-lines.append("")
-
-library_lines = limited_section(
-    library_path,
-    DOC_LIBRARY_LINES,
-    DOC_LIBRARY_CHAR_LIMIT,
-    "... (truncated; see doc-library.md for full listing)"
-)
-if library_lines:
-    lines.append("## Documentation Library Snapshot")
-    lines.extend(library_lines)
-    lines.append("")
-
-index_lines = limited_section(
-    index_path,
-    DOC_INDEX_LINES,
-    DOC_INDEX_CHAR_LIMIT,
-    "... (truncated; see doc-index.md for all headings)"
-)
-if index_lines:
-    lines.append("## Documentation Table of Contents")
-    lines.extend(index_lines)
-    lines.append("")
-
-seen_docs = set()
-for original_path, cleaned_path in manifest_entries:
-    meta = lookup_metadata(original_path)
-    doc_id = meta.get("doc_id") or ""
-    if doc_id and doc_id in seen_docs:
-        continue
-    if doc_id:
-        seen_docs.add(doc_id)
-    title = meta.get("title") or meta.get("rel_path") or Path(original_path).name
-    heading = f"## {title}"
-    if doc_id:
-        heading += f" ({doc_id})"
-    lines.append(heading)
-    rel_path = meta.get("rel_path")
-    if rel_path:
-        lines.append(f"- Path: `{rel_path}`")
-    elif original_path:
-        lines.append(f"- Path: `{original_path}`")
-    if doc_id:
-        lines.append(f"- Doc ID: {doc_id}")
-    tags = [str(tag) for tag in meta.get("tags") or [] if str(tag).strip()]
-    if tags:
-        lines.append(f"- Tags: {', '.join(tags)}")
-    headings = meta.get("headings") or []
-    if headings:
-        lines.append("- Key headings:")
-        for heading_item in headings[:DOC_HEADINGS_LIMIT]:
-            if not isinstance(heading_item, dict):
-                continue
-            label = str(heading_item.get("title") or "").strip()
-            if not label:
-                continue
-            line_no = heading_item.get("line")
-            level = int(heading_item.get("level") or 1)
-            indent = "  " * max(0, level - 1)
-            if line_no:
-                lines.append(f"{indent}- {label} (line {line_no})")
-            else:
-                lines.append(f"{indent}- {label}")
-        if len(headings) > DOC_HEADINGS_LIMIT:
-            lines.append(f"  - ... {len(headings) - DOC_HEADINGS_LIMIT} more heading(s) recorded in doc-index.md")
-    excerpt = ""
-    truncated = False
-    if cleaned_path:
-        cleaned = Path(cleaned_path)
-        if cleaned.exists():
-            try:
-                text = cleaned.read_text(encoding="utf-8", errors="ignore")
-            except Exception:
-                text = ""
-            if text.strip():
-                excerpt, truncated = build_excerpt(text)
-    if excerpt:
-        lines.append("")
-        lines.append(excerpt)
-        if truncated:
-            lines.append("... (excerpt truncated; consult the source document for additional detail)")
-        lines.append("")
-    else:
-        lines.append("")
-        lines.append("(excerpt unavailable; see the source document for full context)")
-        lines.append("")
-
-if not manifest_entries:
-    lines.append("## Documentation")
-    lines.append("(No staged documentation discovered.)")
-
-output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "render_context_snippet.py")" || return 1
+  python3 "$helper_path" "$manifest_path" "$output_path" "$catalog_path" "$library_path" "$index_path"
 }
 
 cjt::build_context_files() {
@@ -1217,26 +458,9 @@ cjt::codex_has_subcommand() {
 
 cjt::task_title_from_json() {
   local json_file="${1:?json file required}" index="${2:?index required}"
-  python3 - "$json_file" "$index" <<'PY'
-import json, sys
-from pathlib import Path
-
-json_path = Path(sys.argv[1])
-index = int(sys.argv[2])
-
-try:
-    payload = json.loads(json_path.read_text(encoding="utf-8"))
-except Exception:
-    print("")
-    raise SystemExit(0)
-
-tasks = payload.get("tasks") or []
-if 0 <= index < len(tasks):
-    title = (tasks[index].get("title") or "").strip()
-    print(title)
-else:
-    print("")
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "task_title_from_json.py")" || return 1
+  python3 "$helper_path" "$json_file" "$index"
 }
 
 cjt::run_codex() {
@@ -1301,632 +525,9 @@ cjt::run_codex() {
 cjt::wrap_json_extractor() {
   local infile="${1:?input file required}"
   local outfile="${2:?output file required}"
-  python3 - "$infile" "$outfile" <<'PY'
-import ast
-import json
-import math
-import string
-import sys
-from pathlib import Path
-from typing import Any
-
-raw_path = Path(sys.argv[1])
-out_path = Path(sys.argv[2])
-text = raw_path.read_text(encoding='utf-8')
-
-UNICODE_QUOTE_MAP = str.maketrans({
-    "\u201c": '"',
-    "\u201d": '"',
-    "\u2018": "'",
-    "\u2019": "'",
-})
-CODE_FENCE_LANG_HINTS = (
-    "javascript",
-    "typescript",
-    "jsonschema",
-    "jsonc",
-    "json5",
-    "jsonl",
-    "json",
-    "js",
-    "ts",
-    "python",
-    "py",
-    "text",
-    "txt",
-)
-VALID_SIMPLE_ESCAPES = {'"', '\\', '/', 'b', 'f', 'n', 'r', 't'}
-HEX_DIGITS = set(string.hexdigits)
-STRUCTURE_BONUS_KEYS = {
-    "epics",
-    "epic_id",
-    "user_stories",
-    "story",
-    "story_id",
-    "stories",
-    "tasks",
-    "task",
-    "task_groups",
-    "items",
-    "work_items",
-    "acceptance_criteria",
-    "dependencies",
-}
-SPECIAL_LITERAL_REPLACEMENTS = [
-    ("-Infinity", "null"),
-    ("Infinity", "null"),
-    ("NaN", "null"),
-    ("undefined", "null"),
-    ("None", "null"),
-]
-IDENTIFIER_CHARS = set(string.ascii_letters + string.digits + "_$")
-
-def is_identifier_char(ch: str) -> bool:
-    return bool(ch) and ch in IDENTIFIER_CHARS
-
-def normalize_unicode_quotes(value: str) -> str:
-    return value.translate(UNICODE_QUOTE_MAP)
-
-def strip_code_fences(value: str) -> str:
-    lines = []
-    for line in value.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(("```", "~~~")):
-            remainder = stripped.lstrip("`~").lstrip()
-            if remainder:
-                lowered = remainder.lower()
-                for hint in CODE_FENCE_LANG_HINTS:
-                    if lowered.startswith(hint):
-                        remainder = remainder[len(hint):]
-                        remainder = remainder.lstrip(" \t:-=")
-                        lowered = remainder.lower()
-                        break
-            if remainder:
-                indent = len(line) - len(line.lstrip())
-                lines.append(" " * indent + remainder)
-            continue
-        lines.append(line)
-    return "\n".join(lines)
-
-def strip_json_comments(payload: str) -> str:
-    result = []
-    length = len(payload)
-    i = 0
-    in_string = False
-    string_char = ""
-    escape = False
-    while i < length:
-        ch = payload[i]
-        if in_string:
-            result.append(ch)
-            if escape:
-                escape = False
-            elif ch == '\\':
-                escape = True
-            elif ch == string_char:
-                in_string = False
-                string_char = ""
-            i += 1
-            continue
-
-        if ch in ('"', "'"):
-            in_string = True
-            string_char = ch
-            result.append(ch)
-            i += 1
-            continue
-
-        if ch == '#':
-            i += 1
-            while i < length and payload[i] not in '\r\n':
-                i += 1
-            continue
-
-        if ch == '/' and i + 1 < length:
-            nxt = payload[i + 1]
-            if nxt == '/':
-                i += 2
-                while i < length and payload[i] not in '\r\n':
-                    i += 1
-                continue
-            if nxt == '*':
-                i += 2
-                while i + 1 < length and not (payload[i] == '*' and payload[i + 1] == '/'):
-                    i += 1
-                i = min(i + 2, length)
-                continue
-
-        result.append(ch)
-        i += 1
-    return ''.join(result)
-
-def escape_invalid_backslashes(payload: str) -> str:
-    result = []
-    length = len(payload)
-    i = 0
-    in_string = False
-    string_char = ""
-    while i < length:
-        ch = payload[i]
-        if in_string:
-            if ch == '\\':
-                if i + 1 >= length:
-                    result.append('\\')
-                    result.append('\\')
-                    i += 1
-                    continue
-                nxt = payload[i + 1]
-                if nxt == 'u':
-                    hex_seq = payload[i + 2:i + 6]
-                    if len(hex_seq) < 4 or any(c not in HEX_DIGITS for c in hex_seq):
-                        result.append('\\')
-                        result.append('\\')
-                        i += 1
-                        continue
-                    result.append('\\')
-                    result.append('u')
-                    result.extend(hex_seq)
-                    i += 6
-                    continue
-                if nxt not in VALID_SIMPLE_ESCAPES:
-                    result.append('\\')
-                    result.append('\\')
-                    i += 1
-                    continue
-                result.append('\\')
-                result.append(nxt)
-                i += 2
-                continue
-            result.append(ch)
-            if ch == string_char:
-                in_string = False
-                string_char = ""
-            i += 1
-            continue
-        result.append(ch)
-        if ch in ('"', "'"):
-            in_string = True
-            string_char = ch
-        i += 1
-    return ''.join(result)
-
-def remove_trailing_commas(payload: str) -> str:
-    result = []
-    length = len(payload)
-    i = 0
-    in_string = False
-    string_char = ""
-    escape = False
-    while i < length:
-        ch = payload[i]
-        if in_string:
-            result.append(ch)
-            if escape:
-                escape = False
-            elif ch == '\\':
-                escape = True
-            elif ch == string_char:
-                in_string = False
-                string_char = ""
-            i += 1
-            continue
-
-        if ch in ('"', "'"):
-            in_string = True
-            string_char = ch
-            result.append(ch)
-            i += 1
-            continue
-
-        if ch == ',':
-            j = i + 1
-            while j < length and payload[j] in ' \t\r\n':
-                j += 1
-            if j < length and payload[j] in '}]':
-                i += 1
-                continue
-
-        result.append(ch)
-        i += 1
-    return ''.join(result)
-
-def replace_invalid_literals(payload: str) -> tuple[str, list[str]]:
-    result = []
-    length = len(payload)
-    i = 0
-    in_string = False
-    string_char = ""
-    escape = False
-    replaced_tokens: list[str] = []
-    while i < length:
-        ch = payload[i]
-        if in_string:
-            result.append(ch)
-            if escape:
-                escape = False
-            elif ch == '\\':
-                escape = True
-            elif ch == string_char:
-                in_string = False
-                string_char = ""
-            i += 1
-            continue
-
-        if ch in ('"', "'"):
-            in_string = True
-            string_char = ch
-            result.append(ch)
-            i += 1
-            continue
-
-        matched = False
-        for token, replacement in SPECIAL_LITERAL_REPLACEMENTS:
-            if payload.startswith(token, i):
-                prev = payload[i - 1] if i > 0 else ''
-                end = i + len(token)
-                nxt = payload[end] if end < length else ''
-                if (prev and is_identifier_char(prev)) or (nxt and is_identifier_char(nxt)):
-                    continue
-                result.append(replacement)
-                replaced_tokens.append(token)
-                i = end
-                matched = True
-                break
-        if matched:
-            continue
-
-        result.append(ch)
-        i += 1
-
-    if replaced_tokens:
-        return ''.join(result), replaced_tokens
-    return payload, []
-
-def has_invalid_numbers(value: Any) -> bool:
-    if isinstance(value, float):
-        return math.isnan(value) or math.isinf(value)
-    if isinstance(value, dict):
-        return any(has_invalid_numbers(v) for v in value.values())
-    if isinstance(value, (list, tuple, set)):
-        return any(has_invalid_numbers(v) for v in value)
-    return False
-
-def normalize_literal(value):
-    if isinstance(value, dict):
-        return {str(k): normalize_literal(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [normalize_literal(v) for v in value]
-    return value
-
-def coerce_python_literal(candidate: str) -> tuple[bool, Any]:
-    try:
-        parsed = ast.literal_eval(candidate)
-    except (ValueError, SyntaxError):
-        return False, None
-    normalized = normalize_literal(parsed)
-    try:
-        json.dumps(normalized)
-    except (TypeError, ValueError):
-        return False, None
-    return True, normalized
-
-def try_json_load(candidate: str):
-    try:
-        data = json.loads(candidate)
-    except json.JSONDecodeError as exc:
-        return False, None, exc
-    if has_invalid_numbers(data):
-        return False, None, ValueError("JSON contains NaN or Infinity")
-    return True, data, None
-
-def parse_candidate(candidate: str):
-    candidate = candidate.strip()
-    if not candidate:
-        return False, None, [], None
-
-    candidate = normalize_unicode_quotes(candidate)
-    notes: list[str] = []
-    last_error = None
-
-    success, parsed, err = try_json_load(candidate)
-    if success:
-        return True, parsed, notes, None
-    last_error = err
-
-    stripped_comments = strip_json_comments(candidate)
-    if stripped_comments != candidate:
-        candidate = stripped_comments
-        notes.append("Removed JavaScript/Python-style comments from JSON payload.")
-        success, parsed, err = try_json_load(candidate)
-        if success:
-            return True, parsed, notes, None
-        last_error = err
-
-    no_trailing = remove_trailing_commas(candidate)
-    if no_trailing != candidate:
-        candidate = no_trailing
-        notes.append("Removed trailing commas from JSON payload.")
-        success, parsed, err = try_json_load(candidate)
-        if success:
-            return True, parsed, notes, None
-        last_error = err
-
-    normalized_literals, replaced_tokens = replace_invalid_literals(candidate)
-    if replaced_tokens:
-        candidate = normalized_literals
-        replacements_note = ", ".join(dict.fromkeys(replaced_tokens))
-        notes.append(f"Replaced invalid literal(s) {replacements_note} with null.")
-        success, parsed, err = try_json_load(candidate)
-        if success:
-            return True, parsed, notes, None
-        last_error = err
-
-    escaped_backslashes = escape_invalid_backslashes(candidate)
-    if escaped_backslashes != candidate:
-        candidate = escaped_backslashes
-        notes.append("Escaped stray backslashes in JSON payload.")
-        success, parsed, err = try_json_load(candidate)
-        if success:
-            return True, parsed, notes, None
-        last_error = err
-
-    literal_success, literal = coerce_python_literal(candidate)
-    if literal_success:
-        notes.append("Coerced Python-style literal to valid JSON.")
-        return True, literal, notes, None
-
-    return False, None, notes, last_error
-
-def candidate_score(data: Any, snippet: str) -> float:
-    score = min(len(snippet.strip()), 8000) / 10.0
-    if isinstance(data, dict):
-        keys = {str(k).lower() for k in data.keys()}
-        score += 40 + len(keys) * 2
-        score += sum(8 for key in STRUCTURE_BONUS_KEYS if key in keys)
-    elif isinstance(data, list):
-        score += 30 + len(data) * 1.2
-    else:
-        score += 5
-    return score
-
-def emit_payload(data, notes):
-    if notes:
-        note = "; ".join(dict.fromkeys(notes))
-        print(f"[create-jira-tasks][json] {note}", file=sys.stderr)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-    sys.exit(0)
-
-clean_text = normalize_unicode_quotes(strip_code_fences(text)).lstrip("\ufeff").strip()
-
-last_error = None
-success, parsed, notes, last_error = parse_candidate(clean_text)
-if success:
-    emit_payload(parsed, notes)
-
-stack = []
-start = None
-string_char = None
-escape_next = False
-last_failed_snippet = None
-best_payload = None
-best_notes: list[str] = []
-best_score = -1.0
-best_snippet = ""
-
-for idx, ch in enumerate(clean_text):
-    if not stack:
-        if ch in '{[':
-            start = idx
-            stack.append('}' if ch == '{' else ']')
-            string_char = None
-            escape_next = False
-        continue
-
-    if string_char is not None:
-        if escape_next:
-            escape_next = False
-        elif ch == '\\':
-            escape_next = True
-        elif ch == string_char:
-            string_char = None
-        continue
-
-    if ch in ('"', "'"):
-        string_char = ch
-        continue
-
-    if ch in '{[':
-        stack.append('}' if ch == '{' else ']')
-        continue
-
-    if ch in '}]':
-        if not stack:
-            continue
-        expected = stack.pop()
-        if ch != expected:
-            stack.clear()
-            start = None
-            string_char = None
-            escape_next = False
-            continue
-        if not stack and start is not None:
-            snippet = clean_text[start:idx+1]
-            success, parsed, notes, err = parse_candidate(snippet)
-            if success:
-                score = candidate_score(parsed, snippet)
-                if score > best_score or (score == best_score and len(snippet) > len(best_snippet)):
-                    best_payload = parsed
-                    best_notes = notes
-                    best_score = score
-                    best_snippet = snippet
-            last_failed_snippet = snippet.strip()
-            if err is not None:
-                last_error = err
-            start = None
-            string_char = None
-            escape_next = False
-        continue
-
-if best_payload is not None:
-    emit_payload(best_payload, best_notes)
-
-if last_failed_snippet:
-    preview = last_failed_snippet[:500]
-    error_msg = f"{last_error}" if last_error else "unable to parse JSON"
-    raise SystemExit(f"Failed to parse Codex JSON output ({error_msg}). Partial preview:\n{preview}")
-
-raise SystemExit("No JSON payload found in Codex output")
-PY
-}
-
-cjt::generate_epics() {
-  local prompt_file="$CJT_PROMPTS_DIR/epics.prompt.md"
-  local raw_output="$CJT_OUTPUT_DIR/epics.raw.txt"
-  local json_output="$CJT_JSON_DIR/epics.json"
-
-  if cjt::state_stage_is_completed "epics" && [[ -f "$json_output" ]]; then
-    cjt::log "Epics already generated; skipping"
-    return
-  fi
-
-  cjt::state_mark_stage_pending "epics"
-
-  cjt::log "Creating Jira epics prompt"
-  cjt::write_epics_prompt "$prompt_file"
-
-  cjt::log "Generating Jira epics"
-  if cjt::run_codex "$prompt_file" "$raw_output" "epic-generation"; then
-    cjt::wrap_json_extractor "$raw_output" "$json_output"
-  else
-    cjt::die "Codex failed while generating epics"
-  fi
-
-  cjt::state_mark_stage_completed "epics"
-}
-
-cjt::write_epics_prompt() {
-  local prompt_file="${1:?prompt file required}"
-  local project_label="${CJT_PROJECT_TITLE:-this project}"
-  {
-    printf "You are a senior delivery lead creating Jira epics for the %s initiative.\n\n" "$project_label"
-    echo "Project scope: prioritize the customer-facing and admin/backoffice experiences described in the documentation."
-    echo "Ignore DevOps, infrastructure, and tooling work unless explicitly documented."
-    echo "Review the documentation catalog, table of contents, and excerpts below before proposing epics. Reuse doc IDs/headings to stay grounded in the staged sources."
-    echo
-    echo "## Context Excerpt (summary)"
-    if [[ -s "$CJT_CONTEXT_EPIC_FILE" ]]; then
-      sed 's/\x1b\[[0-9;]*m//g' "$CJT_CONTEXT_EPIC_FILE"
-    else
-      sed 's/\x1b\[[0-9;]*m//g' "$CJT_CONTEXT_SNIPPET_FILE"
-    fi
-    echo
-    cat <<'PROMPT'
-## Requirements
-- Create a comprehensive backlog of Jira epics that covers every piece of functionality the website and admin/backoffice must deliver.
-- Use identifiers `WEB-XX` for website-facing epics and `ADM-XX` for admin/backoffice epics. Start numbering at 01.
-- Ensure the epics collectively span navigation, authentication, content, commerce/workflows, reporting, localization, accessibility, error states, and any other requirements found in the docs.
-- Provide rich acceptance criteria per epic describing what success looks like (include non-functional needs such as performance, security, accessibility when applicable).
-- Note any cross-epic dependencies.
-- Include a short call-out of the primary user roles touched by the epic.
-
-## Output format (JSON only)
-{
-  "epics": [
-    {
-      "epic_id": "WEB-01",
-      "title": "Global shell, navigation, and layout",
-      "summary": "High-level objective for the epic",
-      "acceptance_criteria": ["Clear measurable criteria ..."],
-      "dependencies": ["ADM-02"],
-      "primary_roles": ["Visitor", "Member", "Admin"],
-      "scope": "web"
-    }
-  ]
-}
-
-Return strictly valid JSON; do not include markdown fences or commentary.
-PROMPT
-  } > "$prompt_file"
-}
-
-cjt::generate_stories() {
-  local epics_json="$CJT_JSON_DIR/epics.json"
-  [[ -f "$epics_json" ]] || cjt::die "Epics JSON not found: ${epics_json}"
-
-  if cjt::state_stage_is_completed "stories"; then
-    cjt::log "User stories already generated; skipping"
-    return
-  fi
-
-  cjt::state_mark_stage_pending "stories"
-
-  local epic_id
-  while IFS= read -r epic_id; do
-    [[ -n "$epic_id" ]] || continue
-    local slug
-    slug="$(cjt::slugify "$epic_id")"
-    local prompt_file="$CJT_PROMPTS_DIR/story_${slug}.prompt.md"
-    local raw_file="$CJT_OUTPUT_DIR/story_${slug}.raw.txt"
-    local json_file="$CJT_JSON_DIR/story_${slug}.json"
-    if cjt::state_story_is_completed "stories" "$slug" "$json_file"; then
-      cjt::log "Story generation already completed for ${epic_id} (${slug}); skipping"
-      continue
-    fi
-    cjt::write_story_prompt "$epic_id" "$prompt_file"
-    cjt::log "Generating user stories for ${epic_id}"
-    if cjt::run_codex "$prompt_file" "$raw_file" "stories-${epic_id}"; then
-      cjt::wrap_json_extractor "$raw_file" "$json_file"
-      cjt::split_story_json "$json_file"
-      cjt::state_mark_story_completed "stories" "$slug"
-    else
-      cjt::die "Codex failed while generating stories for ${epic_id}"
-    fi
-  done < <(python3 - "$epics_json" <<'PY'
-import json
-import os
-import sys
-from datetime import datetime
-from pathlib import Path
-
-payload = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-epics = payload.get('epics') or []
-for epic in epics:
-    eid = (epic.get('epic_id') or '').strip()
-    if eid:
-        print(eid)
-PY
-  )
-
-  cjt::state_mark_stage_completed "stories"
-}
-
-cjt::split_story_json() {
-  local story_bundle="${1:?story bundle required}"
-  python3 - "$story_bundle" "$CJT_JSON_STORIES_DIR" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-bundle_path = Path(sys.argv[1])
-stories_dir = Path(sys.argv[2])
-
-payload = json.loads(bundle_path.read_text(encoding='utf-8'))
-epic_id = payload.get('epic_id') or ''
-
-stories = payload.get('user_stories') or []
-for story in stories:
-    sid = story.get('story_id') or ''
-    if not sid:
-        continue
-    slug = ''.join(ch.lower() if ch.isalnum() else '-' for ch in sid)
-    slug = '-'.join(filter(None, slug.split('-')))
-    story_out = {
-        'epic_id': epic_id,
-        'story': story
-    }
-    (stories_dir / f"{slug}.json").write_text(json.dumps(story_out, indent=2) + '\n', encoding='utf-8')
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "wrap_json_extractor.py")" || return 1
+  python3 "$helper_path" "$infile" "$outfile"
 }
 
 cjt::write_story_prompt() {
@@ -1934,166 +535,9 @@ cjt::write_story_prompt() {
   local prompt_file="${2:?prompt file required}"
   local epics_json="$CJT_JSON_DIR/epics.json"
   local project_label="${CJT_PROJECT_TITLE:-the product}"
-  CJT_PROMPT_TITLE="$project_label" python3 - \
-    "$epics_json" \
-    "$epic_id" \
-    "$prompt_file" \
-    "$CJT_CONTEXT_SNIPPET_FILE" <<'PY'
-import json
-import os
-import re
-import sys
-from pathlib import Path
-
-epics_path = Path(sys.argv[1])
-epic_id = sys.argv[2]
-prompt_path = Path(sys.argv[3])
-context_path = Path(sys.argv[4])
-project_label = os.environ.get('CJT_PROMPT_TITLE', 'the product').strip() or 'the product'
-
-data = json.loads(epics_path.read_text(encoding='utf-8'))
-match = None
-for epic in data.get('epics', []):
-    if str(epic.get('epic_id')).strip().lower() == epic_id.lower():
-        match = epic
-        break
-
-if not match:
-    raise SystemExit(f"Epic {epic_id} not found in epics.json")
-
-def parse_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, default))
-    except Exception:
-        return default
-
-SECTION_LIMIT = parse_int("CJT_STORY_CONTEXT_SECTION_LIMIT", 6)
-SNIPPET_CHAR_LIMIT = parse_int("CJT_STORY_CONTEXT_SECTION_CHAR_LIMIT", 1200)
-TOTAL_CHAR_LIMIT = parse_int("CJT_STORY_CONTEXT_TOTAL_CHAR_LIMIT", 5500)
-
-def load_sections(path: Path):
-    if not path.exists():
-        return []
-    raw = path.read_text(encoding='utf-8', errors='ignore')
-    sections = []
-    current_title = None
-    current_lines = []
-    for line in raw.splitlines():
-        if line.startswith("## "):
-            if current_title is not None and current_lines:
-                sections.append((current_title, "\n".join(current_lines).strip()))
-            current_title = line[3:].strip() or "Section"
-            current_lines = []
-            continue
-        if line.startswith("# "):
-            continue
-        if current_title is None:
-            continue
-        current_lines.append(line)
-    if current_title is not None and current_lines:
-        sections.append((current_title, "\n".join(current_lines).strip()))
-    return sections
-
-STOPWORDS = {
-    "the", "and", "for", "with", "from", "that", "this", "system", "user", "story",
-    "should", "will", "must", "allow", "support", "able", "data", "api", "admin",
-    "project", "documentation", "context", "section"
-}
-TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9\\-_/]{2,}")
-
-def extract_keywords(epic_payload: dict):
-    tokens = []
-    for key in ("title", "summary"):
-        value = epic_payload.get(key)
-        if isinstance(value, str):
-            tokens.append(value)
-    for key in ("acceptance_criteria", "primary_roles", "dependencies"):
-        value = epic_payload.get(key)
-        if isinstance(value, list):
-            tokens.extend(str(item) for item in value if item)
-    blob = " ".join(tokens).lower()
-    keywords = {token.strip("-_/") for token in TOKEN_RE.findall(blob) if len(token) > 3}
-    return {kw for kw in keywords if kw and kw not in STOPWORDS}
-
-def score_sections(sections, keywords):
-    scored = []
-    for idx, (title, body) in enumerate(sections):
-        title_lower = title.lower()
-        if title_lower.startswith("documentation library") or title_lower.startswith("documentation table of contents"):
-            continue
-        lower = body.lower()
-        score = sum(lower.count(keyword) for keyword in keywords)
-        length_score = min(len(body), 2000)
-        scored.append((score, length_score, idx, title, body))
-    scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
-    return scored
-
-def select_sections(sections, keywords):
-    scored = score_sections(sections, keywords)
-    if not scored:
-        return []
-    remaining = len(scored) if SECTION_LIMIT <= 0 else min(SECTION_LIMIT, len(scored))
-    total_chars = 0
-    selected = []
-    for score, length_score, idx, title, body in scored:
-        if remaining == 0:
-            break
-        snippet = body
-        if SNIPPET_CHAR_LIMIT > 0 and len(snippet) > SNIPPET_CHAR_LIMIT:
-            snippet = snippet[:SNIPPET_CHAR_LIMIT].rstrip()
-            snippet += "\n... (truncated; see consolidated context for full details)"
-        snippet_len = len(snippet)
-        if TOTAL_CHAR_LIMIT > 0 and total_chars + snippet_len > TOTAL_CHAR_LIMIT:
-            allowance = TOTAL_CHAR_LIMIT - total_chars
-            if allowance <= 0:
-                break
-            snippet = snippet[:allowance].rstrip()
-            if snippet:
-                snippet += "\n... (truncated; see consolidated context for full details)"
-                snippet_len = len(snippet)
-            else:
-                break
-        selected.append((title, snippet))
-        total_chars += snippet_len
-        remaining -= 1
-    if not selected:
-        fallback = scored[0][3], scored[0][4]
-        return [fallback]
-    return selected
-
-sections = load_sections(context_path)
-keywords = extract_keywords(match)
-selected_sections = select_sections(sections, keywords)
-
-with prompt_path.open('w', encoding='utf-8') as fh:
-    fh.write(f"You are a lead product analyst expanding Jira epics into granular user stories for the {project_label} initiative.\n\n")
-    fh.write("Only focus on the website and admin/backoffice surfaces. Ignore DevOps/infra.\n\n")
-    fh.write("## Target epic\n")
-    json.dump(match, fh, indent=2)
-    fh.write("\n\n")
-    fh.write("## Focused documentation excerpts\n")
-    if selected_sections:
-        for title, snippet in selected_sections:
-            fh.write(f"### {title}\n")
-            fh.write(snippet)
-            if not snippet.endswith("\n"):
-                fh.write("\n")
-            fh.write("\n")
-    else:
-        fh.write("(No high-confidence documentation sections matched; consult the consolidated context if needed.)\n\n")
-    fh.write("## Requirements\n")
-    fh.write("- Produce exhaustive user stories that cover sunny-day flows, edge cases, validation errors, state transitions, and accessibility requirements for this epic.\n")
-    fh.write("- Use identifiers following the pattern '<epic-id>-US-XX'. Start numbering at 01.\n")
-    fh.write("- Provide a user story narrative (role, goal, benefit) and detailed description of scope.\n")
-    fh.write("- List acceptance criteria as bullet-equivalent strings (cover positive and negative cases).\n")
-    fh.write("- Note any dependencies on other epics/stories when relevant.\n")
-    fh.write("- Tag each story with domains (e.g., Web-FE, Web-BE, Admin-FE, Admin-BE).\n")
-    fh.write("- Capture primary user roles touched by the story.\n")
-    fh.write("\n")
-    fh.write("## Output (JSON only)\n")
-    fh.write("{\n  \"epic_id\": \"%s\",\n  \"user_stories\": [\n    {\n      \"story_id\": \"%s-US-01\",\n      \"title\": \"\",\n      \"narrative\": \"As a <role> I want ... so that ...\",\n      \"description\": \"Detailed scope and notes...\",\n      \"acceptance_criteria\": [\"...\"],\n      \"tags\": [\"Web-FE\"],\n      \"dependencies\": [\"WEB-02-US-02\"],\n      \"user_roles\": [\"Visitor\"],\n      \"non_functional\": [\"WCAG 2.2 AA\"]\n    }\n  ]\n}\n" % (epic_id, epic_id))
-    fh.write("\nReturn strictly valid JSON without fences or extra commentary.\n")
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "write_story_prompt.py")" || return 1
+  CJT_PROMPT_TITLE="$project_label" python3 "$helper_path" "$epics_json" "$epic_id" "$prompt_file" "$CJT_CONTEXT_SNIPPET_FILE"
 }
 
 cjt::generate_tasks() {
@@ -2232,74 +676,19 @@ cjt::inline_refine_story_tasks() {
       ;;
   esac
 
+  local inline_refine_helper
+  inline_refine_helper="$(cjt::clone_python_tool "inline_refine_story_tasks.py")" || {
+    rm -f "$working" 2>/dev/null || true
+    return
+  }
+
   local refine_data
-  refine_data=$(python3 - <<'PY' "$working" "$refine_mode"
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-mode = sys.argv[2].strip().lower()
-payload = json.loads(path.read_text(encoding='utf-8'))
-tasks = payload.get("tasks") or []
-
-REQUIRED_TEXT_FIELDS = ("title", "description")
-REQUIRED_LIST_FIELDS = (
-    "acceptance_criteria",
-    "tags",
-    "assignees",
-    "document_references",
-    "endpoints",
-    "data_contracts",
-    "qa_notes",
-)
-
-def normalized_list(value):
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str):
-        striped = value.strip()
-        return [striped] if striped else []
-    return []
-
-def is_positive(value, zero_ok=False):
-    try:
-        if isinstance(value, str):
-            value = float(value.strip())
-        return value >= 0 if zero_ok else value > 0
-    except Exception:
-        return False
-
-def needs_refine(task: dict) -> bool:
-    for field in REQUIRED_TEXT_FIELDS:
-        if not isinstance(task.get(field), str) or not task.get(field).strip():
-            return True
-    for field in REQUIRED_LIST_FIELDS:
-        if not normalized_list(task.get(field)):
-            return True
-    if not is_positive(task.get("story_points"), zero_ok=False):
-        return True
-    if not is_positive(task.get("estimate"), zero_ok=False):
-        return True
-    return False
-
-mode = {"auto": "auto", "automatic": "auto", "all": "all"}.get(mode, mode)
-indices = []
-for idx, task in enumerate(tasks):
-    if mode == "all":
-        indices.append(idx)
-    elif mode == "auto":
-        if needs_refine(task):
-            indices.append(idx)
-    else:
-        indices = []
-        break
-
-print(len(tasks))
-for idx in indices:
-    print(idx)
-PY
-)
+  refine_data="$(python3 "$inline_refine_helper" "$working" "$refine_mode")"
+  if [[ $? -ne 0 || -z "$refine_data" ]]; then
+    cjt::warn "Inline refinement helper failed for ${slug}; skipping"
+    rm -f "$working" 2>/dev/null || true
+    return
+  fi
 
   local total=0
   local -a refine_order=()
@@ -2363,234 +752,11 @@ PY
 cjt::write_task_prompt() {
   local story_file="${1:?story json required}"
   local prompt_file="${2:?prompt file required}"
-  python3 - "$story_file" "$CJT_CONTEXT_SNIPPET_FILE" "$prompt_file" "${CJT_SDS_CHUNKS_LIST:-}" <<'PY'
-import json
-import os
-import re
-import sys
-from pathlib import Path
-
-story_path = Path(sys.argv[1])
-context_raw = Path(sys.argv[2]).read_text(encoding='utf-8')
-prompt_path = Path(sys.argv[3])
-sds_chunk_list = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None
-
-story_payload = json.loads(story_path.read_text(encoding='utf-8'))
-
-epic_id = story_payload.get('epic_id')
-story = story_payload.get('story')
-if not story:
-    raise SystemExit(f"Story payload missing in {story_path}")
-
-def extract_keywords(story_data: dict) -> set[str]:
-    fields = []
-    for key in ("title", "narrative", "description"):
-        value = story_data.get(key) or ""
-        if isinstance(value, str):
-            fields.append(value)
-    extra = story_data.get("acceptance_criteria")
-    if isinstance(extra, list):
-        fields.extend(str(item) for item in extra if item)
-    joined = " ".join(fields).lower()
-    raw_tokens = re.findall(r"[a-z0-9][a-z0-9\-_/]{2,}", joined)
-    stopwords = {
-        "the",
-        "and",
-        "for",
-        "with",
-        "from",
-        "that",
-        "this",
-        "system",
-        "user",
-        "story",
-        "should",
-        "will",
-        "must",
-        "allow",
-        "support",
-        "able",
-        "data",
-        "api",
-        "admin",
-    }
-    keywords = {token.strip("-_/") for token in raw_tokens if len(token) > 3}
-    return {kw for kw in keywords if kw and kw not in stopwords}
-
-def score_text(text: str, keywords: set[str]) -> int:
-    if not text:
-        return 0
-    lower = text.lower()
-    return sum(lower.count(keyword) for keyword in keywords)
-
-def summarize_text(text: str, char_limit: int) -> str:
-    text = text.strip()
-    if not text:
-        return ""
-    if char_limit > 0 and len(text) > char_limit:
-        trimmed = text[:char_limit].rstrip()
-        return f"{trimmed}\n... (truncated; consult source for full details)"
-    return text
-
-def single_line_summary(text: str, max_chars: int) -> str:
-    text = re.sub(r"\s+", " ", text.strip())
-    if not text:
-        return ""
-    if max_chars > 0 and len(text) > max_chars:
-        return text[:max_chars].rstrip() + "…"
-    return text
-
-def parse_context_sections(blob: str) -> list[tuple[str, str]]:
-    sections: list[tuple[str, str]] = []
-    current_title = "Overview"
-    current_lines: list[str] = []
-    for line in blob.splitlines():
-        if line.startswith("## "):
-            if current_lines:
-                sections.append((current_title, "\n".join(current_lines).strip()))
-            current_title = line[3:].strip() or "Section"
-            current_lines = []
-        elif line.startswith("# "):
-            continue
-        else:
-            current_lines.append(line)
-    if current_lines:
-        sections.append((current_title, "\n".join(current_lines).strip()))
-    deduped = []
-    seen = set()
-    for title, text in sections:
-        key = (title, text[:200])
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append((title, text))
-    return deduped
-
-def choose_context_sections(blob: str, keywords: set[str]) -> list[tuple[str, str]]:
-    max_sections = int(os.environ.get("CJT_TASK_CONTEXT_SECTION_LIMIT", "3"))
-    char_limit = int(os.environ.get("CJT_TASK_CONTEXT_SECTION_CHAR_LIMIT", "450"))
-    summary_limit = int(os.environ.get("CJT_TASK_CONTEXT_SUMMARY_CHAR_LIMIT", "220"))
-    sections = parse_context_sections(blob)
-    filtered_sections = []
-    for title, text in sections:
-        title_lower = title.lower()
-        if title_lower.startswith("documentation library") or title_lower.startswith("documentation table of contents"):
-            continue
-        filtered_sections.append((title, text))
-    sections = filtered_sections
-    if not sections:
-        return []
-    scored = []
-    for title, text in sections:
-        snippet = summarize_text(text, char_limit)
-        if not snippet:
-            continue
-        summary = single_line_summary(snippet, summary_limit)
-        score = score_text(text, keywords)
-        scored.append((score, title, summary))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    filtered = [entry for entry in scored if entry[0] > 0][:max_sections]
-    if not filtered:
-        filtered = scored[:max_sections]
-    return [(title, summary) for _, title, summary in filtered if summary]
-
-def load_sds_chunks(list_path: Path) -> list[tuple[str, str, str, str]]:
-    entries: list[tuple[str, str, str, str]] = []
-    for line in list_path.read_text(encoding='utf-8').splitlines():
-        if not line.strip():
-            continue
-        parts = line.split('|', 2)
-        chunk_path = Path(parts[0].strip())
-        label = parts[1].strip() if len(parts) > 1 else ''
-        heading = parts[2].strip() if len(parts) > 2 else ''
-        if not chunk_path.exists():
-            continue
-        try:
-            content = chunk_path.read_text(encoding='utf-8').strip()
-        except Exception:
-            continue
-        if content:
-            entries.append((chunk_path.name, label, heading, content))
-    return entries
-
-def choose_sds_chunks(entries: list[tuple[str, str, str, str]], keywords: set[str]) -> tuple[list[str], list[tuple[str, str]], int]:
-    if not entries:
-        return [], [], 0
-    overview_limit = int(os.environ.get("CJT_TASK_SDS_OVERVIEW_LIMIT", "4"))
-    chunk_limit = int(os.environ.get("CJT_TASK_SDS_CHUNK_LIMIT", "3"))
-    snippet_char_limit = int(os.environ.get("CJT_TASK_SDS_SNIPPET_CHAR_LIMIT", "400"))
-    summary_limit = int(os.environ.get("CJT_TASK_SDS_SUMMARY_CHAR_LIMIT", "200"))
-    scored = []
-    for name, label, heading, content in entries:
-        meta = " ".join(filter(None, (name, label, heading)))
-        combined = f"{meta}\n{content}"
-        score = score_text(combined, keywords)
-        scored.append((score, name, label, heading, content))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    selected = [entry for entry in scored if entry[0] > 0][:chunk_limit]
-    if not selected:
-        selected = scored[:chunk_limit]
-    overview_entries = selected[:overview_limit]
-    prepared: list[tuple[str, str]] = []
-    for _, name, label, heading, content in selected:
-        ref = f"SDS {label}" if label else (heading or name)
-        summary_text = summarize_text(content, snippet_char_limit)
-        summary = single_line_summary(summary_text, summary_limit)
-        prepared.append((ref, summary))
-    overview_list: list[str] = []
-    for _, name, label, heading, _ in overview_entries:
-        ref = f"SDS {label}" if label else (heading or name)
-        overview_list.append(ref)
-    omitted_total = max(0, len(entries) - len(selected))
-    return overview_list, prepared, omitted_total
-
-story_keywords = extract_keywords(story)
-context_refs = choose_context_sections(context_raw, story_keywords)
-
-sds_refs: list[tuple[str, str]] = []
-sds_omitted = 0
-if sds_chunk_list and sds_chunk_list.exists():
-    sds_entries = load_sds_chunks(sds_chunk_list)
-    if sds_entries:
-        _, sds_refs, sds_omitted = choose_sds_chunks(sds_entries, story_keywords)
-
-with prompt_path.open('w', encoding='utf-8') as fh:
-    fh.write("You are a delivery engineer decomposing a single user story into actionable Jira tasks.\n\n")
-    fh.write("Consider frontend, backend, admin UI, data, security, accessibility, analytics, and QA needs.\n\n")
-    fh.write("## User story\n")
-    json.dump(story, fh, indent=2)
-    fh.write("\n\n")
-    fh.write("## Epic context\n")
-    json.dump({"epic_id": epic_id}, fh, indent=2)
-    fh.write("\n\n")
-    fh.write("## Focused documentation references\n")
-    if context_refs:
-        for title, summary in context_refs:
-            fh.write(f"- {title}: {summary}\n")
-        fh.write("\n")
-    else:
-        fh.write("(No high-confidence documentation sections matched; consult the consolidated context if needed.)\n\n")
-    fh.write("## Requirements\n")
-    fh.write("- Cover happy paths, error handling, analytics, and release readiness considerations.\n")
-    fh.write("- Assign owners, note dependencies, and tag each task for the impacted surfaces (Web-FE, API, DB, QA, etc.).\n")
-    fh.write("- Provide numeric story points and hour estimates consistent with the workload.\n")
-    fh.write("- Reference documentation by identifier (e.g., SDS §10.1.1, SQL:users, API:/v1/auth) instead of pasting content.\n")
-    fh.write("- Describe APIs, data contracts, validations, and required testing (unit, integration, E2E).\n\n")
-    if sds_refs:
-        fh.write("## SDS references\n")
-        for ref, summary in sds_refs:
-            if summary:
-                fh.write(f"- {ref}: {summary}\n")
-            else:
-                fh.write(f"- {ref}\n")
-        if sds_omitted > 0:
-            fh.write(f"- ...(additional {sds_omitted} sections omitted; see full SDS for details)\n")
-        fh.write("\n")
-    fh.write("## Output JSON schema\n")
-    fh.write("{\n  \"story_id\": \"...\",\n  \"story_title\": \"...\",\n  \"tasks\": [\n    {\n      \"id\": \"WEB-01-T01\",\n      \"title\": \"...\",\n      \"description\": \"Detailed instructions...\",\n      \"acceptance_criteria\": [\"...\"],\n      \"tags\": [\"Web-FE\"],\n      \"assignees\": [\"FE dev\"],\n      \"estimate\": 5,\n      \"story_points\": 5,\n      \"dependencies\": [\"WEB-01-T00\"],\n      \"document_references\": [\"SDS §10.1.1\"],\n      \"endpoints\": [\"GET /api/v1/...\"],\n      \"data_contracts\": [\"Request payloads, DB tables, indexes, policies, RBAC\"],\n      \"qa_notes\": [\"Unit tests, integration tests\"],\n      \"user_roles\": [\"Visitor\"]\n    }\n  ]\n}\n")
-    fh.write("Return strictly valid JSON with all required fields.\n")
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "write_task_prompt.py")" || return 1
+  python3 "$helper_path" "$story_file" "$CJT_CONTEXT_SNIPPET_FILE" "$prompt_file" "${CJT_SDS_CHUNKS_LIST:-}"
 }
+
 
 cjt::refine_tasks() {
   if [[ "$CJT_SKIP_REFINE" == "1" ]]; then
@@ -2704,100 +870,19 @@ PY
     fi
 
     local refine_mode="${CJT_REFINE_MODE:-auto}"
+    local refine_helper
+    refine_helper="$(cjt::clone_python_tool "refine_tasks_selection.py")" || {
+      rm -f "$working_copy" 2>/dev/null || true
+      continue
+    }
     local refine_data
-    refine_data=$(python3 - <<'PY' "$working_copy" "$refine_mode"
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-mode = (sys.argv[2] if len(sys.argv) > 2 else "auto").strip().lower()
-payload = json.loads(path.read_text(encoding="utf-8"))
-tasks = payload.get("tasks") or []
-
-pending = payload.get("pending_indices")
-indices = []
-if isinstance(pending, list) and pending:
-    for value in pending:
-        try:
-            idx = int(value)
-        except Exception:
-            continue
-        if 0 <= idx < len(tasks):
-            indices.append(idx)
-else:
-    indices = list(range(len(tasks)))
-
-def normalized_list(value):
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped:
-            return [stripped]
-    return []
-
-def is_positive(value, zero_ok=False):
-    if isinstance(value, (int, float)):
-        return value >= 0 if zero_ok else value > 0
-    if isinstance(value, str):
-        try:
-            number = float(value.strip())
-        except Exception:
-            return False
-        return number >= 0 if zero_ok else number > 0
-    return False
-
-REQUIRED_TEXT_FIELDS = ("title", "description")
-REQUIRED_LIST_FIELDS = (
-    "acceptance_criteria",
-    "tags",
-    "assignees",
-    "document_references",
-    "endpoints",
-    "data_contracts",
-    "qa_notes",
-)
-
-def needs_refine(task):
-    for field in REQUIRED_TEXT_FIELDS:
-        if not isinstance(task.get(field), str) or not task.get(field).strip():
-            return True
-    for field in REQUIRED_LIST_FIELDS:
-        if not normalized_list(task.get(field)):
-            return True
-    if not is_positive(task.get("story_points"), zero_ok=False):
-        return True
-    if not is_positive(task.get("estimate"), zero_ok=False):
-        return True
-    return False
-
-mode_map = {
-    "auto": "auto",
-    "automatic": "auto",
-    "all": "all",
-    "pending": "pending",
-}
-mode = mode_map.get(mode, mode)
-
-if mode in {"off", "disabled", "none", "skip", "0"}:
-    print("SKIP")
-    sys.exit(0)
-
-selected = []
-if mode == "all" or mode == "pending":
-    selected = indices
-else:  # default auto
-    for idx in indices:
-        task = tasks[idx] if idx < len(tasks) else {}
-        if needs_refine(task):
-            selected.append(idx)
-
-print(len(indices))
-for idx in selected:
-    print(idx)
-PY
-)
+    refine_data="$(python3 "$refine_helper" "$working_copy" "$refine_mode")"
+    local refine_status=$?
+    if [[ $refine_status -ne 0 ]]; then
+      cjt::warn "Inline refine helper failed for story ${slug}; skipping"
+      rm -f "$working_copy" 2>/dev/null || true
+      continue
+    fi
     if [[ "$refine_data" == "SKIP" ]]; then
       cjt::log "Refinement skipped for story ${slug} (mode=${refine_mode})"
       rm -f "$working_copy" 2>/dev/null || true
@@ -3015,488 +1100,20 @@ cjt::write_refine_task_prompt() {
   local tasks_file="${1:?tasks json required}"
   local task_index="${2:?task index required}"
   local prompt_file="${3:?prompt file required}"
-  local project_name_label="${CJT_PROJECT_TITLE:-the project}"
-  CJT_PROMPT_TITLE="$project_name_label" python3 - \
-    "$tasks_file" \
-    "$task_index" \
-    "$CJT_CONTEXT_FILE" \
-    "$prompt_file" \
-    "${CJT_SDS_CHUNKS_LIST:-}" \
-    "${CJT_PDR_PATH:-}" \
-    "${CJT_SQL_PATH:-}" \
-    "${CJT_TASKS_DB_PATH:-}" <<'PY'
-import json
-import os
-import re
-import sqlite3
-import sys
-from pathlib import Path
-
-tasks_path = Path(sys.argv[1])
-task_index = int(sys.argv[2])
-context_path = Path(sys.argv[3])
-prompt_path = Path(sys.argv[4])
-sds_list_path = Path(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else None
-pdr_path = Path(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6] else None
-sql_path = Path(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7] else None
-db_path = Path(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8] else None
-project_base = os.environ.get("CJT_PROMPT_TITLE", "the project").strip() or "the project"
-project_label = f"{project_base} delivery team"
-
-CONTEXT_SECTION_LIMIT = int(os.environ.get("CJT_REFINE_CONTEXT_SECTION_LIMIT", "2"))
-CONTEXT_SECTION_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_CONTEXT_SECTION_CHAR_LIMIT", "320"))
-CONTEXT_SECTION_SUMMARY_LIMIT = int(os.environ.get("CJT_REFINE_CONTEXT_SUMMARY_CHAR_LIMIT", "180"))
-PDR_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_PDR_CHAR_LIMIT", "360"))
-SQL_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_SQL_CHAR_LIMIT", "360"))
-SDS_OVERVIEW_LIMIT = int(os.environ.get("CJT_REFINE_SDS_OVERVIEW_LIMIT", "3"))
-SDS_CHUNK_LIMIT = int(os.environ.get("CJT_REFINE_SDS_CHUNK_LIMIT", "2"))
-SDS_SNIPPET_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_SDS_SNIPPET_CHAR_LIMIT", "220"))
-SDS_SNIPPET_SUMMARY_LIMIT = int(os.environ.get("CJT_REFINE_SDS_SUMMARY_CHAR_LIMIT", "180"))
-OTHER_TASKS_LIMIT = int(os.environ.get("CJT_REFINE_OTHER_TASKS_LIMIT", "3"))
-OTHER_TASKS_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_OTHER_TASKS_CHAR_LIMIT", "110"))
-TASK_FIELD_CHAR_LIMIT = int(os.environ.get("CJT_REFINE_TASK_FIELD_CHAR_LIMIT", "220"))
-TASK_FIELD_LIST_LIMIT = int(os.environ.get("CJT_REFINE_TASK_LIST_LIMIT", "3"))
-
-payload = json.loads(tasks_path.read_text(encoding="utf-8"))
-tasks = payload.get("tasks") or []
-if task_index < 0 or task_index >= len(tasks):
-    raise SystemExit(f"Task index {task_index} out of range for {tasks_path}")
-
-target_task = tasks[task_index]
-story = payload.get("story") or {}
-epic_id = payload.get("epic_id") or story.get("epic_id") or ""
-epic_title = payload.get("epic_title") or story.get("epic_title") or ""
-story_id = payload.get("story_id") or story.get("story_id") or ""
-story_title = payload.get("story_title") or story.get("title") or ""
-story_description = story.get("description") or payload.get("story_description") or ""
-story_roles = story.get("user_roles") or payload.get("story_roles") or []
-story_acceptance = story.get("acceptance_criteria") or payload.get("story_acceptance_criteria") or []
-story_slug = payload.get("story_slug") or tasks_path.stem
-
-context_blob = ""
-if context_path.exists():
-    context_blob = context_path.read_text(encoding="utf-8", errors="ignore")
-
-STOPWORDS = {
-    "the", "and", "for", "with", "from", "that", "this", "system", "user", "story",
-    "should", "will", "must", "allow", "support", "able", "data", "api", "admin",
-    "task", "jira"
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "write_refine_task_prompt.py")" || return 1
+  CJT_PROMPT_TITLE="${CJT_PROJECT_TITLE:-the project}" \
+    python3 "$helper_path" \
+      "$tasks_file" \
+      "$task_index" \
+      "$CJT_CONTEXT_FILE" \
+      "$prompt_file" \
+      "${CJT_SDS_CHUNKS_LIST:-}" \
+      "${CJT_PDR_PATH:-}" \
+      "${CJT_SQL_PATH:-}" \
+      "${CJT_TASKS_DB_PATH:-}"
 }
 
-REQUIRED_TEXT_FIELDS = ("title", "description")
-REQUIRED_LIST_FIELDS = (
-    "acceptance_criteria",
-    "tags",
-    "assignees",
-    "document_references",
-    "endpoints",
-    "data_contracts",
-    "qa_notes",
-)
-
-def normalized_list(value):
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped:
-            return [stripped]
-    return []
-
-def is_positive(value, zero_ok=False):
-    if isinstance(value, (int, float)):
-        return value >= 0 if zero_ok else value > 0
-    if isinstance(value, str):
-        try:
-            number = float(value.strip())
-        except Exception:
-            return False
-        return number >= 0 if zero_ok else number > 0
-    return False
-
-def detect_gaps(task):
-    gaps = []
-    for field in REQUIRED_TEXT_FIELDS:
-        val = task.get(field)
-        if not isinstance(val, str) or not val.strip():
-            gaps.append(f"{field.replace('_', ' ')} missing or blank")
-    for field in REQUIRED_LIST_FIELDS:
-        if not normalized_list(task.get(field)):
-            gaps.append(f"{field.replace('_', ' ')} missing or empty")
-    if not is_positive(task.get("story_points")):
-        gaps.append("story_points should be a positive integer (1-13)")
-    if not is_positive(task.get("estimate")):
-        gaps.append("estimate should be a positive number of hours")
-    return gaps
-
-def extract_keywords(story_data, task_data):
-    parts = []
-    for key in ("title", "narrative", "description"):
-        value = story_data.get(key)
-        if isinstance(value, str):
-            parts.append(value)
-    acceptance = story_data.get("acceptance_criteria")
-    if isinstance(acceptance, list):
-        parts.extend(str(item) for item in acceptance if item)
-    for key in ("title", "description", "document_references", "endpoints", "data_contracts", "qa_notes", "tags"):
-        value = task_data.get(key)
-        if isinstance(value, str):
-            parts.append(value)
-        elif isinstance(value, list):
-            parts.extend(str(item) for item in value if item)
-    joined = " ".join(parts).lower()
-    tokens = re.findall(r"[a-z0-9][a-z0-9\-_/]{2,}", joined)
-    keywords = {token.strip("-_/") for token in tokens if len(token) > 3}
-    return {kw for kw in keywords if kw and kw not in STOPWORDS}
-
-def score_text(text, keywords):
-    if not text:
-        return 0
-    lower = text.lower()
-    return sum(lower.count(keyword) for keyword in keywords)
-
-def summarize_text(text, char_limit):
-    text = text.strip()
-    if not text:
-        return ""
-    if char_limit > 0 and len(text) > char_limit:
-        return text[:char_limit].rstrip() + "\n... (truncated; consult source for full details)"
-    return text
-
-def parse_context_sections(blob):
-    sections = []
-    current_title = "Context"
-    current_lines = []
-    for line in blob.splitlines():
-        if line.startswith("----- FILE:"):
-            if current_lines:
-                sections.append((current_title, "\n".join(current_lines).strip()))
-            current_title = line.split(":", 1)[-1].strip() or "Context"
-            current_lines = []
-        elif line.startswith("## "):
-            if current_lines:
-                sections.append((current_title, "\n".join(current_lines).strip()))
-            current_title = line[3:].strip() or "Context"
-            current_lines = []
-        elif line.startswith("# "):
-            continue
-        else:
-            current_lines.append(line)
-    if current_lines:
-        sections.append((current_title, "\n".join(current_lines).strip()))
-    deduped = []
-    seen = set()
-    for title, text in sections:
-        key = (title, text[:200])
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append((title, text))
-    return deduped
-
-def choose_context_sections(blob, keywords):
-    sections = parse_context_sections(blob)
-    if not sections:
-        return []
-    scored = []
-    for title, text in sections:
-        snippet = summarize_text(text, CONTEXT_SECTION_CHAR_LIMIT)
-        if not snippet:
-            continue
-        summary = single_line_summary(snippet, CONTEXT_SECTION_SUMMARY_LIMIT)
-        if not summary:
-            continue
-        score = score_text(text, keywords)
-        scored.append((score, title, summary))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    filtered = [entry for entry in scored if entry[0] > 0][:CONTEXT_SECTION_LIMIT]
-    if not filtered:
-        filtered = scored[:CONTEXT_SECTION_LIMIT]
-    return [(title, summary) for _, title, summary in filtered if summary]
-
-def load_sds_chunks(list_path):
-    if not list_path or not list_path.exists():
-        return []
-    entries = []
-    for line in list_path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("|", 2)
-        chunk_path = Path(parts[0].strip())
-        label = parts[1].strip() if len(parts) > 1 else ""
-        heading = parts[2].strip() if len(parts) > 2 else ""
-        if not chunk_path.exists():
-            continue
-        try:
-            content = chunk_path.read_text(encoding="utf-8").strip()
-        except Exception:
-            continue
-        if content:
-            entries.append((chunk_path.name, label, heading, content))
-    return entries
-
-def choose_sds_chunks(entries, keywords):
-    if not entries:
-        return [], [], 0
-    scored = []
-    for name, label, heading, content in entries:
-        meta = " ".join(filter(None, (name, label, heading)))
-        combined = f"{meta}\n{content}"
-        score = score_text(combined, keywords)
-        scored.append((score, name, label, heading, content))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    selected = [entry for entry in scored if entry[0] > 0][:SDS_CHUNK_LIMIT]
-    if not selected:
-        selected = scored[:SDS_CHUNK_LIMIT]
-    overview_entries = selected[:SDS_OVERVIEW_LIMIT]
-    prepared = []
-    for _, name, label, heading, content in selected:
-        ref = f"SDS {label}" if label else (heading or name)
-        summary_text = summarize_text(content, SDS_SNIPPET_CHAR_LIMIT)
-        summary = single_line_summary(summary_text, SDS_SNIPPET_SUMMARY_LIMIT)
-        prepared.append((ref, summary))
-    overview_list = []
-    for _, name, label, heading, _ in overview_entries:
-        ref = f"SDS {label}" if label else (heading or name)
-        overview_list.append(ref)
-    omitted_total = max(0, len(entries) - len(selected))
-    return overview_list, prepared, omitted_total
-
-def safe_excerpt(path, char_limit):
-    if not path or not path.exists():
-        return ""
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore").strip()
-    except Exception:
-        return ""
-    return single_line_summary(text, char_limit)
-
-def load_other_tasks(db_path, story_slug, current_index):
-    if not db_path or not db_path.exists():
-        return []
-    try:
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-    except Exception:
-        return []
-    lines = []
-    try:
-        for row in conn.execute(
-            "SELECT position, task_id, title, status, dependencies_json FROM tasks WHERE story_slug = ? ORDER BY position",
-            (story_slug,),
-        ):
-            pos = int(row["position"] or 0)
-            if pos == current_index:
-                continue
-            identifier = (row["task_id"] or "").strip() or f"Task #{pos + 1:02d}"
-            title = (row["title"] or "").strip() or "Untitled"
-            status = (row["status"] or "pending").strip()
-            deps_summary = ""
-            deps_raw = row["dependencies_json"] or ""
-            if deps_raw:
-                try:
-                    parsed = json.loads(deps_raw)
-                    if isinstance(parsed, list) and parsed:
-                        deps_summary = ", ".join(str(item).strip() for item in parsed if str(item).strip())
-                except Exception:
-                    deps_summary = deps_raw
-            title_summary = single_line_summary(title, OTHER_TASKS_CHAR_LIMIT)
-            line = f"- {identifier}: {title_summary} [status: {status}]"
-            if deps_summary:
-                deps_short = single_line_summary(deps_summary, max(30, OTHER_TASKS_CHAR_LIMIT // 2))
-                if deps_short:
-                    line += f" (deps: {deps_short})"
-            line = single_line_summary(line, OTHER_TASKS_CHAR_LIMIT)
-            lines.append(line)
-            if len(lines) >= OTHER_TASKS_LIMIT:
-                break
-    finally:
-        conn.close()
-    return lines
-
-def single_line_summary(text: str, max_chars: int) -> str:
-    text = text.strip()
-    if not text:
-        return ""
-    text = re.sub(r"\s+", " ", text)
-    if max_chars > 0 and len(text) > max_chars:
-        return text[:max_chars].rstrip() + "…"
-    return text
-
-def _trim_field_text(value: str) -> str:
-    if not isinstance(value, str):
-        return value
-    value = re.sub(r"\s+", " ", value.strip())
-    if TASK_FIELD_CHAR_LIMIT > 0 and len(value) > TASK_FIELD_CHAR_LIMIT:
-        value = value[:TASK_FIELD_CHAR_LIMIT].rstrip() + "…"
-    return value
-
-def _trim_field_list(items):
-    if not isinstance(items, list):
-        return []
-    result = []
-    for idx, item in enumerate(items):
-        if idx >= TASK_FIELD_LIST_LIMIT:
-            remainder = len(items) - TASK_FIELD_LIST_LIMIT
-            if remainder > 0:
-                result.append(f"... (+{remainder} more)")
-            break
-        if isinstance(item, str):
-            result.append(_trim_field_text(item))
-        else:
-            result.append(item)
-    return [entry for entry in result if entry not in ("", None, [])]
-
-def build_compact_task(task: dict) -> dict:
-    keys = [
-        "id",
-        "task_id",
-        "status",
-        "title",
-        "description",
-        "acceptance_criteria",
-        "tags",
-        "assignees",
-        "dependencies",
-        "document_references",
-        "endpoints",
-        "data_contracts",
-        "qa_notes",
-        "user_roles",
-        "estimate",
-        "story_points",
-        "analytics",
-        "observability",
-        "policy",
-        "idempotency",
-        "rate_limits",
-    ]
-    snapshot = {}
-    for key in keys:
-        if key not in task:
-            continue
-        value = task.get(key)
-        if isinstance(value, str):
-            trimmed = _trim_field_text(value)
-            if trimmed:
-                snapshot[key] = trimmed
-        elif isinstance(value, list):
-            trimmed_list = _trim_field_list(value)
-            if trimmed_list:
-                snapshot[key] = trimmed_list
-        elif value not in (None, ""):
-            snapshot[key] = value
-    return snapshot
-
-keywords = extract_keywords(story, target_task)
-context_sections = choose_context_sections(context_blob, keywords)
-
-sds_snippets = []
-sds_omitted = 0
-entries = load_sds_chunks(sds_list_path)
-if entries:
-    _, sds_snippets, sds_omitted = choose_sds_chunks(entries, keywords)
-
-pdr_excerpt = safe_excerpt(pdr_path, PDR_CHAR_LIMIT)
-sql_excerpt = safe_excerpt(sql_path, SQL_CHAR_LIMIT)
-other_tasks = load_other_tasks(db_path, story_slug, task_index)
-gaps = detect_gaps(target_task)
-
-story_summary = {
-    "epic_id": epic_id,
-    "epic_title": epic_title,
-    "story_id": story_id,
-    "story_title": story_title,
-    "story_description": story_description,
-    "story_roles": story_roles,
-    "story_acceptance_criteria": story_acceptance,
-}
-
-with prompt_path.open("w", encoding="utf-8") as fh:
-    fh.write(f"You are the {project_label}, refining a Jira task so it is implementation-ready.\n")
-    fh.write("Fill in missing details using the focused context while preserving correct scope.\n\n")
-
-    fh.write("## Story summary\n")
-    json.dump(story_summary, fh, indent=2)
-    fh.write("\n\n")
-
-    fh.write("## Focused documentation references\n")
-    if context_sections:
-        for title, summary in context_sections:
-            fh.write(f"- {title}: {summary}\n")
-        fh.write("\n")
-    else:
-        fh.write("(No high-signal sections detected; reference the consolidated context if needed.)\n\n")
-
-    if pdr_excerpt:
-        fh.write("## PDR reference\n")
-        fh.write(f"- {pdr_excerpt}\n\n")
-
-    if sql_excerpt:
-        fh.write("## Database schema reference\n")
-        fh.write(f"- {sql_excerpt}\n\n")
-
-    if sds_snippets:
-        fh.write("## SDS references\n")
-        for ref, summary in sds_snippets:
-            if summary:
-                fh.write(f"- {ref}: {summary}\n")
-            else:
-                fh.write(f"- {ref}\n")
-        if sds_omitted > 0:
-            fh.write(f"- ...(additional {sds_omitted} sections omitted; consult full SDS)\n")
-        fh.write("\n")
-
-    if other_tasks:
-        fh.write("## Related tasks in backlog\n")
-        fh.write("\n".join(other_tasks))
-        fh.write("\n\n")
-
-    fh.write("## Current task snapshot (trimmed)\n")
-    json.dump(snapshot, fh, indent=2)
-    fh.write("\n\n")
-
-    if gaps:
-        fh.write("## Fields to revise\n")
-        for gap in gaps:
-            fh.write(f"- {gap}\n")
-        fh.write("\n")
-    else:
-        fh.write("## Fields to revise\n")
-        fh.write("- No validation gaps detected; tighten clarity and references if helpful.\n\n")
-
-    fh.write("## Requirements\n")
-    fh.write("- Update only the fields above that need attention; keep correct data unchanged.\n")
-    fh.write("- Cite documentation by identifier (SDS §#, SQL:table, API:/path) rather than pasting prose.\n")
-    fh.write("- Fill in missing technical specifics (APIs, data contracts, QA, analytics, RBAC) using the references.\n")
-    fh.write("- Keep estimates/story_points realistic and adjust tags, assignees, and dependencies when necessary.\n")
-    fh.write("- Return the complete task as valid JSON with no markdown or commentary outside the object.\n\n")
-
-    task_id = target_task.get("id") or target_task.get("task_id") or "TASK-ID"
-    fh.write("## Output JSON schema\n")
-    fh.write(
-        "{\n"
-        "  \"task\": {\n"
-        f"    \"id\": \"{task_id}\",\n"
-        "    \"title\": \"...\",\n"
-        "    \"description\": \"...\",\n"
-        "    \"acceptance_criteria\": [\"...\"],\n"
-        "    \"tags\": [\"Web-FE\"],\n"
-        "    \"assignees\": [\"FE dev\"],\n"
-        "    \"estimate\": 5,\n"
-        "    \"story_points\": 5,\n"
-        "    \"dependencies\": [\"WEB-01-T00\"],\n"
-        "    \"document_references\": [\"SDS §10.1.1\"],\n"
-        "    \"endpoints\": [\"GET /api/v1/...\"],\n"
-        "    \"data_contracts\": [\"Request payload...\"],\n"
-        "    \"qa_notes\": [\"Tests...\"],\n"
-        "    \"user_roles\": [\"Visitor\"]\n"
-        "  }\n"
-        "}\n"
-    )
-    fh.write("Return strictly valid JSON only.\n")
-PY
-}
 
 cjt::sync_refined_task_to_db() {
   local story_json="${1:?refined story json required}"
@@ -3526,62 +1143,9 @@ cjt::apply_refined_task() {
   local working_json="${1:?working story json required}"
   local refined_json="${2:?refined task json required}"
   local task_index="${3:?task index required}"
-  python3 - "$working_json" "$refined_json" "$task_index" <<'PY'
-import json
-import os
-import sys
-from datetime import datetime
-from pathlib import Path
-
-working_path = Path(sys.argv[1])
-refined_path = Path(sys.argv[2])
-task_index = int(sys.argv[3])
-
-if not refined_path.exists():
-    raise SystemExit(0)
-
-try:
-    refined_payload = json.loads(refined_path.read_text(encoding='utf-8'))
-except json.JSONDecodeError:
-    raise SystemExit(0)
-
-if isinstance(refined_payload, dict):
-    task_data = refined_payload.get('task', refined_payload)
-else:
-    task_data = None
-
-if not isinstance(task_data, dict):
-    raise SystemExit(0)
-
-if not any(key in task_data for key in ("title", "description", "acceptance_criteria", "tags")):
-    raise SystemExit(0)
-
-try:
-    story_payload = json.loads(working_path.read_text(encoding='utf-8'))
-except json.JSONDecodeError:
-    raise SystemExit(0)
-
-tasks = story_payload.get('tasks')
-if not isinstance(tasks, list) or task_index < 0 or task_index >= len(tasks):
-    raise SystemExit(0)
-
-existing = tasks[task_index]
-if not isinstance(existing, dict):
-    raise SystemExit(0)
-
-for key, value in task_data.items():
-    if value is None:
-       continue
-    existing[key] = value
-
-dry_run = os.environ.get('CJT_DRY_RUN', '0') == '1'
-if not dry_run:
-    existing['refined'] = 1
-    existing['refined_at'] = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
-
-story_payload['tasks'][task_index] = existing
-working_path.write_text(json.dumps(story_payload, indent=2) + "\n", encoding='utf-8')
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "apply_refined_task.py")" || return 1
+  python3 "$helper_path" "$working_json" "$refined_json" "$task_index"
 }
 
 cjt::build_payload() {

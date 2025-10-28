@@ -103,39 +103,49 @@ cpdr::run_codex() {
   return 0
 }
 
+cpdr::clone_python_tool() {
+  local script_name="${1:?python script name required}"
+  local project_root="${2:-${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}}"
+
+  if declare -f gc_clone_python_tool >/dev/null 2>&1; then
+    gc_clone_python_tool "$script_name" "$project_root"
+    return
+  fi
+
+  local cli_root
+  if [[ -n "${CPDR_ROOT_DIR:-}" ]]; then
+    cli_root="$CPDR_ROOT_DIR"
+  else
+    cli_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+  fi
+
+  local source_path="${cli_root}/scripts/python/${script_name}"
+  if [[ ! -f "$source_path" ]]; then
+    cpdr::die "Python helper missing at ${source_path}"
+  fi
+
+  local work_dir_name="${GC_WORK_DIR_NAME:-.gpt-creator}"
+  local target_dir="${project_root%/}/${work_dir_name}/shims/python"
+  local target_path="${target_dir}/${script_name}"
+
+  if [[ ! -d "$target_dir" ]]; then
+    mkdir -p "$target_dir" || cpdr::die "Failed to create ${target_dir}"
+  fi
+
+  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
+    cp "$source_path" "$target_path" || cpdr::die "Failed to copy ${script_name} helper"
+  fi
+
+  printf '%s\n' "$target_path"
+}
+
 cpdr::extract_json() {
   local infile="${1:?input file required}"
   local outfile="${2:?output file required}"
-  python3 - "$infile" "$outfile" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-raw_path = Path(sys.argv[1])
-out_path = Path(sys.argv[2])
-text = raw_path.read_text(encoding='utf-8')
-
-stack = []
-start = None
-for idx, ch in enumerate(text):
-    if ch in '{[':
-        if not stack:
-            start = idx
-        stack.append(ch)
-    elif ch in '}]':
-        if stack:
-            stack.pop()
-            if not stack and start is not None:
-                snippet = text[start:idx+1]
-                try:
-                    data = json.loads(snippet)
-                except json.JSONDecodeError:
-                    continue
-                out_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-                sys.exit(0)
-
-raise SystemExit("Failed to locate JSON payload in Codex output")
-PY
+  local helper_path
+  local project_root="${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  helper_path="$(cpdr::clone_python_tool "extract_json.py" "$project_root")" || return 1
+  python3 "$helper_path" "$infile" "$outfile"
 }
 
 cpdr::init() {
@@ -218,55 +228,10 @@ cpdr::prepare_context() {
 cpdr::write_toc_prompt() {
   local prompt_file="${1:?prompt file required}"
   local snippet="${2:?snippet path required}"
-
-  mkdir -p "$(dirname "$prompt_file")"
-  {
-    cat <<'EOF'
-You are Codex, drafting a Product Requirements Document (PDR) from a Request for Proposal (RFP).
-
-Follow this process:
-1. Study the RFP excerpt.
-2. Identify the highest-level themes first (vision, goals, product scope, user segments, success metrics, operating constraints).
-3. Break each theme into progressively more detailed sections and subsections, going from high-level strategy down to detailed requirements, policies, integrations, and validation.
-4. Propose a complete table of contents for the PDR before any narrative is written.
-
-Output strict JSON matching this schema:
-{
-  "document_title": "string",
-  "sections": [
-    {
-      "title": "Top level heading",
-      "summary": "1-3 sentence overview of what belongs in this section",
-      "subsections": [
-        {
-          "title": "Sub heading",
-          "summary": "Short summary",
-          "subsections": [
-            {
-              "title": "Nested heading",
-              "summary": "Short summary"
-            }
-          ]
-        }
-      ]
-    }
-  ]
-}
-
-Rules:
-- Order sections from highest-level concepts down to implementation and validation details.
-- Provide at least three top-level sections.
-- Each subsection list may be empty, but include the key subsections necessary to cover the RFP requirements.
-- Do not include prose outside the JSON response.
-
-## RFP Excerpt
-EOF
-    cat "$snippet"
-    cat <<'EOF'
-
-## End RFP Excerpt
-EOF
-  } >"$prompt_file"
+  local project_root="${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(cpdr::clone_python_tool "write_toc_prompt.py" "$project_root")" || return 1
+  python3 "$helper_path" "$prompt_file" "$snippet"
 }
 
 cpdr::generate_toc() {
@@ -295,116 +260,33 @@ cpdr::build_manifest() {
   local manifest_json="$CPDR_JSON_DIR/manifest.json"
   local flat_json="$CPDR_JSON_DIR/manifest_flat.json"
 
-  python3 - "$toc_json" "$manifest_json" "$flat_json" <<'PY'
-import json
-import re
-import sys
-from pathlib import Path
-
-toc_path, manifest_path, flat_path = sys.argv[1:4]
-toc = json.loads(Path(toc_path).read_text(encoding='utf-8'))
-sections = toc.get('sections') or []
-
-slug_re = re.compile(r'[^a-z0-9]+')
-
-def slugify(text, seen):
-    base = slug_re.sub('-', (text or '').lower()).strip('-') or 'section'
-    slug = base
-    idx = 2
-    while slug in seen:
-        slug = f"{base}-{idx}"
-        idx += 1
-    seen.add(slug)
-    return slug
-
-nodes = []
-seen = set()
-
-def walk(node, path, parent):
-    title = (node.get('title') or '').strip()
-    summary = (node.get('summary') or '').strip()
-    slug = slugify(title or 'section', seen)
-    label = '.'.join(str(i + 1) for i in path)
-    breadcrumbs = []
-    parent_slug = None
-    parent_label = None
-    if parent is not None:
-        breadcrumbs = parent['breadcrumbs'] + [parent['title']]
-        parent_slug = parent['slug']
-        parent_label = parent['label']
-    entry = {
-        'slug': slug,
-        'title': title,
-        'summary': summary,
-        'label': label,
-        'level': len(path),
-        'path': path,
-        'parent_slug': parent_slug,
-        'parent_label': parent_label,
-        'breadcrumbs': breadcrumbs,
-        'children_titles': [ (child.get('title') or '').strip() for child in (node.get('subsections') or []) ],
-    }
-    nodes.append(entry)
-    for idx, child in enumerate(node.get('subsections') or []):
-        walk(child, path + [idx], entry)
-
-for idx, section in enumerate(sections):
-    walk(section, [idx], None)
-
-nodes_by_path = sorted(nodes, key=lambda item: item['path'])
-nodes_generation_order = sorted(nodes, key=lambda item: (item['level'], item['path']))
-
-manifest = {
-    'toc': toc,
-    'nodes': nodes_by_path,
-    'generation_order': [item['slug'] for item in nodes_generation_order],
-}
-
-Path(manifest_path).write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-Path(flat_path).write_text(json.dumps(nodes_by_path, indent=2) + '\n', encoding='utf-8')
-PY
+  local project_root="${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(cpdr::clone_python_tool "build_manifest.py" "$project_root")" || return 1
+  python3 "$helper_path" "$toc_json" "$manifest_json" "$flat_json"
 }
 
 cpdr::manifest_has_nodes() {
   [[ -f "$CPDR_JSON_DIR/manifest.json" ]] || return 1
-  python3 - "$CPDR_JSON_DIR/manifest.json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-nodes = data.get('nodes') or []
-sys.exit(0 if nodes else 1)
-PY
+  local project_root="${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(cpdr::clone_python_tool "manifest_has_nodes.py" "$project_root")" || return 1
+  python3 "$helper_path" "$CPDR_JSON_DIR/manifest.json"
 }
 
 cpdr::manifest_node_json() {
   local slug="${1:?slug required}"
-  python3 - "$CPDR_JSON_DIR/manifest.json" "$slug" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-manifest = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-slug = sys.argv[2]
-for node in manifest.get('nodes') or []:
-    if node.get('slug') == slug:
-        print(json.dumps(node))
-        sys.exit(0)
-raise SystemExit(f"Node not found for slug: {slug}")
-PY
+  local project_root="${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(cpdr::clone_python_tool "manifest_node_json.py" "$project_root")" || return 1
+  python3 "$helper_path" "$CPDR_JSON_DIR/manifest.json" "$slug"
 }
 
 cpdr::manifest_generation_order() {
-  python3 - "$CPDR_JSON_DIR/manifest.json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-manifest = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-for slug in manifest.get('generation_order') or []:
-    print(slug)
-PY
+  local project_root="${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(cpdr::clone_python_tool "manifest_generation_order.py" "$project_root")" || return 1
+  python3 "$helper_path" "$CPDR_JSON_DIR/manifest.json"
 }
 
 cpdr::write_section_prompt() {
@@ -414,87 +296,20 @@ cpdr::write_section_prompt() {
   local node_json
   node_json="$(cpdr::manifest_node_json "$slug")"
 
-  python3 - <<'PY' "$node_json" "$CPDR_JSON_DIR/manifest.json" "$CPDR_CONTEXT_SNIPPET" "$prompt_file"
-import json
-import sys
-from pathlib import Path
-
-node = json.loads(sys.argv[1])
-manifest = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
-snippet = Path(sys.argv[3]).read_text(encoding='utf-8')
-prompt_path = Path(sys.argv[4])
-
-slug = node['slug']
-title = node.get('title') or ''
-summary = node.get('summary') or ''
-label = node.get('label') or ''
-level = int(node.get('level') or 1)
-breadcrumbs = node.get('breadcrumbs') or []
-children = node.get('children_titles') or []
-heading_level = max(2, min(level + 1, 6))
-heading_token = '#' * heading_level
-
-parent = None
-parent_slug = node.get('parent_slug')
-if parent_slug:
-    for candidate in manifest.get('nodes') or []:
-        if candidate.get('slug') == parent_slug:
-            parent = candidate
-            break
-
-lines = []
-lines.append("You are Codex, authoring a Product Requirements Document (PDR) based on the provided RFP excerpt.")
-lines.append("")
-lines.append("## Section metadata")
-lines.append(f"- Slug: {slug}")
-lines.append(f"- Outline label: {label}")
-lines.append(f"- Heading depth: {level}")
-lines.append(f"- Markdown heading token: {heading_token}")
-if breadcrumbs:
-    lines.append(f"- Parent chain: {' > '.join(breadcrumbs)}")
-lines.append(f"- Title: {title}")
-if summary:
-    lines.append(f"- Outline summary: {summary}")
-if parent and parent.get('summary'):
-    lines.append(f"- Parent summary: {parent['summary']}")
-if children:
-    lines.append("- Planned child headings:")
-    for child in children:
-        if child:
-            lines.append(f"  * {child}")
-
-lines.append("")
-lines.append("## RFP excerpt (truncated)")
-lines.append(snippet)
-lines.append("")
-lines.append("## Writing instructions")
-lines.append(f"1. Begin with the heading `{heading_token} {title} {{#{slug}}}` (you may adjust the wording, but keep the heading level and anchor).")
-lines.append("2. Summarize the section at the appropriate fidelity: higher levels focus on narrative, scope, and success criteria; deeper levels provide concrete requirements, data flows, policies, and validation steps.")
-lines.append("3. Align content strictly with the RFP while resolving gaps with reasonable assumptions explicitly marked as such.")
-lines.append("4. Use ordered lists, bullet points, and sub-subheadings sparingly to improve structure, but do not create headings beyond the assigned level for this pass.")
-lines.append("5. Reference downstream subsections (if any) but leave their detailed execution to later iterations.")
-lines.append("6. Close with a short 'Key Considerations' bullet list anchoring the most important commitments for this section.")
-lines.append("")
-lines.append("## Output requirements")
-lines.append("Return Markdown only for this section. Do not include front-matter, global TOC, or commentary outside the section.")
-
-prompt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-PY
+  local project_root="${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(cpdr::clone_python_tool "write_section_prompt.py" "$project_root")" || return 1
+  python3 "$helper_path" "$node_json" "$CPDR_JSON_DIR/manifest.json" "$CPDR_CONTEXT_SNIPPET" "$prompt_file"
 }
 
 cpdr::section_output_path() {
   local slug="${1:?slug required}"
   local node_json
   node_json="$(cpdr::manifest_node_json "$slug")"
-  python3 - <<'PY' "$node_json"
-import json
-import sys
-
-node = json.loads(sys.argv[1])
-label = (node.get('label') or '').replace('.', '-')
-slug = node.get('slug') or 'section'
-print(f"{label}_{slug}.md")
-PY
+  local project_root="${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(cpdr::clone_python_tool "section_output_path.py" "$project_root")" || return 1
+  python3 "$helper_path" "$node_json"
 }
 
 cpdr::generate_sections() {
@@ -535,35 +350,10 @@ cpdr::write_markdown_toc() {
   local toc_json="$CPDR_JSON_DIR/manifest.json"
   local toc_md="$CPDR_ASSEMBLY_DIR/table_of_contents.md"
 
-  python3 - "$toc_json" "$toc_md" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-manifest = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-out_path = Path(sys.argv[2])
-
-def walk(nodes, depth):
-    lines = []
-    for node in nodes:
-        title = node.get('title') or ''
-        label = node.get('label') or ''
-        indent = '  ' * (node.get('level', depth) - 1)
-        display = f"{label} {title}".strip()
-        slug = node.get('slug') or ''
-        if slug:
-            lines.append(f"{indent}- [{display}](#{slug})")
-        else:
-            lines.append(f"{indent}- {display}")
-    return '\n'.join(lines)
-
-lines = []
-lines.append('## Table of Contents')
-lines.append('')
-lines.append(walk(manifest.get('nodes') or [], 1))
-lines.append('')
-out_path.write_text('\n'.join(lines), encoding='utf-8')
-PY
+  local project_root="${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(cpdr::clone_python_tool "write_markdown_toc.py" "$project_root")" || return 1
+  python3 "$helper_path" "$toc_json" "$toc_md"
 }
 
 cpdr::assemble_document() {
@@ -631,58 +421,19 @@ cpdr::write_review_prompt() {
   local rfp_excerpt="$CPDR_CONTEXT_SNIPPET"
 
   mkdir -p "$(dirname "$prompt_file")"
-  {
-    cat <<'PROMPT'
-You are a principal product strategist performing a final quality review of a Product Requirements Document (PDR).
-
-Goals:
-- Confirm the PDR is comprehensive enough for engineering, design, compliance, and go-to-market teams to build and launch the product described in the RFP.
-- Ensure every section of the PDR is internally consistent, aligned with neighbouring sections, and free of contradictions.
-- Identify gaps or ambiguous areas that would block execution, and resolve them by updating the PDR content.
-- Guarantee terminology, roles, success metrics, and scope stay synchronized across all sections.
-
-Method:
-1. Read the RFP excerpt to anchor requirements.
-2. Audit the current PDR, checking that vision, scope, user journeys, functional specs, non-functional requirements, compliance, analytics, rollout, and success metrics interlock without conflicts.
-3. Revise the PDR directly so it is self-consistent, implementation-ready, and efficient—no redundant or conflicting guidance.
-4. Output the improved PDR in Markdown. Do not include commentary, checklists, or code fences—return the updated document only.
-
-## RFP Excerpt
-PROMPT
-    cat "$rfp_excerpt"
-    cat <<'PROMPT'
-
-## Current PDR
-PROMPT
-    cat "$pdr_file"
-    cat <<'PROMPT'
-
-## End PDR
-PROMPT
-  } >"$prompt_file"
+  local project_root="${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(cpdr::clone_python_tool "write_review_prompt.py" "$project_root")" || return 1
+  python3 "$helper_path" "$pdr_file" "$rfp_excerpt" "$prompt_file"
 }
 
 cpdr::extract_review_markdown() {
   local input_file="${1:?input file required}"
   local output_file="${2:?output file required}"
-  python3 - "$input_file" "$output_file" <<'PY'
-import sys
-from pathlib import Path
-
-raw_path = Path(sys.argv[1])
-out_path = Path(sys.argv[2])
-text = raw_path.read_text(encoding='utf-8').strip()
-
-if text.startswith('```'):
-    fence = text.splitlines()
-    if fence and fence[0].startswith('```'):
-        fence = fence[1:]
-        if fence and fence[-1].startswith('```'):
-            fence = fence[:-1]
-        text = '\n'.join(fence).strip()
-
-out_path.write_text(text + ('\n' if not text.endswith('\n') else ''), encoding='utf-8')
-PY
+  local project_root="${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(cpdr::clone_python_tool "extract_review_markdown.py" "$project_root")" || return 1
+  python3 "$helper_path" "$input_file" "$output_file"
 }
 
 cpdr::review_document() {

@@ -18,29 +18,35 @@ fi
 
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "Missing dependency: $1"; }
 
-humanize_name() {
-  python3 - <<'PY' "${1:-}"
-import pathlib
-import re
-import sys
+gc_clone_python_tool() {
+  local script_name="${1:?python script name required}"
+  local root="${2:-${PROJECT_ROOT:-${ROOT_DIR:-$PWD}}}"
+  local cli_root="${GC_ROOT:-${CLI_ROOT:-$ROOT_DIR}}"
 
-raw = sys.argv[1] if len(sys.argv) > 1 else ''
-if raw:
-    raw = pathlib.Path(raw).name
-raw = re.sub(r'[_\-]+', ' ', raw).strip()
-if not raw:
-    print('Project')
-else:
-    words = []
-    for token in raw.split():
-        if len(token) <= 3:
-            words.append(token.upper())
-        elif token.isupper():
-            words.append(token)
-        else:
-            words.append(token.capitalize())
-    print(' '.join(words))
-PY
+  if [[ -z "$root" ]]; then
+    die "Unable to determine project root while preparing ${script_name}"
+  fi
+
+  local source_path="${cli_root}/scripts/python/${script_name}"
+  if [[ ! -f "$source_path" ]]; then
+    die "Python helper missing at ${source_path}"
+  fi
+
+  local target_dir="${root}/${GC_WORK_DIR_NAME:-.gpt-creator}/shims/python"
+  local target_path="${target_dir}/${script_name}"
+  if [[ ! -d "$target_dir" ]]; then
+    mkdir -p "$target_dir" || die "Failed to create ${target_dir}"
+  fi
+  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
+    cp "$source_path" "$target_path" || die "Failed to copy ${script_name} helper"
+  fi
+  printf '%s\n' "$target_path"
+}
+
+humanize_name() {
+  local helper_path
+  helper_path="$(gc_clone_python_tool "humanize_name.py" "$ROOT_DIR")" || return 1
+  python3 "$helper_path" "${1:-}"
 }
 
 usage() {

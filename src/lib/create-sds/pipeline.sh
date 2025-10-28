@@ -103,39 +103,49 @@ csds::run_codex() {
   return 0
 }
 
+csds::clone_python_tool() {
+  local script_name="${1:?python script name required}"
+  local project_root="${2:-${CSDS_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}}"
+
+  if declare -f gc_clone_python_tool >/dev/null 2>&1; then
+    gc_clone_python_tool "$script_name" "$project_root"
+    return
+  fi
+
+  local cli_root
+  if [[ -n "${CSDS_ROOT_DIR:-}" ]]; then
+    cli_root="$CSDS_ROOT_DIR"
+  else
+    cli_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+  fi
+
+  local source_path="${cli_root}/scripts/python/${script_name}"
+  if [[ ! -f "$source_path" ]]; then
+    csds::die "Python helper missing at ${source_path}"
+  fi
+
+  local work_dir_name="${GC_WORK_DIR_NAME:-.gpt-creator}"
+  local target_dir="${project_root%/}/${work_dir_name}/shims/python"
+  local target_path="${target_dir}/${script_name}"
+
+  if [[ ! -d "$target_dir" ]]; then
+    mkdir -p "$target_dir" || csds::die "Failed to create ${target_dir}"
+  fi
+
+  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
+    cp "$source_path" "$target_path" || csds::die "Failed to copy ${script_name} helper"
+  fi
+
+  printf '%s\n' "$target_path"
+}
+
 csds::extract_json() {
   local infile="${1:?input file required}"
   local outfile="${2:?output file required}"
-  python3 - "$infile" "$outfile" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-raw_path = Path(sys.argv[1])
-out_path = Path(sys.argv[2])
-text = raw_path.read_text(encoding='utf-8')
-
-stack = []
-start = None
-for idx, ch in enumerate(text):
-    if ch in '{[':
-        if not stack:
-            start = idx
-        stack.append(ch)
-    elif ch in '}]':
-        if stack:
-            stack.pop()
-            if not stack and start is not None:
-                snippet = text[start:idx+1]
-                try:
-                    data = json.loads(snippet)
-                except json.JSONDecodeError:
-                    continue
-                out_path.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-                sys.exit(0)
-
-raise SystemExit("Failed to locate JSON payload in Codex output")
-PY
+  local project_root="${CSDS_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(csds::clone_python_tool "extract_json.py" "$project_root")" || return 1
+  python3 "$helper_path" "$infile" "$outfile"
 }
 
 csds::init() {
@@ -293,116 +303,33 @@ csds::build_manifest() {
   local manifest_json="$CSDS_JSON_DIR/manifest.json"
   local flat_json="$CSDS_JSON_DIR/manifest_flat.json"
 
-  python3 - "$toc_json" "$manifest_json" "$flat_json" <<'PY'
-import json
-import re
-import sys
-from pathlib import Path
-
-toc_path, manifest_path, flat_path = sys.argv[1:4]
-toc = json.loads(Path(toc_path).read_text(encoding='utf-8'))
-sections = toc.get('sections') or []
-
-slug_re = re.compile(r'[^a-z0-9]+')
-
-def slugify(text, seen):
-    base = slug_re.sub('-', (text or '').lower()).strip('-') or 'section'
-    slug = base
-    idx = 2
-    while slug in seen:
-        slug = f"{base}-{idx}"
-        idx += 1
-    seen.add(slug)
-    return slug
-
-nodes = []
-seen = set()
-
-def walk(node, path, parent):
-    title = (node.get('title') or '').strip()
-    summary = (node.get('summary') or '').strip()
-    slug = slugify(title or 'section', seen)
-    label = '.'.join(str(i + 1) for i in path)
-    breadcrumbs = []
-    parent_slug = None
-    parent_label = None
-    if parent is not None:
-        breadcrumbs = parent['breadcrumbs'] + [parent['title']]
-        parent_slug = parent['slug']
-        parent_label = parent['label']
-    entry = {
-        'slug': slug,
-        'title': title,
-        'summary': summary,
-        'label': label,
-        'level': len(path),
-        'path': path,
-        'parent_slug': parent_slug,
-        'parent_label': parent_label,
-        'breadcrumbs': breadcrumbs,
-        'children_titles': [ (child.get('title') or '').strip() for child in (node.get('subsections') or []) ],
-    }
-    nodes.append(entry)
-    for idx, child in enumerate(node.get('subsections') or []):
-        walk(child, path + [idx], entry)
-
-for idx, section in enumerate(sections):
-    walk(section, [idx], None)
-
-nodes_by_path = sorted(nodes, key=lambda item: item['path'])
-nodes_generation_order = sorted(nodes, key=lambda item: (item['level'], item['path']))
-
-manifest = {
-    'toc': toc,
-    'nodes': nodes_by_path,
-    'generation_order': [item['slug'] for item in nodes_generation_order],
-}
-
-Path(manifest_path).write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-Path(flat_path).write_text(json.dumps(nodes_by_path, indent=2) + '\n', encoding='utf-8')
-PY
+  local project_root="${CSDS_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(csds::clone_python_tool "build_manifest.py" "$project_root")" || return 1
+  python3 "$helper_path" "$toc_json" "$manifest_json" "$flat_json"
 }
 
 csds::manifest_has_nodes() {
   [[ -f "$CSDS_JSON_DIR/manifest.json" ]] || return 1
-  python3 - "$CSDS_JSON_DIR/manifest.json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-nodes = data.get('nodes') or []
-sys.exit(0 if nodes else 1)
-PY
+  local project_root="${CSDS_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(csds::clone_python_tool "manifest_has_nodes.py" "$project_root")" || return 1
+  python3 "$helper_path" "$CSDS_JSON_DIR/manifest.json"
 }
 
 csds::manifest_node_json() {
   local slug="${1:?slug required}"
-  python3 - "$CSDS_JSON_DIR/manifest.json" "$slug" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-manifest = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-slug = sys.argv[2]
-for node in manifest.get('nodes') or []:
-    if node.get('slug') == slug:
-        print(json.dumps(node))
-        sys.exit(0)
-raise SystemExit(f"Node not found for slug: {slug}")
-PY
+  local project_root="${CSDS_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(csds::clone_python_tool "manifest_node_json.py" "$project_root")" || return 1
+  python3 "$helper_path" "$CSDS_JSON_DIR/manifest.json" "$slug"
 }
 
 csds::manifest_generation_order() {
-  python3 - "$CSDS_JSON_DIR/manifest.json" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-manifest = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-for slug in manifest.get('generation_order') or []:
-    print(slug)
-PY
+  local project_root="${CSDS_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(csds::clone_python_tool "manifest_generation_order.py" "$project_root")" || return 1
+  python3 "$helper_path" "$CSDS_JSON_DIR/manifest.json"
 }
 
 csds::write_section_prompt() {
@@ -412,88 +339,20 @@ csds::write_section_prompt() {
   local node_json
   node_json="$(csds::manifest_node_json "$slug")"
 
-  python3 - <<'PY' "$node_json" "$CSDS_JSON_DIR/manifest.json" "$CSDS_CONTEXT_SNIPPET" "$prompt_file"
-import json
-import sys
-from pathlib import Path
-
-node = json.loads(sys.argv[1])
-manifest = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
-snippet = Path(sys.argv[3]).read_text(encoding='utf-8')
-prompt_path = Path(sys.argv[4])
-
-slug = node['slug']
-title = node.get('title') or ''
-summary = node.get('summary') or ''
-label = node.get('label') or ''
-level = int(node.get('level') or 1)
-breadcrumbs = node.get('breadcrumbs') or []
-children = node.get('children_titles') or []
-heading_level = max(2, min(level + 1, 6))
-heading_token = '#' * heading_level
-
-parent = None
-parent_slug = node.get('parent_slug')
-if parent_slug:
-    for candidate in manifest.get('nodes') or []:
-        if candidate.get('slug') == parent_slug:
-            parent = candidate
-            break
-
-lines = []
-lines.append("You are Codex, documenting a System Design Specification (SDS) based on the Product Requirements Document excerpt below.")
-lines.append("")
-lines.append("## Section metadata")
-lines.append(f"- Slug: {slug}")
-lines.append(f"- Outline label: {label}")
-lines.append(f"- Heading depth: {level}")
-lines.append(f"- Markdown heading token: {heading_token}")
-if breadcrumbs:
-    lines.append(f"- Parent chain: {' > '.join(breadcrumbs)}")
-lines.append(f"- Title: {title}")
-if summary:
-    lines.append(f"- Outline summary: {summary}")
-if parent and parent.get('summary'):
-    lines.append(f"- Parent summary: {parent['summary']}")
-if children:
-    lines.append("- Planned child headings:")
-    for child in children:
-        if child:
-            lines.append(f"  * {child}")
-
-lines.append("")
-lines.append("## PDR excerpt (truncated)")
-lines.append(snippet)
-lines.append("")
-lines.append("## Writing instructions")
-lines.append(f"1. Begin with the heading `{heading_token} {title} {{#{slug}}}` (adjust wording if needed, but keep the level and anchor).")
-lines.append("2. Articulate the architectural intent for this section, then specify components, interactions, and data contracts in increasing detail.")
-lines.append("3. Map requirements from the PDR into concrete technical decisions: technologies, responsibilities, data models, interfaces, and operational policies.")
-lines.append("4. If diagrams are referenced, describe their structure textually (component, sequence, deployment) so engineers can implement them.")
-lines.append("5. Cover scalability, reliability, security, observability, and DevOps implications relevant to this scope.")
-lines.append("6. Call out assumptions explicitly and flag open questions or risks.")
-lines.append("7. Close with bullet lists for 'Open Questions & Risks' and 'Verification Strategy'.")
-lines.append("")
-lines.append("## Output requirements")
-lines.append("Return Markdown only for this section. Do not include front-matter, global TOC, or commentary outside the section.")
-
-prompt_path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-PY
+  local project_root="${CSDS_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(csds::clone_python_tool "write_sds_section_prompt.py" "$project_root")" || return 1
+  python3 "$helper_path" "$node_json" "$CSDS_JSON_DIR/manifest.json" "$CSDS_CONTEXT_SNIPPET" "$prompt_file"
 }
 
 csds::section_output_path() {
   local slug="${1:?slug required}"
   local node_json
   node_json="$(csds::manifest_node_json "$slug")"
-  python3 - <<'PY' "$node_json"
-import json
-import sys
-
-node = json.loads(sys.argv[1])
-label = (node.get('label') or '').replace('.', '-')
-slug = node.get('slug') or 'section'
-print(f"{label}_{slug}.md")
-PY
+  local project_root="${CSDS_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(csds::clone_python_tool "section_output_path.py" "$project_root")" || return 1
+  python3 "$helper_path" "$node_json"
 }
 
 csds::generate_sections() {
@@ -534,35 +393,10 @@ csds::write_markdown_toc() {
   local toc_json="$CSDS_JSON_DIR/manifest.json"
   local toc_md="$CSDS_ASSEMBLY_DIR/table_of_contents.md"
 
-  python3 - "$toc_json" "$toc_md" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-manifest = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-out_path = Path(sys.argv[2])
-
-def walk(nodes, depth):
-    lines = []
-    for node in nodes:
-        title = node.get('title') or ''
-        label = node.get('label') or ''
-        indent = '  ' * (node.get('level', depth) - 1)
-        display = f"{label} {title}".strip()
-        slug = node.get('slug') or ''
-        if slug:
-            lines.append(f"{indent}- [{display}](#{slug})")
-        else:
-            lines.append(f"{indent}- {display}")
-    return '\n'.join(lines)
-
-lines = []
-lines.append('## Table of Contents')
-lines.append('')
-lines.append(walk(manifest.get('nodes') or [], 1))
-lines.append('')
-out_path.write_text('\n'.join(lines), encoding='utf-8')
-PY
+  local project_root="${CSDS_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(csds::clone_python_tool "write_markdown_toc.py" "$project_root")" || return 1
+  python3 "$helper_path" "$toc_json" "$toc_md"
 }
 
 csds::assemble_document() {
@@ -664,24 +498,10 @@ PROMPT
 csds::extract_review_markdown() {
   local input_file="${1:?input file required}"
   local output_file="${2:?output file required}"
-  python3 - "$input_file" "$output_file" <<'PY'
-import sys
-from pathlib import Path
-
-raw_path = Path(sys.argv[1])
-out_path = Path(sys.argv[2])
-text = raw_path.read_text(encoding='utf-8').strip()
-
-if text.startswith('```'):
-    lines = text.splitlines()
-    if lines and lines[0].startswith('```'):
-        lines = lines[1:]
-        if lines and lines[-1].startswith('```'):
-            lines = lines[:-1]
-        text = '\n'.join(lines).strip()
-
-out_path.write_text(text + ('\n' if not text.endswith('\n') else ''), encoding='utf-8')
-PY
+  local project_root="${CSDS_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local helper_path
+  helper_path="$(csds::clone_python_tool "extract_review_markdown.py" "$project_root")" || return 1
+  python3 "$helper_path" "$input_file" "$output_file"
 }
 
 csds::review_document() {

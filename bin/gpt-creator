@@ -213,6 +213,137 @@ gc_bootstrap_docs_registry() {
   "$sqlite_bin" "$db_path" ".read $sql_file" >/dev/null 2>&1 || true
 }
 
+gc_doc_catalog_ready() {
+  local root="${1:-${PROJECT_ROOT:-$PWD}}"
+  local runtime_dir="${root}/.gpt-creator"
+  local staging_dir="${runtime_dir}/staging"
+  local doc_library="${staging_dir}/doc-library.md"
+  local doc_index="${staging_dir}/doc-index.md"
+  local doc_catalog="${staging_dir}/doc-catalog.json"
+  local tasks_db="${staging_dir}/plan/tasks/tasks.db"
+  local vector_index="${staging_dir}/plan/tasks/documentation-vector-index.sqlite"
+
+  if [[ ! -s "$doc_library" || ! -s "$doc_index" || ! -s "$doc_catalog" ]]; then
+    return 1
+  fi
+  if [[ ! -f "$tasks_db" ]]; then
+    return 1
+  fi
+  if [[ ! -s "$vector_index" ]]; then
+    return 1
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    if ! python3 - <<'PY' "$tasks_db"; then
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1])
+if not db_path.exists():
+    raise SystemExit(1)
+
+conn = sqlite3.connect(str(db_path))
+try:
+    cur = conn.cursor()
+    required = (
+        "documentation",
+        "documentation_search",
+        "documentation_sections",
+        "documentation_summaries",
+        "documentation_excerpts",
+    )
+    for table in required:
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE name = ?",
+            (table,),
+        )
+        if cur.fetchone() is None:
+            raise SystemExit(1)
+finally:
+    conn.close()
+
+raise SystemExit(0)
+PY
+      return 1
+    fi
+  else
+    return 1
+  fi
+
+  return 0
+}
+
+gc_populate_doc_catalog_shims() {
+  local root="${1:-${PROJECT_ROOT:-$PWD}}"
+  local runtime_dir="${root}/.gpt-creator"
+  local staging_dir="${runtime_dir}/staging"
+  local doc_library="${staging_dir}/doc-library.md"
+  local doc_index="${staging_dir}/doc-index.md"
+  local fallback_library="${root}/docs/doc-library.md"
+  local fallback_index="${root}/docs/doc-index.md"
+
+  if [[ -z "$root" ]]; then
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$doc_library")" "$(dirname "$doc_index")"
+
+  if [[ ! -s "$doc_library" && -s "$fallback_library" ]]; then
+    cp -f "$fallback_library" "$doc_library" 2>/dev/null || true
+    info "Seeded doc-library.md from docs directory."
+  fi
+  if [[ ! -s "$doc_index" && -s "$fallback_index" ]]; then
+    cp -f "$fallback_index" "$doc_index" 2>/dev/null || true
+    info "Seeded doc-index.md from docs directory."
+  fi
+}
+
+gc_require_documentation_catalog() {
+  local root="${1:-${PROJECT_ROOT:-$PWD}}"
+  ensure_ctx "$root"
+
+  if gc_doc_catalog_ready "$root"; then
+    gc_populate_doc_catalog_shims "$root"
+    return 0
+  fi
+
+  info "Documentation catalog missing or stale; running 'gpt-creator scan'."
+  if ! cmd_scan --project "$root"; then
+    warn "Documentation scan failed."
+    return 1
+  fi
+
+  gc_populate_doc_catalog_shims "$root"
+
+  if ! gc_doc_catalog_ready "$root"; then
+    warn "Documentation catalog still incomplete after scan; inspect ${root}/.gpt-creator/staging."
+    return 1
+  fi
+
+  if ! cmd_sweep_artifacts --project "$root"; then
+    warn "Artifact sweep encountered issues; run 'gpt-creator sweep-artifacts --project \"$root\"' manually."
+  fi
+
+  return 0
+}
+
+gc_refresh_documentation_if_needed() {
+  local root="${1:-${PROJECT_ROOT:-$PWD}}"
+  if [[ "${GC_SKIP_AUTO_DOC_REFRESH:-0}" == "1" ]]; then
+    info "Skipping automatic documentation refresh (GC_SKIP_AUTO_DOC_REFRESH=1)."
+    return 0
+  fi
+
+  if gc_require_documentation_catalog "$root"; then
+    ok "Documentation catalog refreshed."
+    return 0
+  fi
+
+  warn "Automatic scan failed; rerun 'gpt-creator scan' manually."
+  return 1
+}
+
 gc_parse_int() {
   local value="$1"
   local fallback="$2"
@@ -6030,6 +6161,28 @@ print(pending)
 PY
 }
 
+gc_count_unstarted_tasks() {
+  local db_path="${1:?tasks database path required}"
+  python3 - <<'PY' "$db_path"
+import sqlite3
+import sys
+
+db_path = sys.argv[1]
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+row = cur.execute(
+    """
+    SELECT COUNT(*)
+      FROM tasks
+     WHERE LOWER(COALESCE(status, 'pending')) IN ('', 'pending')
+    """
+).fetchone()
+pending = row[0] if row else 0
+conn.close()
+print(pending)
+PY
+}
+
 gc_tasks_db_has_rows() {
   local db_path="${1:?tasks database path required}"
   [[ -f "$db_path" ]] || return 1
@@ -7169,6 +7322,19 @@ cmd_scan() {
   done
   ensure_ctx "$root"
 
+  local runtime_dir="$GC_DIR"
+  local manifest_dir="${runtime_dir}/manifests"
+  mkdir -p "$manifest_dir" "${PLAN_DIR}/tasks"
+  local scan_stamp
+  scan_stamp="$(date +%Y%m%d-%H%M%S)"
+  local manifest="${manifest_dir}/discovery_${scan_stamp}.tsv"
+  local manifest_tmp="${manifest}.tmp"
+  local python_bin="${PYTHON_BIN:-python3}"
+  local python_available=0
+  if command -v "$python_bin" >/dev/null 2>&1; then
+    python_available=1
+  fi
+
   local -a scan_dirs=()
   if [[ -n "${GC_SCAN_ROOTS:-}" ]]; then
     local IFS=',:'
@@ -7220,9 +7386,7 @@ cmd_scan() {
   fi
 
   info "Scanning project artifacts under: ${scan_dirs[*]}"
-  local manifest="${GC_DIR}/scan.tsv"
-  local tmp="${manifest}.tmp"
-  printf "type\tconfidence\tpath\n" > "$tmp"
+  printf "type\tconfidence\tpath\n" > "$manifest_tmp"
 
   local -a find_prune_expr=()
   if [[ ${#prune_dirs[@]} -gt 0 ]]; then
@@ -7243,14 +7407,19 @@ cmd_scan() {
     if [[ -n "$hit" ]]; then
       local type conf
       IFS='|' read -r type conf <<<"$hit"
-      printf "%s\t%.2f\t%s\n" "$type" "$conf" "$f" >> "$tmp"
+      printf "%s\t%.2f\t%s\n" "$type" "$conf" "$f" >> "$manifest_tmp"
     fi
   done < <(find "${find_args[@]}")
 
-  mv "$tmp" "$manifest"
+  mv "$manifest_tmp" "$manifest"
+  if ! cp -f "$manifest" "${runtime_dir}/scan.tsv"; then
+    warn "Unable to persist discovery manifest copy at ${runtime_dir}/scan.tsv."
+  fi
+  info "Discovery TSV → ${manifest}"
 
   local scan_json="${STAGING_DIR}/scan.json"
-  python3 - <<'PY' "$manifest" "$PROJECT_ROOT" "$scan_json"
+  if (( python_available )); then
+    "$python_bin" - <<'PY' "$manifest" "$PROJECT_ROOT" "$scan_json"
 import csv, json, sys, time, pathlib
 manifest, root, out = sys.argv[1:4]
 rows = []
@@ -7274,7 +7443,94 @@ with open(out, 'w') as fh:
     json.dump(scan, fh, indent=2)
 print(out)
 PY
-  ok "Scan manifest → ${scan_json}"
+  else
+    warn "Skipping scan.json export; ${python_bin} not available."
+  fi
+
+  if (( python_available )); then
+    local doc_registry_tool="${CLI_ROOT}/src/lib/doc_registry.py"
+    if [[ -f "$doc_registry_tool" ]]; then
+      if "$python_bin" "$doc_registry_tool" sync-scan \
+        --project-root "$PROJECT_ROOT" \
+        --runtime-dir "$runtime_dir" \
+        --scan-tsv "$manifest"; then
+        info "Documentation registry synced."
+      else
+        warn "Documentation registry sync failed; inspect ${runtime_dir}/logs."
+      fi
+    else
+      warn "Skipping documentation registry sync; tool not found at ${doc_registry_tool}."
+    fi
+
+    local doc_catalog_tool="${CLI_ROOT}/src/lib/doc_catalog.py"
+    local doc_catalog_json="${STAGING_DIR}/doc-catalog.json"
+    local doc_catalog_library="${STAGING_DIR}/doc-library.md"
+    local doc_catalog_index="${STAGING_DIR}/doc-index.md"
+    if [[ -f "$doc_catalog_tool" ]]; then
+      if "$python_bin" "$doc_catalog_tool" \
+        --project-root "$PROJECT_ROOT" \
+        --staging-dir "$STAGING_DIR" \
+        --out-json "$doc_catalog_json" \
+        --out-library "$doc_catalog_library" \
+        --out-index "$doc_catalog_index"; then
+        info "Documentation catalog rebuilt."
+      else
+        warn "Documentation catalog build failed."
+      fi
+    else
+      warn "Skipping documentation catalog build; tool not found at ${doc_catalog_tool}."
+    fi
+
+    local doc_pipeline_tool="${CLI_ROOT}/src/lib/doc_pipeline.py"
+    if [[ -f "$doc_pipeline_tool" ]]; then
+      if "$python_bin" "$doc_pipeline_tool" \
+        --project-root "$PROJECT_ROOT" \
+        --runtime-dir "$runtime_dir"; then
+        info "Documentation summaries refreshed."
+      else
+        warn "Documentation summaries refresh failed."
+      fi
+    else
+      warn "Skipping documentation summaries refresh; tool not found at ${doc_pipeline_tool}."
+    fi
+
+    local doc_indexer_pkg_root="${CLI_ROOT}/src"
+    local doc_indexer_ready=0
+    if PYTHONPATH="${doc_indexer_pkg_root}${PYTHONPATH:+:$PYTHONPATH}" \
+      "$python_bin" - <<'PY' "$doc_indexer_pkg_root"; then
+import importlib
+import sys
+root = sys.argv[1]
+sys.path.insert(0, root)
+try:
+    module = importlib.import_module("lib.doc_indexer")
+    getattr(module, "DocIndexer")
+except Exception:
+    raise SystemExit(1)
+else:
+    raise SystemExit(0)
+PY
+      doc_indexer_ready=1
+    fi
+    if (( doc_indexer_ready )); then
+      if PYTHONPATH="${doc_indexer_pkg_root}${PYTHONPATH:+:$PYTHONPATH}" \
+        "$python_bin" -m lib.doc_indexer --runtime-dir "$runtime_dir"; then
+        info "Documentation indexes rebuilt."
+      else
+        warn "Documentation indexing failed."
+      fi
+    else
+      info "Skipping documentation indexing; doc_indexer module not importable."
+    fi
+  else
+    warn "Skipping documentation registry and catalog refresh; ${python_bin} not available."
+  fi
+
+  if [[ -f "$scan_json" ]]; then
+    ok "Scan manifest → ${scan_json}"
+  else
+    warn "Scan manifest export missing (${scan_json}); rerun scan after installing ${python_bin}."
+  fi
 }
 
 cmd_normalize() {
@@ -9465,7 +9721,7 @@ import subprocess
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess
-from typing import Optional, List, Tuple, Set, Dict
+from typing import Optional, List, Tuple, Set, Dict, Sequence
 
 _original_re_compile = re.compile
 _original_re__compile = getattr(re, "_compile", None)
@@ -11319,10 +11575,13 @@ gc_write_task_prompt() {
   python3 - "$db_path" "$story_slug" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" "$staging_dir" <<'PY'
 import hashlib
 import json
+import math
 import os
 import pathlib
 import re
 import sqlite3
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, List, Tuple, Set, Dict
@@ -11364,6 +11623,28 @@ if staging_root:
         plan_instruction_dir = plan_candidate
 
 instruction_prompts: List[Tuple[str, List[str]]] = collect_instruction_prompts(plan_instruction_dir, project_root_path)
+
+if not instruction_prompts:
+    fallback_prompt_paths = [
+        project_root_path / "src" / "prompts" / "iterate" / "work_on_tasks.prompt.md",
+        project_root_path / "docs" / "prompts" / "work_on_tasks.prompt.md",
+    ]
+    for prompt_path in fallback_prompt_paths:
+        if not prompt_path.exists():
+            continue
+        try:
+            prompt_text = prompt_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if prompt_text.strip():
+            try:
+                rel_label = str(prompt_path.relative_to(project_root_path))
+            except ValueError:
+                rel_label = prompt_path.name
+            instruction_prompts = [(rel_label, prompt_text.strip().splitlines())]
+            break
+    else:
+        instruction_prompts = [("builtin/work_on_tasks.prompt.md", DEFAULT_WORK_PROMPT.strip().splitlines())]
 
 story_row = cur.execute(
     'SELECT story_id, story_title, epic_key, epic_title, sequence FROM stories WHERE story_slug = ?',
@@ -11422,6 +11703,7 @@ doc_index_shim_str = _select_display_path([project_root_path / "docs" / "doc-ind
 
 documentation_db_display = _select_display_path([Path(documentation_db_path)]) if documentation_db_path else ""
 
+vector_index_path = None
 vector_index_path_str = ""
 if documentation_db_path:
     db_path_obj = Path(documentation_db_path)
@@ -11429,6 +11711,7 @@ if documentation_db_path:
     resolved_db = _resolve_display_path(db_path_obj)
     vector_index_candidates.append(resolved_db.parent / "documentation-vector-index.sqlite")
     vector_index_candidates.append(db_path_obj.parent / "documentation-vector-index.sqlite")
+    vector_index_path = _first_existing_path(vector_index_candidates)
     vector_index_path_str = _select_display_path(vector_index_candidates)
 
 example_query = "sqlite3 \"$GC_DOCUMENTATION_DB_PATH\" \"SELECT doc_id,surface FROM documentation_search WHERE documentation_search MATCH 'lockout' LIMIT 5;\""
@@ -11525,6 +11808,25 @@ def _select_display_path(candidates: List[Path]) -> str:
     if filtered:
         return str(_resolve_display_path(filtered[-1]))
     return ""
+
+def _first_existing_path(candidates: List[Path]) -> Optional[Path]:
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        if resolved.exists():
+            return resolved
+    return None
+
+DEFAULT_WORK_PROMPT = """## work-on-tasks Prompt
+- Load the task details and acceptance criteria from the context section.
+- Consult the documentation catalog or search hits before modifying files.
+- Outline a concise plan, execute the required edits, and capture verification steps.
+- Record follow-up actions when blockers remain.
+"""
 
 def clamp_text(text: str, limit: int) -> str:
     if limit <= 0 or not text:
@@ -12402,6 +12704,261 @@ def _load_doc_snippet(path_obj: Path, doc_entry: dict) -> str:
     doc_catalog_changed["value"] = True
     return snippet_text
 
+def _dedupe_preserve_order(items: Sequence[str]) -> List[str]:
+    seen: Set[str] = set()
+    result: List[str] = []
+    for item in items:
+        key = (item or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(item.strip())
+    return result
+
+def _tokenize_text_for_search(value: str) -> List[str]:
+    tokens: List[str] = []
+    for match in re.findall(r"[A-Za-z0-9_/.-]{3,}", value or ""):
+        token = match.strip("._-/")
+        if len(token) < 3:
+            continue
+        tokens.append(token.lower())
+    return tokens
+
+def _collect_search_terms(
+    task_title: str,
+    document_reference: str,
+    tags: Sequence[str],
+    acceptance_items: Sequence[str],
+    story_title: str,
+) -> List[str]:
+    raw_terms: List[str] = []
+
+    def add_term(term: str) -> None:
+        if not term:
+            return
+        stripped = term.strip()
+        if len(stripped) < 3:
+            return
+        raw_terms.append(stripped)
+
+    for chunk in re.split(r"[,\n;]+", document_reference or ""):
+        add_term(chunk)
+    for tag in tags or []:
+        add_term(str(tag))
+    for line in (acceptance_items or [])[:3]:
+        add_term(line)
+    add_term(task_title or "")
+    add_term(story_title or "")
+
+    for token in _tokenize_text_for_search(task_title):
+        add_term(token)
+    for token in _tokenize_text_for_search(story_title):
+        add_term(token)
+    if document_reference:
+        for token in _tokenize_text_for_search(document_reference):
+            add_term(token)
+
+    return _dedupe_preserve_order(raw_terms)[:16]
+
+def _build_fts_query(terms: Sequence[str]) -> str:
+    clauses: List[str] = []
+    for term in terms:
+        safe = term.replace('"', " ").strip()
+        if not safe:
+            continue
+        clauses.append(f"\"{safe}\"")
+    return " OR ".join(clauses)
+
+def _run_fts_search(db_path: Optional[Path], terms: Sequence[str], limit: int) -> List[Dict[str, object]]:
+    if not db_path or not db_path.exists() or not terms:
+        return []
+    query = _build_fts_query(terms)
+    if not query:
+        return []
+    hits: List[Dict[str, object]] = []
+    try:
+        with sqlite3_connect(db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT doc_id,
+                       snippet(documentation_search, 1, '[', ']', ' … ', 32) AS excerpt
+                  FROM documentation_search
+                 WHERE documentation_search MATCH ?
+                 LIMIT ?
+                """,
+                (query, limit),
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+
+    for row in rows:
+        doc_id = (row["doc_id"] or "").strip()
+        if not doc_id:
+            continue
+        hits.append(
+            {
+                "doc_id": doc_id,
+                "method": "fts",
+                "snippet": (row["excerpt"] or "").strip(),
+            }
+        )
+    return hits
+
+def _hash_embedding_vector(text: str, dims: int) -> List[float]:
+    digest = hashlib.sha256(text.encode("utf-8", "replace")).digest()
+    values: List[float] = []
+    seed = digest
+    while len(values) < dims:
+        for idx in range(0, len(seed), 4):
+            if len(values) >= dims:
+                break
+            chunk = seed[idx : idx + 4]
+            if len(chunk) < 4:
+                chunk = chunk.ljust(4, b"\0")
+            val = int.from_bytes(chunk, "big", signed=False)
+            values.append((val % 1000) / 1000.0)
+        seed = hashlib.sha256(seed).digest()
+    norm = math.sqrt(sum(val * val for val in values)) or 1.0
+    return [val / norm for val in values]
+
+def _run_vector_search(
+    vector_index_path: Optional[Path],
+    terms: Sequence[str],
+    limit: int,
+    exclude: Set[str],
+) -> List[Dict[str, object]]:
+    if not vector_index_path or not vector_index_path.exists() or not terms or limit <= 0:
+        return []
+    query_text = " ".join(terms).strip()
+    if not query_text:
+        return []
+    try:
+        conn = sqlite3.connect(str(vector_index_path))
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return []
+
+    hits: List[Tuple[float, Dict[str, object]]] = []
+    try:
+        rows = conn.execute(
+            "SELECT doc_id, section_id, surface, vector_json, dims FROM vectors"
+        ).fetchall()
+    except sqlite3.Error:
+        conn.close()
+        return []
+    finally:
+        conn.close()
+
+    for row in rows:
+        doc_id = (row["doc_id"] or "").strip()
+        if not doc_id or doc_id in exclude:
+            continue
+        vector_json = row["vector_json"]
+        dims = row["dims"] or 0
+        try:
+            vector = json.loads(vector_json or "[]")
+        except Exception:
+            continue
+        if dims <= 0:
+            dims = len(vector)
+        if dims <= 0 or len(vector) != dims:
+            continue
+        query_vector = _hash_embedding_vector(query_text, dims)
+        if len(query_vector) != len(vector):
+            continue
+        score = float(sum(a * b for a, b in zip(query_vector, vector)))
+        hits.append(
+            (
+                score,
+                {
+                    "doc_id": doc_id,
+                    "method": "vector",
+                    "score": score,
+                    "surface": row["surface"],
+                },
+            )
+        )
+
+    hits.sort(key=lambda item: item[0], reverse=True)
+    results: List[Dict[str, object]] = []
+    for score, payload in hits:
+        if len(results) >= limit:
+            break
+        doc_id = payload.get("doc_id")
+        if not doc_id or doc_id in exclude:
+            continue
+        results.append(payload)
+        exclude.add(doc_id)
+    return results
+
+def _run_ripgrep_search(
+    project_root: Optional[Path],
+    terms: Sequence[str],
+    limit: int,
+    exclude: Set[str],
+) -> List[Dict[str, object]]:
+    if not project_root or not project_root.exists() or limit <= 0:
+        return []
+    if shutil.which("rg") is None:
+        return []
+    query_term = next((term for term in terms if len(term) >= 3), "")
+    if not query_term:
+        return []
+    docs_dir = project_root / "docs"
+    if not docs_dir.exists():
+        return []
+    cmd = [
+        "rg",
+        "--with-filename",
+        "--no-heading",
+        "--line-number",
+        "--max-count",
+        "2",
+        "--max-filesize",
+        "512K",
+        query_term,
+        str(docs_dir),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+
+    if proc.returncode not in (0, 1):
+        return []
+
+    hits: List[Dict[str, object]] = []
+    for line in proc.stdout.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        path_str, line_number, snippet = parts
+        candidate_path = Path(path_str).resolve()
+        entry = _build_doc_entry(candidate_path)
+        if not entry:
+            continue
+        doc_id = entry.get("doc_id")
+        if not doc_id or doc_id in exclude:
+            continue
+        hits.append(
+            {
+                "doc_id": doc_id,
+                "method": "ripgrep",
+                "line": line_number,
+                "snippet": snippet.strip(),
+            }
+        )
+        exclude.add(doc_id)
+        if len(hits) >= limit:
+            break
+    return hits
+
 if (not doc_catalog_entries_from_db) and doc_snippets_enabled and (staging_root or project_root_path):
     seen_paths = set()
     references = _split_items(document_reference)
@@ -12457,6 +13014,74 @@ if doc_catalog_path and doc_catalog_changed["value"]:
         Path(doc_catalog_path).write_text(json.dumps(doc_catalog_data, indent=2), encoding="utf-8")
     except Exception:
         pass
+
+search_terms = _collect_search_terms(
+    task_title,
+    document_reference,
+    tags,
+    acceptance,
+    story_title,
+)
+doc_search_hits: List[Dict[str, object]] = []
+if search_terms:
+    seen_doc_ids: Set[str] = {
+        entry.get("doc_id", "").strip()
+        for entry in doc_catalog_entries
+        if entry.get("doc_id")
+    }
+    seen_doc_ids.discard("")
+    db_path_obj: Optional[Path] = None
+    if documentation_db_path:
+        try:
+            candidate_path = Path(documentation_db_path)
+            if candidate_path.exists():
+                db_path_obj = candidate_path.resolve()
+            else:
+                db_path_obj = None
+        except Exception:
+            db_path_obj = Path(documentation_db_path)
+    doc_search_hits.extend(_run_fts_search(db_path_obj, search_terms, 12))
+    for hit in list(doc_search_hits):
+        doc_id = (hit.get("doc_id") or "").strip()
+        if not doc_id:
+            doc_search_hits.remove(hit)
+            continue
+        seen_doc_ids.add(doc_id)
+    remaining_hits = 12 - len(doc_search_hits)
+    if remaining_hits > 0:
+        doc_search_hits.extend(_run_vector_search(vector_index_path, search_terms, remaining_hits, seen_doc_ids))
+    remaining_hits = 12 - len(doc_search_hits)
+    if remaining_hits > 0:
+        doc_search_hits.extend(_run_ripgrep_search(project_root_path, search_terms, remaining_hits, seen_doc_ids))
+
+search_summary_payload: List[Dict[str, object]] = []
+if doc_search_hits:
+    lines.append("")
+    lines.append("## Documentation Search Hits")
+    for hit in doc_search_hits[:12]:
+        doc_id = (hit.get("doc_id") or "").strip()
+        if not doc_id:
+            continue
+        entry = documents_store.get(doc_id, {})
+        rel_path = entry.get("rel_path") or entry.get("path") or doc_id
+        method = hit.get("method", "fts")
+        snippet_text = _normalise_space(hit.get("snippet") or "")
+        lines.append(f"- {doc_id} [{method}] — {rel_path}")
+        if snippet_text:
+            lines.append(f"  Snippet: {snippet_text[:280]}")
+        search_summary_payload.append(
+            {
+                "doc_id": doc_id,
+                "method": method,
+                "rel_path": rel_path,
+                "snippet": snippet_text[:500],
+            }
+        )
+    task_ref = task_id or f"{STORY_SLUG}:{TASK_INDEX + 1}"
+    if task_ref:
+        search_map = doc_catalog_data.setdefault("search_hits", {})
+        search_map[task_ref] = search_summary_payload
+        doc_catalog_changed["value"] = True
 
 if doc_catalog_entries:
     lines.append("")
@@ -12764,17 +13389,16 @@ if guard_entries:
         lines.append(f"- {command_label} — {summary}")
 
 lines.append("")
-
-    lines.append("## Instructions")
-    if compact_mode:
-        lines.append("### Output Contract — STRICT")
-        lines.append('Return **only** this minified JSON with **all keys present** (use [] when empty):')
-        lines.append('{"plan":[],"focus":[],"changes":[],"commands":[],"notes":[]}')
-        lines.append('Rules: no prose before/after, no code fences, no comments, no trailing commas.')
-        lines.append('`focus` **must never be omitted** even if no edits yet (then return an empty array).')
-        lines.append("")
-        lines.append('Return a JSON object: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
-        lines.append("- Populate `plan` with the concrete steps you will take for this task.")
+lines.append("## Instructions")
+if compact_mode:
+    lines.append("### Output Contract — STRICT")
+    lines.append('Return **only** this minified JSON with **all keys present** (use [] when empty):')
+    lines.append('{"plan":[],"focus":[],"changes":[],"commands":[],"notes":[]}')
+    lines.append('Rules: no prose before/after, no code fences, no comments, no trailing commas.')
+    lines.append('`focus` **must never be omitted** even if no edits yet (then return an empty array).')
+    lines.append("")
+    lines.append('Return a JSON object: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
+    lines.append("- Populate `plan` with the concrete steps you will take for this task.")
     lines.append("- List the files or symbols you edit in `focus`; you may include diffs in the same reply.")
     lines.append("- Provide actual code edits through `changes` (unified diffs or full file bodies).")
     lines.append("- Record shell commands you executed or recommend in `commands`.")
@@ -13294,6 +13918,10 @@ PY
   local tasks_db="${tasks_dir}/tasks.db"
   mkdir -p "$tasks_dir"
   export GC_DOCUMENTATION_DB_PATH="$tasks_db"
+  if ! gc_require_documentation_catalog "$PROJECT_ROOT"; then
+    local catalog_root="${PROJECT_ROOT:-$PWD}"
+    die "Failed to prepare documentation catalog. Run 'gpt-creator scan --project \"${catalog_root}\"' and retry."
+  fi
   gc_bootstrap_docs_registry "$tasks_db"
 
   if ! gc_tasks_db_has_rows "$tasks_db"; then
@@ -13528,6 +14156,14 @@ PY
         path="${path#$PROJECT_ROOT/}"
       fi
       [[ -n "$path" ]] || continue
+      if [[ "$path" == *.rej ]]; then
+        continue
+      fi
+      case "$path" in
+        .gpt-creator/staging/plan/work/runs/*|.gpt-creator/work/*|.gpt-creator/logs/*|.gpt-creator/cache/*|tmp/*|tmp/**)
+          continue
+          ;;
+      esac
       if [[ -z "${seen_stage_paths[$path]:-}" ]]; then
         stage_paths+=("$path")
         seen_stage_paths[$path]=1
@@ -14499,16 +15135,18 @@ PY
       if [[ "$task_result_status" == "complete" && $task_changes_applied -gt 0 ]]; then
         local -a commit_targets=("${task_written_paths[@]}")
         commit_targets+=("${task_patched_paths[@]}")
+        local apply_status_label="${apply_status:-unknown}"
         local commit_label="${banner_task_id}: ${task_title:-Task ${task_number}}"
-        gc_auto_commit_task "$commit_label" "${commit_targets[@]}"
+        local commit_message="chore(tasks): ${banner_task_id} snapshot (apply_status: ${apply_status_label})"
+        gc_auto_commit_task "$commit_message" "${commit_targets[@]}"
         case "${GC_LAST_AUTO_COMMIT_STATUS:-skipped}" in
           committed)
             local note_message="${commit_label//$'\n'/ }"
             note_message="${note_message//$'\r'/ }"
             if [[ -n "${GC_LAST_AUTO_COMMIT_HASH:-}" ]]; then
-              task_notes+=("Auto-commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} — ${note_message}")
+              task_notes+=("Auto-commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} — ${note_message} (${apply_status_label})")
             else
-              task_notes+=("Auto-commit recorded — ${note_message}")
+              task_notes+=("Auto-commit recorded — ${note_message} (${apply_status_label})")
             fi
             ;;
           failed)
@@ -14876,9 +15514,17 @@ PY
     if (( continue_current_run == 0 )); then
       remaining_tasks="$(gc_count_pending_tasks "$tasks_db" || echo 0)"
       [[ "$remaining_tasks" =~ ^[0-9]+$ ]] || remaining_tasks=0
+      local unstarted_tasks
+      unstarted_tasks="$(gc_count_unstarted_tasks "$tasks_db" || echo 0)"
+      [[ "$unstarted_tasks" =~ ^[0-9]+$ ]] || unstarted_tasks=0
 
-      if (( manual_followups > 0 && remaining_tasks > 0 )); then
-        warn "Manual follow-ups detected; stopping before rerunning ${remaining_tasks} pending task(s)."
+      if (( manual_followups > 0 )); then
+        if (( unstarted_tasks > 0 )); then
+          info "Manual follow-ups recorded; ${unstarted_tasks} task(s) still pending — continuing backlog."
+          continue_current_run=1
+        elif (( remaining_tasks > 0 )); then
+          warn "Manual follow-ups detected; backlog paused with ${remaining_tasks} review task(s)."
+        fi
       elif (( work_failed == 0 && manual_followups == 0 && memory_cycle == 0 && batch_limit_reached == 0 && effective_batch_size == 0 && iteration_processed > 0 && remaining_tasks > 0 )); then
         if [[ -n "$story_filter" ]]; then
           info "Remaining tasks detected beyond filtered story; rerun with a broader filter to continue."

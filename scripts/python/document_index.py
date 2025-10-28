@@ -11,6 +11,9 @@ import sys
 from pathlib import Path
 from typing import Optional, List, Tuple, Set, Dict, Sequence
 
+project_root_path: Optional[Path] = None
+staging_root: Optional[Path] = None
+
 
 def _resolve_display_path(path_obj: Path) -> Path:
     try:
@@ -309,6 +312,17 @@ def _run_ripgrep_search(
 
 DB_PATH, STORY_SLUG, TASK_INDEX, PROMPT_PATH, CONTEXT_TAIL_PATH, MODEL_NAME, PROJECT_ROOT, STAGING_DIR = sys.argv[1:9]
 TASK_INDEX = int(TASK_INDEX)
+
+
+def _relative_path_for_prompt(path_obj: Path) -> str:
+    for base in filter(None, [project_root_path, staging_root]):
+        if not base:
+            continue
+        try:
+            return str(path_obj.relative_to(base))
+        except ValueError:
+            continue
+    return str(path_obj)
 
 
 def _build_doc_entry(path_obj: Path):
@@ -1389,16 +1403,6 @@ if documentation_db_path:
         )
     if doc_catalog_entries:
         doc_catalog_entries_from_db = True
-
-def _relative_path_for_prompt(path_obj: Path) -> str:
-    for base in filter(None, [project_root_path, staging_root]):
-        if not base:
-            continue
-        try:
-            return str(path_obj.relative_to(base))
-        except ValueError:
-            continue
-    return str(path_obj)
 
 if (not doc_catalog_entries_from_db) and doc_snippets_enabled and (staging_root or project_root_path):
     seen_paths = set()

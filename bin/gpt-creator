@@ -213,6 +213,34 @@ gc_bootstrap_docs_registry() {
   "$sqlite_bin" "$db_path" ".read $sql_file" >/dev/null 2>&1 || true
 }
 
+gc_doc_indexer_available() {
+  local python_bin="${PYTHON_BIN:-python3}"
+  local pkg_root="${CLI_ROOT}/src"
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    return 1
+  fi
+  if [[ ! -d "$pkg_root" ]]; then
+    return 1
+  fi
+  if PYTHONPATH="${pkg_root}${PYTHONPATH:+:$PYTHONPATH}" \
+    "$python_bin" - <<'PY' "$pkg_root"; then
+import importlib
+import sys
+pkg_root = sys.argv[1]
+sys.path.insert(0, pkg_root)
+try:
+    module = importlib.import_module("lib.doc_indexer")
+    getattr(module, "DocIndexer")
+except Exception:
+    raise SystemExit(1)
+else:
+    raise SystemExit(0)
+PY
+    return 0
+  fi
+  return 1
+}
+
 gc_doc_catalog_ready() {
   local root="${1:-${PROJECT_ROOT:-$PWD}}"
   local runtime_dir="${root}/.gpt-creator"
@@ -229,7 +257,13 @@ gc_doc_catalog_ready() {
   if [[ ! -f "$tasks_db" ]]; then
     return 1
   fi
-  if [[ ! -s "$vector_index" ]]; then
+  local vector_required=0
+  if [[ "${GC_REQUIRE_VECTOR_INDEX:-0}" == "1" ]]; then
+    vector_required=1
+  elif gc_doc_indexer_available; then
+    vector_required=1
+  fi
+  if (( vector_required )) && [[ ! -s "$vector_index" ]]; then
     return 1
   fi
 

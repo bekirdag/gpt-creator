@@ -11618,7 +11618,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, List, Tuple, Set, Dict
+from typing import Optional, List, Tuple, Set, Dict, Sequence
 
 
 def _resolve_display_path(path_obj: Path) -> Path:

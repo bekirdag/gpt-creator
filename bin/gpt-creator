@@ -11919,6 +11919,31 @@ def _run_ripgrep_search(
 DB_PATH, STORY_SLUG, TASK_INDEX, PROMPT_PATH, CONTEXT_TAIL_PATH, MODEL_NAME, PROJECT_ROOT, STAGING_DIR = sys.argv[1:9]
 TASK_INDEX = int(TASK_INDEX)
 
+
+def _load_doc_snippet(path_obj: Path, doc_entry: dict) -> str:
+    doc_id = doc_entry.get("doc_id")
+    if not doc_id:
+        return ""
+    cached = snippet_store.get(doc_id)
+    current_mtime = doc_entry.get("mtime_ns")
+    if isinstance(cached, dict) and cached.get("mtime_ns") == current_mtime:
+        return cached.get("preview") or ""
+    preview_lines: list[str] = []
+    try:
+        with path_obj.open("r", encoding="utf-8", errors="replace") as handle:
+            for idx, line in enumerate(handle):
+                if idx >= 80:
+                    break
+                stripped = line.strip()
+                if stripped:
+                    preview_lines.append(stripped)
+    except Exception:
+        preview_lines = []
+    snippet_text = _condense_snippet(preview_lines, "", max_chars=360)
+    snippet_store[doc_id] = {"preview": snippet_text, "mtime_ns": current_mtime}
+    doc_catalog_changed["value"] = True
+    return snippet_text
+
 conn = sqlite3.connect(DB_PATH)
 conn.row_factory = sqlite3.Row
 cur = conn.cursor()
@@ -12982,30 +13007,6 @@ def _build_doc_entry(path_obj: Path):
     }
     doc_catalog_changed["value"] = True
     return entry
-
-def _load_doc_snippet(path_obj: Path, doc_entry: dict) -> str:
-    doc_id = doc_entry.get("doc_id")
-    if not doc_id:
-        return ""
-    cached = snippet_store.get(doc_id)
-    current_mtime = doc_entry.get("mtime_ns")
-    if isinstance(cached, dict) and cached.get("mtime_ns") == current_mtime:
-        return cached.get("preview") or ""
-    preview_lines: list[str] = []
-    try:
-        with path_obj.open("r", encoding="utf-8", errors="replace") as handle:
-            for idx, line in enumerate(handle):
-                if idx >= 80:
-                    break
-                stripped = line.strip()
-                if stripped:
-                    preview_lines.append(stripped)
-    except Exception:
-        preview_lines = []
-    snippet_text = _condense_snippet(preview_lines, "", max_chars=360)
-    snippet_store[doc_id] = {"preview": snippet_text, "mtime_ns": current_mtime}
-    doc_catalog_changed["value"] = True
-    return snippet_text
 
 if (not doc_catalog_entries_from_db) and doc_snippets_enabled and (staging_root or project_root_path):
     seen_paths = set()

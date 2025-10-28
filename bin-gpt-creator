@@ -2580,9 +2580,60 @@ gc_discovery_is_stale() {
   if [[ -z "$discovery_file" || ! -f "$discovery_file" || ! -s "$discovery_file" ]]; then
     return 0
   fi
-  local helper_path
-  helper_path="$(gc_clone_python_tool "discovery_is_stale.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path" "$discovery_file" "${required_keys[@]}"
+  python3 - "$discovery_file" "${required_keys[@]}" <<'PY'
+import pathlib, sys
+
+file_path = pathlib.Path(sys.argv[1])
+required = sys.argv[2:]
+
+try:
+    raw = file_path.read_text(encoding="utf-8")
+except Exception:
+    sys.exit(0)
+
+entries = {}
+in_found_section = False
+found_indent = None
+for line in raw.splitlines():
+    if not line.strip():
+        continue
+    if line.lstrip().startswith("#"):
+        continue
+    stripped = line.strip()
+    indent = len(line) - len(line.lstrip())
+    if stripped == "found:" and indent == 0:
+        in_found_section = True
+        found_indent = None
+        continue
+    if in_found_section:
+        if found_indent is None:
+            if indent <= 0:
+                in_found_section = False
+                continue
+            found_indent = indent
+        if indent < found_indent or not stripped:
+            in_found_section = False
+            continue
+        if ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        entries[key.strip()] = value.strip()
+
+if not required:
+    required = ["pdr", "sds", "rfp", "jira", "ui_pages", "openapi", "sql"]
+
+def is_empty(value: str) -> bool:
+    if value is None:
+        return True
+    text = value.strip()
+    return text in {"", "null", "~"}
+
+for key in required:
+    if is_empty(entries.get(key)):
+        sys.exit(0)
+
+sys.exit(1)
+PY
 }
 
 gc_discovery_fill_defaults() {
@@ -2590,9 +2641,290 @@ gc_discovery_fill_defaults() {
   shift || true
   local -a required_keys=("$@")
   [[ -n "$discovery_file" && -f "$discovery_file" ]] || return 1
-  local helper_path
-  helper_path="$(gc_clone_python_tool "discovery_fill_defaults.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path" "$discovery_file" "${required_keys[@]}"
+  python3 - "$discovery_file" "${required_keys[@]}" <<'PY'
+import os
+import pathlib
+import sqlite3
+import sys
+
+file_path = pathlib.Path(sys.argv[1])
+required = sys.argv[2:]
+if not required:
+    required = ["pdr", "sds", "rfp", "jira", "ui_pages", "openapi", "sql"]
+
+raw_lines = file_path.read_text(encoding="utf-8").splitlines()
+header = []
+if raw_lines and raw_lines[0].strip() == "---":
+    header = ["---"]
+    content_lines = raw_lines[1:]
+else:
+    content_lines = raw_lines[:]
+
+entries = {}
+order = []
+seen = set()
+in_found = False
+base_indent = None
+for line in content_lines:
+    stripped = line.strip()
+    if not stripped:
+        continue
+    if stripped == "found:" and line.lstrip() == stripped:
+        in_found = True
+        base_indent = None
+        continue
+    if in_found:
+        indent = len(line) - len(line.lstrip())
+        if base_indent is None:
+            if indent <= 0:
+                in_found = False
+                continue
+            base_indent = indent
+        if indent < base_indent:
+            in_found = False
+            continue
+        if ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        entries[key] = value
+        if key not in seen:
+            order.append(key)
+            seen.add(key)
+
+for key in required:
+    if key not in entries or not entries[key].strip():
+        entries[key] = ""
+        if key not in seen:
+            order.append(key)
+            seen.add(key)
+
+for key in entries:
+    if key not in seen:
+        order.append(key)
+        seen.add(key)
+
+env_input = os.environ.get("INPUT_DIR")
+input_dir = None
+input_candidates = []
+if env_input:
+    input_candidates.append(pathlib.Path(env_input))
+input_candidates.append(file_path.parent / "inputs")
+input_candidates.append(file_path.parent)
+
+for candidate in input_candidates:
+    try:
+        resolved = pathlib.Path(candidate).resolve()
+    except Exception:
+        continue
+    if resolved.exists():
+        input_dir = resolved
+        break
+
+if input_dir is None:
+    input_dir = file_path.parent.resolve()
+
+staging_root = input_dir.parent if input_dir.name == "inputs" else input_dir
+project_root = staging_root.parent if staging_root.name == "staging" else staging_root
+
+locations = {
+    "input_dir": input_dir,
+    "staging_root": staging_root,
+    "staging_docs": staging_root / "docs",
+    "staging_openapi": staging_root / "openapi",
+    "staging_sql": staging_root / "sql",
+    "project_root": project_root,
+    "project_docs": project_root / "docs",
+    "project_openapi": project_root / "openapi",
+    "project_sql": project_root / "sql",
+}
+
+candidate_map = {
+    "pdr": [
+        ("input_dir", "pdr.md"),
+        ("staging_docs", "pdr.md"),
+        ("staging_docs", "PDR.md"),
+        ("project_docs", "pdr.md"),
+        ("project_docs", "PDR.md"),
+    ],
+    "sds": [
+        ("input_dir", "sds.md"),
+        ("staging_docs", "sds.md"),
+        ("project_docs", "sds.md"),
+    ],
+    "rfp": [
+        ("input_dir", "rfp.md"),
+        ("staging_docs", "rfp.md"),
+        ("project_docs", "rfp.md"),
+    ],
+    "jira": [
+        ("input_dir", "jira.md"),
+        ("staging_docs", "jira.md"),
+        ("project_docs", "jira.md"),
+    ],
+    "ui_pages": [
+        ("input_dir", "ui-pages.md"),
+        ("input_dir", "ui_pages.md"),
+        ("staging_docs", "ui-pages.md"),
+        ("staging_docs", "ui_pages.md"),
+        ("project_docs", "ui-pages.md"),
+        ("project_docs", "ui_pages.md"),
+    ],
+    "openapi": [
+        ("input_dir", "openapi.yaml"),
+        ("input_dir", "openapi.yml"),
+        ("input_dir", "openapi.json"),
+        ("staging_openapi", "openapi.yaml"),
+        ("staging_openapi", "openapi.yml"),
+        ("staging_openapi", "openapi.json"),
+        ("project_openapi", "openapi.yaml"),
+        ("project_openapi", "openapi.yml"),
+        ("project_openapi", "openapi.json"),
+    ],
+    "sql": [
+        ("input_dir", "sql"),
+        ("staging_sql", ""),
+        ("project_sql", ""),
+    ],
+}
+
+def resolve_candidate(base_key: str, relative: str):
+    base = locations.get(base_key)
+    if base is None:
+        return None
+    path = base / relative if relative else base
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    if resolved.exists():
+        return resolved
+    return None
+
+def resolve_registry_entry(key: str):
+    doc_type_map = {
+        "pdr": "pdr",
+        "sds": "sds",
+        "rfp": "rfp",
+        "jira": "jira",
+        "ui_pages": "ui",
+        "openapi": "openapi",
+        "sql": "sql",
+    }
+    doc_type = doc_type_map.get(key)
+    if not doc_type:
+        return None
+    registry_path = staging_root / "plan" / "tasks" / "tasks.db"
+    if not registry_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(str(registry_path))
+        conn.row_factory = sqlite3.Row
+    except Exception:
+        return None
+    try:
+        def pick(row):
+            if not row:
+                return None
+            candidate = row["resolved_path"]
+            if not candidate:
+                return None
+            try:
+                return pathlib.Path(candidate).resolve()
+            except Exception:
+                return pathlib.Path(candidate)
+
+        row = conn.execute(
+            """
+            SELECT
+              COALESCE(staging_path, source_path) AS resolved_path
+            FROM documentation
+            WHERE status = 'active'
+              AND doc_type = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (doc_type,),
+        ).fetchone()
+        resolved = pick(row)
+        if resolved is None:
+            row = conn.execute(
+                """
+                SELECT
+                  COALESCE(staging_path, source_path) AS resolved_path
+                FROM documentation
+                WHERE status = 'active'
+                  AND tags_json LIKE ?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (f'%"{doc_type}"%',),
+            ).fetchone()
+            resolved = pick(row)
+        if resolved is None:
+            search_terms = {
+                "pdr": ["pdr", "product"],
+                "sds": ["sds", "system", "design-spec"],
+                "rfp": ["rfp", "proposal"],
+                "jira": ["jira"],
+                "ui_pages": ["ui-pages", "ui_pages", "ui pages", "ui"],
+                "openapi": ["openapi", "swagger"],
+                "sql": [".sql", "dump"],
+            }.get(key, [])
+            lowered_terms = [term.lower() for term in search_terms]
+            for term in lowered_terms:
+                row = conn.execute(
+                    """
+                    SELECT
+                      COALESCE(staging_path, source_path) AS resolved_path
+                    FROM documentation
+                    WHERE status = 'active'
+                      AND (
+                        LOWER(COALESCE(rel_path, '')) LIKE ?
+                        OR LOWER(COALESCE(file_name, '')) LIKE ?
+                      )
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """,
+                    (f"%{term}%", f"%{term}%"),
+                ).fetchone()
+                resolved = pick(row)
+                if resolved is not None:
+                    break
+    except Exception:
+        resolved = None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return resolved
+
+for key in required:
+    value = entries.get(key, "").strip()
+    if value and value.lower() != "n/a":
+        continue
+    resolved = None
+    for base_key, rel in candidate_map.get(key, []):
+        candidate = resolve_candidate(base_key, rel)
+        if candidate is not None:
+            resolved = candidate
+            break
+    if resolved is None:
+        resolved = resolve_registry_entry(key)
+    if resolved is not None:
+        entries[key] = str(resolved)
+    else:
+        entries[key] = "n/a"
+
+out_lines = header[:]
+out_lines.append("found:")
+for key in order:
+    out_lines.append(f"  {key}: {entries.get(key, 'n/a')}")
+
+file_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+PY
 }
 
 gc_refresh_discovery_if_needed() {
@@ -3311,11 +3643,17 @@ gc_execute_sql() {
         fi
       fi
       if [[ "$import_ok" -ne 1 && -n "$fallback_init" && -f "$fallback_init" ]]; then
-        local fallback_output="" fallback_user="" fallback_pass="" fallback_helper=""
-        fallback_helper="$(gc_clone_python_tool "fallback_sql_credentials.py" "${PROJECT_ROOT:-$PWD}")" || fallback_helper=""
-        if [[ -n "$fallback_helper" ]]; then
-          fallback_output="$(python3 "$fallback_helper" "$fallback_init" 2>/dev/null || true)"
-        fi
+        local fallback_output fallback_user fallback_pass
+        fallback_output="$(python3 - "$fallback_init" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+user = re.search(r"CREATE USER IF NOT EXISTS '([^']+)'", text)
+password = re.search(r"IDENTIFIED BY '([^']+)'", text)
+if user and password:
+    print(user.group(1))
+    print(password.group(1))
+PY
+)"
         if [[ -n "$fallback_output" ]]; then
           IFS=$'\n' read -r fallback_user fallback_pass _ <<<"$fallback_output"
           unset IFS
@@ -3407,12 +3745,74 @@ gc_refresh_stack_inspect_containers() {
     return 1
   fi
 
-  local helper_path
-  helper_path="$(gc_clone_python_tool "refresh_stack_inspect_containers.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  INSPECT_JSON="${inspect_json}" python3 "$helper_path"
+  INSPECT_JSON="${inspect_json}" python3 - <<'PY'
+import json
+import sys
+import os
 
+raw = os.environ.get("INSPECT_JSON", "")
+try:
+    data = json.loads(raw)
+except Exception as exc:
+    print(f"Unable to parse docker inspect output: {exc}")
+    sys.exit(1)
+
+if not isinstance(data, list):
+    data = [data]
+
+if not data:
+    print("No container state data returned by docker inspect.")
+    sys.exit(1)
+
+pending = []
+failures = []
+healthy = []
+
+for entry in data:
+    name = (entry.get("Name") or "").lstrip("/")
+    labels = entry.get("Config", {}).get("Labels", {}) or {}
+    service = labels.get("com.docker.compose.service") or name
+    state = entry.get("State") or {}
+    status = (state.get("Status") or "").lower()
+    health = (state.get("Health", {}).get("Status") or "").lower()
+    exit_code = state.get("ExitCode")
+
+    detail = f"{service}: status={status or 'unknown'}"
+    if health:
+        detail += f", health={health}"
+    if exit_code not in (None, 0):
+        detail += f", exit_code={exit_code}"
+
+    if status == "running":
+        if health in ("", "healthy"):
+            healthy.append(detail)
+        elif health == "starting":
+            pending.append(detail)
+        else:
+            failures.append(detail)
+    elif status in ("created", "starting"):
+        pending.append(detail)
+    else:
+        failures.append(detail)
+
+if failures:
+    print("Container failures detected:")
+    for line in failures:
+        print(f"  - {line}")
+    sys.exit(1)
+
+if pending:
+    print("Containers still starting:")
+    for line in pending:
+        print(f"  - {line}")
+    sys.exit(2)
+
+print("All containers running and healthy:")
+for line in healthy:
+    print(f"  - {line}")
+sys.exit(0)
+PY
 }
-
 
 gc_refresh_stack_wait_for_containers() {
   local compose_file="${1:?compose file required}"
@@ -8476,9 +8876,23 @@ PROMPT
   }
 
   if codex_call "iterate-parse" --prompt "$codex_parse_prompt" --output "$codex_raw_json"; then
-    local iterate_parse_helper
-    iterate_parse_helper="$(gc_clone_python_tool "iterate_normalize_codex_json.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-    if python3 "$iterate_parse_helper" "$codex_raw_json" "$codex_json"; then
+    if python3 - <<'PY' "$codex_raw_json" "$codex_json"
+import json, pathlib, re, sys
+raw_path, out_path = sys.argv[1:3]
+text = pathlib.Path(raw_path).read_text().strip()
+if not text:
+    raise SystemExit(1)
+if text.startswith('```'):
+    text = re.sub(r'^```[a-zA-Z0-9_-]*\s*', '', text)
+    text = re.sub(r'```\s*$', '', text)
+data = json.loads(text)
+if isinstance(data, list):
+    data = {'tasks': data}
+elif 'tasks' not in data:
+    data = {'tasks': [data]}
+pathlib.Path(out_path).write_text(json.dumps(data, indent=2) + '\n')
+PY
+      then
       ok "Codex parsed Jira tasks → ${codex_json}"
       tasks_json="$codex_json"
     else
@@ -8492,9 +8906,69 @@ PROMPT
   mkdir -p "$iterate_dir"
   local order_file="${iterate_dir}/tasks-order.txt"
 
-  local iterate_prompts_helper
-  iterate_prompts_helper="$(gc_clone_python_tool "iterate_prepare_task_prompts.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$iterate_prompts_helper" "$tasks_json" "$iterate_dir" "$PROJECT_ROOT"
+  python3 - <<'PY' "$tasks_json" "$iterate_dir" "$PROJECT_ROOT"
+import json, pathlib, sys
+source, out_dir, project_root = sys.argv[1:4]
+tasks = json.load(open(source)).get('tasks', [])
+out = pathlib.Path(out_dir)
+out.mkdir(parents=True, exist_ok=True)
+index_path = out / 'tasks-order.txt'
+with index_path.open('w') as idx:
+    for i, task in enumerate(tasks, 1):
+        title = (task.get('title') or '').strip() or f'Task {i}'
+        task_id = (task.get('id') or '').strip()
+        description = (task.get('description') or '').strip() or '(No additional details provided.)'
+        estimate = (task.get('estimate') or '').strip()
+        tags = ', '.join(task.get('tags') or [])
+        assignees = ', '.join(task.get('assignees') or [])
+        story_bits = [part for part in [(task.get('story_id') or '').strip(), (task.get('story_title') or '').strip()] if part]
+        prompt_path = out / f'task-{i:02d}.md'
+        idx.write(str(prompt_path) + '\n')
+        lines = []
+        if task_id and not title.startswith(task_id):
+            lines.append(f"# Task {i}: {task_id} — {title}")
+        else:
+            lines.append(f"# Task {i}: {title}")
+        lines.append('')
+        lines.append('## Context')
+        lines.append(f'- Working directory: {project_root}')
+        if task_id:
+            lines.append(f'- Task ID: {task_id}')
+        if story_bits:
+            lines.append(f"- Story: {' — '.join(story_bits)}")
+        if assignees:
+            lines.append(f'- Assignees: {assignees}')
+        if estimate:
+            lines.append(f'- Estimate: {estimate}')
+        if tags:
+            lines.append(f'- Tags: {tags}')
+        lines.append('')
+        lines.append('## Description')
+        lines.append(description or '(No additional details provided.)')
+        lines.append('')
+        if task.get('acceptance_criteria'):
+            lines.append('## Acceptance Criteria')
+            for ac in task['acceptance_criteria']:
+                lines.append(f'- {ac}')
+            lines.append('')
+        if task.get('dependencies'):
+            lines.append('## Dependencies')
+            for dep in task['dependencies']:
+                lines.append(f'- {dep}')
+            lines.append('')
+        lines.append('')
+        lines.append('## Instructions')
+        lines.append('- Outline your plan before modifying files.')
+        lines.append('- Implement the task in the repository; commits are not required.')
+        lines.append('- Show relevant diffs (git snippets) and command results.')
+        lines.append('- Verify acceptance criteria for this task.')
+        lines.append('- If blocked, explain why and propose next steps.')
+        lines.append('')
+        lines.append('## Output Format')
+        lines.append('- Begin with a heading `Task {i}`.')
+        lines.append('- Summarise changes, tests, and outstanding follow-ups.')
+        prompt_path.write_text('\n'.join(lines) + '\n')
+PY
 
   if [[ -s "$order_file" ]]; then
     while IFS= read -r prompt_path; do
@@ -8512,9 +8986,39 @@ PROMPT
 
   local summary_prompt="${iterate_dir}/summary.md"
   local summary_output="${iterate_dir}/summary.output.md"
-  local iterate_summary_helper
-  iterate_summary_helper="$(gc_clone_python_tool "iterate_build_summary_prompt.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$iterate_summary_helper" "$tasks_json" "$order_file" "$summary_prompt"
+  python3 - <<'PY' "$tasks_json" "$order_file" "$summary_prompt"
+import json, pathlib, sys
+tasks = json.load(open(sys.argv[1])).get('tasks', [])
+order_file = pathlib.Path(sys.argv[2])
+prompt_path = pathlib.Path(sys.argv[3])
+lines = ['# Summary Request', '', 'Summarise the completed Jira work and list follow-up actions.']
+lines.append('')
+lines.append('## Task Reports')
+if order_file.exists():
+    for i, prompt in enumerate(order_file.read_text().splitlines(), 1):
+        if not prompt:
+            continue
+        title = tasks[i-1].get('title') if i-1 < len(tasks) else f'Task {i}'
+        out_path = pathlib.Path(prompt).with_suffix('.output.md')
+        lines.append(f'- Task {i}: {title}')
+        if out_path.exists():
+            content = out_path.read_text().strip()
+            if content:
+                snippet = content[:2000]
+                lines.append('  ```')
+                lines.append(snippet)
+                lines.append('  ```')
+        else:
+            lines.append('  (No output captured)')
+else:
+    lines.append('- No outputs available.')
+lines.append('')
+lines.append('## Output Requirements')
+lines.append('- Provide an overall summary of work completed.')
+lines.append('- List follow-up items or blockers.')
+lines.append('- Use markdown headings and bullet lists.')
+prompt_path.write_text('\n'.join(lines) + '\n')
+PY
 
   codex_call "iterate-summary" --prompt "$summary_prompt" --output "$summary_output" || warn "Codex summary step returned non-zero"
 

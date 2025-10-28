@@ -11656,29 +11656,7 @@ if staging_root:
     if plan_candidate.exists():
         plan_instruction_dir = plan_candidate
 
-instruction_prompts: List[Tuple[str, List[str]]] = collect_instruction_prompts(plan_instruction_dir, project_root_path)
-
-if not instruction_prompts:
-    fallback_prompt_paths = [
-        project_root_path / "src" / "prompts" / "iterate" / "work_on_tasks.prompt.md",
-        project_root_path / "docs" / "prompts" / "work_on_tasks.prompt.md",
-    ]
-    for prompt_path in fallback_prompt_paths:
-        if not prompt_path.exists():
-            continue
-        try:
-            prompt_text = prompt_path.read_text(encoding="utf-8")
-        except Exception:
-            continue
-        if prompt_text.strip():
-            try:
-                rel_label = str(prompt_path.relative_to(project_root_path))
-            except ValueError:
-                rel_label = prompt_path.name
-            instruction_prompts = [(rel_label, prompt_text.strip().splitlines())]
-            break
-    else:
-        instruction_prompts = [("builtin/work_on_tasks.prompt.md", DEFAULT_WORK_PROMPT.strip().splitlines())]
+instruction_prompts: List[Tuple[str, List[str]]] = []
 
 story_row = cur.execute(
     'SELECT story_id, story_title, epic_key, epic_title, sequence FROM stories WHERE story_slug = ?',
@@ -11919,6 +11897,30 @@ def collect_instruction_prompts(plan_dir: Optional[Path], project_root: Optional
                     rel_repr = candidate.name
             prompts.append((rel_repr, text.splitlines()))
     return prompts
+
+instruction_prompts = collect_instruction_prompts(plan_instruction_dir, project_root_path)
+
+if not instruction_prompts:
+    fallback_prompt_paths = [
+        project_root_path / "src" / "prompts" / "iterate" / "work_on_tasks.prompt.md",
+        project_root_path / "docs" / "prompts" / "work_on_tasks.prompt.md",
+    ]
+    for prompt_path in fallback_prompt_paths:
+        if not prompt_path.exists():
+            continue
+        try:
+            prompt_text = prompt_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if prompt_text.strip():
+            try:
+                rel_label = str(prompt_path.relative_to(project_root_path))
+            except ValueError:
+                rel_label = prompt_path.name
+            instruction_prompts = [(rel_label, prompt_text.strip().splitlines())]
+            break
+    else:
+        instruction_prompts = [("builtin/work_on_tasks.prompt.md", DEFAULT_WORK_PROMPT.strip().splitlines())]
 
 def build_log_excerpt(path_obj: Path, max_lines: int = 40, max_chars: int = 160) -> list[str]:
     try:

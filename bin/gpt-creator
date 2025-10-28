@@ -11652,6 +11652,270 @@ def _first_existing_path(candidates: List[Path]) -> Optional[Path]:
     return None
 
 
+def _dedupe_preserve_order(items: Sequence[str]) -> List[str]:
+    seen: Set[str] = set()
+    result: List[str] = []
+    for item in items:
+        key = (item or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(item.strip())
+    return result
+
+
+def _tokenize_text_for_search(value: str) -> List[str]:
+    tokens: List[str] = []
+    for match in re.findall(r"[A-Za-z0-9_/.-]{3,}", value or ""):
+        token = match.strip("._-/")
+        if len(token) < 3:
+            continue
+        tokens.append(token.lower())
+    return tokens
+
+
+def _collect_search_terms(
+    task_title: str,
+    document_reference: str,
+    tags: Sequence[str],
+    acceptance_items: Sequence[str],
+    story_title: str,
+) -> List[str]:
+    raw_terms: List[str] = []
+
+    def add_term(term: str) -> None:
+        if not term:
+            return
+        stripped = term.strip()
+        if len(stripped) < 3:
+            return
+        raw_terms.append(stripped)
+
+    for chunk in re.split(r"[\n,;]+", document_reference or ""):
+        add_term(chunk)
+    for tag in tags or []:
+        add_term(str(tag))
+    for line in (acceptance_items or [])[:3]:
+        add_term(line)
+    add_term(task_title or "")
+    add_term(story_title or "")
+
+    for token in _tokenize_text_for_search(task_title):
+        add_term(token)
+    for token in _tokenize_text_for_search(story_title):
+        add_term(token)
+    if document_reference:
+        for token in _tokenize_text_for_search(document_reference):
+            add_term(token)
+
+    return _dedupe_preserve_order(raw_terms)[:16]
+
+
+def _build_fts_query(terms: Sequence[str]) -> str:
+    clauses: List[str] = []
+    for term in terms:
+        safe = term.replace('"', " ").strip()
+        if not safe:
+            continue
+        clauses.append(f'"{safe}"')
+    return " OR ".join(clauses)
+
+
+def _run_fts_search(db_path: Optional[Path], terms: Sequence[str], limit: int) -> List[Dict[str, object]]:
+    if not db_path or not db_path.exists() or not terms:
+        return []
+    query = _build_fts_query(terms)
+    if not query:
+        return []
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT doc_id,
+                       snippet(documentation_search, 1, '[', ']', ' … ', 32) AS excerpt
+                  FROM documentation_search
+                 WHERE documentation_search MATCH ?
+                 LIMIT ?
+                """,
+                (query, limit),
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+
+    hits: List[Dict[str, object]] = []
+    for row in rows:
+        doc_id = (row["doc_id"] or "").strip()
+        if not doc_id:
+            continue
+        hits.append(
+            {
+                "doc_id": doc_id,
+                "method": "fts",
+                "snippet": (row["excerpt"] or "").strip(),
+            }
+        )
+    return hits
+
+
+def _hash_embedding_vector(text: str, dims: int) -> List[float]:
+    digest = hashlib.sha256(text.encode("utf-8", "replace")).digest()
+    values: List[float] = []
+    seed = digest
+    while len(values) < dims:
+        for idx in range(0, len(seed), 4):
+            if len(values) >= dims:
+                break
+            chunk = seed[idx : idx + 4]
+            if len(chunk) < 4:
+                chunk = chunk.ljust(4, b"\0")
+            val = int.from_bytes(chunk, "big", signed=False)
+            values.append((val % 1000) / 1000.0)
+        seed = hashlib.sha256(seed).digest()
+    norm = math.sqrt(sum(val * val for val in values)) or 1.0
+    return [val / norm for val in values]
+
+
+def _run_vector_search(
+    vector_index_path: Optional[Path],
+    terms: Sequence[str],
+    limit: int,
+    exclude: Set[str],
+) -> List[Dict[str, object]]:
+    if not vector_index_path or not vector_index_path.exists() or not terms or limit <= 0:
+        return []
+    query_text = " ".join(terms).strip()
+    if not query_text:
+        return []
+    try:
+        conn = sqlite3.connect(str(vector_index_path))
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        return []
+
+    hits: List[Tuple[float, Dict[str, object]]] = []
+    try:
+        rows = conn.execute(
+            "SELECT doc_id, section_id, surface, vector_json, dims FROM vectors"
+        ).fetchall()
+    except sqlite3.Error:
+        conn.close()
+        return []
+    finally:
+        conn.close()
+
+    for row in rows:
+        doc_id = (row["doc_id"] or "").strip()
+        if not doc_id or doc_id in exclude:
+            continue
+        vector_json = row["vector_json"]
+        dims = row["dims"] or 0
+        try:
+            vector = json.loads(vector_json or "[]")
+        except Exception:
+            continue
+        if dims <= 0:
+            dims = len(vector)
+        if dims <= 0 or len(vector) != dims:
+            continue
+        query_vector = _hash_embedding_vector(query_text, dims)
+        if len(query_vector) != len(vector):
+            continue
+        score = float(sum(a * b for a, b in zip(query_vector, vector)))
+        hits.append(
+            (
+                score,
+                {
+                    "doc_id": doc_id,
+                    "method": "vector",
+                    "score": score,
+                    "surface": row["surface"],
+                },
+            )
+        )
+
+    hits.sort(key=lambda item: item[0], reverse=True)
+    results: List[Dict[str, object]] = []
+    for score, payload in hits:
+        if len(results) >= limit:
+            break
+        doc_id = payload.get("doc_id")
+        if not doc_id or doc_id in exclude:
+            continue
+        results.append(payload)
+        exclude.add(doc_id)
+    return results
+
+
+def _run_ripgrep_search(
+    project_root: Optional[Path],
+    terms: Sequence[str],
+    limit: int,
+    exclude: Set[str],
+) -> List[Dict[str, object]]:
+    if not project_root or not project_root.exists() or limit <= 0:
+        return []
+    if shutil.which("rg") is None:
+        return []
+    query_term = next((term for term in terms if len(term) >= 3), "")
+    if not query_term:
+        return []
+    docs_dir = project_root / "docs"
+    if not docs_dir.exists():
+        return []
+    cmd = [
+        "rg",
+        "--with-filename",
+        "--no-heading",
+        "--line-number",
+        "--max-count",
+        "2",
+        "--max-filesize",
+        "512K",
+        query_term,
+        str(docs_dir),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+
+    if proc.returncode not in (0, 1):
+        return []
+
+    hits: List[Dict[str, object]] = []
+    for line in proc.stdout.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        path_str, line_number, snippet = parts
+        candidate_path = Path(path_str).resolve()
+        entry = _build_doc_entry(candidate_path)
+        if not entry:
+            continue
+        doc_id = entry.get("doc_id")
+        if not doc_id or doc_id in exclude:
+            continue
+        hits.append(
+            {
+                "doc_id": doc_id,
+                "method": "ripgrep",
+                "line": line_number,
+                "snippet": snippet.strip(),
+            }
+        )
+        exclude.add(doc_id)
+        if len(hits) >= limit:
+            break
+    return hits
+
+
 DB_PATH, STORY_SLUG, TASK_INDEX, PROMPT_PATH, CONTEXT_TAIL_PATH, MODEL_NAME, PROJECT_ROOT, STAGING_DIR = sys.argv[1:9]
 TASK_INDEX = int(TASK_INDEX)
 
@@ -12742,261 +13006,6 @@ def _load_doc_snippet(path_obj: Path, doc_entry: dict) -> str:
     snippet_store[doc_id] = {"preview": snippet_text, "mtime_ns": current_mtime}
     doc_catalog_changed["value"] = True
     return snippet_text
-
-def _dedupe_preserve_order(items: Sequence[str]) -> List[str]:
-    seen: Set[str] = set()
-    result: List[str] = []
-    for item in items:
-        key = (item or "").strip().lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        result.append(item.strip())
-    return result
-
-def _tokenize_text_for_search(value: str) -> List[str]:
-    tokens: List[str] = []
-    for match in re.findall(r"[A-Za-z0-9_/.-]{3,}", value or ""):
-        token = match.strip("._-/")
-        if len(token) < 3:
-            continue
-        tokens.append(token.lower())
-    return tokens
-
-def _collect_search_terms(
-    task_title: str,
-    document_reference: str,
-    tags: Sequence[str],
-    acceptance_items: Sequence[str],
-    story_title: str,
-) -> List[str]:
-    raw_terms: List[str] = []
-
-    def add_term(term: str) -> None:
-        if not term:
-            return
-        stripped = term.strip()
-        if len(stripped) < 3:
-            return
-        raw_terms.append(stripped)
-
-    for chunk in re.split(r"[,\n;]+", document_reference or ""):
-        add_term(chunk)
-    for tag in tags or []:
-        add_term(str(tag))
-    for line in (acceptance_items or [])[:3]:
-        add_term(line)
-    add_term(task_title or "")
-    add_term(story_title or "")
-
-    for token in _tokenize_text_for_search(task_title):
-        add_term(token)
-    for token in _tokenize_text_for_search(story_title):
-        add_term(token)
-    if document_reference:
-        for token in _tokenize_text_for_search(document_reference):
-            add_term(token)
-
-    return _dedupe_preserve_order(raw_terms)[:16]
-
-def _build_fts_query(terms: Sequence[str]) -> str:
-    clauses: List[str] = []
-    for term in terms:
-        safe = term.replace('"', " ").strip()
-        if not safe:
-            continue
-        clauses.append(f"\"{safe}\"")
-    return " OR ".join(clauses)
-
-def _run_fts_search(db_path: Optional[Path], terms: Sequence[str], limit: int) -> List[Dict[str, object]]:
-    if not db_path or not db_path.exists() or not terms:
-        return []
-    query = _build_fts_query(terms)
-    if not query:
-        return []
-    hits: List[Dict[str, object]] = []
-    try:
-        with sqlite3_connect(db_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT doc_id,
-                       snippet(documentation_search, 1, '[', ']', ' … ', 32) AS excerpt
-                  FROM documentation_search
-                 WHERE documentation_search MATCH ?
-                 LIMIT ?
-                """,
-                (query, limit),
-            ).fetchall()
-    except sqlite3.Error:
-        return []
-
-    for row in rows:
-        doc_id = (row["doc_id"] or "").strip()
-        if not doc_id:
-            continue
-        hits.append(
-            {
-                "doc_id": doc_id,
-                "method": "fts",
-                "snippet": (row["excerpt"] or "").strip(),
-            }
-        )
-    return hits
-
-def _hash_embedding_vector(text: str, dims: int) -> List[float]:
-    digest = hashlib.sha256(text.encode("utf-8", "replace")).digest()
-    values: List[float] = []
-    seed = digest
-    while len(values) < dims:
-        for idx in range(0, len(seed), 4):
-            if len(values) >= dims:
-                break
-            chunk = seed[idx : idx + 4]
-            if len(chunk) < 4:
-                chunk = chunk.ljust(4, b"\0")
-            val = int.from_bytes(chunk, "big", signed=False)
-            values.append((val % 1000) / 1000.0)
-        seed = hashlib.sha256(seed).digest()
-    norm = math.sqrt(sum(val * val for val in values)) or 1.0
-    return [val / norm for val in values]
-
-def _run_vector_search(
-    vector_index_path: Optional[Path],
-    terms: Sequence[str],
-    limit: int,
-    exclude: Set[str],
-) -> List[Dict[str, object]]:
-    if not vector_index_path or not vector_index_path.exists() or not terms or limit <= 0:
-        return []
-    query_text = " ".join(terms).strip()
-    if not query_text:
-        return []
-    try:
-        conn = sqlite3.connect(str(vector_index_path))
-        conn.row_factory = sqlite3.Row
-    except sqlite3.Error:
-        return []
-
-    hits: List[Tuple[float, Dict[str, object]]] = []
-    try:
-        rows = conn.execute(
-            "SELECT doc_id, section_id, surface, vector_json, dims FROM vectors"
-        ).fetchall()
-    except sqlite3.Error:
-        conn.close()
-        return []
-    finally:
-        conn.close()
-
-    for row in rows:
-        doc_id = (row["doc_id"] or "").strip()
-        if not doc_id or doc_id in exclude:
-            continue
-        vector_json = row["vector_json"]
-        dims = row["dims"] or 0
-        try:
-            vector = json.loads(vector_json or "[]")
-        except Exception:
-            continue
-        if dims <= 0:
-            dims = len(vector)
-        if dims <= 0 or len(vector) != dims:
-            continue
-        query_vector = _hash_embedding_vector(query_text, dims)
-        if len(query_vector) != len(vector):
-            continue
-        score = float(sum(a * b for a, b in zip(query_vector, vector)))
-        hits.append(
-            (
-                score,
-                {
-                    "doc_id": doc_id,
-                    "method": "vector",
-                    "score": score,
-                    "surface": row["surface"],
-                },
-            )
-        )
-
-    hits.sort(key=lambda item: item[0], reverse=True)
-    results: List[Dict[str, object]] = []
-    for score, payload in hits:
-        if len(results) >= limit:
-            break
-        doc_id = payload.get("doc_id")
-        if not doc_id or doc_id in exclude:
-            continue
-        results.append(payload)
-        exclude.add(doc_id)
-    return results
-
-def _run_ripgrep_search(
-    project_root: Optional[Path],
-    terms: Sequence[str],
-    limit: int,
-    exclude: Set[str],
-) -> List[Dict[str, object]]:
-    if not project_root or not project_root.exists() or limit <= 0:
-        return []
-    if shutil.which("rg") is None:
-        return []
-    query_term = next((term for term in terms if len(term) >= 3), "")
-    if not query_term:
-        return []
-    docs_dir = project_root / "docs"
-    if not docs_dir.exists():
-        return []
-    cmd = [
-        "rg",
-        "--with-filename",
-        "--no-heading",
-        "--line-number",
-        "--max-count",
-        "2",
-        "--max-filesize",
-        "512K",
-        query_term,
-        str(docs_dir),
-    ]
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []
-
-    if proc.returncode not in (0, 1):
-        return []
-
-    hits: List[Dict[str, object]] = []
-    for line in proc.stdout.splitlines():
-        parts = line.split(":", 2)
-        if len(parts) < 3:
-            continue
-        path_str, line_number, snippet = parts
-        candidate_path = Path(path_str).resolve()
-        entry = _build_doc_entry(candidate_path)
-        if not entry:
-            continue
-        doc_id = entry.get("doc_id")
-        if not doc_id or doc_id in exclude:
-            continue
-        hits.append(
-            {
-                "doc_id": doc_id,
-                "method": "ripgrep",
-                "line": line_number,
-                "snippet": snippet.strip(),
-            }
-        )
-        exclude.add(doc_id)
-        if len(hits) >= limit:
-            break
-    return hits
 
 if (not doc_catalog_entries_from_db) and doc_snippets_enabled and (staging_root or project_root_path):
     seen_paths = set()

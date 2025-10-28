@@ -2050,7 +2050,7 @@ gc_record_codex_usage() {
     return 1
   }
 
-  local usage_source="${CLI_ROOT}/scripts/record_codex_usage.py"
+  local usage_source="${CLI_ROOT}/scripts/python/record_codex_usage.py"
   if [[ ! -f "$usage_source" ]]; then
     warn "Codex usage recorder missing at ${usage_source}"
     rm -f "$tmp_output" "$usage_script_py" || true

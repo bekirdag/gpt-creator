@@ -6792,6 +6792,37 @@ EOHELP
     return 1
   }
 
+  gc_auto_sync_i18n() {
+    local project_root="${PROJECT_ROOT:-$PWD}"
+    if [[ -z "$project_root" || ! -d "$project_root" ]]; then
+      warn "Auto locale sync skipped: project root unavailable."
+      return 1
+    fi
+
+    local sync_cmd_output=""
+
+    if command -v pnpm >/dev/null 2>&1; then
+      info "Attempting auto locale sync via 'pnpm i18n:sync'."
+      if sync_cmd_output="$(cd "$project_root" && pnpm i18n:sync 2>&1)"; then
+        info "Locale sync completed (pnpm)."
+        return 0
+      fi
+      warn "Locale sync via pnpm failed: ${sync_cmd_output//$'\n'/ }"
+    fi
+
+    if command -v npm >/dev/null 2>&1; then
+      info "Attempting auto locale sync via 'npm run i18n:sync'."
+      if sync_cmd_output="$(cd "$project_root" && npm run i18n:sync --silent 2>&1)"; then
+        info "Locale sync completed (npm)."
+        return 0
+      fi
+      warn "Locale sync via npm failed: ${sync_cmd_output//$'\n'/ }"
+    fi
+
+    warn "Auto locale sync failed; pnpm/npm not available or commands returned errors."
+    return 1
+  }
+
   ensure_ctx "$root"
 
   local preflight_script="${CLI_ROOT}/scripts/preflight_git_blockers.sh"
@@ -6871,53 +6902,68 @@ EOHELP
   local i18n_guard_script="${CLI_ROOT}/scripts/preflight_i18n_guard.sh"
   if [[ -x "$i18n_guard_script" ]]; then
     local i18n_guard_output="" i18n_guard_code=0 i18n_guard_outcome=""
-    if [[ -n "${PROJECT_ROOT:-}" ]]; then
-      set +e
-      i18n_guard_output="$(cd "$PROJECT_ROOT" && "$i18n_guard_script")"
-      i18n_guard_code=$?
-      set -e
-    else
-      set +e
-      i18n_guard_output="$("$i18n_guard_script")"
-      i18n_guard_code=$?
-      set -e
+    local i18n_guard_autofix_attempts=0
+    local i18n_guard_autofix_limit="${GC_PREFLIGHT_I18N_AUTO_SYNC_LIMIT:-1}"
+    if ! [[ "$i18n_guard_autofix_limit" =~ ^[0-9]+$ ]]; then
+      i18n_guard_autofix_limit=1
     fi
-    i18n_guard_outcome="${i18n_guard_output//[$'\r\n']}"
-    if [[ -z "$i18n_guard_outcome" ]]; then
-      if (( i18n_guard_code == 6 )); then
-        i18n_guard_outcome="blocked-dependency(i18n_sync_required)"
-      elif (( i18n_guard_code == 3 )); then
-        i18n_guard_outcome="blocked-merge-conflict"
+    while true; do
+      if [[ -n "${PROJECT_ROOT:-}" ]]; then
+        set +e
+        i18n_guard_output="$(cd "$PROJECT_ROOT" && "$i18n_guard_script")"
+        i18n_guard_code=$?
+        set -e
       else
-        i18n_guard_outcome="ok"
+        set +e
+        i18n_guard_output="$("$i18n_guard_script")"
+        i18n_guard_code=$?
+        set -e
       fi
-    fi
-    case "$i18n_guard_outcome" in
-      blocked-merge-conflict)
-        warn "Locale merge conflicts detected; resolve locale .rej files before running work-on-tasks."
-        printf '%s\n' "$i18n_guard_outcome"
-        return 3
-        ;;
-      'blocked-dependency(i18n_sync_required)')
-        warn "Locale files out of sync; run 'pnpm i18n:sync' to regenerate translations."
-        printf '%s\n' "$i18n_guard_outcome"
-        return 6
-        ;;
-      blocked-i18n-guard-error)
-        warn "i18n preflight guard failed; inspect scripts/preflight_i18n_guard.sh output."
-        printf '%s\n' "$i18n_guard_outcome"
-        return 6
-        ;;
-      ok)
-        ;;
-      *)
-        if (( i18n_guard_code != 0 )); then
-          warn "i18n preflight guard returned '${i18n_guard_outcome:-?}' (exit ${i18n_guard_code}); treating as guard failure."
-          printf '%s\n' "blocked-i18n-guard-error"
-          return 6
+      i18n_guard_outcome="${i18n_guard_output//[$'\r\n']}"
+      if [[ -z "$i18n_guard_outcome" ]]; then
+        if (( i18n_guard_code == 6 )); then
+          i18n_guard_outcome="blocked-dependency(i18n_sync_required)"
+        elif (( i18n_guard_code == 3 )); then
+          i18n_guard_outcome="blocked-merge-conflict"
+        else
+          i18n_guard_outcome="ok"
         fi
-        ;;
-    esac
+      fi
+      case "$i18n_guard_outcome" in
+        blocked-merge-conflict)
+          warn "Locale merge conflicts detected; resolve locale .rej files before running work-on-tasks."
+          printf '%s\n' "$i18n_guard_outcome"
+          return 3
+          ;;
+        'blocked-dependency(i18n_sync_required)')
+          if (( i18n_guard_autofix_attempts < i18n_guard_autofix_limit )); then
+            ((i18n_guard_autofix_attempts+=1))
+            if gc_auto_sync_i18n; then
+              continue
+            fi
+          fi
+          warn "Locale files out of sync; run 'pnpm i18n:sync' to regenerate translations."
+          printf '%s\n' "$i18n_guard_outcome"
+          return 6
+          ;;
+        blocked-i18n-guard-error)
+          warn "i18n preflight guard failed; inspect scripts/preflight_i18n_guard.sh output."
+          printf '%s\n' "$i18n_guard_outcome"
+          return 6
+          ;;
+        ok)
+          break
+          ;;
+        *)
+          if (( i18n_guard_code != 0 )); then
+            warn "i18n preflight guard returned '${i18n_guard_outcome:-?}' (exit ${i18n_guard_code}); treating as guard failure."
+            printf '%s\n' "blocked-i18n-guard-error"
+            return 6
+          fi
+          break
+          ;;
+      esac
+    done
   fi
 
   local schema_guard_script="${CLI_ROOT}/scripts/preflight_prisma_guard.sh"

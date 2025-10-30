@@ -128,18 +128,21 @@ gc_budget_get_stage_limit() {
 }
 
 gc_budget_set_stage_limit() {
-  local var="$(gc_budget_stage_limit_var "$1")"
+  local var
+  var="$(gc_budget_stage_limit_var "$1")"
   local value="${2:-0}"
   printf -v "$var" '%s' "$value"
 }
 
 gc_budget_stage_tripped() {
-  local var="$(gc_budget_stage_tripped_var "$1")"
+  local var
+  var="$(gc_budget_stage_tripped_var "$1")"
   [[ "${!var:-0}" == "1" ]]
 }
 
 gc_budget_stage_should_skip() {
-  local var="$(gc_budget_stage_skip_var "$1")"
+  local var
+  var="$(gc_budget_stage_skip_var "$1")"
   [[ "${!var:-0}" == "1" ]]
 }
 
@@ -147,14 +150,17 @@ gc_budget_set_stage_skip() {
   local stage="$1"
   local flag="${2:-0}"
   local reason="${3:-}"
-  local skip_var="$(gc_budget_stage_skip_var "$stage")"
+  local skip_var
+  skip_var="$(gc_budget_stage_skip_var "$stage")"
   printf -v "$skip_var" '%s' "$flag"
-  local reason_var="$(gc_budget_stage_reason_var "$stage")"
+  local reason_var
+  reason_var="$(gc_budget_stage_reason_var "$stage")"
   printf -v "$reason_var" '%s' "$reason"
 }
 
 gc_budget_stage_skip_reason() {
-  local var="$(gc_budget_stage_reason_var "$1")"
+  local var
+  var="$(gc_budget_stage_reason_var "$1")"
   printf '%s' "${!var:-}"
 }
 
@@ -162,33 +168,25 @@ gc_budget_reset_stage_tracking() {
   local stages=("retrieve" "plan" "patch" "verify")
   local stage
   for stage in "${stages[@]}"; do
-    local total_var="$(gc_budget_stage_total_var "$stage")"
+    local total_var
+    total_var="$(gc_budget_stage_total_var "$stage")"
     printf -v "$total_var" '%s' "0"
-    local trip_var="$(gc_budget_stage_tripped_var "$stage")"
+    local trip_var
+    trip_var="$(gc_budget_stage_tripped_var "$stage")"
     printf -v "$trip_var" '%s' "0"
-    local skip_var="$(gc_budget_stage_skip_var "$stage")"
+    local skip_var
+    skip_var="$(gc_budget_stage_skip_var "$stage")"
     printf -v "$skip_var" '%s' "0"
-    local reason_var="$(gc_budget_stage_reason_var "$stage")"
+    local reason_var
+    reason_var="$(gc_budget_stage_reason_var "$stage")"
     printf -v "$reason_var" '%s' ""
   done
 }
 
 gc_budget_collect_tool_actions_json() {
-  python3 - <<'PY' "$GC_BUDGET_TOOL_ACTIONS_JSON"
-import json, os, sys
-base = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
-if not isinstance(base, dict):
-    base = {}
-prefix = "GC_BUDGET_TOOL_ACTION_"
-for key, value in os.environ.items():
-    if not key.startswith(prefix):
-        continue
-    tool = key[len(prefix):].lower()
-    tool = tool.replace('_', '-')
-    if value:
-        base[tool] = value
-print(json.dumps(base, separators=(',', ':'), ensure_ascii=True))
-PY
+  local helper_path
+  helper_path="$(gc_clone_python_tool "gc_budget_collect_tool_actions_json.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "${GC_BUDGET_TOOL_ACTIONS_JSON:-}"
 }
 
 resolve_cli_root() {
@@ -1410,6 +1408,7 @@ gc_migrate_progress_artifacts() {
     return 0
   fi
   GC_PROGRESS_MIGRATION_LAST_COUNT=0
+  local python_bin="${PYTHON_BIN:-python3}"
   local -a moved=()
   local entry src_rel dest_rel src_path dest_dir record
 
@@ -1468,41 +1467,27 @@ gc_migrate_progress_artifacts() {
       warn "Unable to prepare progress migration helper; skipping task state reconciliation."
       return 0
     fi
+    if ! command -v "$python_bin" >/dev/null 2>&1; then
+      warn "Skipping task state reconciliation; ${python_bin} not available."
+      return 0
+    fi
     local plan_output=""
-    if plan_output="$(python3 "$helper_path" plan --db "$tasks_db" --output "$plan_path" 2>/dev/null)"; then
-      local plan_updates
-      plan_updates="$(python3 - <<'PY' "$plan_output"
-import json, sys
-try:
-    payload = json.loads(sys.argv[1])
-except Exception:
-    print("")
-else:
-    total = payload.get("tasks_needing_update", 0)
-    print(str(total))
-PY
-)"
+    if plan_output="$("$python_bin" "$helper_path" plan --db "$tasks_db" --output "$plan_path" 2>/dev/null)"; then
+      local plan_updates=""
+      local plan_stats_helper=""
+      if plan_stats_helper="$(gc_clone_python_tool "progress_migration_extract_plan_updates.py" "$project_root")"; then
+        plan_updates="$("$python_bin" "$plan_stats_helper" "$plan_output" 2>/dev/null)"
+      fi
       if [[ -n "$plan_updates" && "$plan_updates" != "0" ]]; then
         info "Planned task migration updates for ${plan_updates} item(s); applying carry-over."
       fi
       local apply_output=""
-      if apply_output="$(python3 "$helper_path" apply --db "$tasks_db" --plan "$plan_path" --map-log "$map_path" 2>/dev/null)"; then
-        local apply_stats
-        apply_stats="$(python3 - <<'PY' "$apply_output"
-import json, sys
-try:
-    payload = json.loads(sys.argv[1])
-except Exception:
-    print("")
-else:
-    stats = payload.get("stats") or {}
-    updated = stats.get("tasks_updated", 0)
-    locked = stats.get("states_locked", 0)
-    preserved = stats.get("states_preserved", 0)
-    reopened = stats.get("states_reopened", 0)
-    print(f"{updated}\t{preserved}\t{locked}\t{reopened}")
-PY
-)"
+      if apply_output="$("$python_bin" "$helper_path" apply --db "$tasks_db" --plan "$plan_path" --map-log "$map_path" 2>/dev/null)"; then
+        local apply_stats=""
+        local apply_stats_helper=""
+        if apply_stats_helper="$(gc_clone_python_tool "progress_migration_extract_apply_stats.py" "$project_root")"; then
+          apply_stats="$("$python_bin" "$apply_stats_helper" "$apply_output" 2>/dev/null)"
+        fi
         if [[ -n "$apply_stats" ]]; then
           IFS=$'\t' read -r updatedTotal preservedTotal lockedTotal reopenedTotal <<<"$apply_stats"
           info "Carried forward migration state for ${updatedTotal:-0} task(s) (preserved=${preservedTotal:-0}, locked=${lockedTotal:-0}, reopened=${reopenedTotal:-0})."
@@ -2282,7 +2267,8 @@ gc_budget_log_stage() {
   fi
 
   local stage_key="${stage:-}"
-  local total_var="$(gc_budget_stage_total_var "$stage_key")"
+  local total_var
+  total_var="$(gc_budget_stage_total_var "$stage_key")"
   local current_total="${!total_var:-0}"
   if [[ "$total_tokens" =~ ^[-+]?[0-9]+$ ]]; then
     local updated_total=$((current_total + total_tokens))
@@ -2296,56 +2282,12 @@ gc_budget_log_stage() {
       blocked_flag="true"
     fi
   fi
-  python3 - "$usage_file" "$ts" "$run_id" "$story_ref" "$task_ref" "$stage" "$model_name" "$prompt_tokens" "$completion_tokens" "$total_tokens" "$duration_ms" "$pruned_items_raw" "$tool_bytes_raw" "$blocked_flag" "$note" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-usage_path = Path(sys.argv[1])
-ts, run_id, story, task, stage, model = sys.argv[2:8]
-prompt_tokens = int(float(sys.argv[8] or "0"))
-completion_tokens = int(float(sys.argv[9] or "0"))
-total_tokens = int(float(sys.argv[10] or "0"))
-duration_ms = int(float(sys.argv[11] or "0"))
-pruned_raw = sys.argv[12] if len(sys.argv) > 12 else "[]"
-tool_raw = sys.argv[13] if len(sys.argv) > 13 else "{}"
-blocked_raw = sys.argv[14] if len(sys.argv) > 14 else "false"
-note = sys.argv[15] if len(sys.argv) > 15 else ""
-
-def _parse_json(data, fallback):
-    try:
-        return json.loads(data)
-    except Exception:
-        return fallback
-
-pruned_items = _parse_json(pruned_raw or "[]", [])
-tool_bytes = _parse_json(tool_raw or "{}", {})
-blocked_flag = str(blocked_raw).strip().lower() in {"1", "true", "yes", "on"}
-
-record = {
-    "ts": ts,
-    "run_id": run_id,
-    "story": story,
-    "task": task,
-    "stage": stage,
-    "model": model,
-    "prompt_tokens": prompt_tokens,
-    "completion_tokens": completion_tokens,
-    "total_tokens": total_tokens,
-    "duration_ms": duration_ms,
-    "pruned_items": pruned_items,
-    "tool_bytes": tool_bytes,
-    "blocked_quota": blocked_flag,
-}
-if note:
-    record["note"] = note
-
-try:
-    with usage_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record, separators=(",", ":")) + "\n")
-except Exception as exc:
-    print(f"[warn] Failed to append stage telemetry: {exc}", file=sys.stderr)
-PY
+  local helper_path
+  helper_path="$(gc_clone_python_tool "gc_budget_log_stage.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" \
+    "$usage_file" "$ts" "$run_id" "$story_ref" "$task_ref" "$stage" "$model_name" \
+    "$prompt_tokens" "$completion_tokens" "$total_tokens" "$duration_ms" \
+    "$pruned_items_raw" "$tool_bytes_raw" "$blocked_flag" "$note"
 }
 
 gc_record_codex_usage() {
@@ -2604,11 +2546,14 @@ gc_record_codex_usage() {
         esac
       done <<<"$py_output"
       if [[ -n "$step" ]]; then
+        # shellcheck disable=SC2034  # tracked for downstream diagnostics
         GC_LAST_CODEX_OUTPUT_STEP="$step"
       fi
       if [[ "$max_output" =~ ^[0-9]+$ ]]; then
+        # shellcheck disable=SC2034  # tracked for downstream diagnostics
         GC_LAST_CODEX_OUTPUT_LIMIT="$max_output"
       else
+        # shellcheck disable=SC2034  # tracked for downstream diagnostics
         GC_LAST_CODEX_OUTPUT_LIMIT=0
       fi
     fi
@@ -3350,13 +3295,9 @@ gc_make_observation_hash() {
   if [[ -z "$seed" ]]; then
     return 1
   fi
-  if ! command -v python3 >/dev/null 2>&1; then
-    return 1
-  fi
-  python3 - "$seed" <<'PY'
-import hashlib, sys
-print(hashlib.sha256(sys.argv[1].encode()).hexdigest())
-PY
+  local helper_path
+  helper_path="$(gc_clone_python_tool "gc_make_observation_hash.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$seed"
 }
 
 gc_update_throughput_metrics() {
@@ -4192,30 +4133,9 @@ cmd_scan() {
 
   local scan_json="${STAGING_DIR}/scan.json"
   if (( python_available )); then
-    "$python_bin" - <<'PY' "$manifest" "$PROJECT_ROOT" "$scan_json"
-import csv, json, sys, time, pathlib
-manifest, root, out = sys.argv[1:4]
-rows = []
-with open(manifest, newline='') as fh:
-    reader = csv.DictReader(fh, delimiter='\t')
-    for row in reader:
-        if not row['type']:
-            continue
-        rows.append({
-            "type": row['type'],
-            "confidence": float(row['confidence'] or 0),
-            "path": str(pathlib.Path(row['path']).resolve())
-        })
-scan = {
-    "project_root": str(pathlib.Path(root).resolve()),
-    "generated_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-    "artifacts": rows
-}
-pathlib.Path(out).parent.mkdir(parents=True, exist_ok=True)
-with open(out, 'w') as fh:
-    json.dump(scan, fh, indent=2)
-print(out)
-PY
+    local scan_manifest_helper
+    scan_manifest_helper="$(gc_clone_python_tool "scan_manifest_to_json.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+    "$python_bin" "$scan_manifest_helper" "$manifest" "$PROJECT_ROOT" "$scan_json"
   else
     warn "Skipping scan.json export; ${python_bin} not available."
   fi
@@ -4269,21 +4189,12 @@ PY
 
     local doc_indexer_pkg_root="${CLI_ROOT}/src"
     local doc_indexer_ready=0
-    if PYTHONPATH="${doc_indexer_pkg_root}${PYTHONPATH:+:$PYTHONPATH}" \
-      "$python_bin" - <<'PY' "$doc_indexer_pkg_root"; then
-import importlib
-import sys
-root = sys.argv[1]
-sys.path.insert(0, root)
-try:
-    module = importlib.import_module("lib.doc_indexer")
-    getattr(module, "DocIndexer")
-except Exception:
-    raise SystemExit(1)
-else:
-    raise SystemExit(0)
-PY
-      doc_indexer_ready=1
+    local doc_indexer_helper=""
+    if doc_indexer_helper="$(gc_clone_python_tool "doc_indexer_ready.py" "${PROJECT_ROOT:-$PWD}")"; then
+      if PYTHONPATH="${doc_indexer_pkg_root}${PYTHONPATH:+:$PYTHONPATH}" \
+        "$python_bin" "$doc_indexer_helper" "$doc_indexer_pkg_root"; then
+        doc_indexer_ready=1
+      fi
     fi
     if (( doc_indexer_ready )); then
       if PYTHONPATH="${doc_indexer_pkg_root}${PYTHONPATH:+:$PYTHONPATH}" \
@@ -4322,127 +4233,14 @@ cmd_normalize() {
     cmd_scan --project "$PROJECT_ROOT"
   fi
 
-  scan_json="${STAGING_DIR}/scan.json"
-  python3 - <<'PY' "$scan_json" "$INPUT_DIR" "$PLAN_DIR"
-import json, sys, shutil, pathlib, time
-scan_path, input_dir, plan_dir = sys.argv[1:4]
-input_dir = pathlib.Path(input_dir)
-plan_dir = pathlib.Path(plan_dir)
-input_dir.mkdir(parents=True, exist_ok=True)
-plan_dir.mkdir(parents=True, exist_ok=True)
+  local python_bin="${PYTHON_BIN:-python3}"
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    die "Python runtime '${python_bin}' not available; cannot normalize inputs."
+  fi
 
-data = json.load(open(scan_path))
-project_root = pathlib.Path(data.get('project_root', '.')).resolve()
-artifacts = data.get('artifacts', [])
-
-unique_types = {"pdr", "sds", "rfp", "jira", "ui_pages", "openapi"}
-unique = {}
-for entry in artifacts:
-    t = entry.get('type')
-    if t in unique_types:
-        if t not in unique or entry['confidence'] > unique[t]['confidence']:
-            unique[t] = entry
-
-multi_map = {
-    "sql": pathlib.Path('sql'),
-    "mermaid": pathlib.Path('mermaid'),
-    "page_sample_html": pathlib.Path('page_samples'),
-    "page_sample_css": pathlib.Path('page_samples')
-}
-collected = {key: [] for key in multi_map}
-for entry in artifacts:
-    t = entry.get('type')
-    if t in multi_map:
-        collected[t].append(entry)
-
-provenance = []
-
-def copy_file(src_path, rel_dest, entry):
-    src = pathlib.Path(src_path)
-    dest = input_dir / rel_dest
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest)
-    provenance.append({
-        "type": entry.get('type'),
-        "source": str(src),
-        "destination": str(dest.relative_to(input_dir)),
-        "confidence": entry.get('confidence', 0)
-    })
-
-name_map = {
-    "pdr": pathlib.Path('pdr.md'),
-    "sds": pathlib.Path('sds.md'),
-    "rfp": pathlib.Path('rfp.md'),
-    "jira": pathlib.Path('jira.md'),
-    "ui_pages": pathlib.Path('ui-pages.md')
-}
-
-for t, entry in unique.items():
-    src = entry['path']
-    if t == 'openapi':
-        suffix = pathlib.Path(src).suffix.lower()
-        if suffix in {'.yaml', '.yml'}:
-            rel = pathlib.Path('openapi.yaml')
-        elif suffix == '.json':
-            rel = pathlib.Path('openapi.json')
-        else:
-            rel = pathlib.Path('openapi.src')
-    else:
-        rel = name_map[t]
-    copy_file(src, rel, entry)
-
-for t, entries in collected.items():
-    dest_root = multi_map[t]
-    for entry in entries:
-        src = pathlib.Path(entry['path'])
-        try:
-            rel = src.resolve().relative_to(project_root)
-        except ValueError:
-            rel = pathlib.Path(src.name)
-        rel = dest_root / rel
-        copy_file(src, rel, entry)
-
-# discovery.yaml (summary)
-import io
-from textwrap import indent
-summary = io.StringIO()
-summary.write('generated_at: %s\n' % time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
-summary.write('project_root: %s\n' % project_root)
-summary.write('artifacts:\n')
-for entry in artifacts:
-    summary.write('  - type: %s\n' % entry.get('type'))
-    summary.write('    confidence: %.2f\n' % entry.get('confidence', 0))
-    summary.write('    path: %s\n' % entry.get('path'))
-(input_dir / '..' / 'discovery.yaml').resolve().write_text(summary.getvalue())
-
-focus_targets = []
-core_types = {"pdr", "sds", "rfp", "jira", "openapi", "ui_pages", "sql"}
-seen_focus = set()
-for entry in provenance:
-    dest = entry.get('destination')
-    if not dest:
-        continue
-    t = entry.get('type')
-    dest_rel = str(pathlib.Path(dest).as_posix())
-    if t in core_types and dest_rel not in seen_focus:
-        focus_targets.append(dest_rel)
-        seen_focus.add(dest_rel)
-if not focus_targets:
-    for entry in provenance:
-        dest = entry.get('destination')
-        if dest:
-            dest_rel = str(pathlib.Path(dest).as_posix())
-            if dest_rel not in seen_focus:
-                focus_targets.append(dest_rel)
-                seen_focus.add(dest_rel)
-
-prov = {
-    'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-    'entries': provenance,
-    'focus': focus_targets,
-}
-(plan_dir / 'provenance.json').write_text(json.dumps(prov, indent=2))
-PY
+  local normalize_helper
+  normalize_helper="$(gc_clone_python_tool "normalize_inputs.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  "$python_bin" "$normalize_helper" "$scan_json" "$INPUT_DIR" "$PLAN_DIR"
 
   ok "Normalized inputs → ${INPUT_DIR}"
 }
@@ -4462,177 +4260,13 @@ cmd_plan() {
     [[ -f "$cand" ]] && { openapi="$cand"; break; }
   done
   local sql_dir="$INPUT_DIR/sql"
-
-  python3 - <<'PY' "$openapi" "$sql_dir" "$PLAN_DIR"
-import json, os, re, sys, time, pathlib
-from collections import OrderedDict
-openapi_path, sql_dir, plan_dir = sys.argv[1:4]
-plan_dir = pathlib.Path(plan_dir)
-plan_dir.mkdir(parents=True, exist_ok=True)
-
-routes = []
-schemas = []
-openapi_loaded = False
-if openapi_path:
-    try:
-        text = pathlib.Path(openapi_path).read_text()
-        if openapi_path.endswith('.json'):
-            data = json.loads(text)
-            openapi_loaded = True
-        else:
-            try:
-                import yaml  # type: ignore
-                data = yaml.safe_load(text)  # type: ignore
-                openapi_loaded = True
-            except Exception:
-                data = None
-        if openapi_loaded and isinstance(data, dict):
-            for path, methods in (data.get('paths') or {}).items():
-                if isinstance(methods, dict):
-                    for method, body in methods.items():
-                        if not isinstance(body, dict):
-                            continue
-                        routes.append({
-                            'method': method.upper(),
-                            'path': path,
-                            'summary': body.get('summary') or ''
-                        })
-            schemas = list((data.get('components') or {}).get('schemas') or {})
-        else:
-            raise ValueError('fallback parser')
-    except Exception:
-        routes = []
-        schemas = []
-        text = pathlib.Path(openapi_path).read_text() if openapi_path else ''
-        current_path = None
-        for line in text.splitlines():
-            if re.match(r'^\s*/[^\s]+:\s*$', line):
-                current_path = line.strip().rstrip(':')
-                continue
-            if current_path:
-                m = re.match(r'^\s{2,}(get|post|put|patch|delete|options|head):\s*$', line, re.I)
-                if m:
-                    routes.append({'method': m.group(1).upper(), 'path': current_path, 'summary': ''})
-                    continue
-                if re.match(r'^\S', line):
-                    current_path = None
-
-        in_components = False
-        in_schemas = False
-        for line in text.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if re.match(r'^components:\s*$', stripped):
-                in_components = True
-                in_schemas = False
-                continue
-            if in_components and re.match(r'^schemas:\s*$', stripped):
-                in_schemas = True
-                continue
-            indent = len(line) - len(line.lstrip(' '))
-            if in_schemas:
-                if indent <= 2 and not stripped.startswith('#') and not stripped.startswith('schemas:'):
-                    in_schemas = False
-                    continue
-                if indent == 4 and re.match(r'^[A-Za-z0-9_.-]+:\s*$', stripped):
-                    name = stripped.split(':', 1)[0]
-                    schemas.append(name)
-
-sql_tables = []
-sql_dir_path = pathlib.Path(sql_dir)
-if sql_dir and sql_dir_path.is_dir():
-    for sql_file in sql_dir_path.rglob('*.sql'):
-        try:
-            text = sql_file.read_text()
-        except Exception:
-            continue
-        for m in re.finditer(r'CREATE\s+TABLE\s+`?([A-Za-z0-9_]+)`?', text, flags=re.IGNORECASE):
-            sql_tables.append(m.group(1))
-
-schema_set = {s.lower() for s in schemas}
-table_set = {t.lower() for t in sql_tables}
-only_in_openapi = sorted(schema_set - table_set)
-only_in_sql = sorted(table_set - schema_set)
-
-routes_path = plan_dir / 'routes.md'
-entities_path = plan_dir / 'entities.md'
-tasks_path = plan_dir / 'tasks.json'
-plan_todo = plan_dir / 'PLAN_TODO.md'
-
-def write_routes():
-    lines = ['# Routes', '']
-    if routes:
-        for item in sorted(routes, key=lambda r: (r['path'], r['method'])):
-            summary = f" — {item['summary']}" if item.get('summary') else ''
-            lines.append(f"- `{item['method']} {item['path']}`{summary}")
-    else:
-        lines.append('No routes detected — ensure openapi.yaml is present in staging/inputs.')
-    routes_path.write_text('\n'.join(lines) + '\n')
-
-
-def write_entities():
-    lines = ['# Entities', '']
-    lines.append('## OpenAPI Schemas')
-    if schemas:
-        for name in sorted(schemas):
-            lines.append(f'- {name}')
-    else:
-        lines.append('- (none found)')
-    lines.append('')
-    lines.append('## SQL Tables')
-    if sql_tables:
-        for name in sorted(sql_tables):
-            lines.append(f'- {name}')
-    else:
-        lines.append('- (none found)')
-    lines.append('')
-    lines.append('## Detected deltas')
-    if only_in_openapi:
-        lines.append('- Only in OpenAPI: ' + ', '.join(only_in_openapi))
-    if only_in_sql:
-        lines.append('- Only in SQL: ' + ', '.join(only_in_sql))
-    if not only_in_openapi and not only_in_sql:
-        lines.append('- None (schemas and tables aligned on name)')
-    entities_path.write_text('\n'.join(lines) + '\n')
-
-
-def write_tasks():
-    tasks = []
-    if only_in_openapi:
-        tasks.append({
-            'id': 'align-openapi-sql',
-            'title': 'Align OpenAPI schemas with SQL tables',
-            'details': f"Create tables or update schemas for: {', '.join(only_in_openapi)}"
-        })
-    if only_in_sql:
-        tasks.append({
-            'id': 'document-sql-gap',
-            'title': 'Document SQL tables missing from OpenAPI',
-            'details': f"Expose or document SQL tables not covered by API: {', '.join(only_in_sql)}"
-        })
-    tasks_path.write_text(json.dumps({'generated_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'tasks': tasks}, indent=2))
-
-
-def write_plan_todo():
-    lines = [
-        '# Build Plan',
-        '',
-        '- Validate discovery outputs under `staging/inputs`.',
-        '- Review `routes.md` & `entities.md` for coverage and deltas.',
-        '- Implement generation steps for API, DB, Web, Admin, Docker.',
-        '- Run `gpt-creator generate all --project <path>` if not already executed.',
-        '- Bring the stack up with `gpt-creator run up` and smoke test.',
-        '- Execute `gpt-creator verify all` to satisfy acceptance & NFR gates.',
-        '- Iterate on Jira tasks using `gpt-creator iterate` until checks pass.'
-    ]
-    plan_todo.write_text('\n'.join(lines) + '\n')
-
-write_routes()
-write_entities()
-write_tasks()
-write_plan_todo()
-PY
+  local python_bin="${PYTHON_BIN:-python3}"
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    die "Python runtime '${python_bin}' not available; cannot build plan artifacts."
+  fi
+  local plan_helper
+  plan_helper="$(gc_clone_python_tool "generate_plan_artifacts.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  "$python_bin" "$plan_helper" "$openapi" "$sql_dir" "$PLAN_DIR"
 
   ok "Plan artifacts created under ${PLAN_DIR}"
 }
@@ -5134,6 +4768,7 @@ EOHELP
   local app_pass="${DB_PASSWORD:-$GC_DB_PASSWORD}"
   local db_name="${DB_NAME:-$GC_DB_NAME}"
   local app_host="${refresh_sql_default_user_host:-%}"
+  local python_bin="${PYTHON_BIN:-python3}"
 
   local import_rc=0 seed_rc=0
   local schema_attempted=0 seed_attempted=0
@@ -5147,37 +4782,20 @@ EOHELP
     fi
   else
     if (( skip_import == 0 || skip_seed == 0 )); then
-      local ensure_sql
-      ensure_sql="$(python3 - <<'PY' "$db_name" "$app_user" "$app_pass" "$app_host"
-import sys
-
-db, user, password, host = sys.argv[1:5]
-if not host:
-    host = '%'
-if not db:
-    db = 'app'
-if not user:
-    user = 'app'
-
-def quote_identifier(name: str) -> str:
-    return '`' + name.replace('`', '``') + '`'
-
-def quote_string(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-statements = [
-    f"CREATE DATABASE IF NOT EXISTS {quote_identifier(db)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
-    f"CREATE USER IF NOT EXISTS {quote_string(user)}@{quote_string(host)} IDENTIFIED BY {quote_string(password)};",
-    f"GRANT ALL PRIVILEGES ON {quote_identifier(db)}.* TO {quote_string(user)}@{quote_string(host)};",
-    "FLUSH PRIVILEGES;",
-]
-print("\n".join(statements))
-PY
-)"
-      if ! gc_refresh_stack_exec_inline_sql "$db_container" "$root_user" "$root_pass" "" "$db_port" <<<"$ensure_sql"; then
-        warn "Failed to ensure database or user; continuing with imports."
+      local ensure_sql=""
+      if command -v "$python_bin" >/dev/null 2>&1; then
+        local ensure_helper
+        ensure_helper="$(gc_clone_python_tool "gc_refresh_stack_ensure_sql.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+        ensure_sql="$("$python_bin" "$ensure_helper" "$db_name" "$app_user" "$app_pass" "$app_host")"
       else
-        info "Ensured database ${db_name} and user ${app_user}"
+        warn "Skipping database/user ensure; ${python_bin} not available."
+      fi
+      if [[ -n "$ensure_sql" ]]; then
+        if ! gc_refresh_stack_exec_inline_sql "$db_container" "$root_user" "$root_pass" "" "$db_port" <<<"$ensure_sql"; then
+          warn "Failed to ensure database or user; continuing with imports."
+        else
+          info "Ensured database ${db_name} and user ${app_user}"
+        fi
       fi
     fi
 
@@ -5399,173 +5017,9 @@ cmd_verify() {
     local run_kind="$9"
     local timestamp="${10}"
     local event=""
-    event="$(
-      CHECK_NAME="$name" \
-      CHECK_STATUS="$status" \
-      CHECK_LABEL="$label" \
-      CHECK_MESSAGE="$message" \
-      CHECK_LOG="$log_path" \
-      CHECK_REPORT="$report_path" \
-      CHECK_SCORE="$score" \
-      CHECK_DURATION="$duration" \
-      CHECK_RUN_KIND="$run_kind" \
-      CHECK_TIMESTAMP="$timestamp" \
-      CHECK_ORDER="$check_order" \
-      PROJECT_ROOT="$PROJECT_ROOT" \
-      "$python_bin" - "$summary_path" <<'PY'
-import json, os, sys, datetime
-path = sys.argv[1]
-root = os.environ.get("PROJECT_ROOT", "")
-name = os.environ.get("CHECK_NAME", "")
-if not name:
-    sys.exit(0)
-label = os.environ.get("CHECK_LABEL", name.title())
-status = os.environ.get("CHECK_STATUS", "unknown")
-message = os.environ.get("CHECK_MESSAGE", "")
-log_path = os.environ.get("CHECK_LOG", "")
-report_path = os.environ.get("CHECK_REPORT", "")
-score_raw = os.environ.get("CHECK_SCORE", "")
-duration_raw = os.environ.get("CHECK_DURATION", "")
-run_kind = os.environ.get("CHECK_RUN_KIND", "")
-timestamp = os.environ.get("CHECK_TIMESTAMP", datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z")
-order_raw = os.environ.get("CHECK_ORDER", "")
-
-def relify(path_value):
-    if not path_value:
-        return ""
-    if not os.path.isabs(path_value) and root:
-        abs_path = os.path.normpath(os.path.join(root, path_value))
-    else:
-        abs_path = os.path.normpath(path_value)
-    if root:
-        try:
-            rel = os.path.relpath(abs_path, root)
-        except Exception:
-            rel = abs_path
-    else:
-        rel = abs_path
-    return rel.replace(os.sep, "/")
-
-score = None
-if score_raw:
-    try:
-        score = float(score_raw)
-    except Exception:
-        score = None
-
-duration = None
-if duration_raw:
-    try:
-        duration = float(duration_raw)
-    except Exception:
-        duration = None
-
-try:
-    with open(path, "r", encoding="utf-8") as fh:
-        data = json.load(fh)
-except Exception:
-    data = {}
-
-checks = data.get("checks")
-if not isinstance(checks, dict):
-    checks = {}
-
-entry = checks.get(name, {})
-entry["name"] = name
-entry["label"] = label
-entry["status"] = status
-if message:
-    entry["message"] = message
-elif "message" in entry:
-    del entry["message"]
-
-log_rel = relify(log_path)
-if log_rel:
-    entry["log"] = log_rel
-elif "log" in entry:
-    del entry["log"]
-
-report_rel = relify(report_path)
-if report_rel:
-    entry["report"] = report_rel
-elif "report" in entry:
-    del entry["report"]
-
-if score is not None:
-    entry["score"] = score
-elif "score" in entry:
-    del entry["score"]
-
-if duration is not None:
-    entry["duration_seconds"] = duration
-elif "duration_seconds" in entry:
-    del entry["duration_seconds"]
-
-entry["updated"] = timestamp
-if run_kind:
-    entry["run_kind"] = run_kind
-
-checks[name] = entry
-data["checks"] = checks
-data["last_updated"] = timestamp
-if run_kind:
-    data["last_run_kind"] = run_kind
-
-stats = {"passed": 0, "failed": 0, "skipped": 0, "total": 0}
-for chk in checks.values():
-    status_value = str(chk.get("status", "")).lower()
-    if status_value in ("pass", "passed", "ok", "success"):
-        stats["passed"] += 1
-    elif status_value in ("skip", "skipped"):
-        stats["skipped"] += 1
-    else:
-        stats["failed"] += 1
-    stats["total"] += 1
-data["stats"] = stats
-
-order = [part.strip() for part in order_raw.split(",") if part.strip()]
-if order:
-    merged = []
-    seen = set()
-    for item in order:
-        if item not in seen:
-            merged.append(item); seen.add(item)
-    for item in checks.keys():
-        if item not in seen:
-            merged.append(item); seen.add(item)
-    data["order"] = merged
-else:
-    existing = data.get("order")
-    merged = []
-    seen = set()
-    if isinstance(existing, list):
-        for item in existing:
-            if isinstance(item, str) and item not in seen:
-                merged.append(item); seen.add(item)
-    for item in checks.keys():
-        if item not in seen:
-            merged.append(item); seen.add(item)
-    data["order"] = merged
-
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(data, fh, indent=2)
-
-event = {
-    "name": name,
-    "label": label,
-    "status": status,
-    "message": message,
-    "log": entry.get("log", ""),
-    "report": entry.get("report", ""),
-    "score": entry.get("score"),
-    "updated": timestamp,
-    "run_kind": run_kind,
-    "stats": stats,
-    "duration_seconds": entry.get("duration_seconds"),
-}
-print(json.dumps(event))
-PY
-    )" || event=""
+    local summary_helper
+    summary_helper="$(gc_clone_python_tool "update_verify_summary.py" "${PROJECT_ROOT:-$PWD}")" || return 0
+    event="$("$python_bin" "$summary_helper" "$summary_path" "$PROJECT_ROOT" "$check_order" "$name" "$status" "$label" "$message" "$log_path" "$report_path" "$score" "$duration" "$run_kind" "$timestamp")" || event=""
     if [[ -n "$event" ]]; then
       printf '::verify::%s\n' "$event"
     fi
@@ -5671,457 +5125,19 @@ gc_exec_with_timeout() {
   shift 3 || true
   local -a cmd=("$@")
 
+  local python_bin="${PYTHON_BIN:-python3}"
   if (( ${#cmd[@]} == 0 )); then
     return 1
   fi
 
-  python3 - "$timeout" "$stdin_file" "$log_file" "${cmd[@]}" <<'PY'
-import hashlib
-import os
-import re
-import select
-import signal
-import subprocess
-import sys
-import time
-from collections import deque
-from pathlib import Path
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    warn "Python runtime '$python_bin' not available for gc_exec_with_timeout"
+    return 1
+  fi
 
-def to_int(value: str) -> int:
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return 0
-
-timeout = to_int(sys.argv[1] if len(sys.argv) > 1 else "0")
-stdin_path = sys.argv[2] if len(sys.argv) > 2 else ""
-log_path = sys.argv[3] if len(sys.argv) > 3 else ""
-cmd = sys.argv[4:]
-max_duration = to_int(os.environ.get("GC_CODEX_EXEC_MAX_DURATION", "0"))
-idle_ping_interval = to_int(os.environ.get("GC_CODEX_IDLE_PING_INTERVAL", "180"))
-idle_ping_max = to_int(os.environ.get("GC_CODEX_IDLE_PING_MAX", "3"))
-idle_ping_count = 0
-next_idle_ping = idle_ping_interval if idle_ping_interval > 0 else 0
-
-def describe_command(args):
-    if not args:
-        return "command"
-    first = os.path.basename(args[0])
-    tail = []
-    for token in args[1:3]:
-        if token.strip():
-            tail.append(token)
-    if tail:
-        first = f"{first} {' '.join(tail)}"
-    if len(args) > 3:
-        first += " …"
-    return first
-
-cmd_label = describe_command(cmd)
-
-if not cmd:
-    sys.exit(1)
-
-stdin = None
-if stdin_path:
-    try:
-        stdin = open(stdin_path, "rb")
-    except FileNotFoundError:
-        print(f"{stdin_path}: No such file or directory", file=sys.stderr, flush=True)
-        sys.exit(1)
-
-log = None
-if log_path:
-    log_dir = os.path.dirname(log_path)
-    if log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-    log = open(log_path, "w", encoding="utf-8", buffering=1)
-
-diff_cache = {}
-diff_dir = None
-diff_counter = 0
-capturing_diff = False
-diff_header = ""
-diff_lines = []
-diff_repeat_limit = to_int(os.environ.get("GC_CODEX_DIFF_REPEAT_LIMIT", "6"))
-diff_repeat_counts = {}
-diff_recent = deque(maxlen=max(5, diff_repeat_limit if diff_repeat_limit > 0 else 5))
-last_diff_digest = None
-last_diff_streak = 0
-abort_now = False
-abort_reason = ""
-abort_repeat_count = 0
-turn_limit = to_int(os.environ.get("GC_CODEX_MAX_TURNS", "0"))
-turn_count = 0
-
-def normalize_diff_for_digest(diff_text: str) -> str:
-    lines = []
-    for raw_line in diff_text.splitlines():
-        if raw_line.startswith("index "):
-            continue
-        line = re.sub(r"\b[0-9a-f]{7,40}\b", "<sha>", raw_line)
-        lines.append(line)
-    return "\n".join(lines)
-
-def ensure_diff_dir():
-    global diff_dir
-    if diff_dir is None and log_path:
-        base = Path(log_path)
-        diff_dir_path = base.parent / f"{base.name}.diffs"
-        diff_dir_path.mkdir(parents=True, exist_ok=True)
-        diff_dir = diff_dir_path
-    return diff_dir
-
-def emit(text: str) -> None:
-    if not text:
-        return
-    try:
-        sys.stdout.write(text)
-        sys.stdout.flush()
-    except OSError:
-        pass
-    if log:
-        try:
-            log.write(text)
-            log.flush()
-        except OSError:
-            pass
-
-def is_diff_line(line: str) -> bool:
-    if line == "":
-        return True
-    prefixes = (
-        "diff --git ",
-        "index ",
-        "@@",
-        "--- ",
-        "+++ ",
-        "+",
-        "-",
-        " ",
-        "Binary files ",
-        "No newline at end of file",
-        "rename ",
-        "similarity index",
-        "dissimilarity index",
-        "copy from",
-        "copy to",
-        "new file mode",
-        "deleted file mode",
-        "old mode",
-        "new mode",
-    )
-    return any(line.startswith(prefix) for prefix in prefixes)
-
-def flush_diff():
-    global capturing_diff, diff_header, diff_lines, diff_counter
-    global abort_now, abort_reason, abort_repeat_count, timed_out, timeout_type
-    global diff_recent, last_diff_digest, last_diff_streak
-    if not diff_header:
-        capturing_diff = False
-        diff_lines = []
-        return
-    diff_text = "".join(diff_lines)
-    normalized_diff = normalize_diff_for_digest(diff_text)
-    digest_source = normalized_diff if normalized_diff.strip() else diff_text
-    digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:12]
-    count = diff_repeat_counts.get(digest, 0) + 1
-    diff_repeat_counts[digest] = count
-    if last_diff_digest == digest:
-        last_diff_streak = last_diff_streak + 1
-    else:
-        last_diff_digest = digest
-        last_diff_streak = 1
-    diff_recent.append(digest)
-    recent_occurrences = diff_recent.count(digest)
-    oscillates = False
-    if len(diff_recent) >= 3:
-        a, b, c = diff_recent[-3], diff_recent[-2], diff_recent[-1]
-        if a == c and a != b:
-            oscillates = True
-    diff_dir_path = ensure_diff_dir()
-    base_dir = diff_dir_path.parent if diff_dir_path is not None else os.getcwd()
-    base_dir_str = str(base_dir)
-    if digest in diff_cache:
-        stored_path = diff_cache[digest]
-        if stored_path:
-            rel = os.path.relpath(str(stored_path), base_dir_str)
-            emit(f"{diff_header.strip()} (repeat #{count}) see {rel}\n")
-        else:
-            emit(f"{diff_header.strip()} (repeat #{count} diff cached earlier)\n")
-    else:
-        if diff_dir_path is not None:
-            diff_counter += 1
-            stored_path = diff_dir_path / f"turn-{diff_counter:03d}-{digest}.patch"
-            stored_path.write_text(diff_text, encoding="utf-8")
-            diff_cache[digest] = stored_path
-            rel = os.path.relpath(str(stored_path), base_dir_str)
-            emit(f"{diff_header.strip()} stored patch {rel}\n")
-        else:
-            diff_cache[digest] = None
-            emit(f"{diff_header.strip()} (diff of {len(diff_text)} bytes captured)\n")
-    if diff_repeat_limit and diff_repeat_limit > 0 and not abort_now:
-        triggered = False
-        if last_diff_streak >= diff_repeat_limit:
-            abort_reason = f"turn diff repeated {last_diff_streak} times consecutively"
-            abort_repeat_count = last_diff_streak
-            timeout_type = "diff-repeat"
-            triggered = True
-        elif len(diff_recent) >= diff_repeat_limit and recent_occurrences >= diff_repeat_limit:
-            abort_reason = f"turn diff repeated {recent_occurrences} times within last {len(diff_recent)} turns"
-            abort_repeat_count = recent_occurrences
-            timeout_type = "diff-repeat"
-            triggered = True
-        elif oscillates:
-            abort_reason = "turn diff oscillation detected (A→B→A pattern)"
-            timeout_type = "diff-oscillation"
-            triggered = True
-        if triggered:
-            abort_now = True
-            timed_out = True
-    capturing_diff = False
-    diff_header = ""
-    diff_lines.clear()
-
-buffer = ""
-
-def process_line(line: str):
-    global capturing_diff, diff_header, diff_lines
-    global abort_now, turn_count, abort_reason, timed_out, timeout_type
-    stripped = line.rstrip("\n")
-    lowered = stripped.lower()
-    if turn_limit:
-        turn_pos = lowered.find("turn ")
-        if turn_pos != -1:
-            prev_char = lowered[turn_pos - 1] if turn_pos > 0 else ""
-            if turn_pos == 0 or prev_char in {"", " ", "\t", "]"}:
-                turn_count += 1
-                if turn_count >= turn_limit and not abort_now:
-                    abort_now = True
-                    timeout_type = "turn-limit"
-                    abort_reason = f"turn limit {turn_limit} reached"
-                    timed_out = True
-                    return
-    if capturing_diff:
-        if is_diff_line(stripped):
-            diff_lines.append(line)
-            return
-        flush_diff()
-        # fall through to treat current line normally
-        if abort_now:
-            return
-    if stripped.lower().startswith("turn diff"):
-        capturing_diff = True
-        diff_header = stripped
-        diff_lines = []
-        return
-    emit(line)
-
-def process_text(text: str):
-    global buffer
-    global abort_now
-    buffer += text
-    while True:
-        if "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            process_line(line + "\n")
-            if abort_now:
-                break
-        else:
-            break
-
-preexec = os.setsid if hasattr(os, "setsid") else None
-
-try:
-    proc = subprocess.Popen(
-        cmd,
-        stdin=stdin,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        bufsize=0,
-        preexec_fn=preexec,
-    )
-except FileNotFoundError:
-    emit(f"{cmd[0]} not found\n")
-    if log:
-        log.close()
-    sys.exit(127)
-
-start = time.monotonic()
-last_activity = start
-timed_out = False
-timeout_type = None
-
-if not proc.stdout:
-    if stdin:
-        stdin.close()
-    if log:
-        log.close()
-    sys.exit(1)
-
-fd = proc.stdout.fileno()
-
-interrupted = False
-
-try:
-    while True:
-        now = time.monotonic()
-        elapsed = now - start
-        if max_duration and elapsed >= max_duration:
-            timed_out = True
-            timeout_type = "hard"
-            break
-        if timeout:
-            idle_for = now - last_activity
-            if (
-                idle_ping_interval
-                and idle_ping_max
-                and next_idle_ping
-                and idle_ping_count < idle_ping_max
-                and idle_for >= next_idle_ping
-                and not abort_now
-            ):
-                idle_ping_count += 1
-                elapsed_sec = int(elapsed)
-                idle_sec = int(idle_for)
-                emit(
-                    f"[gc] Waiting on {cmd_label}: no output for {idle_sec}s (elapsed {elapsed_sec}s)\n"
-                )
-                last_activity = time.monotonic()
-                idle_for = 0.0
-                if idle_ping_count < idle_ping_max:
-                    next_idle_ping = idle_ping_interval
-                else:
-                    next_idle_ping = 0
-            if idle_for >= timeout:
-                timed_out = True
-                timeout_type = "idle"
-                break
-            remaining = timeout - idle_for
-            wait_time = remaining if remaining < 0.2 else 0.2
-        else:
-            wait_time = 0.2
-        ready, _, _ = select.select([fd], [], [], wait_time)
-        if ready:
-            chunk = os.read(fd, 8192)
-            if chunk:
-                text = chunk.decode("utf-8", errors="replace")
-                process_text(text)
-                last_activity = time.monotonic()
-                if idle_ping_interval:
-                    idle_ping_count = 0
-                    next_idle_ping = idle_ping_interval if idle_ping_interval > 0 else 0
-                if abort_now:
-                    break
-            else:
-                break
-        else:
-            if proc.poll() is not None:
-                break
-        if abort_now:
-            break
-    if not timed_out and not abort_now:
-        while True:
-            chunk = os.read(fd, 8192)
-            if not chunk:
-                break
-            text = chunk.decode("utf-8", errors="replace")
-            process_text(text)
-            if idle_ping_interval:
-                idle_ping_count = 0
-                next_idle_ping = idle_ping_interval if idle_ping_interval > 0 else 0
-            if abort_now:
-                break
-except KeyboardInterrupt:
-    interrupted = True
-    abort_now = True
-    try:
-        if preexec:
-            os.killpg(proc.pid, signal.SIGINT)
-        else:
-            proc.send_signal(signal.SIGINT)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(5)
-    except subprocess.TimeoutExpired:
-        try:
-            if preexec:
-                os.killpg(proc.pid, signal.SIGTERM)
-            else:
-                proc.terminate()
-        except ProcessLookupError:
-            pass
-finally:
-    if stdin:
-        stdin.close()
-
-proc.stdout.close()
-
-if buffer:
-    process_line(buffer)
-    buffer = ""
-
-flush_diff()
-if abort_now and not timed_out:
-    timed_out = True
-
-if timed_out:
-    try:
-        if preexec:
-            os.killpg(proc.pid, signal.SIGTERM)
-        else:
-            proc.terminate()
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(5)
-    except subprocess.TimeoutExpired:
-        try:
-            if preexec:
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                proc.kill()
-        except ProcessLookupError:
-            pass
-        proc.wait()
-    if timeout_type == "hard":
-        emit(f"\n[gc] Command exceeded max runtime of {max_duration} seconds\n")
-    elif timeout_type == "diff-repeat":
-        limit_msg = diff_repeat_limit if diff_repeat_limit else abort_repeat_count
-        emit(f"\n[gc] Command emitted the same diff {abort_repeat_count or limit_msg} times; aborting to prevent an infinite loop\n")
-    elif timeout_type == "diff-oscillation":
-        emit("\n[gc] Command diff output oscillated between patterns (A→B→A); aborting to prevent an infinite loop\n")
-    elif timeout_type == "turn-limit":
-        emit(f"\n[gc] Command exceeded the maximum of {turn_limit} Codex turns; aborting to prevent an infinite loop\n")
-    else:
-        emit(f"\n[gc] Command produced no output for {timeout} seconds\n")
-    if log:
-        log.flush()
-        log.close()
-    if timeout_type in {"diff-repeat", "diff-oscillation"}:
-        sys.exit(125)
-    elif timeout_type == "turn-limit":
-        sys.exit(126)
-    else:
-        sys.exit(124)
-elif interrupted:
-    if log:
-        log.flush()
-        log.close()
-    emit("\n[gc] Command interrupted by user (KeyboardInterrupt)\n")
-    sys.exit(130)
-
-exit_code = proc.poll()
-if exit_code is None:
-    exit_code = proc.wait()
-
-if log:
-    log.flush()
-    log.close()
-
-sys.exit(exit_code)
-PY
+  local helper_path
+  helper_path="$(gc_clone_python_tool "gc_exec_with_timeout.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  "$python_bin" "$helper_path" "$timeout" "$stdin_file" "$log_file" "${cmd[@]}"
   return "$?"
 }
 
@@ -6173,7 +5189,9 @@ PROMPT
   if ! [[ "$call_max_output" =~ ^[0-9]+$ ]]; then
     call_max_output=0
   fi
+  # shellcheck disable=SC2034  # exposed for observability in external tooling
   GC_CURRENT_CODEX_STEP="$call_step"
+  # shellcheck disable=SC2034  # exposed for observability in external tooling
   GC_CURRENT_CODEX_MAX_OUT="$call_max_output"
 
   if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" && "${GC_CODEX_USAGE_LIMIT_CONFIRMED:-0}" == "1" ]]; then
@@ -6787,7 +5805,7 @@ EOUSAGE
 
   local story_plan_helper
   story_plan_helper="$(gc_clone_python_tool "story_scheduler.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$story_plan_helper" "$tasks_db" "${story:-}" "1" >/dev/null 2>&1 || true
+  "$python_bin" "$story_plan_helper" "$tasks_db" "${story:-}" "1" >/dev/null 2>&1 || true
 
   local dag_helper
   dag_helper="$(gc_clone_python_tool "dag_inspect.py" "${PROJECT_ROOT:-$PWD}")" || return 1
@@ -6931,109 +5949,32 @@ EOUSAGE
   local tasks_db="${PLAN_DIR}/tasks/tasks.db"
   [[ -f "$tasks_db" ]] || die "Tasks database not found: ${tasks_db}"
 
+  local python_bin="${PYTHON_BIN:-python3}"
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    die "Python runtime '$python_bin' not available; cannot refine tasks."
+  fi
+
   local pipeline_dir="${PLAN_DIR}/create-jira-tasks"
   local json_tasks_dir="${pipeline_dir}/json/tasks"
   [[ -d "$json_tasks_dir" ]] || die "Tasks JSON directory not found: ${json_tasks_dir}"
 
   local have_refined
-  have_refined=$(python3 - <<'PY' "$tasks_db"
-import sqlite3, sys
-
-path = sys.argv[1]
-conn = sqlite3.connect(path)
-cur = conn.cursor()
-cur.execute("PRAGMA table_info(tasks)")
-cols = {row[1] for row in cur.fetchall()}
-added = False
-if "refined" not in cols:
-    cur.execute("ALTER TABLE tasks ADD COLUMN refined INTEGER DEFAULT 0")
-    added = True
-if "refined_at" not in cols:
-    cur.execute("ALTER TABLE tasks ADD COLUMN refined_at TEXT")
-    added = True
-if added:
-    conn.commit()
-cur.execute("PRAGMA table_info(tasks)")
-cols = {row[1] for row in cur.fetchall()}
-conn.close()
-print("1" if "refined" in cols else "0")
-PY
-  )
+  local refine_init_helper
+  refine_init_helper="$(gc_clone_python_tool "refine_tasks_init_db.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  have_refined="$($python_bin "$refine_init_helper" "$tasks_db")"
 
   local summary
-  summary=$(python3 - <<'PY' "$tasks_db" "$story_filter"
-import sqlite3, sys
-
-db_path = sys.argv[1]
-filters_raw = sys.argv[2] if len(sys.argv) > 2 else ''
-filters = {value.strip().lower() for value in filters_raw.split(',') if value.strip()}
-
-conn = sqlite3.connect(db_path)
-cur = conn.cursor()
-
-cur.execute("PRAGMA table_info(tasks)")
-cols = {row[1] for row in cur.fetchall()}
-have_refined = 'refined' in cols
-
-story_map = {
-    (row[0] or '').strip(): (row[1] or '').strip().lower()
-    for row in cur.execute("SELECT story_slug, story_id FROM stories")
-}
-
-def story_in_scope(slug: str) -> bool:
-    lower = slug.lower()
-    if not filters:
-        return True
-    if lower in filters:
-        return True
-    story_id_lower = story_map.get(slug, '')
-    if story_id_lower in filters:
-        return True
-    return False
-
-if have_refined:
-    rows = cur.execute("SELECT story_slug, COALESCE(refined, 0) FROM tasks").fetchall()
-else:
-    rows = [(slug, 0) for (slug,) in cur.execute("SELECT story_slug FROM tasks").fetchall()]
-conn.close()
-
-total_tasks = 0
-refined_tasks = 0
-stories_total = set()
-stories_pending = set()
-
-for slug, refined in rows:
-    slug = (slug or '').strip()
-    if not slug or not story_in_scope(slug):
-        continue
-    stories_total.add(slug)
-    total_tasks += 1
-    try:
-        refined_value = int(refined)
-    except Exception:
-        refined_value = 0
-    if refined_value:
-        refined_tasks += 1
-    else:
-        stories_pending.add(slug)
-
-pending_tasks = total_tasks - refined_tasks
-print(total_tasks, refined_tasks, pending_tasks, len(stories_total), len(stories_pending))
-PY
-  ) || die "Failed to summarise tasks backlog"
+  local refine_summary_helper
+  refine_summary_helper="$(gc_clone_python_tool "refine_tasks_summary.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  summary="$($python_bin "$refine_summary_helper" "$tasks_db" "$story_filter")" || die "Failed to summarise tasks backlog"
 
   local total_tasks refined_tasks pending_tasks total_stories pending_stories
   read -r total_tasks refined_tasks pending_tasks total_stories pending_stories <<<"$summary"
 
   if (( force )); then
-    python3 - <<'PY' "$tasks_db"
-import sqlite3, sys
-conn = sqlite3.connect(sys.argv[1])
-cur = conn.cursor()
-cur.execute("UPDATE tasks SET refined = 0, refined_at = NULL")
-conn.commit()
-conn.close()
-PY
+    local refine_reset_helper
+    refine_reset_helper="$(gc_clone_python_tool "refine_tasks_reset.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+    "$python_bin" "$refine_reset_helper" "$tasks_db"
     refined_tasks=0
     pending_tasks=$total_tasks
   fi
@@ -7238,6 +6179,7 @@ cmd_work_on_tasks() {
   local binder_ttl_seconds=604800
   local binder_max_size_bytes=209715200
   local binder_clear_on_migration=0
+  local python_bin="${PYTHON_BIN:-python3}"
   if [[ -n "${GC_BINDER_ENABLED:-}" ]]; then
     case "${GC_BINDER_ENABLED,,}" in
       0|false|no|off) binder_enabled=0;;
@@ -7799,70 +6741,40 @@ EOHELP
   local budget_cfg_json="{}"
   local budget_loader
   if budget_loader="$(gc_clone_python_tool "load_budget_config.py" "$PROJECT_ROOT" 2>/dev/null)"; then
-    budget_cfg_json="$(python3 "$budget_loader" "$PROJECT_ROOT" 2>/dev/null || echo '{}')"
+    budget_cfg_json="$("$python_bin" "$budget_loader" "$PROJECT_ROOT" 2>/dev/null || echo '{}')"
   fi
 
   local budget_stage_json
-  budget_stage_json="$(python3 - <<'PY' "$budget_cfg_json"
-import json, sys
-cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
-stage = cfg.get("per_stage_limits", {}) if isinstance(cfg, dict) else {}
-print(json.dumps(stage, separators=(',', ':'), ensure_ascii=True))
-PY
-)"
-  [[ -n "$budget_stage_json" ]] || budget_stage_json="{}"
-
-  if ((${#stage_limit_overrides[@]} > 0)); then
-    budget_stage_json="$(python3 - <<'PY' "$budget_stage_json" "${stage_limit_overrides[@]}"
-import json, sys
-stage_cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
-if not isinstance(stage_cfg, dict):
-    stage_cfg = {}
-for raw in sys.argv[2:]:
-    if '=' not in raw:
-        continue
-    name, value = raw.split('=', 1)
-    name = name.strip()
-    value = value.strip()
-    if not name:
-        continue
-    try:
-        number = int(value)
-    except ValueError:
-        continue
-    if number > 0:
-        stage_cfg[name] = number
-print(json.dumps(stage_cfg, separators=(',', ':'), ensure_ascii=True))
-PY
-)"
+  local budget_stage_helper
+  if budget_stage_helper="$(gc_clone_python_tool "budget_stage_from_config.py" "${PROJECT_ROOT:-$PWD}")"; then
+    budget_stage_json="$("$python_bin" "$budget_stage_helper" "$budget_cfg_json" 2>/dev/null || echo '{}')"
+  else
+    budget_stage_json="{}"
   fi
 
-  while IFS=$'\t' read -r stage_name stage_limit_value; do
-    gc_budget_set_stage_limit "$stage_name" "$stage_limit_value"
-  done < <(python3 - <<'PY' "$budget_stage_json"
-import json, sys
-stage_cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
-if not isinstance(stage_cfg, dict):
-    stage_cfg = {}
-for name, value in stage_cfg.items():
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        continue
-    if number > 0:
-        print(f"{name}\t{number}")
-PY
-  )
+  if ((${#stage_limit_overrides[@]} > 0)); then
+    local budget_stage_override_helper
+    if budget_stage_override_helper="$(gc_clone_python_tool "budget_stage_apply_overrides.py" "${PROJECT_ROOT:-$PWD}")"; then
+      budget_stage_json="$("$python_bin" "$budget_stage_override_helper" "$budget_stage_json" "${stage_limit_overrides[@]}" 2>/dev/null || echo '{}')"
+    fi
+  fi
+
+  local budget_stage_iter_helper
+  budget_stage_iter_helper="$(gc_clone_python_tool "budget_stage_iter.py" "${PROJECT_ROOT:-$PWD}")" || budget_stage_iter_helper=""
+
+  if [[ -n "$budget_stage_iter_helper" ]]; then
+    while IFS=$'\t' read -r stage_name stage_limit_value; do
+      gc_budget_set_stage_limit "$stage_name" "$stage_limit_value"
+    done < <("$python_bin" "$budget_stage_iter_helper" "$budget_stage_json")
+  fi
 
   gc_budget_reset_stage_tracking
 
-  local budget_off_json
-  budget_off_json="$(python3 - <<'PY' "$budget_cfg_json"
-import json, sys
-cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
-print(json.dumps(cfg.get('offenders', {}), separators=(',', ':'), ensure_ascii=True))
-PY
-)"
+  local budget_off_json="{}"
+  local budget_off_helper
+  if budget_off_helper="$(gc_clone_python_tool \"budget_offenders_from_config.py\" \"${PROJECT_ROOT:-$PWD}\")"; then
+    budget_off_json="$("$python_bin" "$budget_off_helper" "$budget_cfg_json" 2>/dev/null || echo '{}')"
+  fi
   [[ -n "$budget_off_json" ]] || budget_off_json="{}"
 
   local budget_offender_window=10
@@ -7870,39 +6782,14 @@ PY
   local budget_offender_dom=0.5
   local budget_auto_abandon_default=1
   local budget_offender_actions_json="{}"
-  local offender_meta
-  offender_meta="$(python3 - <<'PY' "$budget_off_json"
-import json, sys
-cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
-if not isinstance(cfg, dict):
-    cfg = {}
-def as_int(value, fallback):
-    try:
-        iv = int(value)
-    except (TypeError, ValueError):
-        return fallback
-    return iv if iv > 0 else fallback
-def as_float(value, fallback):
-    try:
-        fv = float(value)
-    except (TypeError, ValueError):
-        return fallback
-    return fv if 0.0 < fv <= 1.0 else fallback
-window = as_int(cfg.get('window_runs', 10), 10)
-top_k = as_int(cfg.get('top_k', 3), 3)
-dominance = as_float(cfg.get('dominance_threshold', 0.5), 0.5)
-auto_val = cfg.get('auto_abandon', True)
-if isinstance(auto_val, str):
-    auto_flag = auto_val.strip().lower() in {'1','true','yes','on'}
-else:
-    auto_flag = bool(auto_val)
-actions = cfg.get('actions', {})
-if not isinstance(actions, dict):
-    actions = {}
-print(f"{window}\t{top_k}\t{dominance}\t{int(auto_flag)}\t" + json.dumps(actions, separators=(',', ':'), ensure_ascii=True))
-PY
-)"
-  IFS=$'\t' read -r budget_offender_window budget_offender_top_k budget_offender_dom budget_auto_abandon_default budget_offender_actions_json <<< "$offender_meta"
+  local budget_offender_meta_helper
+  if budget_offender_meta_helper="$(gc_clone_python_tool \"budget_offenders_meta.py\" \"${PROJECT_ROOT:-$PWD}\")"; then
+    local offender_meta
+    offender_meta="$("$python_bin" "$budget_offender_meta_helper" "$budget_off_json" 2>/dev/null)"
+    if [[ -n "$offender_meta" ]]; then
+      IFS=$'\t' read -r budget_offender_window budget_offender_top_k budget_offender_dom budget_auto_abandon_default budget_offender_actions_json <<<"$offender_meta"
+    fi
+  fi
   budget_offender_window=${budget_offender_window:-10}
   budget_offender_top_k=${budget_offender_top_k:-3}
   budget_offender_dom=${budget_offender_dom:-0.5}
@@ -7919,65 +6806,48 @@ PY
   local budget_usage_file="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/codex-usage.ndjson"
   local budget_offenders_json="{}"
   local offenders_helper
-  if offenders_helper="$(gc_clone_python_tool "budget_offenders.py" "$PROJECT_ROOT" 2>/dev/null)"; then
+  if offenders_helper="$(gc_clone_python_tool \"budget_offenders.py\" \"$PROJECT_ROOT\" 2>/dev/null)"; then
     local -a offender_args=("$offenders_helper" --usage-file "$budget_usage_file" --per-stage-json "$budget_stage_json" --actions-json "$budget_offender_actions_json" --window-runs "$budget_offender_window" --top-k "$budget_offender_top_k" --dominance-threshold "$budget_offender_dom")
     if (( auto_abandon_flag )); then
       offender_args+=(--auto-abandon)
     else
       offender_args+=(--no-auto-abandon)
     fi
-    budget_offenders_json="$(python3 "${offender_args[@]}" 2>/dev/null || echo '{}')"
+    budget_offenders_json="$("$python_bin" "${offender_args[@]}" 2>/dev/null || echo '{}')"
   fi
 
   local last_offender_run=""
   local offenders_auto_flag=$auto_abandon_flag
   if [[ -n "$budget_offenders_json" && "$budget_offenders_json" != "{}" ]]; then
-    while IFS=$'\t' read -r kind a b c d; do
-      case "$kind" in
-        AUTO)
-          offenders_auto_flag="$a"
-          ;;
-        RUN)
-          last_offender_run="$a"
-          ;;
-        STAGE)
-          if [[ "$offenders_auto_flag" == "1" ]]; then
-            gc_budget_set_stage_skip "$a" 1 "auto-abandon:${last_offender_run:-previous}"
-          fi
-          ;;
-        TOOL)
-          local tool_key
-          tool_key="$(gc_budget_stage_id "$a")"
-          local tool_action_var="GC_BUDGET_TOOL_ACTION_${tool_key^^}"
-          printf -v "$tool_action_var" '%s' "$d"
-          local tool_bytes_var="GC_BUDGET_TOOL_BYTES_${tool_key^^}"
-          printf -v "$tool_bytes_var" '%s' "$b"
-          local tool_share_var="GC_BUDGET_TOOL_SHARE_${tool_key^^}"
-          printf -v "$tool_share_var" '%s' "$c"
-          ;;
-      esac
-    done < <(python3 - <<'PY' "$budget_offenders_json"
-import json, sys
-cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
-print(f"AUTO\t{int(bool(cfg.get('auto_abandon')))}")
-print(f"RUN\t{cfg.get('target_run_id','')}")
-for item in cfg.get('stage_offenders', []):
-    stage = item.get('stage')
-    if not stage:
-        continue
-    total = int(item.get('total_tokens') or 0)
-    limit = int(item.get('limit') or 0)
-    print(f"STAGE\t{stage}\t{total}\t{limit}")
-for item in cfg.get('tool_offenders', []):
-    tool = item.get('tool')
-    if not tool:
-        continue
-    bytes_used = int(item.get('bytes') or 0)
-    share = float(item.get('share') or 0.0)
-    action = item.get('action') or ''
-    print(f"TOOL\t{tool}\t{bytes_used}\t{share}\t{action}")
-PY
-    )
+    local budget_off_iter_helper
+    budget_off_iter_helper="$(gc_clone_python_tool \"budget_offenders_iter.py\" \"${PROJECT_ROOT:-$PWD}\")" || budget_off_iter_helper=""
+    if [[ -n "$budget_off_iter_helper" ]]; then
+      while IFS=$'\t' read -r kind value1 value2 value3 value4; do
+        case "$kind" in
+          AUTO)
+            offenders_auto_flag="${value1:-0}"
+            ;;
+          RUN)
+            last_offender_run="$value1"
+            ;;
+          STAGE)
+            if [[ "$offenders_auto_flag" == "1" ]]; then
+              gc_budget_set_stage_skip "$value1" 1 "auto-abandon:${last_offender_run:-previous}"
+            fi
+            ;;
+          TOOL)
+            local tool_key
+            tool_key="$(gc_budget_stage_id "$value1")"
+            local tool_action_var="GC_BUDGET_TOOL_ACTION_${tool_key^^}"
+            printf -v "$tool_action_var" '%s' "$value4"
+            local tool_bytes_var="GC_BUDGET_TOOL_BYTES_${tool_key^^}"
+            printf -v "$tool_bytes_var" '%s' "$value2"
+            local tool_share_var="GC_BUDGET_TOOL_SHARE_${tool_key^^}"
+            printf -v "$tool_share_var" '%s' "$value3"
+            ;;
+        esac
+      done < <("$python_bin" "$budget_off_iter_helper" "$budget_offenders_json")
+    fi
   fi
 
   if [[ "${GC_BUDGET_TOOL_ACTION_SHOW_FILE:-}" == "range-only" ]]; then
@@ -8240,132 +7110,79 @@ PY
     GC_LAST_AUTO_COMMIT_HASH=""
     GC_LAST_AUTO_COMMIT_STATUS="skipped"
 
-    if [[ -z "${PROJECT_ROOT:-}" ]]; then
-      info "    Auto-commit skipped: project root unavailable."
-      return 0
-    fi
-    if ! command -v git >/dev/null 2>&1; then
-      info "    Auto-commit skipped: git command not found."
-      return 0
-    fi
-    if ! git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-      info "    Auto-commit skipped: not a git repository."
+    local helper_path
+    helper_path="$(gc_clone_python_tool "gc_auto_commit_task.py" "${PROJECT_ROOT:-$PWD}")" || return 0
+
+    local helper_output=""
+    if ! helper_output="$("${python_bin:-python3}" "$helper_path" "$commit_message" "${raw_paths[@]}")"; then
+      warn "    Auto-commit helper failed."
       return 0
     fi
 
-    local -a stage_paths=()
-    local -A seen_stage_paths=()
-    local raw path
-    for raw in "${raw_paths[@]}"; do
-      path="$raw"
-      path="${path%% (*}"
-      while [[ "$path" == " "* ]]; do
-        path="${path# }"
-      done
-      while [[ "$path" == *" " ]]; do
-        path="${path% }"
-      done
-      if [[ "$path" == "$PROJECT_ROOT/"* ]]; then
-        path="${path#$PROJECT_ROOT/}"
-      fi
-      [[ -n "$path" ]] || continue
-      if [[ "$path" == *.rej ]]; then
-        continue
-      fi
-      if [[ "$path" == tmp/* ]]; then
-        continue
-      fi
-      case "$path" in
-        .gpt-creator/staging/plan/work/runs/*|.gpt-creator/work/*|.gpt-creator/logs/*|.gpt-creator/cache/*)
-          continue
+    local status_received=0
+    while IFS=$'	' read -r kind field1 rest; do
+      [[ -z "$kind" ]] && continue
+      case "$kind" in
+        MESSAGE)
+          local message="$rest"
+          case "$field1" in
+            info) info "    ${message}" ;;
+            warn) warn "    ${message}" ;;
+            *) info "    ${message}" ;;
+          esac
+          ;;
+        RESULT)
+          GC_LAST_AUTO_COMMIT_STATUS="${field1:-skipped}"
+          GC_LAST_AUTO_COMMIT_HASH="${rest:-}"
+          status_received=1
           ;;
       esac
-      if [[ -z "${seen_stage_paths[$path]:-}" ]]; then
-        stage_paths+=("$path")
-        seen_stage_paths[$path]=1
-      fi
-    done
+    done <<<"$helper_output"
 
-    if (( ${#stage_paths[@]} == 0 )); then
-      info "    Auto-commit skipped: no paths to stage."
-      GC_LAST_AUTO_COMMIT_STATUS="clean"
-      return 0
-    fi
-
-    local sanitized_message="$commit_message"
-    if command -v python3 >/dev/null 2>&1; then
-      sanitized_message="$(python3 - "$commit_message" <<'PY'
-import sys
-msg = sys.argv[1]
-msg = ' '.join(msg.replace('\r', ' ').replace('\n', ' ').split())
-print((msg[:69] + '...') if len(msg) > 72 else msg)
-PY
-      )" || sanitized_message="$commit_message"
-    else
-      sanitized_message="${sanitized_message//$'\r'/ }"
-      sanitized_message="${sanitized_message//$'\n'/ }"
-    fi
-
-    local add_output
-    if ! add_output="$(git -C "$PROJECT_ROOT" add -- "${stage_paths[@]}" 2>&1)"; then
-      warn "    Auto-commit staging failed: ${add_output}"
-      GC_LAST_AUTO_COMMIT_STATUS="failed"
-      return 0
-    fi
-
-    if git -C "$PROJECT_ROOT" diff --cached --quiet --exit-code; then
-      info "    Auto-commit skipped: staged state clean."
-      GC_LAST_AUTO_COMMIT_STATUS="clean"
-      return 0
-    fi
-
-    local commit_output
-    if ! commit_output="$(git -C "$PROJECT_ROOT" commit -m "$sanitized_message" 2>&1)"; then
-      warn "    Auto-commit failed: ${commit_output}"
-      GC_LAST_AUTO_COMMIT_STATUS="failed"
-      return 0
-    fi
-
-    local commit_hash
-    commit_hash="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)" || commit_hash=""
-    GC_LAST_AUTO_COMMIT_HASH="$commit_hash"
-    GC_LAST_AUTO_COMMIT_STATUS="committed"
-    if [[ -n "$commit_hash" ]]; then
-      info "    Auto-commit ${commit_hash:0:7}: ${sanitized_message}"
-    else
-      info "    Auto-commit created: ${sanitized_message}"
+    if (( status_received == 0 )); then
+      GC_LAST_AUTO_COMMIT_STATUS="skipped"
+      GC_LAST_AUTO_COMMIT_HASH=""
     fi
     return 0
   }
 
+
   gc_diff_fingerprint() {
     if [[ -z "${PROJECT_ROOT:-}" ]]; then
-      printf 'no-project-%s\n' "$RANDOM$RANDOM$$"
+      printf 'no-project-%s
+' "$RANDOM$RANDOM$$"
       return 0
     fi
     if ! command -v git >/dev/null 2>&1; then
-      printf 'nogit-%s\n' "$RANDOM$RANDOM$$"
+      printf 'nogit-%s
+' "$RANDOM$RANDOM$$"
       return 0
     fi
     local diff_payload
-    if ! diff_payload="$( (git -C "$PROJECT_ROOT" diff --shortstat --no-ext-diff || true; printf '\n'; git -C "$PROJECT_ROOT" diff --numstat --no-ext-diff || true; printf '\n'; git -C "$PROJECT_ROOT" diff --name-only --no-ext-diff || true) 2>/dev/null )"; then
-      printf 'diff-error-%s\n' "$RANDOM$RANDOM$$"
+    if ! diff_payload="$( (git -C "$PROJECT_ROOT" diff --shortstat --no-ext-diff || true; printf '
+'; git -C "$PROJECT_ROOT" diff --numstat --no-ext-diff || true; printf '
+'; git -C "$PROJECT_ROOT" diff --name-only --no-ext-diff || true) 2>/dev/null )"; then
+      printf 'diff-error-%s
+' "$RANDOM$RANDOM$$"
       return 0
     fi
-    if command -v python3 >/dev/null 2>&1; then
-      python3 - "$diff_payload" <<'PY'
-import hashlib, sys
-data = sys.argv[1].encode('utf-8', 'replace')
-print(hashlib.sha1(data).hexdigest())
-PY
-    elif command -v shasum >/dev/null 2>&1; then
+    if command -v "$python_bin" >/dev/null 2>&1; then
+      local diff_hash_helper
+      if diff_hash_helper="$(gc_clone_python_tool "diff_payload_hash.py" "${PROJECT_ROOT:-$PWD}")"; then
+        "$python_bin" "$diff_hash_helper" "$diff_payload"
+        return 0
+      fi
+    fi
+    if command -v shasum >/dev/null 2>&1; then
       printf '%s' "$diff_payload" | shasum -a 1 2>/dev/null | awk '{print $1}'
     elif command -v sha1sum >/dev/null 2>&1; then
       printf '%s' "$diff_payload" | sha1sum 2>/dev/null | awk '{print $1}'
     else
-      printf 'hash-%s\n' "$(printf '%s' "$diff_payload" | wc -c | awk '{print $1}')"
+      printf 'hash-%s
+' "$(printf '%s' "$diff_payload" | wc -c | awk '{print $1}')"
     fi
   }
+
 
   gc_create_empty_apply_checkpoint() {
     local story_slug="$1"
@@ -8389,16 +7206,15 @@ Generated automatically because the agent response contained no actionable 'chan
 - Review the raw agent output under .gpt-creator/staging/plan/work/runs for detailed context.
 EOF
     fi
-    python3 - <<'PY' "$checkpoint_file" "$root"
-import sys
-from pathlib import Path
-file_path = Path(sys.argv[1])
-root = Path(sys.argv[2])
-try:
-    rel = file_path.relative_to(root)
-except ValueError:
-    rel = file_path
-print(rel)
+    local checkpoint_rel
+    local checkpoint_helper
+    checkpoint_helper="$(gc_clone_python_tool \"checkpoint_relative_path.py\" \"${PROJECT_ROOT:-$PWD}\")" || checkpoint_helper=""
+    if [[ -n "$checkpoint_helper" ]]; then
+      checkpoint_rel="$("$python_bin" "$checkpoint_helper" "$checkpoint_file" "$root")"
+    else
+      checkpoint_rel="$checkpoint_file"
+    fi
+    printf '%s\n' "$checkpoint_rel"
 PY
   }
 
@@ -8670,42 +7486,13 @@ PY
 
       local prompt_meta_path="${prompt_path}.meta.json"
       if [[ -f "$prompt_meta_path" ]]; then
-        read -r prompt_status prompt_soft_limit_value prompt_hard_limit_value prompt_stop_on_overbudget prompt_token_estimate prompt_pruned_bytes prompt_pruned_items prompt_reserved_output_value prompt_binder_status prompt_binder_reason < <(
-          python3 - "$prompt_meta_path" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-except Exception:
-    print("ok\t0\t0\ttrue\t0\t0\t{}\t0\tmissing\tinvalid-meta")
-    raise SystemExit(0)
-
-def normalise_bool(value):
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    text = str(value).strip().lower()
-    if text in {"false", "0", "no", "off"}:
-        return "false"
-    return "true"
-
-status = data.get("status") or "ok"
-soft = data.get("token_budget_soft") or 0
-hard = data.get("token_budget_hard") or 0
-stop = normalise_bool(data.get("stop_on_overbudget"))
-estimate = data.get("token_estimate_final") or 0
-pruned = data.get("pruned") or {}
-pruned_bytes = pruned.get("bytes") or 0
-pruned_items = pruned.get("items") or {}
-reserved = data.get("reserved_output") or 0
-binder = data.get("binder") or {}
-binder_status = binder.get("status") or ""
-binder_reason = binder.get("reason") or ""
-print(f"{status}\t{soft}\t{hard}\t{stop}\t{estimate}\t{pruned_bytes}\t{json.dumps(pruned_items, separators=(',', ':'))}\t{reserved}\t{binder_status}\t{binder_reason}")
-PY
-        )
+        local prompt_meta_helper
+        prompt_meta_helper="$(gc_clone_python_tool \"prompt_meta_summary.py\" \"${PROJECT_ROOT:-$PWD}\")" || prompt_meta_helper=""
+        if [[ -n "$prompt_meta_helper" ]]; then
+          read -r prompt_status prompt_soft_limit_value prompt_hard_limit_value prompt_stop_on_overbudget prompt_token_estimate prompt_pruned_bytes prompt_pruned_items prompt_reserved_output_value prompt_binder_status prompt_binder_reason < <(
+            "$python_bin" "$prompt_meta_helper" "$prompt_meta_path"
+          )
+        fi
       fi
       GC_CURRENT_PRUNED_ITEMS="$prompt_pruned_items"
       local retrieve_tokens=0
@@ -9146,12 +7933,14 @@ REM
               git -C "$PROJECT_ROOT" diff --numstat || true
               printf '\n-- stdout tail (latest %s bytes) --\n' "$diff_guard_stdout_slice"
               if [[ -n "$stdout_base64" ]]; then
-                if command -v python3 >/dev/null 2>&1; then
-                  python3 - <<'PY' "$stdout_base64"
-import base64, sys, textwrap
-data = base64.b64decode(sys.argv[1])
-print(data.decode('utf-8', errors='replace'))
-PY
+                if command -v "$python_bin" >/dev/null 2>&1; then
+                  local decode_helper
+                  decode_helper="$(gc_clone_python_tool \"decode_base64_stdout.py\" \"${PROJECT_ROOT:-$PWD}\")" || decode_helper=""
+                  if [[ -n "$decode_helper" ]]; then
+                    "$python_bin" "$decode_helper" "$stdout_base64"
+                  else
+                    printf '(python helper unavailable to decode base64 tail)\n'
+                  fi
                 else
                   printf '(python3 unavailable to decode base64 tail)\n'
                 fi
@@ -9209,30 +7998,13 @@ PY
             fi
 
             local wait_seconds
-            wait_seconds="$(python3 - "${limit_message}" <<'PY'
-import re
-import sys
-
-def parse_wait(msg: str) -> int:
-    msg = (msg or "").lower()
-    total = 0
-    for value, unit in re.findall(r'(\d+)\s*(hour|hours|hr|hrs|h|minute|minutes|min|mins|m|second|seconds|sec|secs|s)', msg):
-        count = int(value)
-        if unit.startswith(('hour', 'hr', 'h')):
-            total += count * 3600
-        elif unit.startswith(('minute', 'min', 'm')):
-            total += count * 60
-        elif unit.startswith(('second', 'sec', 's')):
-            total += count
-    return total
-
-msg = sys.argv[1] if len(sys.argv) > 1 else ""
-wait = parse_wait(msg)
-if wait <= 0:
-    wait = 3600
-print(wait)
-PY
-)"
+            local wait_helper
+            wait_helper="$(gc_clone_python_tool \"parse_wait_seconds.py\" \"${PROJECT_ROOT:-$PWD}\")" || wait_helper=""
+            if [[ -n "$wait_helper" ]]; then
+              wait_seconds="$("$python_bin" "$wait_helper" "${limit_message}")"
+            else
+              wait_seconds=3600
+            fi
             if ! [[ "$wait_seconds" =~ ^[0-9]+$ ]]; then
               wait_seconds=3600
             fi
@@ -9411,30 +8183,31 @@ PY
             while IFS= read -r gc_doc_line; do
               gc_doc_sorted+=("$gc_doc_line")
             done < <(printf '%s\n' "${!gc_doc_changed[@]}" | LC_ALL=C sort)
-            local gc_doc_reg_path=""
-            for gc_doc_reg_path in "${gc_doc_sorted[@]}"; do
-              local gc_doc_abs="${PROJECT_ROOT}/${gc_doc_reg_path}"
-              if [[ ! -f "$gc_doc_abs" ]]; then
-                task_notes+=("Doc registry skipped ${gc_doc_reg_path} (file missing after apply).")
-                continue
-              fi
-              local gc_doc_id=""
-              if ! gc_doc_id="$("$doc_registry_python" - <<'PY' "$gc_doc_abs"
-import hashlib, pathlib, sys
-target = pathlib.Path(sys.argv[1]).resolve()
-digest = hashlib.sha256(str(target).encode("utf-8", "replace")).hexdigest().upper()
-print("DOC-" + digest[:8])
-PY
-)"; then
-                gc_doc_register_ok=0
-                task_notes+=("Failed to compute documentation id for ${gc_doc_reg_path}; register manually.")
-                continue
-              fi
-              if ! "$doc_registry_python" "$doc_registry_tool" register "$gc_doc_id" "$gc_doc_abs" "updated trace link(s)"; then
-                gc_doc_register_ok=0
-                task_notes+=("Doc registry update failed for ${gc_doc_reg_path}; rerun `python3 src/lib/doc_registry.py register ${gc_doc_id} ${gc_doc_reg_path}`.")
-              fi
-            done
+            local gc_doc_helper=""
+            gc_doc_helper="$(gc_clone_python_tool "doc_registry_compute_id.py" "${PROJECT_ROOT:-$PWD}")" || gc_doc_helper=""
+            if [[ -z "$gc_doc_helper" ]]; then
+              gc_doc_register_ok=0
+              task_notes+=("Doc registry helper unavailable; register manually for: ${gc_doc_sorted[*]}")
+            else
+              local gc_doc_reg_path=""
+              for gc_doc_reg_path in "${gc_doc_sorted[@]}"; do
+                local gc_doc_abs="${PROJECT_ROOT}/${gc_doc_reg_path}"
+                if [[ ! -f "$gc_doc_abs" ]]; then
+                  task_notes+=("Doc registry skipped ${gc_doc_reg_path} (file missing after apply).")
+                  continue
+                fi
+                local gc_doc_id=""
+                if ! gc_doc_id="$("$doc_registry_python" "$gc_doc_helper" "$gc_doc_abs")"; then
+                  gc_doc_register_ok=0
+                  task_notes+=("Failed to compute documentation id for ${gc_doc_reg_path}; register manually.")
+                  continue
+                fi
+                if ! "$doc_registry_python" "$doc_registry_tool" register "$gc_doc_id" "$gc_doc_abs" "updated trace link(s)"; then
+                  gc_doc_register_ok=0
+                  task_notes+=("Doc registry update failed for ${gc_doc_reg_path}; rerun `python3 src/lib/doc_registry.py register ${gc_doc_id} ${gc_doc_reg_path}`.")
+                fi
+              done
+            fi
             if (( gc_doc_register_ok == 0 )); then
               task_needs_review=1
               manual_followups=1
@@ -9754,7 +8527,7 @@ PY
       rmdir "${story_run_dir}/prompts" 2>/dev/null || true
       rmdir "${story_run_dir}/out" 2>/dev/null || true
     fi
-  done < <(python3 "$story_plan_helper" "$tasks_db" "${story_filter}" "$resume_flag")
+  done < <("$python_bin" "$story_plan_helper" "$tasks_db" "${story_filter}" "$resume_flag")
 
     if (( migration_transition_triggered )); then
       break
@@ -9936,7 +8709,7 @@ PY
   if budget_report_helper="$(gc_clone_python_tool "generate_budget_report.py" "$PROJECT_ROOT" 2>/dev/null)"; then
     local budget_tool_actions_json
     budget_tool_actions_json="$(gc_budget_collect_tool_actions_json)"
-    python3 "$budget_report_helper" \
+    "$python_bin" "$budget_report_helper" \
       --usage-file "${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/codex-usage.ndjson" \
       --run-id "$run_stamp" \
       --stage-limits "${GC_BUDGET_STAGE_LIMITS_JSON:-{}}" \
@@ -10451,308 +9224,13 @@ USAGE
       if ((${#allow_pairs[@]} > 0)); then
         allow_join="$(printf '%s\n' "${allow_pairs[@]}")"
       fi
-      python3 - <<'PY' "$repo" "$token" "$state" "$close_invalid" "$close_comment" "$audit_limit" "$digests_path" "$invalid_label" "$allow_join"
-import json
-import os
-import sys
-import urllib.error
-import urllib.parse
-import urllib.request
-import hashlib
-from textwrap import indent
-
-repo, token, state, close_flag, close_comment, limit_value, digests_path, invalid_label, allow_payload = sys.argv[1:10]
-close_invalid = close_flag == "1"
-limit = None
-if limit_value:
-    try:
-        parsed_limit = int(limit_value)
-        if parsed_limit > 0:
-            limit = parsed_limit
-    except ValueError:
-        limit = None
-
-session_headers = {
-    "Authorization": f"Bearer {token}",
-    "Accept": "application/vnd.github+json",
-    "Content-Type": "application/json",
-    "X-GitHub-Api-Version": "2022-11-28",
-    "User-Agent": "gpt-creator-reports-audit",
-}
-
-def github_request(url, method="GET", payload=None):
-    data = None
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(url, data=data, headers=session_headers, method=method)
-    with urllib.request.urlopen(request) as resp:
-        if resp.status == 204:
-            return None
-        body = resp.read().decode("utf-8")
-        if not body:
-            return None
-        return json.loads(body)
-
-def load_allowlist(path, inline_pairs):
-    mapping = {}
-    inline_pairs = [line.strip() for line in inline_pairs.splitlines() if line.strip()]
-    for entry in inline_pairs:
-        if "=" not in entry:
-            continue
-        version, digest = entry.split("=", 1)
-        version = version.strip()
-        digest = digest.strip().lower()
-        if not version or len(digest) != 64:
-            continue
-        mapping.setdefault(version, set()).add(digest)
-    if not path:
-        return mapping
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except FileNotFoundError:
-        return mapping
-    except Exception as exc:
-        print(f"Failed to read digest allowlist '{path}': {exc}", file=sys.stderr)
-        return mapping
-    if isinstance(data, dict):
-        iterable = data.items()
-    elif isinstance(data, list):
-        iterable = []
-        for item in data:
-            if isinstance(item, dict):
-                version = str(item.get("version") or "").strip()
-                if not version:
-                    continue
-                sha_values = []
-                sha_field = item.get("sha256")
-                if isinstance(sha_field, str):
-                    sha_values = [sha_field]
-                elif isinstance(sha_field, list):
-                    sha_values = [val for val in sha_field if isinstance(val, str)]
-                elif isinstance(sha_field, dict):
-                    sha_values = []
-                    for val in sha_field.values():
-                        if isinstance(val, str):
-                            sha_values.append(val)
-                        elif isinstance(val, list):
-                            sha_values.extend(x for x in val if isinstance(x, str))
-                for digest in sha_values:
-                    mapping.setdefault(version, set()).add(digest.lower())
-            elif isinstance(item, str):
-                if "=" in item:
-                    version, digest = item.split("=", 1)
-                    mapping.setdefault(version.strip(), set()).add(digest.strip().lower())
-        return mapping
-    else:
-        return mapping
-    for version, values in iterable:
-        if isinstance(values, str):
-            mapping.setdefault(str(version), set()).add(values.lower())
-        elif isinstance(values, list):
-            mapping.setdefault(str(version), set()).update(val.lower() for val in values if isinstance(val, str))
-        elif isinstance(values, dict):
-            for val in values.values():
-                if isinstance(val, str):
-                    mapping.setdefault(str(version), set()).add(val.lower())
-                elif isinstance(val, list):
-                    mapping.setdefault(str(version), set()).update(v.lower() for v in val if isinstance(v, str))
-    return mapping
-
-digest_allowlist = load_allowlist(digests_path, allow_payload or "")
-
-def fetch_issues():
-    collected = []
-    page = 1
-    per_page = 100
-    while True:
-        url = f"https://api.github.com/repos/{repo}/issues?state={urllib.parse.quote(state)}&labels=auto-report&per_page={per_page}&page={page}"
-        try:
-            items = github_request(url)
-        except urllib.error.HTTPError as err:
-            text = err.read().decode("utf-8", "ignore")
-            print(f"GitHub API error while fetching issues: {err.code} {text}", file=sys.stderr)
-            return collected
-        except Exception as exc:
-            print(f"Failed to fetch GitHub issues: {exc}", file=sys.stderr)
-            return collected
-        if not items:
-            break
-        for issue in items:
-            if "pull_request" in issue:
-                continue
-            collected.append(issue)
-            if limit is not None and len(collected) >= limit:
-                return collected
-        if len(items) < per_page:
-            break
-        page += 1
-    return collected
-
-def parse_issue(issue):
-    body = issue.get("body") or ""
-    metadata = {}
-    for line in body.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("- **") and "**:" in stripped:
-            head, value = stripped.split("**:", 1)
-            label = head.replace("- **", "").strip()
-            metadata[label] = value.strip()
-    watermark_token = ""
-    start = body.find("<!--")
-    while start != -1:
-        end = body.find("-->", start + 4)
-        if end == -1:
-            break
-        comment = body[start + 4:end].strip()
-        if comment.lower().startswith("gpt-creator:"):
-            watermark_token = comment.split(":", 1)[1].strip()
-            break
-        start = body.find("<!--", end + 3)
-    version = metadata.get("CLI Version", "").strip()
-    binary_hash = metadata.get("CLI Binary SHA256", "").strip().lower()
-    signature = metadata.get("CLI Signature", "").strip().lower()
-    expected_signature = ""
-    signature_valid = False
-    watermark_valid = False
-    reasons = []
-    if version or binary_hash:
-        expected_signature = hashlib.sha256(f"{version}:{binary_hash}".encode("utf-8")).hexdigest()
-    if not binary_hash or len(binary_hash) != 64:
-        reasons.append("missing CLI binary hash")
-    if not version:
-        reasons.append("missing CLI version")
-    if signature and expected_signature:
-        if signature == expected_signature:
-            signature_valid = True
-        else:
-            reasons.append("signature mismatch")
-    else:
-        reasons.append("missing CLI signature")
-    if watermark_token:
-        watermark_expected = f"{version or 'unknown'}:{expected_signature}" if expected_signature else ""
-        if watermark_expected and watermark_token.lower() == watermark_expected.lower():
-            watermark_valid = True
-        elif version and signature_valid and watermark_token.lower() == f"{version.lower()}:unsigned":
-            watermark_valid = False
-            reasons.append("watermark unsigned but signature present")
-        else:
-            reasons.append("watermark mismatch")
-    else:
-        reasons.append("missing watermark")
-    digest_allowed = True
-    if digest_allowlist:
-        allowed_hashes = digest_allowlist.get(version, set())
-        if allowed_hashes:
-            if binary_hash not in allowed_hashes:
-                digest_allowed = False
-                reasons.append("binary hash not in allowlist")
-        else:
-            digest_allowed = False
-            reasons.append("version not present in allowlist")
-    valid = signature_valid and watermark_valid and digest_allowed
-    return {
-        "number": issue.get("number"),
-        "title": issue.get("title") or "",
-        "url": issue.get("html_url") or "",
-        "state": issue.get("state"),
-        "version": version,
-        "binary_hash": binary_hash,
-        "signature": signature,
-        "expected_signature": expected_signature,
-        "signature_valid": signature_valid,
-        "watermark": watermark_token,
-        "watermark_valid": watermark_valid,
-        "digest_allowed": digest_allowed,
-        "valid": valid,
-        "reasons": reasons,
-        "metadata": metadata,
-    }
-
-def ensure_label(issue_number):
-    if not invalid_label:
-        return
-    try:
-        issue = github_request(f"https://api.github.com/repos/{repo}/issues/{issue_number}")
-    except Exception:
-        return
-    if not issue:
-        return
-    labels = issue.get("labels") or []
-    label_names = {lbl["name"] if isinstance(lbl, dict) else str(lbl) for lbl in labels}
-    if invalid_label in label_names:
-        return
-    label_names.add(invalid_label)
-    payload = {"labels": sorted(label_names)}
-    try:
-        github_request(f"https://api.github.com/repos/{repo}/issues/{issue_number}", method="PATCH", payload=payload)
-    except Exception:
-        pass
-
-def close_issue(item):
-    number = item["number"]
-    if not close_invalid:
-        return
-    if str(item.get("state")) == "closed":
-        return
-    try:
-        github_request(
-            f"https://api.github.com/repos/{repo}/issues/{number}/comments",
-            method="POST",
-            payload={"body": close_comment},
-        )
-    except Exception as exc:
-        print(f"Failed to comment on issue #{number}: {exc}", file=sys.stderr)
-    try:
-        github_request(
-            f"https://api.github.com/repos/{repo}/issues/{number}",
-            method="PATCH",
-            payload={"state": "closed"},
-        )
-    except Exception as exc:
-        print(f"Failed to close issue #{number}: {exc}", file=sys.stderr)
-    else:
-        ensure_label(number)
-        print(f"Closed issue #{number} ({item['title']}) as authenticity failed.")
-
-issues = fetch_issues()
-if not issues:
-    print("No GitHub issues labelled 'auto-report' found.")
-    sys.exit(0)
-
-parsed = [parse_issue(issue) for issue in issues]
-valid_count = sum(1 for item in parsed if item["valid"])
-invalid_items = [item for item in parsed if not item["valid"]]
-
-print(f"Audited {len(parsed)} auto-report issue(s) [{state}].")
-print(f" - Valid:   {valid_count}")
-print(f" - Invalid: {len(invalid_items)}")
-if digest_allowlist:
-    print(f" - Allowlist source: {digests_path or 'inline overrides only'}")
-
-def summarize(item):
-    header = f"#{item['number']} [{item['state']}] {item['title']}"
-    verdict = "VALID" if item["valid"] else "INVALID"
-    print(f"\n{header}\nResult: {verdict}")
-    print(f"URL: {item['url']}")
-    print(f"Version: {item['version'] or '(missing)'}")
-    print(f"Binary SHA256: {item['binary_hash'] or '(missing)'}")
-    print(f"Signature: {item['signature'] or '(missing)'}")
-    print(f"Watermark: {item['watermark'] or '(missing)'}")
-    print(f"Signature OK: {'yes' if item['signature_valid'] else 'no'}")
-    print(f"Watermark OK: {'yes' if item['watermark_valid'] else 'no'}")
-    if digest_allowlist:
-        print(f"Allowlist OK: {'yes' if item['digest_allowed'] else 'no'}")
-    if item["reasons"]:
-        detail = "\n".join(f"- {reason}" for reason in item["reasons"])
-        print("Notes:\n" + indent(detail, "  "))
-
-for item in parsed:
-    summarize(item)
-    if not item["valid"]:
-        close_issue(item)
-
-PY
+      local github_audit_helper
+      github_audit_helper="$(gc_clone_python_tool "github_audit_auto_reports.py" "${PROJECT_ROOT:-$PWD}")" || github_audit_helper=""
+      if [[ -n "$github_audit_helper" ]]; then
+        "$python_bin" "$github_audit_helper" "$repo" "$token" "$state" "$close_invalid" "$close_comment" "$audit_limit" "$digests_path" "$invalid_label" "$allow_join"
+      else
+        warn "GitHub audit helper unavailable; skipping auto-report audit."
+      fi
       return
       ;;
     list|backlog)
@@ -10760,160 +9238,25 @@ PY
         info "No issue reports recorded yet."
         return 0
       fi
-      python3 - <<'PY' "$reports_dir" "$mode"
-import datetime
-import os
-import sys
-
-dir_path = sys.argv[1]
-mode = sys.argv[2]
-entries = []
-
-for name in os.listdir(dir_path):
-    lower = name.lower()
-    if not (lower.endswith(".yml") or lower.endswith(".yaml")):
-        continue
-    path = os.path.join(dir_path, name)
-    if not os.path.isfile(path):
-        continue
-    try:
-        stat = os.stat(path)
-    except OSError:
-        continue
-    slug = os.path.splitext(name)[0]
-    summary = ""
-    priority = ""
-    timestamp = ""
-    issue_type = ""
-    status = ""
-    likes = 0
-    comments = 0
-    reporter = ""
-    metadata = False
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if stripped.startswith("summary:") and not summary:
-                    value = stripped.split(":", 1)[1].strip()
-                    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
-                        value = value[1:-1]
-                    summary = value
-                elif stripped.startswith("priority:") and not priority:
-                    priority = stripped.split(":", 1)[1].strip()
-                elif stripped.startswith("type:") and not issue_type:
-                    issue_type = stripped.split(":", 1)[1].strip()
-                elif stripped.startswith("timestamp:") and not timestamp:
-                    timestamp = stripped.split(":", 1)[1].strip().strip('"')
-                if stripped == "metadata:":
-                    metadata = True
-                    continue
-                if metadata:
-                    if not line.startswith("  "):
-                        metadata = False
-                    else:
-                        meta = line.strip()
-                        if meta.startswith("timestamp:") and not timestamp:
-                            timestamp = meta.split(":", 1)[1].strip().strip('"')
-                        elif meta.startswith("status:") and not status:
-                            status = meta.split(":", 1)[1].strip()
-                        elif meta.startswith("likes:") and likes == 0:
-                            try:
-                                likes = int(meta.split(":", 1)[1].strip())
-                            except ValueError:
-                                likes = 0
-                        elif meta.startswith("comments:") and comments == 0:
-                            try:
-                                comments = int(meta.split(":", 1)[1].strip())
-                            except ValueError:
-                                comments = 0
-                        elif meta.startswith("reporter:") and not reporter:
-                            reporter = meta.split(":", 1)[1].strip().strip('"')
-    except OSError:
-        continue
-    popularity = likes + comments
-    entries.append((stat.st_mtime, slug, summary, priority, timestamp, issue_type, status, popularity, likes, comments, reporter))
-
-entries.sort(key=lambda item: item[0], reverse=True)
-
-printed = False
-for mtime, slug, summary, priority, timestamp, issue_type, status, popularity, likes, comments, reporter in entries:
-    if mode == "backlog" and status and status.lower() not in ("open", "new", "todo"):
-        continue
-    summary = summary or "(no summary)"
-    priority = priority or "unknown"
-    issue_type = issue_type or "unknown"
-    status_display = status or "open"
-    display_time = timestamp or datetime.datetime.utcfromtimestamp(mtime).strftime("%Y-%m-%dT%H:%M:%SZ")
-    print(f"[{slug}] {display_time} {priority} ({issue_type}) status={status_display} pop={popularity} (likes={likes}, comments={comments})")
-    if reporter:
-        print(f"  reporter={reporter}")
-    print(f"  {summary}")
-    print()
-    printed = True
-
-if mode == "backlog" and not printed:
-    print("No open reports found.")
-PY
+      local reports_summary_helper
+      reports_summary_helper="$(gc_clone_python_tool "reports_summarize.py" "${PROJECT_ROOT:-$PWD}")" || reports_summary_helper=""
+      if [[ -n "$reports_summary_helper" ]]; then
+        "$python_bin" "$reports_summary_helper" "$reports_dir" "$mode"
+      else
+        warn "Reports summary helper unavailable; skipping report summary."
+      fi
       ;;
     auto)
       local reporter="${reporter_filter:-$(gc_reports_current_user)}"
       info "Auto-processing reports for reporter: ${reporter}"
       local auto_slugs=()
-      while IFS= read -r slug_entry; do
-        [[ -n "$slug_entry" ]] && auto_slugs+=("$slug_entry")
-      done < <(python3 - <<'PY' "$reports_dir" "$reporter"
-import os
-import sys
-
-dir_path = sys.argv[1]
-reporter_filter = sys.argv[2].strip()
-entries = []
-
-for name in os.listdir(dir_path):
-    lower = name.lower()
-    if not (lower.endswith('.yml') or lower.endswith('.yaml')):
-        continue
-    path = os.path.join(dir_path, name)
-    if not os.path.isfile(path):
-        continue
-    try:
-        stat = os.stat(path)
-    except OSError:
-        continue
-    slug = os.path.splitext(name)[0]
-    metadata = {}
-    metadata_active = False
-    try:
-        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
-            for line in fh:
-                stripped = line.strip()
-                if stripped == 'metadata:':
-                    metadata_active = True
-                    continue
-                if metadata_active:
-                    if line.startswith('  '):
-                        if ':' in stripped:
-                            k, v = stripped.split(':', 1)
-                            metadata[k.strip()] = v.strip().strip('"')
-                    else:
-                        metadata_active = False
-    except OSError:
-        continue
-    reporter = metadata.get('reporter', '')
-    status = metadata.get('status', 'open').lower()
-    if reporter_filter and reporter.lower() != reporter_filter.lower():
-        continue
-    if status not in ('open', 'new', 'todo'):
-        continue
-    entries.append((stat.st_mtime, slug))
-
-entries.sort(key=lambda item: item[0], reverse=True)
-
-for _, slug in entries:
-    print(slug)
-PY
-)
+      local reports_list_helper
+      reports_list_helper="$(gc_clone_python_tool "reports_list_by_reporter.py" "${PROJECT_ROOT:-$PWD}")" || reports_list_helper=""
+      if [[ -n "$reports_list_helper" ]]; then
+        while IFS= read -r slug_entry; do
+          [[ -n "$slug_entry" ]] && auto_slugs+=("$slug_entry")
+        done < <("$python_bin" "$reports_list_helper" "$reports_dir" "$reporter")
+      fi
       if ((${#auto_slugs[@]} == 0)); then
         info "No matching reports for reporter '${reporter}'."
         return 0

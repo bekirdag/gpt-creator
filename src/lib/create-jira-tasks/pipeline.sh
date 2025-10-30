@@ -830,19 +830,18 @@ cjt::refine_tasks() {
       slug="${source_file##*/}"; slug="${slug%.json}"
       working_copy="$CJT_TMP_DIR/refine_${slug}.json"
       cp "$source_file" "$working_copy"
-      task_total=$(python3 - <<'PY' "$working_copy"
-import json, sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-try:
-    payload = json.loads(path.read_text(encoding='utf-8'))
-except Exception:
-    print(0)
-else:
-    print(len(payload.get('tasks') or []))
-PY
-)
+      local count_helper
+      count_helper="$(cjt::clone_python_tool "count_story_tasks.py")" || {
+        rm -f "$working_copy" 2>/dev/null || true
+        continue
+      }
+      task_total="$(python3 "$count_helper" "$working_copy")"
+      local count_status=$?
+      if (( count_status != 0 )); then
+        cjt::warn "Unable to count tasks for story ${slug}; skipping"
+        rm -f "$working_copy" 2>/dev/null || true
+        continue
+      fi
     fi
     if [[ -n "${CJT_ONLY_STORY_SLUG:-}" ]]; then
       local _match=0
@@ -1057,29 +1056,30 @@ REM
       cjt::state_mark_stage_completed "refine"
     else
       local remaining=0
-      for entry in "${story_entries[@]}"; do
-        local slug_entry="${entry##*/}"; slug_entry="${slug_entry%.json}"
-        local total
-        total=$(python3 - <<'PY' "$entry"
-import json, sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-try:
-    payload = json.loads(path.read_text(encoding='utf-8'))
-except Exception:
-    print(0)
-else:
-    print(len(payload.get('tasks') or []))
-PY
-)
-        total=${total//$'\n'/}
-        total=${total:-0}
-        if [[ "$(cjt::state_get_refine_progress "$slug_entry" "$total")" != "done" ]]; then
-          remaining=1
-          break
-        fi
-      done
+      local count_helper=""
+      count_helper="$(cjt::clone_python_tool "count_story_tasks.py")" || count_helper=""
+      if [[ -z "$count_helper" ]]; then
+        cjt::warn "Unable to prepare count_story_tasks helper; leaving refine stage pending"
+        remaining=1
+      else
+        for entry in "${story_entries[@]}"; do
+          local slug_entry="${entry##*/}"; slug_entry="${slug_entry%.json}"
+          local total=""
+          total="$(python3 "$count_helper" "$entry")"
+          local total_status=$?
+          if (( total_status != 0 )); then
+            cjt::warn "Unable to count tasks for story ${slug_entry}; leaving refine stage pending"
+            remaining=1
+            break
+          fi
+          total=${total//$'\n'/}
+          total=${total:-0}
+          if [[ "$(cjt::state_get_refine_progress "$slug_entry" "$total")" != "done" ]]; then
+            remaining=1
+            break
+          fi
+        done
+      fi
       if (( remaining == 0 )); then
         cjt::state_mark_stage_completed "refine"
       fi

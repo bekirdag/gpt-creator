@@ -1,0 +1,10 @@
+type	confidence	path
+jira	0.60	/Users/bekirdag/Documents/apps/gpt-creator/docs/USAGE.md
+pdr	0.95	/Users/bekirdag/Documents/apps/gpt-creator/docs/PDR.md
+sql	0.80	/Users/bekirdag/Documents/apps/gpt-creator/docs/document-catalog-schema.sql
+jira	0.60	/Users/bekirdag/Documents/apps/gpt-creator/docs/tui_requirements.md
+jira	0.60	/Users/bekirdag/Documents/apps/gpt-creator/docs/CONFIG.md
+jira	0.60	/Users/bekirdag/Documents/apps/gpt-creator/docs/GETTING_STARTED.md
+jira	0.88	/Users/bekirdag/Documents/apps/gpt-creator/src/prompts/iterate/jira_task.prompt.md
+sql	0.65	/Users/bekirdag/Documents/apps/gpt-creator/src/templates/db/seed.sql
+sql	0.65	/Users/bekirdag/Documents/apps/gpt-creator/src/templates/db/init.sql

@@ -60,6 +60,15 @@ def _safe_int(value: Optional[str]) -> Optional[int]:
         return None
 
 
+def _safe_float(value: Optional[str]) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_file(path: Path) -> bool:
     try:
         return path.is_file()
@@ -142,6 +151,14 @@ class ExcerptInput:
     source_version: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class SearchEntry:
+    doc_id: str
+    section_id: Optional[str]
+    surface: str
+    content: str
+
+
 class DocRegistry:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
@@ -194,9 +211,6 @@ class DocRegistry:
               recorded_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
               FOREIGN KEY(doc_id) REFERENCES documentation(doc_id) ON DELETE CASCADE
             );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS documentation_search
-              USING fts5(doc_id, surface, tokenize = 'unicode61');
 
             CREATE TABLE IF NOT EXISTS documentation_sections (
               section_id       TEXT PRIMARY KEY,
@@ -269,21 +283,35 @@ class DocRegistry:
             """
         )
 
-        # Backfill rows for the search table if it was newly created.
-        has_rows = conn.execute(
-            "SELECT 1 FROM documentation_search LIMIT 1;"
-        ).fetchone()
-        if not has_rows:
+        self._ensure_search_schema(conn)
+
+    def _ensure_search_schema(self, conn: sqlite3.Connection) -> None:
+        expected_columns = ("doc_id", "section_id", "surface", "content")
+        try:
+            columns = conn.execute("PRAGMA table_info(documentation_search);").fetchall()
+            column_names = tuple(row[1] for row in columns)
+        except sqlite3.Error:
+            column_names = ()
+        if column_names != expected_columns:
+            conn.execute("DROP TABLE IF EXISTS documentation_search;")
             conn.execute(
                 """
-                INSERT INTO documentation_search(doc_id, surface)
-                SELECT doc_id,
-                       COALESCE(title, rel_path, file_name, source_path, doc_id)
-                FROM documentation;
+                CREATE VIRTUAL TABLE documentation_search
+                  USING fts5(
+                    doc_id UNINDEXED,
+                    section_id UNINDEXED,
+                    surface,
+                    content,
+                    tokenize = 'unicode61'
+                  );
                 """
             )
 
     # -- Public API -----------------------------------------------------
+
+    def ensure_schema(self, conn: sqlite3.Connection) -> None:
+        self._apply_pragmas(conn)
+        self._ensure_schema(conn)
 
     def bulk_upsert(self, documents: Sequence[DocumentInput]) -> None:
         if not documents:
@@ -360,6 +388,43 @@ class DocRegistry:
                         for entry in entries
                     ],
                 )
+
+    def replace_search_entries(
+        self,
+        entries: Dict[str, Sequence[SearchEntry]],
+    ) -> None:
+        if not entries:
+            return
+        with self._connect() as conn:
+            self._apply_pragmas(conn)
+            self._ensure_schema(conn)
+            for doc_id, doc_entries in entries.items():
+                conn.execute(
+                    "DELETE FROM documentation_search WHERE doc_id = ?;",
+                    (doc_id,),
+                )
+                if not doc_entries:
+                    continue
+                conn.executemany(
+                    """
+                    INSERT INTO documentation_search (
+                      doc_id,
+                      section_id,
+                      surface,
+                      content
+                    ) VALUES (?, ?, ?, ?);
+                    """,
+                    [
+                        (
+                            entry.doc_id,
+                            entry.section_id,
+                            entry.surface,
+                            entry.content,
+                        )
+                        for entry in doc_entries
+                    ],
+                )
+            conn.commit()
 
     def fetch_all(self) -> List[Dict[str, object]]:
         with self._connect() as conn:
@@ -486,6 +551,40 @@ class DocRegistry:
                     (now,),
                 )
 
+    def update_index_state(
+        self,
+        doc_id: str,
+        surface: str,
+        *,
+        status: str = "ready",
+        usage_score: Optional[float] = None,
+        metadata: Optional[Dict[str, object]] = None,
+    ) -> None:
+        indexed_at = _iso_now()
+        metadata_json = json.dumps(metadata, sort_keys=True) if metadata else None
+        with self._connect() as conn:
+            self._apply_pragmas(conn)
+            self._ensure_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO documentation_index_state (
+                  doc_id,
+                  surface,
+                  indexed_at,
+                  status,
+                  usage_score,
+                  metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(doc_id, surface) DO UPDATE SET
+                  indexed_at = excluded.indexed_at,
+                  status = excluded.status,
+                  usage_score = excluded.usage_score,
+                  metadata_json = excluded.metadata_json;
+                """,
+                (doc_id, surface, indexed_at, status, usage_score, metadata_json),
+            )
+            conn.commit()
+
     def sync_scan(self, project_root: Path, scan_tsv: Path) -> None:
         project_root = project_root.resolve()
         documents: List[DocumentInput] = []
@@ -504,7 +603,9 @@ class DocRegistry:
                 if not _is_file(path):
                     continue
                 doc_id = _stable_doc_id(path)
-                doc_type = (row.get("category") or "document").strip() or "document"
+                raw_category = row.get("category") or row.get("type") or "document"
+                doc_category = str(raw_category).strip() or "document"
+                doc_type = doc_category.split("_", 1)[0] or doc_category
                 rel_path: Optional[str]
                 try:
                     rel_path = str(path.relative_to(project_root))
@@ -521,18 +622,23 @@ class DocRegistry:
                 ) if stat else None
                 sha = _sha256(path)
                 score = _safe_int(row.get("score"))
+                confidence = _safe_float(row.get("confidence"))
                 tags = _normalize_tags(
-                    [doc_type] + (doc_type.replace("-", "_").split("_"))
+                    [doc_category] + (doc_category.replace("-", "_").split("_"))
                 )
                 metadata: Dict[str, object] = {
-                    "discovery_category": doc_type,
+                    "discovery_category": doc_category,
                 }
                 if score is not None:
                     metadata["discovery_score"] = score
+                if confidence is not None:
+                    metadata["discovery_confidence"] = confidence
+                    if score is None:
+                        metadata["discovery_score"] = int(confidence * 100)
                 documents.append(
                     DocumentInput(
                         doc_id=doc_id,
-                        doc_type=doc_type.split("_", 1)[0] or doc_type,
+                        doc_type=doc_type,
                         source_path=str(path),
                         staging_path=str(path)
                         if ".gpt-creator" in path.parts

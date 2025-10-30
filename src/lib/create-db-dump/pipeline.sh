@@ -19,14 +19,44 @@ cddb::abs_path() {
   if command -v realpath >/dev/null 2>&1; then
     realpath "$path"
   else
-    python3 - <<'PY' "$path"
-import pathlib
-import sys
-
-p = pathlib.Path(sys.argv[1] or '.')
-print(p.expanduser().resolve())
-PY
+    local helper_path
+    helper_path="$(cddb::clone_python_tool "resolve_abs_path.py" "$PWD")" || return 1
+    python3 "$helper_path" "$path"
   fi
+}
+
+cddb::clone_python_tool() {
+  local script_name="${1:?python script name required}"
+  local project_root="${2:-${CDDB_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}}"
+
+  if declare -f gc_clone_python_tool >/dev/null 2>&1; then
+    gc_clone_python_tool "$script_name" "$project_root"
+    return
+  fi
+
+  local cli_root
+  if [[ -n "${CDDB_ROOT_DIR:-}" ]]; then
+    cli_root="$CDDB_ROOT_DIR"
+  else
+    cli_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+  fi
+
+  local source_path="${cli_root}/scripts/python/${script_name}"
+  [[ -f "$source_path" ]] || cddb::die "Python helper missing at ${source_path}"
+
+  local work_dir_name="${GC_WORK_DIR_NAME:-.gpt-creator}"
+  local target_dir="${project_root%/}/${work_dir_name}/shims/python"
+  local target_path="${target_dir}/${script_name}"
+
+  if [[ ! -d "$target_dir" ]]; then
+    mkdir -p "$target_dir" || cddb::die "Failed to create ${target_dir}"
+  fi
+
+  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
+    cp "$source_path" "$target_path" || cddb::die "Failed to copy ${script_name} helper"
+  fi
+
+  printf '%s\n' "$target_path"
 }
 
 cddb::codex_has_subcommand() {
@@ -333,23 +363,9 @@ cddb::run_pipeline() {
   cddb::log "Reviewing schema and seed dumps for consistency"
   cddb::write_review_prompt "$CDDB_SCHEMA_PATH" "$CDDB_SEED_PATH" "$review_prompt"
   if cddb::run_codex "$review_prompt" "$review_raw" "db-review"; then
-    python3 - <<'PY' "$review_raw" "$review_schema" "$review_seed"
-import sys
-from pathlib import Path
-
-raw = Path(sys.argv[1]).read_text(encoding='utf-8').strip()
-if not raw:
-    schema_sql = ''
-    seed_sql = ''
-else:
-    parts = raw.split('\n\n', 1)
-    if len(parts) == 2:
-        schema_sql, seed_sql = parts
-    else:
-        schema_sql, seed_sql = raw, ''
-Path(sys.argv[2]).write_text(schema_sql.strip() + ('\n' if schema_sql and not schema_sql.endswith('\n') else ''), encoding='utf-8')
-Path(sys.argv[3]).write_text(seed_sql.strip() + ('\n' if seed_sql and not seed_sql.endswith('\n') else ''), encoding='utf-8')
-PY
+    local review_helper
+    review_helper="$(cddb::clone_python_tool "split_codex_review_dump.py" "$CDDB_PROJECT_ROOT")" || return 1
+    python3 "$review_helper" "$review_raw" "$review_schema" "$review_seed"
     if [[ -s "$review_schema" ]]; then
       local backup_schema="${CDDB_SCHEMA_PATH%.sql}.initial.sql"
       if [[ ! -f "$backup_schema" ]]; then

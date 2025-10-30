@@ -62,6 +62,33 @@ gc::ensure_workspace() {
   printf "%s" "$work"
 }
 
+gc::clone_python_tool() {
+  local script_name="${1:?python script name required}"
+  local project_root="${2:-${PROJECT_ROOT:-$PWD}}"
+
+  if declare -f gc_clone_python_tool >/dev/null 2>&1; then
+    gc_clone_python_tool "$script_name" "$project_root"
+    return
+  fi
+
+  local source_path="${GC_ROOT}/scripts/python/${script_name}"
+  if [[ ! -f "$source_path" ]]; then
+    gc::die "Python helper missing at ${source_path}"
+  fi
+
+  local target_dir="${project_root%/}/${GC_WORK_DIR_NAME}/shims/python"
+  if [[ ! -d "$target_dir" ]]; then
+    mkdir -p "$target_dir" || gc::die "Failed to create ${target_dir}"
+  fi
+
+  local target_path="${target_dir}/${script_name}"
+  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
+    cp "$source_path" "$target_path" || gc::die "Failed to copy ${script_name}"
+  fi
+
+  printf '%s\n' "$target_path"
+}
+
 # ------------- Discovery (fuzzy) -------------
 gc::_found_doc_var() {
   local key="$1"
@@ -139,6 +166,8 @@ gc::discover() {
     work_dir="$(gc::ensure_workspace "$project_root")"
     registry_path="$work_dir/staging/plan/tasks/tasks.db"
     if [[ -f "$registry_path" ]]; then
+      local fallback_helper
+      fallback_helper="$(gc::clone_python_tool "discover_doc_registry_fallback.py" "$project_root")"
       local key
       for key in pdr sds rfp jira ui_pages openapi sql; do
         local current
@@ -146,110 +175,8 @@ gc::discover() {
         if [[ -n "$current" ]]; then
           continue
         fi
-        local fallback
-        fallback="$(python3 - "$registry_path" "$key" <<'PY'
-import sqlite3
-import sys
-from pathlib import Path
-
-registry = Path(sys.argv[1])
-key = sys.argv[2]
-
-doc_type_map = {
-    "pdr": "pdr",
-    "sds": "sds",
-    "rfp": "rfp",
-    "jira": "jira",
-    "ui_pages": "ui",
-    "openapi": "openapi",
-    "sql": "sql",
-}
-
-search_terms_map = {
-    "pdr": ["pdr", "product"],
-    "sds": ["sds", "system", "design-spec"],
-    "rfp": ["rfp", "proposal"],
-    "jira": ["jira"],
-    "ui_pages": ["ui-pages", "ui_pages", "ui pages", "ui"],
-    "openapi": ["openapi", "swagger"],
-    "sql": [".sql", "dump"],
-}
-
-def pick(row):
-    if row is None:
-        return ""
-    value = row["resolved_path"]
-    if not value:
-        return ""
-    try:
-        return str(Path(value).resolve())
-    except Exception:
-        return str(Path(value))
-
-doc_type = doc_type_map.get(key)
-
-try:
-    conn = sqlite3.connect(str(registry))
-    conn.row_factory = sqlite3.Row
-except Exception:
-    print("")
-    raise SystemExit(0)
-
-resolved = ""
-try:
-    if doc_type:
-        row = conn.execute(
-            """
-            SELECT COALESCE(staging_path, source_path) AS resolved_path
-            FROM documentation
-            WHERE status = 'active' AND doc_type = ?
-            ORDER BY updated_at DESC
-            LIMIT 1
-            """,
-            (doc_type,),
-        ).fetchone()
-        resolved = pick(row)
-    if not resolved and doc_type:
-        row = conn.execute(
-            """
-            SELECT COALESCE(staging_path, source_path) AS resolved_path
-            FROM documentation
-            WHERE status = 'active' AND tags_json LIKE ?
-            ORDER BY updated_at DESC
-            LIMIT 1
-            """,
-            (f'%"{doc_type}"%',),
-        ).fetchone()
-        resolved = pick(row)
-    if not resolved:
-        for term in search_terms_map.get(key, []):
-            term = term.lower()
-            row = conn.execute(
-                """
-                SELECT COALESCE(staging_path, source_path) AS resolved_path
-                FROM documentation
-                WHERE status = 'active'
-                  AND (
-                    LOWER(COALESCE(rel_path, '')) LIKE ?
-                    OR LOWER(COALESCE(file_name, '')) LIKE ?
-                  )
-                ORDER BY updated_at DESC
-                LIMIT 1
-                """,
-                (f"%{term}%", f"%{term}%"),
-            ).fetchone()
-            resolved = pick(row)
-            if resolved:
-                break
-finally:
-    try:
-        conn.close()
-    except Exception:
-        pass
-
-print(resolved)
-PY
-)"
+        local fallback=""
+        fallback="$(python3 "$fallback_helper" "$registry_path" "$key")" || fallback=""
         if [[ -n "$fallback" ]]; then
           gc::_set_found_doc "$key" "$fallback"
         fi

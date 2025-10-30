@@ -19,13 +19,9 @@ cpdr::abs_path() {
   if command -v realpath >/dev/null 2>&1; then
     realpath "$path"
   else
-    python3 - <<'PY' "$path"
-import pathlib
-import sys
-
-target = pathlib.Path(sys.argv[1] or '.')
-print(target.expanduser().resolve())
-PY
+    local helper_path
+    helper_path="$(cpdr::clone_python_tool "cpdr_resolve_abs_path.py")" || return 1
+    python3 "$helper_path" "$path"
   fi
 }
 
@@ -366,15 +362,16 @@ cpdr::assemble_document() {
   local sections_dir="$CPDR_SECTIONS_DIR"
   local toc_markdown="$CPDR_ASSEMBLY_DIR/table_of_contents.md"
 
-  local document_title
-  document_title=$(python3 - <<'PY' "$toc_json"
-import json, sys
-from pathlib import Path
-
-toc = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-print(toc.get('document_title') or 'Product Requirements Document')
-PY
-)
+  local document_title=""
+  local title_helper=""
+  title_helper="$(cpdr::clone_python_tool "cpdr_document_title.py" "${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}")" || title_helper=""
+  if [[ -n "$title_helper" ]]; then
+    document_title="$(python3 "$title_helper" "$toc_json" "Product Requirements Document")" || document_title=""
+  else
+    cpdr::warn "Unable to prepare cpdr_document_title helper; using default title"
+  fi
+  document_title=${document_title//$'\n'/}
+  document_title=${document_title:-Product Requirements Document}
 
   local tmp_file="${final_path}.tmp"
   : >"$tmp_file"
@@ -386,30 +383,14 @@ PY
   cat "$toc_markdown" >>"$tmp_file"
   printf '\n' >>"$tmp_file"
 
-  python3 - <<'PY' "$manifest_json" "$sections_dir" "$tmp_file"
-import json
-import sys
-from pathlib import Path
-
-manifest_path, sections_dir, out_file = sys.argv[1:4]
-manifest = json.loads(Path(manifest_path).read_text(encoding='utf-8'))
-sections_root = Path(sections_dir)
-out = Path(out_file)
-
-for node in manifest.get('nodes') or []:
-    label = (node.get('label') or '').replace('.', '-')
-    slug = node.get('slug') or 'section'
-    filename = f"{label}_{slug}.md"
-    content_path = sections_root / filename
-    if content_path.exists():
-        with out.open('a', encoding='utf-8') as fh:
-            fh.write(f"<a id=\"{slug}\"></a>\n")
-        section_text = content_path.read_text(encoding='utf-8').strip()
-        if section_text:
-            with out.open('a', encoding='utf-8') as fh:
-                fh.write(section_text)
-                fh.write('\n\n')
-PY
+  local assemble_helper=""
+  assemble_helper="$(cpdr::clone_python_tool "cpdr_assemble_sections.py" "${CPDR_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}")" || assemble_helper=""
+  if [[ -z "$assemble_helper" ]]; then
+    cpdr::die "Unable to prepare cpdr_assemble_sections helper"
+  fi
+  python3 "$assemble_helper" "$manifest_json" "$sections_dir" "$tmp_file" || {
+    cpdr::die "Failed to append PDR sections"
+  }
 
   mv "$tmp_file" "$final_path"
   cpdr::log "PDR assembled → ${final_path}"

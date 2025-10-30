@@ -50,21 +50,10 @@ check_pattern "apps/admin/src/services/analytics.ts" \
 info "Verifying GA4 lockout payload structure (if present)"
 analytics_path="${PROJECT_ROOT%/}/apps/admin/src/services/analytics.ts"
 if [[ -f "$analytics_path" ]]; then
-  if python3 - "$analytics_path" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-content = path.read_text(encoding="utf-8")
-match = re.search(r"adminLoginLockoutGa\s*\(.*?\)", content, re.S)
-if match:
-    snippet = match.group(0)
-    print(snippet[:200])
-    sys.exit(0)
-sys.exit(1)
-PY
-  then
+  helper_path="$(gc_clone_python_tool "check_ga4_lockout_snippet.py" "${PROJECT_ROOT:-$PWD}")" || helper_path=""
+  if [[ -z "$helper_path" ]]; then
+    warn "Unable to prepare GA4 lockout snippet helper; skipping check"
+  elif python3 "$helper_path" "$analytics_path"; then
     ok "GA4 lockout payload reference detected"
   else
     warn "GA4 lockout payload reference not found (manual review recommended)"

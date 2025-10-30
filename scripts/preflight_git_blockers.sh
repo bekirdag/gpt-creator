@@ -43,7 +43,7 @@ if ((${#conflict_excludes[@]})); then
 fi
 conflict_marker_file=""
 while IFS= read -r -d '' tracked_file; do
-  if grep -nE '^(<<<<<<<|=======|>>>>>>>)' --color=never -- "$tracked_file" >/dev/null 2>&1; then
+  if grep -nE '^<<<<<<<($|[[:space:]])|^>>>>>>>($|[[:space:]])|^=======$' --color=never -- "$tracked_file" >/dev/null 2>&1; then
     conflict_marker_file="$tracked_file"
     break
   fi

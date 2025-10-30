@@ -250,6 +250,12 @@ class DocIndexer:
             summary = summaries.get(doc_id)
             doc_entries: List[SearchEntry] = []
             text_parts: List[str] = []
+            doc_updated_at_raw = doc.get("updated_at")
+            doc_updated_at = (
+                doc_updated_at_raw
+                if isinstance(doc_updated_at_raw, str) and doc_updated_at_raw
+                else _iso_ts_now()
+            )
             if doc.get("title"):
                 text_parts.append(doc["title"])
             if doc.get("rel_path"):
@@ -293,6 +299,7 @@ class DocIndexer:
                         section_id=None,
                         surface="document",
                         content=combined,
+                        updated_at=doc_updated_at,
                     )
                 )
 
@@ -304,12 +311,19 @@ class DocIndexer:
                 full = _normalise_whitespace(content + extra)
                 if not full:
                     continue
+                excerpt_updated_at_raw = row.get("updated_at")
+                excerpt_updated_at = (
+                    excerpt_updated_at_raw
+                    if isinstance(excerpt_updated_at_raw, str) and excerpt_updated_at_raw
+                    else doc_updated_at
+                )
                 doc_entries.append(
                     SearchEntry(
                         doc_id=doc_id,
                         section_id=row.get("section_id"),
                         surface="excerpt",
                         content=full,
+                        updated_at=excerpt_updated_at,
                     )
                 )
 
@@ -485,7 +499,7 @@ class DocIndexer:
             # Base document rows.
             for row in conn.execute(
                 f"""
-                SELECT doc_id, title, rel_path, tags_json, metadata_json
+                SELECT doc_id, title, rel_path, tags_json, metadata_json, updated_at
                 FROM documentation
                 {doc_filter}
                 """,
@@ -538,7 +552,8 @@ class DocIndexer:
                   justification,
                   token_length,
                   embedding_id,
-                  source_version
+                  source_version,
+                  updated_at
                 FROM documentation_excerpts
                 WHERE doc_id IN ({placeholders})
                 ORDER BY

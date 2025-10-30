@@ -157,6 +157,7 @@ class SearchEntry:
     section_id: Optional[str]
     surface: str
     content: str
+    updated_at: Optional[str] = None
 
 
 class DocRegistry:
@@ -286,7 +287,7 @@ class DocRegistry:
         self._ensure_search_schema(conn)
 
     def _ensure_search_schema(self, conn: sqlite3.Connection) -> None:
-        expected_columns = ("doc_id", "section_id", "surface", "content")
+        expected_columns = ("doc_id", "section_id", "surface", "content", "updated_at")
         try:
             columns = conn.execute("PRAGMA table_info(documentation_search);").fetchall()
             column_names = tuple(row[1] for row in columns)
@@ -302,6 +303,7 @@ class DocRegistry:
                     section_id UNINDEXED,
                     surface,
                     content,
+                    updated_at UNINDEXED,
                     tokenize = 'unicode61'
                   );
                 """
@@ -411,8 +413,9 @@ class DocRegistry:
                       doc_id,
                       section_id,
                       surface,
-                      content
-                    ) VALUES (?, ?, ?, ?);
+                      content,
+                      updated_at
+                    ) VALUES (?, ?, ?, ?, ?);
                     """,
                     [
                         (
@@ -420,6 +423,7 @@ class DocRegistry:
                             entry.section_id,
                             entry.surface,
                             entry.content,
+                            entry.updated_at or _iso_now(),
                         )
                         for entry in doc_entries
                     ],
@@ -948,8 +952,16 @@ class DocRegistry:
             (doc.doc_id,),
         )
         conn.execute(
-            "INSERT INTO documentation_search(doc_id, surface) VALUES (?, ?);",
-            (doc.doc_id, surface),
+            """
+            INSERT INTO documentation_search (
+              doc_id,
+              section_id,
+              surface,
+              content,
+              updated_at
+            ) VALUES (?, NULL, ?, ?, ?);
+            """,
+            (doc.doc_id, surface, surface, now),
         )
 
     @staticmethod

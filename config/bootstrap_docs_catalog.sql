@@ -36,9 +36,20 @@ CREATE TABLE IF NOT EXISTS documentation_changes (
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS documentation_search
-USING fts5(doc_id, surface, tokenize = 'unicode61');
+USING fts5(
+  doc_id UNINDEXED,
+  section_id UNINDEXED,
+  surface,
+  content,
+  updated_at UNINDEXED,
+  tokenize = 'unicode61'
+);
 
-INSERT INTO documentation_search(doc_id, surface)
-SELECT doc_id, COALESCE(title, rel_path, file_name, source_path, doc_id)
+INSERT INTO documentation_search(doc_id, section_id, surface, content, updated_at)
+SELECT doc_id,
+       NULL,
+       COALESCE(title, rel_path, file_name, source_path, doc_id),
+       COALESCE(title, rel_path, file_name, source_path, doc_id),
+       CURRENT_TIMESTAMP
 FROM documentation
 WHERE NOT EXISTS (SELECT 1 FROM documentation_search LIMIT 1);

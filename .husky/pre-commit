@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+
+. "$(dirname -- "$0")/_/husky.sh"
+
+set -euo pipefail
+
+if [ -d apps ]; then
+  echo "[husky] running i18n-check"
+  node scripts/i18n-check.js
+else
+  echo "[husky] skipping i18n-check (apps directory missing)"
+fi
+
+if [ -d apps ]; then
+  FORMAT_TARGET="apps/**/src/locales/**/*.json"
+  if command -v pnpm >/dev/null 2>&1; then
+    echo "[husky] formatting locale JSON via pnpm prettier"
+    pnpm exec prettier --write "$FORMAT_TARGET" || true
+  elif command -v npx >/dev/null 2>&1; then
+    echo "[husky] formatting locale JSON via npx prettier"
+    npx --yes prettier --write "$FORMAT_TARGET" || true
+  else
+    echo "[husky] prettier unavailable; skipping locale formatting"
+  fi
+fi

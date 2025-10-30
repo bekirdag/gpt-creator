@@ -1,9 +1,29 @@
 import json
+import os
+import re
 import sqlite3
 import sys
 import time
 from pathlib import Path
 from typing import Iterable, Optional
+
+from task_binder import update_after_progress as binder_update_after_progress
+
+TERMINAL_LOCK_STATUSES = {
+    "complete",
+    "completed",
+    "completed-no-changes",
+    "blocked-budget",
+    "blocked-quota",
+    "blocked-merge-conflict",
+    "blocked-schema-drift",
+    "blocked-schema-guard-error",
+    "skipped-already-complete",
+}
+
+
+def _is_blocked_dependency(status: Optional[str]) -> bool:
+    return (status or "").strip().lower().startswith("blocked-dependency(")
 
 
 def parse_int(value: Optional[str]) -> Optional[int]:
@@ -21,9 +41,28 @@ def parse_bool(value: Optional[str]) -> int:
     return 1 if text in {"1", "true", "yes", "y", "on"} else 0
 
 
+def parse_points(value: Optional[str]) -> float:
+    text = (value or "").strip()
+    if not text:
+        return 0.0
+    normalized = text.lower().replace(",", ".")
+    match = re.search(r"-?\d+(?:\.\d+)?", normalized)
+    if not match:
+        return 0.0
+    try:
+        points = float(match.group(0))
+    except (TypeError, ValueError):
+        return 0.0
+    return points if points > 0 else 0.0
+
+
 def as_json(text: str) -> Optional[str]:
     items = [line.strip() for line in text.splitlines() if line.strip()]
     return json.dumps(items, ensure_ascii=False) if items else None
+
+
+def split_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
 
 
 def ensure_column(cur: sqlite3.Cursor, table: str, column: str, definition: str) -> None:
@@ -51,7 +90,13 @@ def record_task_progress(
     written_text: str,
     patched_text: str,
     commands_text: str,
+    observation_hash: str,
     occurred_at: str,
+    stage_tokens_retrieve: str,
+    stage_tokens_plan: str,
+    stage_tokens_patch: str,
+    stage_tokens_verify: str,
+    story_points_raw: str,
 ) -> None:
     position_int = int(position)
     attempts_int = parse_int(attempts) or 0
@@ -59,7 +104,7 @@ def record_task_progress(
     duration_int = parse_int(duration_seconds)
     changes_int = parse_bool(changes_applied)
     run_stamp = (run_stamp or "manual").strip() or "manual"
-    status = (status or "").strip() or None
+    status_value = (status or "").strip()
     log_path = (log_path or "").strip() or None
     prompt_path = (prompt_path or "").strip() or None
     output_path = (output_path or "").strip() or None
@@ -68,6 +113,7 @@ def record_task_progress(
     written_text = written_text or ""
     patched_text = patched_text or ""
     commands_text = commands_text or ""
+    observation_hash = (observation_hash or "").strip()
 
     notes_json = as_json(notes_text)
     written_json = as_json(written_text)
@@ -77,6 +123,32 @@ def record_task_progress(
     timestamp = (occurred_at or "").strip()
     if not timestamp:
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    tokens_retrieve_int = parse_int(stage_tokens_retrieve) or 0
+    tokens_plan_int = parse_int(stage_tokens_plan) or 0
+    tokens_patch_int = parse_int(stage_tokens_patch) or 0
+    tokens_verify_int = parse_int(stage_tokens_verify) or 0
+    tokens_retrieve_int = max(tokens_retrieve_int, 0)
+    tokens_plan_int = max(tokens_plan_int, 0)
+    tokens_patch_int = max(tokens_patch_int, 0)
+    tokens_verify_int = max(tokens_verify_int, 0)
+    tokens_stage_total = tokens_retrieve_int + tokens_plan_int + tokens_patch_int + tokens_verify_int
+    story_points_value = parse_points(story_points_raw)
+    tokens_per_sp_value = tokens_stage_total / story_points_value if story_points_value > 0 else 0.0
+    hotspot_phase = ""
+    if tokens_stage_total > 0:
+        stage_pairs = [
+            ("retrieve", tokens_retrieve_int),
+            ("plan", tokens_plan_int),
+            ("patch", tokens_patch_int),
+            ("verify", tokens_verify_int),
+        ]
+        max_stage = max(stage_pairs, key=lambda item: item[1])
+        if max_stage[1] > 0:
+            hotspot_phase = max_stage[0]
+
+    if tokens_int is None:
+        tokens_int = tokens_stage_total
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -96,6 +168,13 @@ def record_task_progress(
           output_path TEXT,
           attempts INTEGER,
           tokens_total INTEGER,
+          tokens_retrieve INTEGER,
+          tokens_plan INTEGER,
+          tokens_patch INTEGER,
+          tokens_verify INTEGER,
+          tokens_per_sp REAL,
+          story_points REAL,
+          hotspot_phase TEXT,
           duration_seconds INTEGER,
           apply_status TEXT,
           changes_applied INTEGER,
@@ -112,6 +191,17 @@ def record_task_progress(
     )
 
     for column, definition in (
+        ("tokens_retrieve", "INTEGER"),
+        ("tokens_plan", "INTEGER"),
+        ("tokens_patch", "INTEGER"),
+        ("tokens_verify", "INTEGER"),
+        ("tokens_per_sp", "REAL"),
+        ("story_points", "REAL"),
+        ("hotspot_phase", "TEXT"),
+    ):
+        ensure_column(cur, "task_progress", column, definition)
+
+    for column, definition in (
         ("last_log_path", "TEXT"),
         ("last_prompt_path", "TEXT"),
         ("last_output_path", "TEXT"),
@@ -126,26 +216,86 @@ def record_task_progress(
         ("last_commands_json", "TEXT"),
         ("last_progress_at", "TEXT"),
         ("last_progress_run", "TEXT"),
+        ("status_reason", "TEXT"),
+        ("locked_by_migration", "INTEGER DEFAULT 0"),
+        ("migration_epoch", "INTEGER DEFAULT 0"),
+        ("locked_by", "TEXT"),
+        ("doc_refs", "TEXT"),
+        ("last_verified_commit", "TEXT"),
+        ("last_tokens_retrieve", "INTEGER"),
+        ("last_tokens_plan", "INTEGER"),
+        ("last_tokens_patch", "INTEGER"),
+        ("last_tokens_verify", "INTEGER"),
+        ("last_tokens_per_sp", "REAL"),
+        ("last_story_points", "REAL"),
+        ("last_hotspot_phase", "TEXT"),
     ):
         ensure_column(cur, "tasks", column, definition)
 
     task_row = cur.execute(
-        "SELECT id FROM tasks WHERE story_slug = ? AND position = ?",
+        """
+        SELECT id,
+               status,
+               locked_by_migration,
+               status_reason,
+               task_id,
+               story_slug,
+               epic_key
+          FROM tasks
+         WHERE story_slug = ? AND position = ?
+        """,
         (story_slug, position_int),
     ).fetchone()
     task_id = task_row["id"] if task_row else None
+    task_ref = str(task_id) if task_id is not None else f"{story_slug}:{position_int}"
+    existing_status = (task_row["status"] or "").strip() if task_row else ""
+    existing_status_lower = existing_status.lower()
+    locked_by_migration = int(task_row["locked_by_migration"] or 0) if task_row else 0
+    status_lower = status_value.lower()
+    apply_status_lower = (apply_status or "").strip().lower() if apply_status else ""
+    status_reason_update = None
+
+    if apply_status_lower in {"empty-apply", "invalid-json", "no-output"}:
+        if locked_by_migration and (
+            existing_status_lower in TERMINAL_LOCK_STATUSES or _is_blocked_dependency(existing_status_lower)
+        ):
+            status_value = existing_status
+            status_lower = existing_status_lower
+        else:
+            status_value = "apply-failed-migration-context"
+            status_lower = status_value
+        status_reason_update = apply_status_lower
+
+    if locked_by_migration and (
+        existing_status_lower in TERMINAL_LOCK_STATUSES or _is_blocked_dependency(existing_status_lower)
+    ):
+        if not status_lower or status_lower in {"skipped-no-changes", "pending"}:
+            status_value = existing_status
+            status_lower = existing_status_lower
+
+    if status_lower == "blocked-migration-transition":
+        status_reason_update = status_reason_update or "migration-epoch-change"
+
+    final_status = status_value or None
 
     progress_row: Iterable = (
         task_id,
         story_slug,
         position_int,
         run_stamp,
-        status,
+        final_status,
         log_path,
         prompt_path,
         output_path,
         attempts_int,
         tokens_int,
+        tokens_retrieve_int,
+        tokens_plan_int,
+        tokens_patch_int,
+        tokens_verify_int,
+        tokens_per_sp_value,
+        story_points_value,
+        hotspot_phase,
         duration_int,
         apply_status,
         changes_int,
@@ -162,11 +312,15 @@ def record_task_progress(
         """
         INSERT INTO task_progress (
           task_id, story_slug, task_position, run_stamp, status, log_path,
-          prompt_path, output_path, attempts, tokens_total, duration_seconds,
-          apply_status, changes_applied, notes_json, written_json, patched_json,
-          commands_json, occurred_at, created_at, updated_at
+          prompt_path, output_path, attempts, tokens_total, tokens_retrieve,
+          tokens_plan, tokens_patch, tokens_verify, tokens_per_sp, story_points,
+          hotspot_phase, duration_seconds, apply_status, changes_applied,
+          notes_json, written_json, patched_json, commands_json, occurred_at,
+          created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
         """,
         progress_row,
     )
@@ -192,7 +346,16 @@ def record_task_progress(
     set_field("last_commands_json", commands_json)
     set_field("last_progress_at", timestamp)
     set_field("last_progress_run", run_stamp)
+    set_field("last_tokens_retrieve", tokens_retrieve_int)
+    set_field("last_tokens_plan", tokens_plan_int)
+    set_field("last_tokens_patch", tokens_patch_int)
+    set_field("last_tokens_verify", tokens_verify_int)
+    set_field("last_tokens_per_sp", tokens_per_sp_value)
+    set_field("last_story_points", story_points_value)
+    set_field("last_hotspot_phase", hotspot_phase)
     set_field("updated_at", timestamp)
+    if status_reason_update:
+        set_field("status_reason", status_reason_update)
 
     if task_row:
         cur.execute(
@@ -204,12 +367,61 @@ def record_task_progress(
             params + [task_id],
         )
 
+    binder_enabled = os.getenv("GC_BINDER_ENABLED", "").strip().lower() not in {"0", "false", "no", "off"}
+    if binder_enabled and task_row:
+        project_root = os.getenv("PROJECT_ROOT", "").strip()
+        if project_root:
+            binder_reopened = False
+            if locked_by_migration and status_lower not in TERMINAL_LOCK_STATUSES and not _is_blocked_dependency(status_lower):
+                binder_reopened = True
+            if status_lower == "blocked-migration-transition":
+                binder_reopened = True
+
+            binder_update_after_progress(
+                Path(project_root),
+                epic_slug=task_row.get("epic_key") or "",
+                story_slug=task_row.get("story_slug") or story_slug,
+                task_id=task_row.get("task_id") or f"{story_slug}:{position_int}",
+                status=final_status or "",
+                apply_status=apply_status,
+                notes=split_lines(notes_text),
+                written_paths=split_lines(written_text),
+                patched_paths=split_lines(patched_text),
+                tokens_total=tokens_int,
+                run_stamp=run_stamp,
+                reopened_by_migration=binder_reopened,
+            )
+
+    if observation_hash and tokens_int > 0:
+        try:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS doc_observations (
+                  task_id TEXT NOT NULL,
+                  doc_hash TEXT NOT NULL,
+                  tokens INTEGER NOT NULL,
+                  first_seen_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                  PRIMARY KEY (task_id, doc_hash)
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO doc_observations(task_id, doc_hash, tokens, first_seen_at)
+                VALUES(?, ?, ?, strftime('%s','now'))
+                ON CONFLICT(task_id, doc_hash) DO UPDATE SET tokens=excluded.tokens
+                """,
+                (task_ref, observation_hash, int(tokens_int)),
+            )
+        except sqlite3.DatabaseError:
+            pass
+
     conn.commit()
     conn.close()
 
 
 def main() -> int:
-    if len(sys.argv) < 19:
+    if len(sys.argv) < 25:
         return 1
 
     db_path = Path(sys.argv[1])
@@ -229,7 +441,13 @@ def main() -> int:
     written_text = sys.argv[15]
     patched_text = sys.argv[16]
     commands_text = sys.argv[17]
-    occurred_at = sys.argv[18]
+    observation_hash = sys.argv[18]
+    occurred_at = sys.argv[19]
+    stage_tokens_retrieve = sys.argv[20]
+    stage_tokens_plan = sys.argv[21]
+    stage_tokens_patch = sys.argv[22]
+    stage_tokens_verify = sys.argv[23]
+    story_points_raw = sys.argv[24]
 
     record_task_progress(
         db_path=db_path,
@@ -249,7 +467,13 @@ def main() -> int:
         written_text=written_text,
         patched_text=patched_text,
         commands_text=commands_text,
+        observation_hash=observation_hash,
         occurred_at=occurred_at,
+        stage_tokens_retrieve=stage_tokens_retrieve,
+        stage_tokens_plan=stage_tokens_plan,
+        stage_tokens_patch=stage_tokens_patch,
+        stage_tokens_verify=stage_tokens_verify,
+        story_points_raw=story_points_raw,
     )
     return 0
 

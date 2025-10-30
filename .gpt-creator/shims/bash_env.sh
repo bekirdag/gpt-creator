@@ -148,3 +148,30 @@ if __gc_cmd_exists gpt-creator; then
   export -f __gc_cmd
   alias gpt-creator='__gc_cmd'
 fi
+
+# Documentation search helper backed by the catalog FTS index.
+__gc_doc_search() {
+  if ! __gc_cmd_exists python3; then
+    printf 'doc_search: python3 is required.\n' >&2
+    return 127
+  fi
+  local query="${1:-}"
+  local limit="${2:-12}"
+  if [[ -z "$query" ]]; then
+    printf 'Usage: doc_search "<fts query>" [limit]\n' >&2
+    return 1
+  fi
+  if ! [[ "$limit" =~ ^[0-9]+$ ]]; then
+    printf 'doc_search: limit must be numeric (received %s).\n' "$limit" >&2
+    return 1
+  fi
+  local root="${GC_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}"
+  local script="${root}/src/lib/doc_registry.py"
+  if [[ ! -f "$script" ]]; then
+    printf 'doc_search: doc registry script not found at %s\n' "$script" >&2
+    return 1
+  fi
+  python3 "$script" search "$query" --limit "$limit"
+}
+export -f __gc_doc_search
+alias doc_search='__gc_doc_search'

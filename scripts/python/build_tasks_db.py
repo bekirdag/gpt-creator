@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import sqlite3
@@ -38,6 +39,21 @@ def as_text(value):
         return None
     text = str(value).strip()
     return text if text else None
+
+
+def normalise_title(value):
+    if not value:
+        return ""
+    return " ".join(value.strip().lower().split())
+
+
+def stable_task_uid(story_slug, task_id, title, position):
+    slug = (story_slug or "").strip().lower()
+    identifier = (task_id or "").strip().lower()
+    if not identifier:
+        identifier = f"pos:{position}"
+    key = f"{slug}|{identifier}|{normalise_title(title)}"
+    return hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()
 
 
 def parse_tasks(tasks_json_path: Path) -> tuple[list, str]:
@@ -153,6 +169,15 @@ def main() -> int:
               user_story_ref_id TEXT,
               epic_ref_id TEXT,
               status TEXT NOT NULL DEFAULT 'pending',
+              status_reason TEXT,
+              evidence_ptr TEXT,
+              doc_refs TEXT,
+              last_verified_commit TEXT,
+              locked_by TEXT,
+              locked_by_migration INTEGER DEFAULT 0,
+              migration_epoch INTEGER DEFAULT 0,
+              reopened_by_migration_at TEXT,
+              reopened_by_migration INTEGER DEFAULT 0,
               started_at TEXT,
               completed_at TEXT,
               last_run TEXT,
@@ -160,9 +185,11 @@ def main() -> int:
               story_title TEXT,
               epic_key TEXT,
               epic_title TEXT,
+              uid TEXT,
               updated_at TEXT NOT NULL,
               created_at TEXT NOT NULL,
               UNIQUE(story_slug, position),
+              UNIQUE(uid),
               FOREIGN KEY(story_slug) REFERENCES stories(story_slug)
             )
         """
@@ -195,8 +222,20 @@ def main() -> int:
             )
         """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS doc_observations (
+              task_id TEXT NOT NULL,
+              doc_hash TEXT NOT NULL,
+              tokens INTEGER NOT NULL,
+              first_seen_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+              PRIMARY KEY (task_id, doc_hash)
+            )
+        """
+        )
 
     ensure_table()
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_uid ON tasks(uid)")
 
     def column_exists(table: str, column: str) -> bool:
         cur.execute(f"PRAGMA table_info({table})")
@@ -251,6 +290,13 @@ def main() -> int:
     ensure_column("tasks", "last_commands_json", "TEXT")
     ensure_column("tasks", "last_progress_at", "TEXT")
     ensure_column("tasks", "last_progress_run", "TEXT")
+    ensure_column("tasks", "status_reason", "TEXT")
+    ensure_column("tasks", "evidence_ptr", "TEXT")
+    ensure_column("tasks", "doc_refs", "TEXT")
+    ensure_column("tasks", "last_verified_commit", "TEXT")
+    ensure_column("tasks", "uid", "TEXT")
+    ensure_column("tasks", "migration_epoch", "INTEGER DEFAULT 0")
+    ensure_column("tasks", "locked_by_migration", "INTEGER DEFAULT 0")
 
     prior_story_slugs: dict[str, str] = {}
     prior_story_state: dict[str, dict] = {}
@@ -276,22 +322,53 @@ def main() -> int:
         except sqlite3.OperationalError:
             pass
 
+        uid_state: dict[str, dict] = {}
         try:
             for row in cur.execute(
-                "SELECT story_slug, position, task_id, status, started_at, completed_at, last_run FROM tasks"
+                """
+                SELECT story_slug, position, task_id, status, started_at, completed_at, last_run,
+                       status_reason, evidence_ptr, doc_refs, last_verified_commit,
+                       uid, migration_epoch, locked_by_migration, locked_by,
+                       reopened_by_migration_at, reopened_by_migration
+                  FROM tasks
+                """
             ):
                 base = {
                     "status": row["status"] or "pending",
                     "started_at": row["started_at"],
                     "completed_at": row["completed_at"],
                     "last_run": row["last_run"],
+                    "status_reason": row["status_reason"],
+                    "evidence_ptr": row["evidence_ptr"],
+                    "doc_refs": row["doc_refs"],
+                    "last_verified_commit": row["last_verified_commit"],
+                    "uid": row["uid"],
+                    "migration_epoch": int(row["migration_epoch"] or 0),
+                    "locked_by_migration": int(row["locked_by_migration"] or 0),
+                    "locked_by": row["locked_by"],
+                    "reopened_by_migration_at": row["reopened_by_migration_at"],
+                    "reopened_by_migration": int(row["reopened_by_migration"] or 0),
                 }
                 prior_task_state[("pos", row["story_slug"], row["position"])] = base
                 task_id = (row["task_id"] or "").strip().lower()
                 if task_id:
                     prior_task_state[("id", row["story_slug"], task_id)] = base
+                if row["uid"]:
+                    uid_state[row["uid"]] = base
+        except sqlite3.OperationalError:
+            uid_state = {}
+
+        try:
+            for row in cur.execute("SELECT old_uid, new_uid FROM task_id_map"):
+                old_uid = (row["old_uid"] or "").strip()
+                new_uid = (row["new_uid"] or "").strip()
+                if old_uid and new_uid and old_uid in uid_state and new_uid not in uid_state:
+                    uid_state[new_uid] = uid_state[old_uid]
         except sqlite3.OperationalError:
             pass
+
+        for uid_key, payload in uid_state.items():
+            prior_task_state[("uid", uid_key)] = payload
 
     cur.execute("DELETE FROM tasks")
     cur.execute("DELETE FROM stories")
@@ -373,8 +450,11 @@ def main() -> int:
 
             key_id = ("id", story_slug, task_id.lower()) if task_id else None
             key_pos = ("pos", story_slug, position)
+            task_uid = stable_task_uid(story_slug, task_id, task.get("title"), position)
             restore = None
-            if key_id and key_id in prior_task_state and not force:
+            if ("uid", task_uid) in prior_task_state and not force:
+                restore = prior_task_state[("uid", task_uid)]
+            elif key_id and key_id in prior_task_state and not force:
                 restore = prior_task_state[key_id]
             elif key_pos in prior_task_state and not force:
                 restore = prior_task_state[key_pos]
@@ -384,7 +464,7 @@ def main() -> int:
             completed_at = (restore or {}).get("completed_at")
             last_run = (restore or {}).get("last_run")
 
-            if status == "complete":
+            if status in {"complete", "completed-no-changes"}:
                 completed_tasks += 1
 
             if restore:
@@ -413,6 +493,15 @@ def main() -> int:
                 task.get("user_story_ref_id") or task.get("user_story_reference_id") or story_id
             )
             epic_ref_id = as_text(task.get("epic_ref_id") or task.get("epic_reference_id") or epic_id)
+            status_reason = (restore or {}).get("status_reason")
+            evidence_ptr = (restore or {}).get("evidence_ptr")
+            doc_refs = (restore or {}).get("doc_refs")
+            last_verified_commit = (restore or {}).get("last_verified_commit")
+            locked_by_value = (restore or {}).get("locked_by")
+            locked_by_migration = int((restore or {}).get("locked_by_migration") or 0)
+            migration_epoch = int((restore or {}).get("migration_epoch") or 0)
+            reopened_by_migration_at = (restore or {}).get("reopened_by_migration_at")
+            reopened_by_migration = int((restore or {}).get("reopened_by_migration") or 0)
 
             cur.execute(
                 """
@@ -424,10 +513,12 @@ def main() -> int:
                   messaging_workflows, performance_targets, observability,
                   acceptance_text, endpoints, sample_create_request, sample_create_response,
                   user_story_ref_id, epic_ref_id,
-                  status, started_at, completed_at, last_run,
+                  status, status_reason, evidence_ptr, doc_refs, last_verified_commit,
+                  locked_by, locked_by_migration, migration_epoch, reopened_by_migration_at, reopened_by_migration,
+                  started_at, completed_at, last_run,
                   story_id, story_title, epic_key, epic_title,
-                  updated_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  uid, updated_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     story_slug,
@@ -458,6 +549,15 @@ def main() -> int:
                     user_story_ref_id,
                     epic_ref_id,
                     status,
+                    status_reason,
+                    evidence_ptr,
+                    doc_refs,
+                    last_verified_commit,
+                    locked_by_value,
+                    locked_by_migration,
+                    migration_epoch,
+                    reopened_by_migration_at,
+                    reopened_by_migration,
                     started_at,
                     completed_at,
                     last_run,
@@ -465,6 +565,7 @@ def main() -> int:
                     story_title or None,
                     epic_key,
                     epic_title or None,
+                    task_uid,
                     generated_at,
                     generated_at,
                 ),

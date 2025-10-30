@@ -7,6 +7,14 @@ db_path, type_arg, item_children, progress_flag, task_details = sys.argv[1:6]
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 
+NON_REMAINING_STATUSES = {
+    "complete",
+    "completed",
+    "done",
+    "completed-no-changes",
+    "skipped-no-changes",
+}
+
 def pluralize(value, singular, plural=None):
     try:
         count = int(value or 0)
@@ -27,6 +35,19 @@ def empty_counts():
         "tasks_in_progress": 0,
         "tasks_pending": 0,
     }
+
+
+def count_remaining_tasks(cur: sqlite3.Connection) -> int:
+    if not NON_REMAINING_STATUSES:
+        row = cur.execute("SELECT COUNT(*) FROM tasks").fetchone()
+        return int(row[0]) if row else 0
+    placeholders = ",".join("?" for _ in NON_REMAINING_STATUSES)
+    query = (
+        "SELECT COUNT(*) FROM tasks "
+        f"WHERE LOWER(COALESCE(status, '')) NOT IN ({placeholders})"
+    )
+    row = cur.execute(query, tuple(NON_REMAINING_STATUSES)).fetchone()
+    return int(row[0]) if row else 0
 
 def fetch_stories():
     query = """
@@ -559,4 +580,8 @@ try:
     if task_details:
         print_task_details(task_details)
 finally:
+    canonical_remaining = count_remaining_tasks(conn)
+    if 'printed' in locals() and printed:
+        print()
+    print(f"Remaining tasks (canonical): {canonical_remaining}")
     conn.close()

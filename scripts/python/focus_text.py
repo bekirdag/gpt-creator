@@ -17,7 +17,7 @@ COMMAND_BLOCK_PATTERN = re.compile(
     flags=re.IGNORECASE,
 )
 COMMAND_WHITELIST_PATTERN = re.compile(
-    r'^(git|pnpm|npm|node|bash|sh|python3|python|sqlite3|jq|rg|sed|awk|perl|cat|tee|mv|cp|mkdir|touch|gpt-creator)\b'
+    r'^(git|pnpm|npm|node|bash|sh|python3|python|sqlite3|jq|rg|find|ls|date|apply_patch|sed|awk|perl|cat|tee|mv|cp|mkdir|touch|gpt-creator)\b'
 )
 
 output_path = Path(sys.argv[1])
@@ -125,6 +125,17 @@ def _status_delta(before: Dict[str, str], after: Dict[str, str]) -> Dict[str, st
     return delta
 
 
+def _snippet(text: Optional[str], limit: int = 160) -> str:
+    if not text:
+        return ""
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    if len(stripped) <= limit:
+        return stripped
+    return stripped[: limit - 3] + "..."
+
+
 def compile_safe(pattern: str, flags: int = 0):
     try:
         if _original_re__compile is not None:
@@ -146,6 +157,8 @@ try:
         apply_timeout = 1500
 except Exception:
     apply_timeout = 1500
+
+patch_artifact_spec = os.environ.get("GC_PATCH_ARTIFACT_PATH", "").strip()
 
 if not output_path.exists():
     print("no-output", flush=True)
@@ -460,6 +473,7 @@ noop_entries = []
 manual_notes = []
 actual_changes = 0
 change_bytes = {}
+collected_patch_diffs: List[str] = []
 
 def rewrite_patch_paths(diff_text: str) -> str:
     mapping = {
@@ -577,6 +591,7 @@ for change in changes:
         diff_bytes = len(diff.encode('utf-8'))
         if not diff.endswith('\n'):
             diff += '\n'
+        collected_patch_diffs.append(diff)
 
         try:
             proc = subprocess.run(
@@ -807,6 +822,13 @@ if isinstance(command_entries, list) and command_entries:
         if not COMMAND_WHITELIST_PATTERN.match(command):
             manual_notes.append(f"Command '{command}' skipped (not whitelisted).")
             continue
+        if os.environ.get("GC_RG_NARROW", "") == "1" and command.startswith("rg "):
+            if " -m " not in command and "--max-count" not in command:
+                command = command.replace("rg ", "rg -m 200 --max-count 200 ", 1)
+            if "--max-filesize" not in command:
+                command = command.replace("rg ", "rg --max-filesize 256K ", 1)
+        if os.environ.get("GC_TESTS_SUMMARY", "") == "1" and ("pnpm test" in command or "npm test" in command) and "--reporter" not in command:
+            command += " --reporter summary"
         try:
             proc_cmd = subprocess.run(
                 ['bash', '-lc', command],
@@ -824,9 +846,13 @@ if isinstance(command_entries, list) and command_entries:
         if proc_cmd.stderr:
             sys.stderr.write(proc_cmd.stderr)
         if proc_cmd.returncode != 0:
-            manual_notes.append(
-                f"Command '{command}' exited with status {proc_cmd.returncode}; review output."
-            )
+            snippet = _snippet(proc_cmd.stderr) or _snippet(proc_cmd.stdout)
+            note = f"Command '{command}' exited with status {proc_cmd.returncode}; review output."
+            if snippet:
+                note += f" stderr: {snippet}"
+            manual_notes.append(note)
+            if "doc_registry.py" in command and proc_cmd.returncode in {2, 127}:
+                manual_notes.append("Doc registry tool missing (src/lib/doc_registry.py).")
         else:
             manual_notes.append(f"Command '{command}' executed successfully.")
             executed_commands.append(command)
@@ -856,6 +882,29 @@ if isinstance(command_entries, list) and command_entries:
         manual_notes.append(
             "Commands executed but produced no new tracked changes; verify if additional steps are required."
         )
+
+if patch_artifact_spec and collected_patch_diffs:
+    try:
+        artifact_target = ensure_within_root(Path(patch_artifact_spec))
+        artifact_target.parent.mkdir(parents=True, exist_ok=True)
+        combined_diff = "\n".join(collected_patch_diffs)
+        if combined_diff and not combined_diff.endswith("\n"):
+            combined_diff += "\n"
+        artifact_target.write_text(combined_diff, encoding="utf-8")
+        diff_lines = combined_diff.splitlines()
+        hunk_count = sum(1 for line in diff_lines if line.startswith("@@"))
+        line_count = len(diff_lines)
+        relative_patch: Path = artifact_target
+        try:
+            relative_patch = artifact_target.relative_to(project_root)
+        except ValueError:
+            pass
+        manual_notes.append(
+            f"Patch artifact saved to {relative_patch} (hunks={hunk_count}, lines={line_count})."
+        )
+        print(f"ARTIFACT {relative_patch}\t{hunk_count}\t{line_count}")
+    except Exception as exc:
+        manual_notes.append(f"Failed to write patch artifact ({patch_artifact_spec}): {exc}")
 
 if invalid_regex_patterns:
     logged_patterns = []

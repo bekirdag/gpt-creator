@@ -15,8 +15,10 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -886,6 +888,15 @@ def _registry_db_path(runtime_dir: Path) -> Path:
     return runtime_dir / "staging" / "plan" / "tasks" / "tasks.db"
 
 
+def _db_path_from_runtime(runtime_dir: Optional[str]) -> Path:
+    if runtime_dir:
+        return _registry_db_path(Path(runtime_dir).expanduser())
+    env_path = os.environ.get("GC_DOCUMENTATION_DB_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
+    return Path(".gpt-creator/staging/plan/tasks/tasks.db")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="doc_registry",
@@ -893,18 +904,56 @@ def _build_parser() -> argparse.ArgumentParser:
         add_help=True,
         allow_abbrev=False,
     )
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
     register_parser = subparsers.add_parser(
         "register",
-        help="Compatibility shim; prints a success message.",
+        help="Record a documentation change in the registry.",
         add_help=True,
         allow_abbrev=False,
     )
     register_parser.add_argument(
         "--runtime-dir",
-        default=".gpt-creator",
-        help="Runtime directory (unused).",
+        default=None,
+        help="Runtime directory containing the tasks catalog (fallbacks to GC_DOCUMENTATION_DB_PATH).",
+    )
+    register_parser.add_argument(
+        "doc_id",
+        nargs="?",
+        help="Document identifier (required to log a change).",
+    )
+    register_parser.add_argument(
+        "path",
+        nargs="?",
+        help="Path to the updated document or section.",
+    )
+    register_parser.add_argument(
+        "summary",
+        nargs="?",
+        default="",
+        help="Short summary describing the change.",
+    )
+
+    search_parser = subparsers.add_parser(
+        "search",
+        help="Query the documentation FTS index.",
+        add_help=True,
+        allow_abbrev=False,
+    )
+    search_parser.add_argument(
+        "query",
+        help="FTS5 query (e.g. \"lockout\" OR \"audit\").",
+    )
+    search_parser.add_argument(
+        "--limit",
+        type=int,
+        default=12,
+        help="Maximum number of rows to return (default: 12).",
+    )
+    search_parser.add_argument(
+        "--runtime-dir",
+        default=None,
+        help="Runtime directory containing the documentation catalog (fallbacks to GC_DOCUMENTATION_DB_PATH).",
     )
 
     sync_parser = subparsers.add_parser(
@@ -932,9 +981,36 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _handle_register() -> int:
-    print("doc_registry: register OK (compatibility shim).", flush=True)
-    return 0
+def _handle_register(args: argparse.Namespace) -> int:
+    doc_id = getattr(args, "doc_id", None)
+    if not doc_id:
+        print("doc_registry: register OK (compatibility shim).", flush=True)
+        return 0
+
+    path_arg = getattr(args, "path", None)
+    if not path_arg:
+        print("doc_registry: register requires DOC_ID and PATH arguments.", file=sys.stderr)
+        return 2
+
+    summary = getattr(args, "summary", "") or ""
+    db_path = _db_path_from_runtime(getattr(args, "runtime_dir", None))
+
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("SELECT 1 FROM documentation_changes LIMIT 1;")
+            conn.execute(
+                "INSERT INTO documentation_changes(doc_id, path, summary, changed_at) VALUES(?,?,?,?)",
+                (doc_id, path_arg, summary, int(time.time())),
+            )
+            conn.commit()
+            print("registered", flush=True)
+            return 0
+    except sqlite3.OperationalError as exc:
+        print(f"documentation_changes table missing in {db_path}: {exc}", file=sys.stderr)
+        return 2
+    except sqlite3.Error as exc:
+        print(f"doc_registry: failed to record change ({exc}).", file=sys.stderr)
+        return 2
 
 
 def _handle_sync_scan(args: argparse.Namespace) -> int:
@@ -948,11 +1024,36 @@ def _handle_sync_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_search(args: argparse.Namespace) -> int:
+    db_path = _db_path_from_runtime(getattr(args, "runtime_dir", None))
+    limit = getattr(args, "limit", 12) or 12
+    if limit < 1:
+        limit = 1
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            for doc_id, surface in conn.execute(
+                """
+                SELECT doc_id, substr(surface, 1, 200)
+                FROM documentation_search
+                WHERE documentation_search MATCH ?
+                LIMIT ?
+                """,
+                (args.query, limit),
+            ):
+                print(f"{doc_id} | {surface}")
+        return 0
+    except sqlite3.Error as exc:
+        print(f"doc_registry: search failed ({exc}).", file=sys.stderr)
+        return 2
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "register":
-        return _handle_register()
+        return _handle_register(args)
+    if args.command == "search":
+        return _handle_search(args)
     if args.command == "sync-scan":
         return _handle_sync_scan(args)
     parser.print_help()

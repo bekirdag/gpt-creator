@@ -1,0 +1,113 @@
+{
+  "meta": {
+    "generator": "scripts/python/update_traceability.py",
+    "version": 1,
+    "sources": {
+      "docs/PDR.md": "DOC-E89DE7B8"
+    }
+  },
+  "acceptance_criteria": {
+    "AC-1": {
+      "title": "Stack Up",
+      "description": "Given a folder with sample artifacts \u2192 When `create-project` runs \u2192 Then API `/health` returns 200, web `/` and admin `/admin/` return 200.",
+      "source": {
+        "path": "docs/PDR.md",
+        "doc_id": "DOC-E89DE7B8",
+        "line": 134
+      },
+      "evidence": [
+        {
+          "type": "verify-script",
+          "path": "verify/acceptance.sh",
+          "sha256": "cbccac2b255c3c076ea66ce90e2423b8566216c19d6323f201741168aabbf833",
+          "description": "Acceptance smoke test covering API, web, and admin reachability."
+        }
+      ]
+    },
+    "AC-2": {
+      "title": "OpenAPI Valid",
+      "description": "Given `openapi.yaml` \u2192 When `verify` runs \u2192 Then swagger\u2011cli validates spec (exit 0).",
+      "source": {
+        "path": "docs/PDR.md",
+        "doc_id": "DOC-E89DE7B8",
+        "line": 137
+      },
+      "evidence": [
+        {
+          "type": "verify-script",
+          "path": "verify/check-openapi.sh",
+          "sha256": "e7543412768ea45050e517643b2e759a7cf8f20c0d57e4c58b3fcfc63d0f0357",
+          "description": "OpenAPI validation via swagger-cli / openapi-generator."
+        }
+      ]
+    },
+    "AC-3": {
+      "title": "a11y",
+      "description": "Given running web/admin \u2192 When pa11y runs on `/` and `/admin/` \u2192 Then no errors of severity \u201cerror\u201d; warnings allowed.",
+      "source": {
+        "path": "docs/PDR.md",
+        "doc_id": "DOC-E89DE7B8",
+        "line": 140
+      },
+      "evidence": [
+        {
+          "type": "verify-script",
+          "path": "verify/check-a11y.sh",
+          "sha256": "e9e518cb9689e272965dab8ff517ddc4e9afa1d4ac5390e99536aac67061b299",
+          "description": "Accessibility gate using pa11y for web and admin."
+        }
+      ]
+    },
+    "AC-4": {
+      "title": "Lighthouse",
+      "description": "Given running web/admin \u2192 When Lighthouse runs \u2192 Then performance \u2265 0.80, a11y \u2265 0.85.",
+      "source": {
+        "path": "docs/PDR.md",
+        "doc_id": "DOC-E89DE7B8",
+        "line": 143
+      },
+      "evidence": [
+        {
+          "type": "verify-script",
+          "path": "verify/check-lighthouse.sh",
+          "sha256": "13157e1cd245352413022a3b1edb5b3ffc42161aff08d042d986724030589e1d",
+          "description": "Lighthouse performance & accessibility thresholds."
+        }
+      ]
+    },
+    "AC-5": {
+      "title": "Consent",
+      "description": "Given web root \u2192 When consent checker runs \u2192 Then consent keywords/selectors found and a privacy link exists.",
+      "source": {
+        "path": "docs/PDR.md",
+        "doc_id": "DOC-E89DE7B8",
+        "line": 146
+      },
+      "evidence": [
+        {
+          "type": "verify-script",
+          "path": "verify/check-consent.sh",
+          "sha256": "2ed09247fdbe740b49515c52b4e05b246acc2f5e73308940aac0727f3a0a61f6",
+          "description": "Consent checker ensuring privacy link and selectors."
+        }
+      ]
+    },
+    "AC-6": {
+      "title": "Domain Filters",
+      "description": "Given `/programs` endpoint \u2192 When filters (type,instructor,level,from,to) are applied \u2192 Then results match filters for all items.",
+      "source": {
+        "path": "docs/PDR.md",
+        "doc_id": "DOC-E89DE7B8",
+        "line": 149
+      },
+      "evidence": [
+        {
+          "type": "verify-script",
+          "path": "verify/check-program-filters.sh",
+          "sha256": "2ea2cf75213893b5e3d94838377d81ec25fbd73c108e3414a16fb4249a2cacb0",
+          "description": "Program filter verification across API endpoints."
+        }
+      ]
+    }
+  }
+}

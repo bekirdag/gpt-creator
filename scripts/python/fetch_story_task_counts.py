@@ -16,7 +16,7 @@ def fetch_story_task_counts(db_path: Path, story_slug: str) -> str:
         """
         SELECT
             COUNT(*) AS total_count,
-            SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'complete' THEN 1 ELSE 0 END) AS complete_count
+            SUM(CASE WHEN LOWER(COALESCE(status, '')) IN ('complete', 'completed-no-changes') THEN 1 ELSE 0 END) AS complete_count
           FROM tasks
          WHERE LOWER(COALESCE(story_slug, '')) = ?
         """,

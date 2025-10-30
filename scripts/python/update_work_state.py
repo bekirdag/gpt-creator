@@ -3,6 +3,9 @@ import sys
 import time
 from pathlib import Path
 
+def _is_blocked_dependency(status: str) -> bool:
+    return (status or "").strip().lower().startswith("blocked-dependency(")
+
 
 def update_work_state(
     db_path: Path,
@@ -27,7 +30,7 @@ def update_work_state(
         """
         SELECT
             COUNT(*) AS total_count,
-            SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'complete' THEN 1 ELSE 0 END) AS complete_count,
+            SUM(CASE WHEN LOWER(COALESCE(status, '')) IN ('complete', 'completed-no-changes') THEN 1 ELSE 0 END) AS complete_count,
             SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'in-progress' THEN 1 ELSE 0 END) AS in_progress_count
           FROM tasks
          WHERE LOWER(COALESCE(story_slug, '')) = ?
@@ -46,10 +49,10 @@ def update_work_state(
         elif complete_count > 0 or in_progress_count > 0:
             if status_final == "complete":
                 status_final = "in-progress"
-            elif status_final not in {"blocked", "on-hold", "in-progress"}:
+            elif status_final not in {"blocked", "blocked-quota", "blocked-schema-drift", "blocked-schema-guard-error", "on-hold", "in-progress"} and not _is_blocked_dependency(status_final):
                 status_final = "in-progress"
         else:
-            if status_final not in {"blocked", "on-hold"}:
+            if status_final not in {"blocked", "blocked-schema-drift", "blocked-schema-guard-error", "on-hold"} and not _is_blocked_dependency(status_final):
                 status_final = "pending"
         completed_value = complete_count
         total_value = total_count

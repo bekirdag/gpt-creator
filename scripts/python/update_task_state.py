@@ -3,6 +3,22 @@ import sys
 import time
 from pathlib import Path
 
+LOCKABLE_STATUSES = {
+    "complete",
+    "completed",
+    "completed-no-changes",
+    "blocked-budget",
+    "blocked-quota",
+    "blocked-merge-conflict",
+    "blocked-schema-drift",
+    "blocked-schema-guard-error",
+    "skipped-already-complete",
+}
+
+
+def _is_blocked_dependency(status: str) -> bool:
+    return (status or "").strip().lower().startswith("blocked-dependency(")
+
 
 def update_task_state(
     db_path: Path,
@@ -19,11 +35,33 @@ def update_task_state(
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
     row = cur.execute(
-        "SELECT id, status, started_at, completed_at FROM tasks WHERE story_slug = ? AND position = ?",
+        """
+        SELECT id, status, started_at, completed_at, locked_by_migration,
+               reopened_by_migration, reopened_by_migration_at
+          FROM tasks
+         WHERE story_slug = ? AND position = ?
+        """,
         (story_slug, position_int),
     ).fetchone()
 
     if row is not None:
+        current_status = (row["status"] or "").strip().lower()
+        locked_by_migration = int(row["locked_by_migration"] or 0)
+        reopened_by_migration = int(row["reopened_by_migration"] or 0)
+        status_lower = (status or "").strip().lower()
+
+        if locked_by_migration and status_lower not in LOCKABLE_STATUSES and not _is_blocked_dependency(status_lower):
+            allow_reopen = False
+            if status_lower in {"pending", "in-progress"}:
+                allow_reopen = True
+            elif status_lower == current_status:
+                allow_reopen = True
+            elif status_lower == "blocked-migration-transition":
+                allow_reopen = True
+            if not allow_reopen:
+                conn.close()
+                return
+
         fields = [
             ("status", status),
             ("last_run", run_stamp),
@@ -42,9 +80,17 @@ def update_task_state(
         elif status == "pending":
             fields.append(("started_at", None))
             fields.append(("completed_at", None))
-        elif status == "blocked":
+        elif status in {"blocked", "blocked-quota", "blocked-schema-drift", "blocked-schema-guard-error"} or _is_blocked_dependency(status):
             if not started_at:
                 fields.append(("started_at", timestamp))
+
+        if locked_by_migration and status_lower not in LOCKABLE_STATUSES and not _is_blocked_dependency(status_lower):
+            fields.append(("locked_by_migration", 0))
+            fields.append(("reopened_by_migration", 1))
+            if not reopened_by_migration:
+                fields.append(("reopened_by_migration_at", timestamp))
+        elif status_lower in LOCKABLE_STATUSES or _is_blocked_dependency(status_lower):
+            fields.append(("locked_by_migration", 1))
 
         set_clause = ", ".join(f"{col} = ?" for col, _ in fields)
         params = [value for _, value in fields] + [story_slug, position_int]

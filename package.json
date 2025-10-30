@@ -6,6 +6,14 @@
     "bootstrap": "bash scripts/bootstrap_dependencies.sh",
     "work:tasks": "bash ops/scripts/preflight-metadata.sh && gpt-creator work-on-tasks --project .",
     "work:packed": "bash ops/scripts/preflight-metadata.sh && GC_SOFT_CONTEXT=95000 GC_HARD_CONTEXT=105000 GC_MIN_OUTPUT=5000 GC_MAX_SNIPPET_LINES=120 gpt-creator work-on-tasks --project . | node .gpt-creator/shims/context-packer.mjs",
-    "work:sigint-safe": "bash ops/scripts/run_tasks_sigint_safe.sh"
+    "work:sigint-safe": "bash ops/scripts/run_tasks_sigint_safe.sh",
+    "doc:search": "python3 src/lib/doc_registry.py search",
+    "doc:register": "python3 src/lib/doc_registry.py register",
+    "doc:index:check": "python3 src/lib/doc_indexer.py --check",
+    "i18n:check": "node scripts/i18n-check.js",
+    "i18n:sync": "node scripts/i18n-sync.js",
+    "i18n:types": "node scripts/i18n-types.js",
+    "i18n:coverage": "node scripts/i18n-coverage.js",
+    "trace:update": "python3 scripts/python/update_traceability.py"
   }
 }

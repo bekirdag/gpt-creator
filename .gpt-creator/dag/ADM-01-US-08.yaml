@@ -1,0 +1,51 @@
+story: ADM-01-US-08
+nodes:
+  T01:
+    title: "ADR: thresholds/monitoring/recovery"
+    kind: ADR
+  T02:
+    title: "Schema: lockout tracking"
+    kind: SCHEMA
+  T03:
+    title: "Auth: lockout enforcement"
+    kind: API
+  T04:
+    title: "Telemetry & feeds"
+    kind: INSTRUMENT
+  T05:
+    title: "Unlock API + RBAC + audit"
+    kind: API
+  T06:
+    title: "Admin UI: evidence & unlock"
+    kind: UI
+  T07:
+    title: "Login UI: attempt feedback"
+    kind: UI
+  T08:
+    title: "Finalize messaging & instrumentation"
+    kind: SPEC
+  T09:
+    title: "QA automation: lockout/unlock"
+    kind: TEST
+  T10:
+    title: "Runbooks & monitoring plan"
+    kind: RUNBOOK
+edges:
+  - [T01, T02]
+  - [T02, T03]
+  - [T03, T07]
+  - [T03, T04]
+  - [T03, T05]
+  - [T05, T06]
+  - [T04, T08]
+  - [T06, T09]
+  - [T05, T09]
+  - [T04, T09]
+  - [T04, T10]
+  - [T05, T10]
+policies:
+  ready_requires:
+    - no_rej
+    - clean_tree
+    - schema_applied
+    - api_contract_exists

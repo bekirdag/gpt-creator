@@ -115,6 +115,7 @@ def main() -> None:
     refresh = os.environ.get("GC_SHOW_FILE_REFRESH") == "1"
     diff_mode = os.environ.get("GC_SHOW_FILE_DIFF") == "1"
     cache_dir = Path(os.environ.get("GC_SHOW_FILE_CACHE_DIR") or "").resolve()
+    force_range = (os.environ.get("GC_SHOW_FILE_FORCE_RANGE", "") or "").strip().lower() in {"1", "true", "yes", "on"}
 
     if not path.exists():
         print(f"File not found: {rel_path}", file=sys.stderr)
@@ -126,6 +127,15 @@ def main() -> None:
         max_lines = 400
     if max_lines <= 0:
         max_lines = 400
+
+    if force_range and not range_spec and not head_lines and not tail_lines:
+        head_lines = os.environ.get("GC_SHOW_FILE_FORCE_HEAD", "200").strip() or "200"
+
+    if head_lines:
+        try:
+            max_lines = min(max_lines, int(head_lines))
+        except Exception:
+            pass
 
     mode_descriptor = []
     if range_spec:
@@ -325,4 +335,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -64,6 +64,133 @@ GC_CODEX_EXEC_TIMEOUT_INITIAL="${GC_CODEX_EXEC_TIMEOUT-}"
 export GC_CODEX_EXEC_MAX_DURATION
 export GC_CODEX_MAX_TURNS
 
+GC_LLM_OUTPUT_LIMIT_PLAN_DEFAULT=450
+GC_LLM_OUTPUT_LIMIT_STATUS_DEFAULT=350
+GC_LLM_OUTPUT_LIMIT_VERIFY_DEFAULT=500
+GC_LLM_OUTPUT_LIMIT_PATCH_DEFAULT=7000
+GC_LLM_OUTPUT_LIMIT_HARD_CAP_DEFAULT=12000
+
+GC_LLM_OUTPUT_LIMIT_PLAN="${GC_LLM_OUTPUT_LIMIT_PLAN_DEFAULT}"
+GC_LLM_OUTPUT_LIMIT_STATUS="${GC_LLM_OUTPUT_LIMIT_STATUS_DEFAULT}"
+GC_LLM_OUTPUT_LIMIT_VERIFY="${GC_LLM_OUTPUT_LIMIT_VERIFY_DEFAULT}"
+GC_LLM_OUTPUT_LIMIT_PATCH="${GC_LLM_OUTPUT_LIMIT_PATCH_DEFAULT}"
+GC_LLM_OUTPUT_LIMIT_HARD_CAP="${GC_LLM_OUTPUT_LIMIT_HARD_CAP_DEFAULT}"
+
+GC_LAST_CODEX_OUTPUT_STEP=""
+GC_LAST_CODEX_OUTPUT_LIMIT=0
+
+gc_budget_stage_id() {
+  local stage="${1:-}"
+  stage="${stage,,}"
+  stage="${stage//[^a-z0-9]/_}"
+  printf '%s' "$stage"
+}
+
+gc_budget_stage_limit_var() {
+  local id
+  id="$(gc_budget_stage_id "$1")"
+  id="${id^^}"
+  printf 'GC_BUDGET_STAGE_LIMIT_%s' "$id"
+}
+
+gc_budget_stage_total_var() {
+  local id
+  id="$(gc_budget_stage_id "$1")"
+  id="${id^^}"
+  printf 'GC_BUDGET_STAGE_TOTAL_%s' "$id"
+}
+
+gc_budget_stage_tripped_var() {
+  local id
+  id="$(gc_budget_stage_id "$1")"
+  id="${id^^}"
+  printf 'GC_BUDGET_STAGE_TRIPPED_%s' "$id"
+}
+
+gc_budget_stage_skip_var() {
+  local id
+  id="$(gc_budget_stage_id "$1")"
+  id="${id^^}"
+  printf 'GC_BUDGET_STAGE_SKIP_%s' "$id"
+}
+
+gc_budget_stage_reason_var() {
+  local id
+  id="$(gc_budget_stage_id "$1")"
+  id="${id^^}"
+  printf 'GC_BUDGET_STAGE_SKIP_REASON_%s' "$id"
+}
+
+gc_budget_get_stage_limit() {
+  local var
+  var="$(gc_budget_stage_limit_var "$1")"
+  printf '%s' "${!var:-0}"
+}
+
+gc_budget_set_stage_limit() {
+  local var="$(gc_budget_stage_limit_var "$1")"
+  local value="${2:-0}"
+  printf -v "$var" '%s' "$value"
+}
+
+gc_budget_stage_tripped() {
+  local var="$(gc_budget_stage_tripped_var "$1")"
+  [[ "${!var:-0}" == "1" ]]
+}
+
+gc_budget_stage_should_skip() {
+  local var="$(gc_budget_stage_skip_var "$1")"
+  [[ "${!var:-0}" == "1" ]]
+}
+
+gc_budget_set_stage_skip() {
+  local stage="$1"
+  local flag="${2:-0}"
+  local reason="${3:-}"
+  local skip_var="$(gc_budget_stage_skip_var "$stage")"
+  printf -v "$skip_var" '%s' "$flag"
+  local reason_var="$(gc_budget_stage_reason_var "$stage")"
+  printf -v "$reason_var" '%s' "$reason"
+}
+
+gc_budget_stage_skip_reason() {
+  local var="$(gc_budget_stage_reason_var "$1")"
+  printf '%s' "${!var:-}"
+}
+
+gc_budget_reset_stage_tracking() {
+  local stages=("retrieve" "plan" "patch" "verify")
+  local stage
+  for stage in "${stages[@]}"; do
+    local total_var="$(gc_budget_stage_total_var "$stage")"
+    printf -v "$total_var" '%s' "0"
+    local trip_var="$(gc_budget_stage_tripped_var "$stage")"
+    printf -v "$trip_var" '%s' "0"
+    local skip_var="$(gc_budget_stage_skip_var "$stage")"
+    printf -v "$skip_var" '%s' "0"
+    local reason_var="$(gc_budget_stage_reason_var "$stage")"
+    printf -v "$reason_var" '%s' ""
+  done
+}
+
+gc_budget_collect_tool_actions_json() {
+  python3 - <<'PY' "$GC_BUDGET_TOOL_ACTIONS_JSON"
+import json, os, sys
+base = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+if not isinstance(base, dict):
+    base = {}
+prefix = "GC_BUDGET_TOOL_ACTION_"
+for key, value in os.environ.items():
+    if not key.startswith(prefix):
+        continue
+    tool = key[len(prefix):].lower()
+    tool = tool.replace('_', '-')
+    if value:
+        base[tool] = value
+print(json.dumps(base, separators=(',', ':'), ensure_ascii=True))
+PY
+}
+
 resolve_cli_root() {
   local source="${BASH_SOURCE[0]}"
   while [[ -L "$source" ]]; do
@@ -1135,6 +1262,57 @@ gc_port_reserved_by_other() {
   return 1
 }
 
+gc_parse_duration_seconds() {
+  local value="${1:-}"
+  local default="${2:-0}"
+  if [[ -z "$value" ]]; then
+    echo "$default"
+    return
+  fi
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "$value"
+    return
+  fi
+  if [[ "$value" =~ ^([0-9]+)([smhd])$ ]]; then
+    local number="${BASH_REMATCH[1]}"
+    local unit="${BASH_REMATCH[2]}"
+    case "$unit" in
+      s) echo "$number" ;;
+      m) echo $((number * 60)) ;;
+      h) echo $((number * 3600)) ;;
+      d) echo $((number * 86400)) ;;
+      *) echo "$default" ;;
+    esac
+    return
+  fi
+  echo "$default"
+}
+
+gc_parse_size_bytes() {
+  local value="${1:-}"
+  local default="${2:-0}"
+  if [[ -z "$value" ]]; then
+    echo "$default"
+    return
+  fi
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "$value"
+    return
+  fi
+  if [[ "$value" =~ ^([0-9]+)([KMG]B?|[kmg]b?)$ ]]; then
+    local number="${BASH_REMATCH[1]}"
+    local unit="${BASH_REMATCH[2],,}"
+    case "$unit" in
+      kb|k) echo $((number * 1024)) ;;
+      mb|m) echo $((number * 1024 * 1024)) ;;
+      gb|g) echo $((number * 1024 * 1024 * 1024)) ;;
+      *) echo "$default" ;;
+    esac
+    return
+  fi
+  echo "$default"
+}
+
 GC_PROGRESS_DIR_MIGRATIONS=(
   "docs/delivery::staging/docs"
   "Design::staging/docs"
@@ -1280,6 +1458,69 @@ gc_migrate_progress_artifacts() {
     info "Migrated ${#moved[@]} work artifacts into .gpt-creator (see ${log_file#$project_root/})."
   fi
   GC_PROGRESS_MIGRATION_LAST_COUNT=${#moved[@]}
+
+  local tasks_db="${gc_root}/staging/plan/tasks/tasks.db"
+  if [[ -f "$tasks_db" ]]; then
+    local plan_path="${gc_root}/logs/progress-migration.plan.json"
+    local map_path="${gc_root}/logs/progress-migration.map.ndjson"
+    local helper_path=""
+    if ! helper_path="$(gc_clone_python_tool "progress_migration.py" "$project_root")"; then
+      warn "Unable to prepare progress migration helper; skipping task state reconciliation."
+      return 0
+    fi
+    local plan_output=""
+    if plan_output="$(python3 "$helper_path" plan --db "$tasks_db" --output "$plan_path" 2>/dev/null)"; then
+      local plan_updates
+      plan_updates="$(python3 - <<'PY' "$plan_output"
+import json, sys
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    print("")
+else:
+    total = payload.get("tasks_needing_update", 0)
+    print(str(total))
+PY
+)"
+      if [[ -n "$plan_updates" && "$plan_updates" != "0" ]]; then
+        info "Planned task migration updates for ${plan_updates} item(s); applying carry-over."
+      fi
+      local apply_output=""
+      if apply_output="$(python3 "$helper_path" apply --db "$tasks_db" --plan "$plan_path" --map-log "$map_path" 2>/dev/null)"; then
+        local apply_stats
+        apply_stats="$(python3 - <<'PY' "$apply_output"
+import json, sys
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    print("")
+else:
+    stats = payload.get("stats") or {}
+    updated = stats.get("tasks_updated", 0)
+    locked = stats.get("states_locked", 0)
+    preserved = stats.get("states_preserved", 0)
+    reopened = stats.get("states_reopened", 0)
+    print(f"{updated}\t{preserved}\t{locked}\t{reopened}")
+PY
+)"
+        if [[ -n "$apply_stats" ]]; then
+          IFS=$'\t' read -r updatedTotal preservedTotal lockedTotal reopenedTotal <<<"$apply_stats"
+          info "Carried forward migration state for ${updatedTotal:-0} task(s) (preserved=${preservedTotal:-0}, locked=${lockedTotal:-0}, reopened=${reopenedTotal:-0})."
+        fi
+      else
+        warn "Failed to apply task migration plan; inspect ${plan_path#$project_root/} for details."
+      fi
+    fi
+  fi
+}
+
+gc_binder_clear_story() {
+  local project_root="${1:?project root required}"
+  local epic_slug="${2:-}"
+  local story_slug="${3:-}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "task_binder.py" "$project_root")" || return 1
+  python3 "$helper_path" clear --project "$project_root" --epic "$epic_slug" --story "$story_slug"
 }
 
 # Manual command helper to sweep legacy artifacts
@@ -1905,7 +2146,7 @@ gc_reports_run_work() {
   gc_reports_set_metadata_field "$report_path" branch "\"$(gc_reports_escape "$branch")\""
   gc_reports_set_metadata_field "$report_path" last_started "\"$now_utc\""
 
-  if codex_call "report-${slug}" --prompt "$prompt_path"; then
+  if codex_call "report-${slug}" --step status --prompt "$prompt_path"; then
     local completed_utc
     completed_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     gc_reports_set_metadata_field "$report_path" status resolved
@@ -2013,12 +2254,112 @@ gc_exit_handler() {
   gc_reports_cleanup
 }
 
+gc_budget_log_stage() {
+  local stage="${1:-unknown}"
+  local prompt_tokens="${2:-0}"
+  local completion_tokens="${3:-0}"
+  local total_tokens="${4:-0}"
+  local duration_ms="${5:-0}"
+  local pruned_items_raw="${6:-[]}"
+  local tool_bytes_raw="${7:-{}}"
+  local blocked_quota="${8:-false}"
+  local note="${9:-}"
+
+  local log_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
+  mkdir -p "$log_dir"
+  local usage_file="${log_dir}/codex-usage.ndjson"
+
+  local run_id="${GC_BUDGET_RUN_ID:-manual}"
+  local story_ref="${GC_BUDGET_STORY_ID:-}"
+  local task_ref="${GC_BUDGET_TASK_ID:-}"
+  local model_name="${CODEX_MODEL:-gpt-5-codex}"
+  local ts
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local blocked_flag="${blocked_quota:-false}"
+  blocked_flag="${blocked_flag,,}"
+  if [[ "$blocked_flag" != "true" && "$blocked_flag" != "false" ]]; then
+    blocked_flag="false"
+  fi
+
+  local stage_key="${stage:-}"
+  local total_var="$(gc_budget_stage_total_var "$stage_key")"
+  local current_total="${!total_var:-0}"
+  if [[ "$total_tokens" =~ ^[-+]?[0-9]+$ ]]; then
+    local updated_total=$((current_total + total_tokens))
+    printf -v "$total_var" '%s' "$updated_total"
+    local limit_value
+    limit_value="$(gc_budget_get_stage_limit "$stage_key")"
+    if [[ "$limit_value" =~ ^[0-9]+$ ]] && (( limit_value > 0 && updated_total > limit_value )); then
+      local trip_var
+      trip_var="$(gc_budget_stage_tripped_var "$stage_key")"
+      printf -v "$trip_var" '%s' "1"
+      blocked_flag="true"
+    fi
+  fi
+  python3 - "$usage_file" "$ts" "$run_id" "$story_ref" "$task_ref" "$stage" "$model_name" "$prompt_tokens" "$completion_tokens" "$total_tokens" "$duration_ms" "$pruned_items_raw" "$tool_bytes_raw" "$blocked_flag" "$note" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+usage_path = Path(sys.argv[1])
+ts, run_id, story, task, stage, model = sys.argv[2:8]
+prompt_tokens = int(float(sys.argv[8] or "0"))
+completion_tokens = int(float(sys.argv[9] or "0"))
+total_tokens = int(float(sys.argv[10] or "0"))
+duration_ms = int(float(sys.argv[11] or "0"))
+pruned_raw = sys.argv[12] if len(sys.argv) > 12 else "[]"
+tool_raw = sys.argv[13] if len(sys.argv) > 13 else "{}"
+blocked_raw = sys.argv[14] if len(sys.argv) > 14 else "false"
+note = sys.argv[15] if len(sys.argv) > 15 else ""
+
+def _parse_json(data, fallback):
+    try:
+        return json.loads(data)
+    except Exception:
+        return fallback
+
+pruned_items = _parse_json(pruned_raw or "[]", [])
+tool_bytes = _parse_json(tool_raw or "{}", {})
+blocked_flag = str(blocked_raw).strip().lower() in {"1", "true", "yes", "on"}
+
+record = {
+    "ts": ts,
+    "run_id": run_id,
+    "story": story,
+    "task": task,
+    "stage": stage,
+    "model": model,
+    "prompt_tokens": prompt_tokens,
+    "completion_tokens": completion_tokens,
+    "total_tokens": total_tokens,
+    "duration_ms": duration_ms,
+    "pruned_items": pruned_items,
+    "tool_bytes": tool_bytes,
+    "blocked_quota": blocked_flag,
+}
+if note:
+    record["note"] = note
+
+try:
+    with usage_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+except Exception as exc:
+    print(f"[warn] Failed to append stage telemetry: {exc}", file=sys.stderr)
+PY
+}
+
 gc_record_codex_usage() {
   local log_file="${1:-}"
   local task="${2:-}"
   local model="${3:-}"
   local prompt_file="${4:-}"
   local exit_code="${5:-0}"
+  local step="${6:-}"
+  local max_output="${7:-0}"
+  local duration_ms="${8:-0}"
+
+  GC_STAGE_LIMIT_LAST_STEP=""
+  GC_STAGE_LIMIT_LAST_LIMIT=""
 
   GC_LAST_CODEX_PROMPT_TOKENS=0
   GC_LAST_CODEX_COMPLETION_TOKENS=0
@@ -2064,7 +2405,7 @@ gc_record_codex_usage() {
   fi
 
 
-  if python3 "$usage_script_py" "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" "${GC_COMMAND_FAILURE_CACHE:-}" "${GC_COMMAND_STREAM_CACHE:-}" "${GC_COMMAND_FILE_CACHE:-}" "${GC_COMMAND_SCAN_CACHE:-}" >"$tmp_output"
+  if GC_USAGE_SUPPRESS_WRITE=1 python3 "$usage_script_py" "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" "${GC_COMMAND_FAILURE_CACHE:-}" "${GC_COMMAND_STREAM_CACHE:-}" "${GC_COMMAND_FILE_CACHE:-}" "${GC_COMMAND_SCAN_CACHE:-}" "$step" "$max_output" "$duration_ms" >"$tmp_output"
   then
     py_output="$(<"$tmp_output")"
     rm -f "$usage_script_py" || true
@@ -2262,6 +2603,14 @@ gc_record_codex_usage() {
             ;;
         esac
       done <<<"$py_output"
+      if [[ -n "$step" ]]; then
+        GC_LAST_CODEX_OUTPUT_STEP="$step"
+      fi
+      if [[ "$max_output" =~ ^[0-9]+$ ]]; then
+        GC_LAST_CODEX_OUTPUT_LIMIT="$max_output"
+      else
+        GC_LAST_CODEX_OUTPUT_LIMIT=0
+      fi
     fi
     local limit_value="${GC_CODEX_MAX_TOKENS_PER_TASK:-0}"
     if [[ "$limit_value" =~ ^[0-9]+$ ]]; then
@@ -2299,6 +2648,19 @@ gc_record_codex_usage() {
         fi
       fi
     fi
+    local stage_blocked="false"
+    if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
+      stage_blocked="true"
+    fi
+    local stage_pruned="${GC_CURRENT_PRUNED_ITEMS:-[]}" 
+    if [[ -z "$stage_pruned" ]]; then
+      stage_pruned="[]"
+    fi
+    gc_budget_log_stage "${step:-patch}" "${GC_LAST_CODEX_PROMPT_TOKENS:-0}" "${GC_LAST_CODEX_COMPLETION_TOKENS:-0}" "${GC_LAST_CODEX_TOTAL_TOKENS:-0}" "${duration_ms:-0}" "$stage_pruned" "{}" "$stage_blocked"
+    if [[ -n "${step:-}" ]] && gc_budget_stage_tripped "${step}"; then
+      GC_STAGE_LIMIT_LAST_STEP="${step}"
+      GC_STAGE_LIMIT_LAST_LIMIT="$(gc_budget_get_stage_limit "${step}")"
+    fi
     rm -f "$log_file" || true
     return 0
   else
@@ -2306,6 +2668,126 @@ gc_record_codex_usage() {
     warn "Failed to record Codex usage for task=${task} model=${model}."
     return 1
   fi
+}
+
+gc_set_llm_output_limit_if_valid() {
+  local var_name="$1"
+  local candidate="${2//[[:space:]]/}"
+  if [[ "$candidate" =~ ^[0-9]+$ ]] && (( candidate > 0 )); then
+    printf -v "$var_name" '%s' "$candidate"
+  fi
+}
+
+gc_load_llm_output_limits() {
+  local root="${1:-${PROJECT_ROOT:-$PWD}}"
+  local helper=""
+  if helper="$(gc_clone_python_tool "load_output_limits.py" "$root")"; then
+    :
+  else
+    return 1
+  fi
+  local raw_output=""
+  if ! raw_output="$(python3 "$helper" "$root" 2>/dev/null)"; then
+    return 1
+  fi
+  while IFS='=' read -r key value; do
+    [[ -z "${key// }" ]] && continue
+    case "$key" in
+      plan) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_PLAN "$value" ;;
+      status) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_STATUS "$value" ;;
+      verify) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_VERIFY "$value" ;;
+      patch) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_PATCH "$value" ;;
+      hard_cap) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_HARD_CAP "$value" ;;
+    esac
+  done <<<"$raw_output"
+  return 0
+}
+
+gc_output_limit_default_for_step() {
+  local step="${1:-patch}"
+  case "${step,,}" in
+    plan) printf '%s\n' "$GC_LLM_OUTPUT_LIMIT_PLAN_DEFAULT" ;;
+    status) printf '%s\n' "$GC_LLM_OUTPUT_LIMIT_STATUS_DEFAULT" ;;
+    verify) printf '%s\n' "$GC_LLM_OUTPUT_LIMIT_VERIFY_DEFAULT" ;;
+    patch|*) printf '%s\n' "$GC_LLM_OUTPUT_LIMIT_PATCH_DEFAULT" ;;
+  esac
+}
+
+gc_output_limit_for_step() {
+  local step="${1:-patch}"
+  local step_lower="${step,,}"
+  local limit
+  case "$step_lower" in
+    plan) limit="$GC_LLM_OUTPUT_LIMIT_PLAN" ;;
+    status) limit="$GC_LLM_OUTPUT_LIMIT_STATUS" ;;
+    verify) limit="$GC_LLM_OUTPUT_LIMIT_VERIFY" ;;
+    patch) limit="$GC_LLM_OUTPUT_LIMIT_PATCH" ;;
+    *) step_lower="patch"; limit="$GC_LLM_OUTPUT_LIMIT_PATCH" ;;
+  esac
+  if ! [[ "$limit" =~ ^[0-9]+$ ]] || (( limit <= 0 )); then
+    limit="$(gc_output_limit_default_for_step "$step_lower")"
+  fi
+  local hard_cap="$GC_LLM_OUTPUT_LIMIT_HARD_CAP"
+  if ! [[ "$hard_cap" =~ ^[0-9]+$ ]] || (( hard_cap <= 0 )); then
+    hard_cap="$GC_LLM_OUTPUT_LIMIT_HARD_CAP_DEFAULT"
+  fi
+  if (( limit > hard_cap )); then
+    limit="$hard_cap"
+  fi
+  printf '%s\n' "$limit"
+}
+
+gc_log_blocked_quota() {
+  local meta_path="$1"
+  local task_id="$2"
+  local story_slug="$3"
+  local run_stamp="$4"
+  local model="$5"
+
+  [[ -f "$meta_path" ]] || return 0
+
+  local log_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
+  local log_path="${log_dir}/work-on-tasks/blocked-quota.ndjson"
+
+  python3 "${CLI_ROOT}/scripts/python/log_blocked_quota.py" \
+    --meta "$meta_path" \
+    --task-id "$task_id" \
+    --story-slug "$story_slug" \
+    --run-id "$run_stamp" \
+    --model "$model" \
+    --log "$log_path"
+}
+
+gc_log_task_metrics() {
+  local run_id="$1"
+  local story_slug="$2"
+  local task_number="$3"
+  local task_id="$4"
+  local status="$5"
+  local story_points="$6"
+  local tokens_retrieve="${7:-0}"
+  local tokens_plan="${8:-0}"
+  local tokens_patch="${9:-0}"
+  local tokens_verify="${10:-0}"
+
+  local helper_path
+  helper_path="$(gc_clone_python_tool "log_task_metrics.py" "${PROJECT_ROOT:-$PWD}")" || return 0
+  local log_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/work-on-tasks"
+  mkdir -p "$log_dir"
+  local log_path="${log_dir}/task-metrics.ndjson"
+
+  python3 "$helper_path" \
+    --log "$log_path" \
+    --run-id "$run_id" \
+    --story "$story_slug" \
+    --task-number "$task_number" \
+    --task-id "$task_id" \
+    --status "$status" \
+    --story-points "$story_points" \
+    --tokens-retrieve "$tokens_retrieve" \
+    --tokens-plan "$tokens_plan" \
+    --tokens-patch "$tokens_patch" \
+    --tokens-verify "$tokens_verify"
 }
 
 gc_bootstrap_reset_state() {
@@ -2706,7 +3188,7 @@ gc_finalize_active_task() {
     local prompt_db="$prompt_entry"
     local output_db="$output_entry"
     local notes_payload="Interrupted by signal ${signal}; rerun work-on-tasks to resume."
-    gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "on-hold" "$report_entry_db" "$prompt_db" "$output_db" "0" "0" "0" "interrupted" "false" "$notes_payload" "" "" "" "$timestamp"
+    gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "on-hold" "$report_entry_db" "$prompt_db" "$output_db" "0" "0" "0" "interrupted" "false" "$notes_payload" "" "" "" "" "$timestamp" "0" "0" "0" "0" ""
     gc_update_task_state "$tasks_db" "$slug" "$task_index" "on-hold" "$run_stamp"
   fi
 
@@ -2827,7 +3309,13 @@ gc_record_task_progress() {
   local written_text="${15:-}"
   local patched_text="${16:-}"
   local commands_text="${17:-}"
-  local occurred_at="${18:-}"
+  local observation_hash="${18:-}"
+  local occurred_at="${19:-}"
+  local tokens_retrieve="${20:-0}"
+  local tokens_plan="${21:-0}"
+  local tokens_patch="${22:-0}"
+  local tokens_verify="${23:-0}"
+  local story_points="${24:-}"
   local helper_path
   helper_path="$(gc_clone_python_tool "record_task_progress.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   python3 "$helper_path" \
@@ -2848,7 +3336,27 @@ gc_record_task_progress() {
     "$written_text" \
     "$patched_text" \
     "$commands_text" \
-    "$occurred_at"
+    "$observation_hash" \
+    "$occurred_at" \
+    "$tokens_retrieve" \
+    "$tokens_plan" \
+    "$tokens_patch" \
+    "$tokens_verify" \
+    "$story_points"
+}
+
+gc_make_observation_hash() {
+  local seed="${1:-}"
+  if [[ -z "$seed" ]]; then
+    return 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+  python3 - "$seed" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(sys.argv[1].encode()).hexdigest())
+PY
 }
 
 gc_update_throughput_metrics() {
@@ -2859,6 +3367,40 @@ gc_update_throughput_metrics() {
   local helper_path
   helper_path="$(gc_clone_python_tool "update_throughput_metrics.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   python3 "$helper_path" "$db_path" "$action" "$story_slug" "$position"
+}
+
+gc_backlog_guard_snapshot() {
+  local db_path="${1:?tasks database path required}"
+  local output_path="${2:-}"
+  local window_days="${3:-}"
+  local wip_limit="${4:-}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "backlog_guard.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local -a args=("snapshot" "--db" "$db_path" "--epic" "ADM-01")
+  if [[ -n "$window_days" ]]; then
+    args+=("--window-days" "$window_days")
+  fi
+  if [[ -n "$wip_limit" ]]; then
+    args+=("--wip-limit" "$wip_limit")
+  fi
+  if [[ -n "$output_path" ]]; then
+    mkdir -p "$(dirname "$output_path")"
+    args+=("--output" "$output_path")
+  fi
+  python3 "$helper_path" "${args[@]}"
+}
+
+gc_backlog_guard_compare() {
+  local before_path="${1:?before snapshot path required}"
+  local after_path="${2:?after snapshot path required}"
+  local wip_limit="${3:-}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "backlog_guard.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local -a args=("compare" "--before" "$before_path" "--after" "$after_path" "--epic" "ADM-01")
+  if [[ -n "$wip_limit" ]]; then
+    args+=("--wip-limit" "$wip_limit")
+  fi
+  python3 "$helper_path" "${args[@]}"
 }
 
 gc_rewind_backlog_from_task() {
@@ -2897,6 +3439,13 @@ gc_fetch_story_task_counts() {
   local helper_path
   helper_path="$(gc_clone_python_tool "fetch_story_task_counts.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   python3 "$helper_path" "$db_path" "$story_slug"
+}
+
+gc_fetch_migration_epoch() {
+  local db_path="${1:?tasks database path required}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "fetch_migration_epoch.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path"
 }
 
 gc_trim_memory() {
@@ -5584,6 +6133,8 @@ codex_call() {
 
   local prompt_file=""
   local output_file=""
+  local call_step="patch"
+  local call_max_output=0
 
   if [[ $# -gt 0 && -f "$1" ]]; then
     prompt_file="$1"
@@ -5594,6 +6145,10 @@ codex_call() {
     case "$1" in
       --prompt) prompt_file="$2"; shift 2;;
       --output) output_file="$2"; shift 2;;
+      --step)
+        call_step="${2,,}"
+        shift 2
+        ;;
       *) break;;
     esac
   done
@@ -5612,13 +6167,22 @@ PROMPT
     gc_trim_prompt_file "$prompt_file"
   fi
 
+  call_step="${call_step,,}"
+  [[ -n "$call_step" ]] || call_step="patch"
+  call_max_output="$(gc_output_limit_for_step "$call_step")"
+  if ! [[ "$call_max_output" =~ ^[0-9]+$ ]]; then
+    call_max_output=0
+  fi
+  GC_CURRENT_CODEX_STEP="$call_step"
+  GC_CURRENT_CODEX_MAX_OUT="$call_max_output"
+
   if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" && "${GC_CODEX_USAGE_LIMIT_CONFIRMED:-0}" == "1" ]]; then
     warn "Codex usage limit previously reached; skipping ${task}."
     return 95
   fi
 
   if command -v "$CODEX_BIN" >/dev/null 2>&1; then
-    info "Codex ${task} → model=${CODEX_MODEL}"
+    info "Codex ${task} (step=${call_step}) → model=${CODEX_MODEL}"
     local fallback_model="${CODEX_FALLBACK_MODEL:-gpt-5-codex}"
     # shellcheck disable=SC2034  # local function assigned below for lexical scoping
     local run_codex_model
@@ -5634,6 +6198,9 @@ PROMPT
       fi
       if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
         args+=(-c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"")
+      fi
+      if (( call_max_output > 0 )); then
+        args+=(-c "model_max_output_tokens=${call_max_output}")
       fi
       args+=(--full-auto --sandbox workspace-write --skip-git-repo-check)
       if [[ -n "$output_file" ]]; then
@@ -5660,15 +6227,29 @@ PROMPT
       fi
       if [[ -n "$codex_log" ]]; then
         local cmd_status=0
+        local exec_start_time exec_end_time exec_duration_ms
+        exec_start_time="$(date +%s)"
         if gc_exec_with_timeout "$exec_timeout" "$prompt_file" "$codex_log" "$CODEX_BIN" "${args[@]}"; then
           cmd_status=0
         else
           cmd_status=$?
         fi
-        gc_record_codex_usage "$codex_log" "$task" "$model" "$prompt_file" "$cmd_status"
+        exec_end_time="$(date +%s)"
+        exec_duration_ms=$(( (exec_end_time - exec_start_time) * 1000 ))
+        (( exec_duration_ms < 0 )) && exec_duration_ms=0
+        gc_record_codex_usage "$codex_log" "$task" "$model" "$prompt_file" "$cmd_status" "$call_step" "$call_max_output" "$exec_duration_ms"
         local attempt_tokens="${GC_LAST_CODEX_TOTAL_TOKENS:-0}"
         if [[ "$attempt_tokens" =~ ^[0-9]+$ ]]; then
           GC_CODEX_CALL_TOKEN_ACCUM=$((GC_CODEX_CALL_TOKEN_ACCUM + attempt_tokens))
+        fi
+        if [[ "${GC_STAGE_LIMIT_LAST_STEP:-}" == "$call_step" ]]; then
+          skip_codex=1
+          skip_codex_reason="stage-limit"
+          blocked_stop_run=1
+          run_blocked_quota=1
+          task_result_status="blocked-quota"
+          codex_ok=1
+          task_notes+=("Stage ${call_step} exceeded budget limit ${GC_STAGE_LIMIT_LAST_LIMIT:-}")
         fi
         if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
           return 95
@@ -5937,9 +6518,14 @@ ensure_node_dependencies() {
 gc_apply_codex_changes() {
   local output_file="${1:?output file required}"
   local project_root="${2:?project root required}"
+  local artifact_path="${3:-}"
   local helper_path
   helper_path="$(gc_clone_python_tool "focus_text.py" "$project_root")" || return 1
-  python3 "$helper_path" "$output_file" "$project_root"
+  if [[ -n "$artifact_path" ]]; then
+    GC_PATCH_ARTIFACT_PATH="$artifact_path" python3 "$helper_path" "$output_file" "$project_root"
+  else
+    python3 "$helper_path" "$output_file" "$project_root"
+  fi
 }
 
 cmd_create_jira_tasks() {
@@ -6006,6 +6592,11 @@ EOUSAGE
   local parsed_local="${tasks_dir}/parsed.local.json"
   local tasks_db="${tasks_dir}/tasks.db"
   mkdir -p "$tasks_dir"
+  local intake_lock_path="${tasks_dir}/.intake-frozen"
+  if [[ -f "$intake_lock_path" && "$force" -ne 1 ]]; then
+    warn "Backlog intake frozen (see ${intake_lock_path#${PROJECT_ROOT:-$PWD}/}); rerun with --force after resolving duplicates."
+    return 1
+  fi
 
   info "Parsing Jira backlog → ${parsed_local}"
   gc_parse_jira_tasks "$jira" "$parsed_local"
@@ -6101,6 +6692,156 @@ EOUSAGE
   python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}"
 }
 
+cmd_dag() {
+  local root="" action="" story=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project|-p)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      validate)
+        action="validate"
+        shift
+        break
+        ;;
+      -h|--help)
+        cat <<'EOUSAGE'
+Usage: gpt-creator dag validate [--project PATH] [--story SLUG]
+
+Validate story-level DAG definitions under .gpt-creator/dag.
+EOUSAGE
+        return 0
+        ;;
+      *)
+        die "Unknown argument for dag: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$action" ]] || die "dag requires a subcommand (e.g. 'dag validate')"
+  ensure_ctx "$root"
+
+  case "$action" in
+    validate)
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --story)
+            story="$2"
+            shift 2
+            ;;
+          --help|-h)
+            cat <<'EOUSAGE'
+Usage: gpt-creator dag validate [--project PATH] [--story SLUG]
+EOUSAGE
+            return 0
+            ;;
+          *)
+            die "Unknown argument for dag validate: $1"
+            ;;
+        esac
+      done
+      local dag_helper
+      dag_helper="$(gc_clone_python_tool "dag_inspect.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+      if [[ -n "$story" ]]; then
+        python3 "$dag_helper" validate --project-root "${PROJECT_ROOT:-$PWD}" --story "$story"
+      else
+        python3 "$dag_helper" validate --project-root "${PROJECT_ROOT:-$PWD}"
+      fi
+      ;;
+    *)
+      die "Unknown dag subcommand: ${action}"
+      ;;
+  esac
+}
+
+cmd_next() {
+  local root="" story=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project|-p)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      --story)
+        story="$2"
+        shift 2
+        ;;
+      -h|--help)
+        cat <<'EOUSAGE'
+Usage: gpt-creator next [--project PATH] [--story SLUG]
+
+List the next ready task(s) per story with dependency gate reasons.
+EOUSAGE
+        return 0
+        ;;
+      *)
+        die "Unknown argument for next: $1"
+        ;;
+    esac
+  done
+
+  ensure_ctx "$root"
+  local tasks_db="${PLAN_DIR}/tasks/tasks.db"
+  [[ -f "$tasks_db" ]] || die "Tasks database not found at ${tasks_db}. Run 'gpt-creator create-tasks' first."
+
+  local story_plan_helper
+  story_plan_helper="$(gc_clone_python_tool "story_scheduler.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$story_plan_helper" "$tasks_db" "${story:-}" "1" >/dev/null 2>&1 || true
+
+  local dag_helper
+  dag_helper="$(gc_clone_python_tool "dag_inspect.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local -a helper_args=(next --project-root "${PROJECT_ROOT:-$PWD}" --db "$tasks_db")
+  if [[ -n "$story" ]]; then
+    helper_args+=(--story "$story")
+  fi
+  python3 "$dag_helper" "${helper_args[@]}"
+}
+
+cmd_why() {
+  local root="" story="" task=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project|-p)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      --story)
+        story="$2"
+        shift 2
+        ;;
+      --task)
+        task="$2"
+        shift 2
+        ;;
+      -h|--help)
+        cat <<'EOUSAGE'
+Usage: gpt-creator why --task TASK_ID [--project PATH] [--story SLUG]
+
+Explain why a task is blocked, including dependency and readiness gates.
+EOUSAGE
+        return 0
+        ;;
+      *)
+        die "Unknown argument for why: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$task" ]] || die "--task is required"
+  ensure_ctx "$root"
+  local tasks_db="${PLAN_DIR}/tasks/tasks.db"
+  [[ -f "$tasks_db" ]] || die "Tasks database not found at ${tasks_db}. Run 'gpt-creator create-tasks' first."
+
+  local story_plan_helper
+  story_plan_helper="$(gc_clone_python_tool "story_scheduler.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$story_plan_helper" "$tasks_db" "${story:-}" "1" >/dev/null 2>&1 || true
+
+  local dag_helper
+  dag_helper="$(gc_clone_python_tool "dag_inspect.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$dag_helper" why --project-root "${PROJECT_ROOT:-$PWD}" --db "$tasks_db" --task "$task"
+}
+
 cmd_migrate_tasks_json() {
   local root="" force=0
   while [[ $# -gt 0 ]]; do
@@ -6140,6 +6881,11 @@ EOUSAGE
   local tasks_workspace="${PLAN_DIR}/tasks"
   mkdir -p "$tasks_workspace"
   local db_path="${tasks_workspace}/tasks.db"
+  local intake_lock_path="${tasks_workspace}/.intake-frozen"
+  if [[ -f "$intake_lock_path" && "$force" -ne 1 ]]; then
+    warn "Backlog intake frozen (see ${intake_lock_path#${PROJECT_ROOT:-$PWD}/}); rerun with --force after resolving duplicates."
+    return 1
+  fi
 
   info "Building tasks payload from JSON → ${payload}"
   info "Updating tasks database → ${db_path}"
@@ -6466,12 +7212,50 @@ cmd_work_on_tasks() {
   local root="" resume=1 story_filter="" start_task_ref="" no_verify=0 keep_artifacts=0 memory_cycle=0 force_reset=0
   local batch_size=0 sleep_between=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=1
   local -a context_skip_patterns=()
-  local token_limit="${GC_CODEX_MAX_TOKENS_PER_TASK:-0}"
-  local token_limit_override=0
+  local override_max_tokens=""
+  local override_soft_limit=""
+  local override_reserved_output=""
+  local override_stop_on_overbudget=""
+  local -a stage_limit_overrides=()
+  local auto_abandon_override=""
   local idle_timeout="${GC_WORK_ON_TASKS_IDLE_TIMEOUT:-0}"
   local throughput_checkpoint_interval=300
   local throughput_next_checkpoint=0
   local diff_repeat_limit_override=""
+  local override_plan_max_out=""
+  local override_status_max_out=""
+  local override_verify_max_out=""
+  local override_patch_max_out=""
+  local override_hard_cap=""
+  local backlog_guard_window_days="${GC_BACKLOG_GUARD_WINDOW_DAYS:-7}"
+  local backlog_guard_wip_limit="${GC_BACKLOG_GUARD_WIP_LIMIT:-12}"
+  local backlog_snapshot_before_path=""
+  local backlog_snapshot_after_path=""
+  local backlog_guard_enabled=0
+  local backlog_guard_window_value=""
+
+  local binder_enabled=1
+  local binder_ttl_seconds=604800
+  local binder_max_size_bytes=209715200
+  local binder_clear_on_migration=0
+  if [[ -n "${GC_BINDER_ENABLED:-}" ]]; then
+    case "${GC_BINDER_ENABLED,,}" in
+      0|false|no|off) binder_enabled=0;;
+      *) binder_enabled=1;;
+    esac
+  fi
+  if [[ -n "${GC_BINDER_TTL_SECONDS:-}" ]]; then
+    binder_ttl_seconds=$(gc_parse_duration_seconds "${GC_BINDER_TTL_SECONDS}" "$binder_ttl_seconds")
+  fi
+  if [[ -n "${GC_BINDER_MAX_BYTES:-}" ]]; then
+    binder_max_size_bytes=$(gc_parse_size_bytes "${GC_BINDER_MAX_BYTES}" "$binder_max_size_bytes")
+  fi
+  if [[ -n "${GC_BINDER_CLEAR_ON_MIGRATION:-}" ]]; then
+    case "${GC_BINDER_CLEAR_ON_MIGRATION,,}" in
+      1|true|yes|on) binder_clear_on_migration=1;;
+      *) binder_clear_on_migration=0;;
+    esac
+  fi
 
   local codex_timeout_default=600
   local codex_timeout_value="${GC_CODEX_EXEC_TIMEOUT:-}"
@@ -6548,14 +7332,85 @@ cmd_work_on_tasks() {
         doc_snippets=0
         shift
         ;;
+      --plan-max-out)
+        override_plan_max_out="${2:-}"
+        shift 2
+        ;;
+      --status-max-out)
+        override_status_max_out="${2:-}"
+        shift 2
+        ;;
+      --verify-max-out)
+        override_verify_max_out="${2:-}"
+        shift 2
+        ;;
+      --patch-max-out)
+        override_patch_max_out="${2:-}"
+        shift 2
+        ;;
+      --out-hard-cap)
+        override_hard_cap="${2:-}"
+        shift 2
+        ;;
       --sample-lines)
         sample_lines="${2:-}"
         shift 2
         ;;
-      --token-limit)
-        token_limit="${2:-}"
-        token_limit_override=1
+      --max-tokens)
+        override_max_tokens="${2:-}"
         shift 2
+        ;;
+      --soft-limit)
+        override_soft_limit="${2:-}"
+        shift 2
+        ;;
+      --reserve-output)
+        override_reserved_output="${2:-}"
+        shift 2
+        ;;
+      --stop-on-overbudget)
+        override_stop_on_overbudget="true"
+        shift
+        ;;
+      --stop-on-overbudget=*)
+        override_stop_on_overbudget="${1#*=}"
+        shift
+        ;;
+      --no-stop-on-overbudget)
+        override_stop_on_overbudget="false"
+        shift
+        ;;
+      --max-tokens-per-stage)
+        stage_limit_overrides+=("${2:-}")
+        shift 2
+        ;;
+      --auto-abandon-top-offenders)
+        auto_abandon_override="true"
+        shift
+        ;;
+      --no-auto-abandon-top-offenders)
+        auto_abandon_override="false"
+        shift
+        ;;
+      --binder-ttl)
+        binder_ttl_seconds=$(gc_parse_duration_seconds "${2:-}" "$binder_ttl_seconds")
+        shift 2
+        ;;
+      --binder-max-size)
+        binder_max_size_bytes=$(gc_parse_size_bytes "${2:-}" "$binder_max_size_bytes")
+        shift 2
+        ;;
+      --binder-clear-on-migration)
+        binder_clear_on_migration=1
+        shift
+        ;;
+      --no-binder)
+        binder_enabled=0
+        shift
+        ;;
+      --binder-enabled)
+        binder_enabled=1
+        shift
         ;;
       --diff-repeat-limit)
         diff_repeat_limit_override="${2:-}"
@@ -6599,8 +7454,29 @@ Options:
                         (default) Pull scoped excerpts for referenced docs/endpoints when available
   --no-context-doc-snippets
                         Disable doc-snippet mode and include staged docs verbatim
+  --plan-max-out NUM    Max output tokens for planning/status updates (default: 450; respects config/overrides)
+  --status-max-out NUM  Max output tokens for per-task status notes (default: 350)
+  --verify-max-out NUM  Max output tokens for verification summaries (default: 500)
+  --patch-max-out NUM   Max output tokens for code/diff responses (default: 7000)
+  --out-hard-cap NUM    Absolute ceiling for any Codex response (default: 12000)
   --sample-lines NUM   Include at most NUM chunks of minified sample payloads (default: 0; increase to view raw content)
-  --token-limit NUM    Stop after a task exceeds NUM Codex tokens (default: 0 → unlimited)
+  --max-tokens NUM     Override per-task hard token limit (defaults to model context minus reserved output)
+  --soft-limit RATIO   Override soft budget ratio (0 < ratio ≤ 1, default: 0.85)
+  --reserve-output NUM Reserve NUM tokens for model output (default: 1024)
+  --stop-on-overbudget[=true|false]
+                        Halt the run when a prompt exceeds the hard budget (default: true)
+  --max-tokens-per-stage stage=NUM
+                        Override a specific stage budget (e.g. --max-tokens-per-stage patch=15000)
+  --auto-abandon-top-offenders
+                        Force auto-abandon when prior runs exceeded stage budgets regardless of config
+  --no-auto-abandon-top-offenders
+                        Disable auto-abandon for offender stages even if configured
+  --binder-ttl DUR     Retain binder cache for duration (e.g. 7d, 12h; default: 7d)
+  --binder-max-size SIZE
+                        Maximum on-disk size for binder cache (supports KB/MB/GB suffixes; default: 200MB)
+  --binder-clear-on-migration
+                        Drop cached binders when the task migration epoch changes
+  --no-binder          Disable binder cache reuse for this run
   --diff-repeat-limit NUM
                         Override Codex diff repeat guard threshold (default: GC_CODEX_DIFF_REPEAT_LIMIT or 6)
   --idle-timeout SEC   Abort the run if no forward progress occurs for SEC seconds (default: 0 → disabled)
@@ -6612,6 +7488,15 @@ EOHELP
         ;;
     esac
   done
+
+  if (( binder_enabled )); then
+    export GC_BINDER_ENABLED=1
+  else
+    export GC_BINDER_ENABLED=0
+  fi
+  export GC_BINDER_TTL_SECONDS="$binder_ttl_seconds"
+  export GC_BINDER_MAX_BYTES="$binder_max_size_bytes"
+  export GC_BINDER_CLEAR_ON_MIGRATION="$binder_clear_on_migration"
 
   if [[ $# -gt 0 ]]; then
     die "Unexpected argument for work-on-tasks: ${1}"
@@ -6629,72 +7514,88 @@ EOHELP
   else
     die "Invalid --idle-timeout value: ${idle_timeout}"
   fi
-  if [[ -z "$token_limit" ]]; then
-    token_limit=0
-  elif [[ "$token_limit" =~ ^[0-9]+$ ]]; then
-    :
-  else
-    if (( token_limit_override )); then
-      die "Invalid --token-limit value: ${token_limit}"
-    else
-      warn "GC_CODEX_MAX_TOKENS_PER_TASK ('${token_limit}') is not numeric; disabling per-task token guard."
-      token_limit=0
-    fi
-  fi
   batch_size=$((batch_size))
   sleep_between=$((sleep_between))
   context_lines=$((context_lines))
   context_file_lines=$((context_file_lines))
   sample_lines=$((sample_lines))
-  token_limit=$((token_limit))
   idle_timeout=$((idle_timeout))
   (( sample_lines >= 0 )) || die "--sample-lines must be zero or positive (got ${sample_lines})"
 
-  local token_budget_raw="${GC_TOKENS_PER_TASK_BUDGET:-${GC_PER_TASK_TOKEN_BUDGET:-}}"
-  local token_budget=0
-  if [[ -n "${token_budget_raw:-}" ]]; then
-    token_budget="$(gc_parse_int "$token_budget_raw" "$token_limit")"
+  backlog_guard_window_value="$backlog_guard_window_days"
+  if [[ -z "$backlog_guard_window_value" ]]; then
+    backlog_guard_window_value="7"
+  elif [[ "$backlog_guard_window_value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    :
   else
-    if (( token_limit > 0 )); then
-      token_budget="$token_limit"
-    else
-      token_budget=100000
-    fi
+    warn "GC_BACKLOG_GUARD_WINDOW_DAYS ('${backlog_guard_window_days}') is invalid; defaulting to 7."
+    backlog_guard_window_value="7"
   fi
-  token_budget=$((token_budget))
-  if (( token_budget < 0 )); then
-    token_budget=0
-  fi
-  token_limit="$token_budget"
-
-  local token_soft_ratio_raw="${GC_TOKENS_SOFT_RATIO:-0.9}"
-  local token_soft_threshold=0
-  if (( token_limit > 0 )); then
-    token_soft_threshold=$(python3 - "$token_limit" "$token_soft_ratio_raw" <<'PY'
-import sys
-budget = int(sys.argv[1])
-try:
-    ratio = float(sys.argv[2])
-except Exception:
-    ratio = 0.9
-if ratio <= 0:
-    print(0)
-else:
-    if ratio > 1:
-        ratio = 1.0
-    print(int(budget * ratio))
-PY
-    ) || token_soft_threshold=0
+  if [[ -z "$backlog_guard_wip_limit" || ! "$backlog_guard_wip_limit" =~ ^[0-9]+$ ]]; then
+    warn "GC_BACKLOG_GUARD_WIP_LIMIT ('${backlog_guard_wip_limit}') is invalid; defaulting to 12."
+    backlog_guard_wip_limit="12"
   fi
 
-  local token_min_headroom
-  token_min_headroom="$(gc_parse_int "${GC_TOKENS_MIN_HEADROOM:-3000}" 3000)"
-  local token_next_estimate
-  token_next_estimate="$(gc_parse_int "${GC_TOKENS_NEXT_STEP_ESTIMATE:-5000}" 5000)"
+  if [[ -n "$override_max_tokens" && ! "$override_max_tokens" =~ ^[0-9]+$ ]]; then
+    die "Invalid --max-tokens value: ${override_max_tokens}"
+  fi
+  if [[ -n "$override_soft_limit" && ! "$override_soft_limit" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+    die "Invalid --soft-limit value: ${override_soft_limit}"
+  fi
+  if [[ -n "$override_reserved_output" && ! "$override_reserved_output" =~ ^[0-9]+$ ]]; then
+    die "Invalid --reserve-output value: ${override_reserved_output}"
+  fi
+  local entry
+  for entry in "${stage_limit_overrides[@]}"; do
+    [[ -n "$entry" && "$entry" == *"="* ]] || die "--max-tokens-per-stage expects stage=value (received: ${entry})"
+    local stage_name="${entry%%=*}"
+    local stage_value="${entry#*=}"
+    [[ -n "$stage_name" ]] || die "--max-tokens-per-stage requires a stage name"
+    [[ "$stage_value" =~ ^[0-9]+$ ]] || die "Invalid stage limit '${entry}'; value must be numeric"
+  done
+  if [[ -n "$override_plan_max_out" && ! "$override_plan_max_out" =~ ^[0-9]+$ ]]; then
+    die "Invalid --plan-max-out value: ${override_plan_max_out}"
+  fi
+  if [[ -n "$override_status_max_out" && ! "$override_status_max_out" =~ ^[0-9]+$ ]]; then
+    die "Invalid --status-max-out value: ${override_status_max_out}"
+  fi
+  if [[ -n "$override_verify_max_out" && ! "$override_verify_max_out" =~ ^[0-9]+$ ]]; then
+    die "Invalid --verify-max-out value: ${override_verify_max_out}"
+  fi
+  if [[ -n "$override_patch_max_out" && ! "$override_patch_max_out" =~ ^[0-9]+$ ]]; then
+    die "Invalid --patch-max-out value: ${override_patch_max_out}"
+  fi
+  if [[ -n "$override_hard_cap" && ! "$override_hard_cap" =~ ^[0-9]+$ ]]; then
+    die "Invalid --out-hard-cap value: ${override_hard_cap}"
+  fi
+  local stop_override_normalized=""
+  if [[ -n "$override_stop_on_overbudget" ]]; then
+    stop_override_normalized="${override_stop_on_overbudget,,}"
+    case "$stop_override_normalized" in
+      true|false|0|1|yes|no|on|off|t|f|y|n) ;;
+      *) die "Invalid --stop-on-overbudget value: ${override_stop_on_overbudget}" ;;
+    esac
+  fi
 
-  export GC_CODEX_MAX_TOKENS_PER_TASK="$token_limit"
-  if (( token_limit > 0 )); then
-    info "Per-task Codex token guard active → ${token_limit} tokens."
+  if [[ -n "$override_max_tokens" ]]; then
+    export GC_PER_TASK_HARD_LIMIT_OVERRIDE="$override_max_tokens"
+  else
+    unset GC_PER_TASK_HARD_LIMIT_OVERRIDE
+  fi
+  if [[ -n "$override_soft_limit" ]]; then
+    export GC_PER_TASK_SOFT_RATIO_OVERRIDE="$override_soft_limit"
+  else
+    unset GC_PER_TASK_SOFT_RATIO_OVERRIDE
+  fi
+  if [[ -n "$override_reserved_output" ]]; then
+    export GC_PER_TASK_MIN_OUTPUT_OVERRIDE="$override_reserved_output"
+  else
+    unset GC_PER_TASK_MIN_OUTPUT_OVERRIDE
+  fi
+  if [[ -n "$stop_override_normalized" ]]; then
+    export GC_STOP_ON_OVERBUDGET_OVERRIDE="$stop_override_normalized"
+  else
+    unset GC_STOP_ON_OVERBUDGET_OVERRIDE
   fi
   if (( idle_timeout > 0 )); then
     info "Idle watchdog active → ${idle_timeout}s without progress."
@@ -6748,10 +7649,383 @@ PY
   fi
 
   ensure_ctx "$root"
+
+  local preflight_script="${CLI_ROOT}/scripts/preflight_git_blockers.sh"
+  if [[ -x "$preflight_script" ]]; then
+    local preflight_output="" preflight_code=0 preflight_outcome=""
+    if [[ -n "${PROJECT_ROOT:-}" ]]; then
+      set +e
+      preflight_output="$(cd "$PROJECT_ROOT" && "$preflight_script")"
+      preflight_code=$?
+      set -e
+    else
+      set +e
+      preflight_output="$("$preflight_script")"
+      preflight_code=$?
+      set -e
+    fi
+    preflight_outcome="${preflight_output//[$'\r\n']}"
+    if [[ -z "$preflight_outcome" ]]; then
+      if (( preflight_code == 3 )); then
+        preflight_outcome="blocked-merge-conflict"
+      elif (( preflight_code == 2 )); then
+        preflight_outcome="blocked-dirty-tree"
+      else
+        preflight_outcome="ok"
+      fi
+    fi
+    case "$preflight_outcome" in
+      blocked-merge-conflict)
+        warn "Git merge conflicts detected; resolve before running work-on-tasks."
+        printf '%s\n' "$preflight_outcome"
+        return 3
+        ;;
+      blocked-dirty-tree)
+        warn "Dirty working tree detected; commit or stash changes before running work-on-tasks."
+        printf '%s\n' "$preflight_outcome"
+        return 2
+        ;;
+      ok)
+        ;;
+      *)
+        if (( preflight_code != 0 )); then
+          warn "Preflight git blockers returned '${preflight_outcome:-?}' (exit ${preflight_code}); treating as dirty tree."
+          printf '%s\n' "${preflight_outcome:-blocked-dirty-tree}"
+          return 2
+        fi
+        ;;
+    esac
+  fi
+
+  local i18n_guard_script="${CLI_ROOT}/scripts/preflight_i18n_guard.sh"
+  if [[ -x "$i18n_guard_script" ]]; then
+    local i18n_guard_output="" i18n_guard_code=0 i18n_guard_outcome=""
+    if [[ -n "${PROJECT_ROOT:-}" ]]; then
+      set +e
+      i18n_guard_output="$(cd "$PROJECT_ROOT" && "$i18n_guard_script")"
+      i18n_guard_code=$?
+      set -e
+    else
+      set +e
+      i18n_guard_output="$("$i18n_guard_script")"
+      i18n_guard_code=$?
+      set -e
+    fi
+    i18n_guard_outcome="${i18n_guard_output//[$'\r\n']}"
+    if [[ -z "$i18n_guard_outcome" ]]; then
+      if (( i18n_guard_code == 6 )); then
+        i18n_guard_outcome="blocked-dependency(i18n_sync_required)"
+      elif (( i18n_guard_code == 3 )); then
+        i18n_guard_outcome="blocked-merge-conflict"
+      else
+        i18n_guard_outcome="ok"
+      fi
+    fi
+    case "$i18n_guard_outcome" in
+      blocked-merge-conflict)
+        warn "Locale merge conflicts detected; resolve locale .rej files before running work-on-tasks."
+        printf '%s\n' "$i18n_guard_outcome"
+        return 3
+        ;;
+      'blocked-dependency(i18n_sync_required)')
+        warn "Locale files out of sync; run 'pnpm i18n:sync' to regenerate translations."
+        printf '%s\n' "$i18n_guard_outcome"
+        return 6
+        ;;
+      blocked-i18n-guard-error)
+        warn "i18n preflight guard failed; inspect scripts/preflight_i18n_guard.sh output."
+        printf '%s\n' "$i18n_guard_outcome"
+        return 6
+        ;;
+      ok)
+        ;;
+      *)
+        if (( i18n_guard_code != 0 )); then
+          warn "i18n preflight guard returned '${i18n_guard_outcome:-?}' (exit ${i18n_guard_code}); treating as guard failure."
+          printf '%s\n' "blocked-i18n-guard-error"
+          return 6
+        fi
+        ;;
+    esac
+  fi
+
+  local schema_guard_script="${CLI_ROOT}/scripts/preflight_prisma_guard.sh"
+  if [[ -x "$schema_guard_script" ]]; then
+    local schema_guard_output="" schema_guard_code=0 schema_guard_outcome=""
+    if [[ -n "${PROJECT_ROOT:-}" ]]; then
+      set +e
+      schema_guard_output="$(cd "$PROJECT_ROOT" && "$schema_guard_script")"
+      schema_guard_code=$?
+      set -e
+    else
+      set +e
+      schema_guard_output="$("$schema_guard_script")"
+      schema_guard_code=$?
+      set -e
+    fi
+    schema_guard_outcome="${schema_guard_output//[$'\r\n']}"
+    if [[ -z "$schema_guard_outcome" ]]; then
+      if (( schema_guard_code == 4 )); then
+        schema_guard_outcome="blocked-schema-drift"
+      elif (( schema_guard_code == 5 )); then
+        schema_guard_outcome="blocked-schema-guard-error"
+      else
+        schema_guard_outcome="ok"
+      fi
+    fi
+    case "$schema_guard_outcome" in
+      blocked-schema-drift)
+        warn "Prisma schema drift detected; align prisma/schema.prisma with migrations before running work-on-tasks."
+        printf '%s\n' "$schema_guard_outcome"
+        return 4
+        ;;
+      blocked-schema-guard-error)
+        warn "Prisma schema guard failed; inspect prisma migrate diff output and rerun."
+        printf '%s\n' "$schema_guard_outcome"
+        return 4
+        ;;
+      ok)
+        ;;
+      *)
+        if (( schema_guard_code != 0 )); then
+          warn "Prisma schema guard returned '${schema_guard_outcome:-?}' (exit ${schema_guard_code}); treating as guard failure."
+          printf '%s\n' "blocked-schema-guard-error"
+          return 4
+        fi
+        ;;
+    esac
+  fi
+
+  local budget_cfg_json="{}"
+  local budget_loader
+  if budget_loader="$(gc_clone_python_tool "load_budget_config.py" "$PROJECT_ROOT" 2>/dev/null)"; then
+    budget_cfg_json="$(python3 "$budget_loader" "$PROJECT_ROOT" 2>/dev/null || echo '{}')"
+  fi
+
+  local budget_stage_json
+  budget_stage_json="$(python3 - <<'PY' "$budget_cfg_json"
+import json, sys
+cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+stage = cfg.get("per_stage_limits", {}) if isinstance(cfg, dict) else {}
+print(json.dumps(stage, separators=(',', ':'), ensure_ascii=True))
+PY
+)"
+  [[ -n "$budget_stage_json" ]] || budget_stage_json="{}"
+
+  if ((${#stage_limit_overrides[@]} > 0)); then
+    budget_stage_json="$(python3 - <<'PY' "$budget_stage_json" "${stage_limit_overrides[@]}"
+import json, sys
+stage_cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+if not isinstance(stage_cfg, dict):
+    stage_cfg = {}
+for raw in sys.argv[2:]:
+    if '=' not in raw:
+        continue
+    name, value = raw.split('=', 1)
+    name = name.strip()
+    value = value.strip()
+    if not name:
+        continue
+    try:
+        number = int(value)
+    except ValueError:
+        continue
+    if number > 0:
+        stage_cfg[name] = number
+print(json.dumps(stage_cfg, separators=(',', ':'), ensure_ascii=True))
+PY
+)"
+  fi
+
+  while IFS=$'\t' read -r stage_name stage_limit_value; do
+    gc_budget_set_stage_limit "$stage_name" "$stage_limit_value"
+  done < <(python3 - <<'PY' "$budget_stage_json"
+import json, sys
+stage_cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+if not isinstance(stage_cfg, dict):
+    stage_cfg = {}
+for name, value in stage_cfg.items():
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        continue
+    if number > 0:
+        print(f"{name}\t{number}")
+PY
+  )
+
+  gc_budget_reset_stage_tracking
+
+  local budget_off_json
+  budget_off_json="$(python3 - <<'PY' "$budget_cfg_json"
+import json, sys
+cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+print(json.dumps(cfg.get('offenders', {}), separators=(',', ':'), ensure_ascii=True))
+PY
+)"
+  [[ -n "$budget_off_json" ]] || budget_off_json="{}"
+
+  local budget_offender_window=10
+  local budget_offender_top_k=3
+  local budget_offender_dom=0.5
+  local budget_auto_abandon_default=1
+  local budget_offender_actions_json="{}"
+  local offender_meta
+  offender_meta="$(python3 - <<'PY' "$budget_off_json"
+import json, sys
+cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+if not isinstance(cfg, dict):
+    cfg = {}
+def as_int(value, fallback):
+    try:
+        iv = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return iv if iv > 0 else fallback
+def as_float(value, fallback):
+    try:
+        fv = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    return fv if 0.0 < fv <= 1.0 else fallback
+window = as_int(cfg.get('window_runs', 10), 10)
+top_k = as_int(cfg.get('top_k', 3), 3)
+dominance = as_float(cfg.get('dominance_threshold', 0.5), 0.5)
+auto_val = cfg.get('auto_abandon', True)
+if isinstance(auto_val, str):
+    auto_flag = auto_val.strip().lower() in {'1','true','yes','on'}
+else:
+    auto_flag = bool(auto_val)
+actions = cfg.get('actions', {})
+if not isinstance(actions, dict):
+    actions = {}
+print(f"{window}\t{top_k}\t{dominance}\t{int(auto_flag)}\t" + json.dumps(actions, separators=(',', ':'), ensure_ascii=True))
+PY
+)"
+  IFS=$'\t' read -r budget_offender_window budget_offender_top_k budget_offender_dom budget_auto_abandon_default budget_offender_actions_json <<< "$offender_meta"
+  budget_offender_window=${budget_offender_window:-10}
+  budget_offender_top_k=${budget_offender_top_k:-3}
+  budget_offender_dom=${budget_offender_dom:-0.5}
+  budget_auto_abandon_default=${budget_auto_abandon_default:-1}
+  [[ -n "$budget_offender_actions_json" ]] || budget_offender_actions_json="{}"
+
+  local auto_abandon_flag=$budget_auto_abandon_default
+  if [[ "$auto_abandon_override" == "true" ]]; then
+    auto_abandon_flag=1
+  elif [[ "$auto_abandon_override" == "false" ]]; then
+    auto_abandon_flag=0
+  fi
+
+  local budget_usage_file="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/codex-usage.ndjson"
+  local budget_offenders_json="{}"
+  local offenders_helper
+  if offenders_helper="$(gc_clone_python_tool "budget_offenders.py" "$PROJECT_ROOT" 2>/dev/null)"; then
+    local -a offender_args=("$offenders_helper" --usage-file "$budget_usage_file" --per-stage-json "$budget_stage_json" --actions-json "$budget_offender_actions_json" --window-runs "$budget_offender_window" --top-k "$budget_offender_top_k" --dominance-threshold "$budget_offender_dom")
+    if (( auto_abandon_flag )); then
+      offender_args+=(--auto-abandon)
+    else
+      offender_args+=(--no-auto-abandon)
+    fi
+    budget_offenders_json="$(python3 "${offender_args[@]}" 2>/dev/null || echo '{}')"
+  fi
+
+  local last_offender_run=""
+  local offenders_auto_flag=$auto_abandon_flag
+  if [[ -n "$budget_offenders_json" && "$budget_offenders_json" != "{}" ]]; then
+    while IFS=$'\t' read -r kind a b c d; do
+      case "$kind" in
+        AUTO)
+          offenders_auto_flag="$a"
+          ;;
+        RUN)
+          last_offender_run="$a"
+          ;;
+        STAGE)
+          if [[ "$offenders_auto_flag" == "1" ]]; then
+            gc_budget_set_stage_skip "$a" 1 "auto-abandon:${last_offender_run:-previous}"
+          fi
+          ;;
+        TOOL)
+          local tool_key
+          tool_key="$(gc_budget_stage_id "$a")"
+          local tool_action_var="GC_BUDGET_TOOL_ACTION_${tool_key^^}"
+          printf -v "$tool_action_var" '%s' "$d"
+          local tool_bytes_var="GC_BUDGET_TOOL_BYTES_${tool_key^^}"
+          printf -v "$tool_bytes_var" '%s' "$b"
+          local tool_share_var="GC_BUDGET_TOOL_SHARE_${tool_key^^}"
+          printf -v "$tool_share_var" '%s' "$c"
+          ;;
+      esac
+    done < <(python3 - <<'PY' "$budget_offenders_json"
+import json, sys
+cfg = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+print(f"AUTO\t{int(bool(cfg.get('auto_abandon')))}")
+print(f"RUN\t{cfg.get('target_run_id','')}")
+for item in cfg.get('stage_offenders', []):
+    stage = item.get('stage')
+    if not stage:
+        continue
+    total = int(item.get('total_tokens') or 0)
+    limit = int(item.get('limit') or 0)
+    print(f"STAGE\t{stage}\t{total}\t{limit}")
+for item in cfg.get('tool_offenders', []):
+    tool = item.get('tool')
+    if not tool:
+        continue
+    bytes_used = int(item.get('bytes') or 0)
+    share = float(item.get('share') or 0.0)
+    action = item.get('action') or ''
+    print(f"TOOL\t{tool}\t{bytes_used}\t{share}\t{action}")
+PY
+    )
+  fi
+
+  if [[ "${GC_BUDGET_TOOL_ACTION_SHOW_FILE:-}" == "range-only" ]]; then
+    export GC_SHOW_FILE_FORCE_RANGE=1
+  fi
+  if [[ "${GC_BUDGET_TOOL_ACTION_RG:-}" == "narrow" ]]; then
+    export GC_RG_NARROW=1
+  fi
+  if [[ "${GC_BUDGET_TOOL_ACTION_TESTS:-}" == "summary" ]]; then
+    export GC_TESTS_SUMMARY=1
+  fi
+
+  export GC_BUDGET_STAGE_LIMITS_JSON="$budget_stage_json"
+  export GC_BUDGET_TOOL_ACTIONS_JSON="$budget_offender_actions_json"
+
+  gc_load_llm_output_limits "${PROJECT_ROOT:-$PWD}" || true
+  if [[ -n "$override_hard_cap" ]]; then
+    gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_HARD_CAP "$override_hard_cap"
+  fi
+  if [[ -n "$override_plan_max_out" ]]; then
+    gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_PLAN "$override_plan_max_out"
+  fi
+  if [[ -n "$override_status_max_out" ]]; then
+    gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_STATUS "$override_status_max_out"
+  fi
+  if [[ -n "$override_verify_max_out" ]]; then
+    gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_VERIFY "$override_verify_max_out"
+  fi
+  if [[ -n "$override_patch_max_out" ]]; then
+    gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_PATCH "$override_patch_max_out"
+  fi
+
+  info "LLM output limits → plan=${GC_LLM_OUTPUT_LIMIT_PLAN}, status=${GC_LLM_OUTPUT_LIMIT_STATUS}, verify=${GC_LLM_OUTPUT_LIMIT_VERIFY}, patch=${GC_LLM_OUTPUT_LIMIT_PATCH}, hard_cap=${GC_LLM_OUTPUT_LIMIT_HARD_CAP}"
+
   local tasks_dir="${PLAN_DIR}/tasks"
   local tasks_db="${tasks_dir}/tasks.db"
+  local intake_lock_path="${tasks_dir}/.intake-frozen"
   mkdir -p "$tasks_dir"
   export GC_DOCUMENTATION_DB_PATH="$tasks_db"
+  local doc_vector_path="${tasks_dir}/documentation-vector-index.sqlite"
+  export GC_DOC_VECTOR_INDEX_PATH="$doc_vector_path"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    if ! sqlite3 "$GC_DOCUMENTATION_DB_PATH" 'SELECT count(*) FROM documentation;' >/dev/null 2>&1; then
+      die "Documentation database missing or invalid at ${GC_DOCUMENTATION_DB_PATH}; run 'gpt-creator scan --project \"${PROJECT_ROOT:-$PWD}\"' and retry."
+    fi
+  else
+    warn "sqlite3 not available; unable to verify documentation database integrity."
+  fi
   if ! gc_require_documentation_catalog "$PROJECT_ROOT"; then
     local catalog_root="${PROJECT_ROOT:-$PWD}"
     die "Failed to prepare documentation catalog. Run 'gpt-creator scan --project \"${catalog_root}\"' and retry."
@@ -6786,6 +8060,15 @@ PY
     gc_reset_task_progress "$tasks_db"
     gc_sync_story_totals "$tasks_db"
   fi
+
+  local migration_epoch_initial=0
+  if migration_epoch_initial="$(gc_fetch_migration_epoch "$tasks_db" 2>/dev/null)"; then
+    :
+  else
+    migration_epoch_initial=0
+  fi
+  local migration_epoch_baseline="$migration_epoch_initial"
+  local migration_transition_triggered=0
 
   local start_task_story_slug="" start_task_story_title="" start_task_position="" start_task_id="" start_task_title=""
   if [[ -n "$start_task_ref" ]]; then
@@ -6845,9 +8128,20 @@ PY
 
   local run_stamp
   run_stamp="$(date +%Y%m%d_%H%M%S)"
+  export GC_BUDGET_RUN_ID="$run_stamp"
   local run_dir="${runs_dir}/${run_stamp}"
   local run_log_dir="${work_logs_root}/${run_stamp}"
   mkdir -p "$run_dir" "$run_log_dir"
+  local backlog_guard_snapshot_output=""
+  backlog_snapshot_before_path="${run_dir}/backlog-before.json"
+  if backlog_guard_snapshot_output="$(gc_backlog_guard_snapshot "$tasks_db" "" "$backlog_guard_window_value" "$backlog_guard_wip_limit" 2>/dev/null)"; then
+    if [[ -n "$backlog_guard_snapshot_output" ]]; then
+      printf '%s\n' "$backlog_guard_snapshot_output" >"$backlog_snapshot_before_path"
+      backlog_guard_enabled=1
+    fi
+  else
+    backlog_guard_enabled=0
+  fi
   local doc_catalog_path="${state_dir}/doc-catalog.json"
   if [[ ! -f "$doc_catalog_path" ]]; then
     mkdir -p "$(dirname "$doc_catalog_path")"
@@ -6906,22 +8200,6 @@ PY
   if ! [[ "$context_auto_shrink_threshold" =~ ^[0-9]+$ ]]; then
     context_auto_shrink_threshold=60000
   fi
-  if (( token_limit > 0 )); then
-    local derived_threshold=$(( (token_limit * 85) / 100 ))
-    if (( derived_threshold <= 0 )); then
-      derived_threshold="$token_limit"
-    fi
-    if (( derived_threshold >= token_limit )); then
-      local delta=$(( token_limit / 10 ))
-      (( delta < 1 )) && delta=1
-      derived_threshold=$(( token_limit - delta ))
-    fi
-    if (( derived_threshold <= 0 )); then
-      derived_threshold="$token_limit"
-    fi
-    context_auto_shrink_threshold="$derived_threshold"
-  fi
-
   info "Work run directory → ${run_dir}"
 
   local resume_flag=1
@@ -6932,6 +8210,7 @@ PY
   local manual_followups=0
   local usage_limit_triggered=0
   local batch_limit_reached=0
+  local run_blocked_quota=0
 
   gc_touch_progress() {
     last_progress_ts="$(date +%s)"
@@ -7129,6 +8408,8 @@ PY
   local processed_any_total=0
   local remaining_tasks=0
   local memory_cycle_single=0
+  local story_plan_helper=""
+  story_plan_helper="$(gc_clone_python_tool "story_scheduler.py" "${PROJECT_ROOT:-$PWD}")" || return 1
 
   while :; do
     if gc_check_idle_timeout; then :; else break; fi
@@ -7182,6 +8463,35 @@ PY
       next_task_int=$((next_task))
     fi
 
+    if (( migration_transition_triggered )); then
+      break
+    fi
+
+    local migration_epoch_current=""
+    if migration_epoch_current="$(gc_fetch_migration_epoch "$tasks_db" 2>/dev/null)"; then
+      if [[ "$migration_epoch_current" != "$migration_epoch_baseline" ]]; then
+        migration_transition_triggered=1
+        work_failed=1
+        manual_followups=1
+        local block_position="$next_task_int"
+        if (( block_position >= total_tasks_int )); then
+          if (( total_tasks_int > 0 )); then
+            block_position=$((total_tasks_int - 1))
+          else
+            block_position=0
+          fi
+        fi
+        gc_update_task_state "$tasks_db" "$slug" "$block_position" "blocked-migration-transition" "$run_stamp" 2>/dev/null || true
+        if (( binder_clear_on_migration )); then
+          gc_binder_clear_story "$PROJECT_ROOT" "${epic_id:-}" "$slug"
+          info "  Cleared binder cache for story ${slug} due to migration epoch change."
+        fi
+        info "  Migration epoch changed ($migration_epoch_baseline → $migration_epoch_current); deferring remaining tasks to a fresh run."
+        migration_epoch_baseline="$migration_epoch_current"
+        break
+      fi
+    fi
+
     printf -v story_prefix "%03d" "${sequence:-0}"
     [[ -n "$slug" ]] || slug="story-${story_prefix}"
     local story_run_dir="${run_dir}/story_${story_prefix}_${slug}"
@@ -7190,6 +8500,7 @@ PY
     local report_dir="${story_run_dir}/reports"
 
     info "Story ${story_prefix} (${story_id:-$slug}) — ${story_title:-Unnamed}"
+    export GC_BUDGET_STORY_ID="${story_id:-$slug}"
 
     if (( total_tasks_int == 0 )); then
       local stats=""
@@ -7252,6 +8563,10 @@ PY
       printf -v task_number "%03d" $((task_index + 1))
       local prompt_path="${story_run_dir}/prompts/task_${task_number}.prompt.md"
       local output_path="${story_run_dir}/out/task_${task_number}.out.md"
+      local stage_baseline_retrieve="${GC_BUDGET_STAGE_TOTAL_RETRIEVE:-0}"
+      local stage_baseline_plan="${GC_BUDGET_STAGE_TOTAL_PLAN:-0}"
+      local stage_baseline_patch="${GC_BUDGET_STAGE_TOTAL_PATCH:-0}"
+      local stage_baseline_verify="${GC_BUDGET_STAGE_TOTAL_VERIFY:-0}"
 
       local prompt_meta
       if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$task_index" "$prompt_path" "$context_tail" "$CODEX_MODEL" "$PROJECT_ROOT" "$STAGING_DIR")"; then
@@ -7260,8 +8575,8 @@ PY
         break
       fi
 
-      local task_id="" task_title="" task_story_points=""
-      IFS=$'\t' read -r task_id task_title task_story_points <<<"$prompt_meta"
+      local task_id="" task_title="" task_story_points="" task_status_current="" task_locked_flag="0" task_status_reason=""
+      IFS=$'\t' read -r task_id task_title task_story_points task_status_current task_locked_flag task_status_reason <<<"$prompt_meta"
       local banner_task_id="${task_id:-no-id}"
       local task_start_epoch
       task_start_epoch="$(date +%s)"
@@ -7272,6 +8587,22 @@ PY
       local task_story_points_display="—"
       if [[ -n "$task_story_points" ]]; then
         task_story_points_display="$task_story_points"
+      fi
+
+      local task_status_original="$task_status_current"
+      local task_status_lower="${task_status_original,,}"
+      local task_locked_migration=0
+      if [[ "$task_locked_flag" =~ ^[0-9]+$ ]] && (( task_locked_flag > 0 )); then
+        task_locked_migration=1
+      fi
+      local task_status_reason_current="$task_status_reason"
+      local terminal_locked_regex='^(complete|completed|completed-no-changes|blocked-budget|blocked-quota|blocked-merge-conflict|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\([^)]+\)|skipped-already-complete)$'
+      if [[ "$task_status_lower" == blocked-dependency\(* ]]; then
+        local blocked_reason="${task_status_reason_current:-${task_status_original}}"
+        warn "  Task ${task_number} (${banner_task_id}) blocked by dependency: ${blocked_reason}"
+        manual_followups=1
+        story_failed=1
+        break
       fi
 
       printf '\n'
@@ -7295,6 +8626,7 @@ PY
       local -a task_commands=()
       local task_changes_applied=0
       local apply_status="pending"
+      local skip_codex_reason="prompt-blocked"
       local task_report_path="${report_dir}/task_${task_number}.log"
       local task_log_archive_path="${story_log_dir}/task_${task_number}.log"
       local task_change_sizes=""
@@ -7308,9 +8640,21 @@ PY
       if (( diff_guard_stall_limit <= 0 && diff_guard_file_cooldown <= 0 && diff_guard_turn_repeat_limit <= 0 )); then
         diff_guard_enabled=0
       fi
-      local token_soft_warned=0
-      local token_lean_attempted=0
       local empty_checkpoint_created=0
+      local attempt_tokens=0
+      local codex_attempted=0
+      local skip_codex=0
+      local blocked_stop_run=0
+      local prompt_status="ok"
+      local prompt_soft_limit_value=0
+      local prompt_hard_limit_value=0
+      local prompt_stop_on_overbudget="true"
+      local prompt_token_estimate=0
+      local prompt_pruned_bytes=0
+      local prompt_pruned_items="[]"
+      local prompt_reserved_output_value=0
+      local prompt_binder_status=""
+      local prompt_binder_reason=""
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
       export GC_ACTIVE_TASK_DB="$tasks_db"
       export GC_ACTIVE_TASK_SLUG="$slug"
@@ -7322,50 +8666,168 @@ PY
       export GC_ACTIVE_TASK_ARCHIVE="$task_log_archive_path"
       export GC_ACTIVE_TASK_PROMPT="$prompt_path"
       export GC_ACTIVE_TASK_OUTPUT="$output_path"
+      export GC_BUDGET_TASK_ID="${task_id:-$banner_task_id}"
+
+      local prompt_meta_path="${prompt_path}.meta.json"
+      if [[ -f "$prompt_meta_path" ]]; then
+        read -r prompt_status prompt_soft_limit_value prompt_hard_limit_value prompt_stop_on_overbudget prompt_token_estimate prompt_pruned_bytes prompt_pruned_items prompt_reserved_output_value prompt_binder_status prompt_binder_reason < <(
+          python3 - "$prompt_meta_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("ok\t0\t0\ttrue\t0\t0\t{}\t0\tmissing\tinvalid-meta")
+    raise SystemExit(0)
+
+def normalise_bool(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    text = str(value).strip().lower()
+    if text in {"false", "0", "no", "off"}:
+        return "false"
+    return "true"
+
+status = data.get("status") or "ok"
+soft = data.get("token_budget_soft") or 0
+hard = data.get("token_budget_hard") or 0
+stop = normalise_bool(data.get("stop_on_overbudget"))
+estimate = data.get("token_estimate_final") or 0
+pruned = data.get("pruned") or {}
+pruned_bytes = pruned.get("bytes") or 0
+pruned_items = pruned.get("items") or {}
+reserved = data.get("reserved_output") or 0
+binder = data.get("binder") or {}
+binder_status = binder.get("status") or ""
+binder_reason = binder.get("reason") or ""
+print(f"{status}\t{soft}\t{hard}\t{stop}\t{estimate}\t{pruned_bytes}\t{json.dumps(pruned_items, separators=(',', ':'))}\t{reserved}\t{binder_status}\t{binder_reason}")
+PY
+        )
+      fi
+      GC_CURRENT_PRUNED_ITEMS="$prompt_pruned_items"
+      local retrieve_tokens=0
+      if [[ "$prompt_pruned_bytes" =~ ^[0-9]+$ && prompt_pruned_bytes -gt 0 ]]; then
+        retrieve_tokens=$((prompt_pruned_bytes / 4))
+      fi
+      local retrieve_tool_bytes="{}"
+      if [[ "$prompt_pruned_bytes" =~ ^[0-9]+$ && prompt_pruned_bytes -gt 0 ]]; then
+        retrieve_tool_bytes="{\"show-file\": ${prompt_pruned_bytes}}"
+      fi
+      gc_budget_log_stage "retrieve" "$retrieve_tokens" 0 "$retrieve_tokens" 0 "$prompt_pruned_items" "$retrieve_tool_bytes" "false"
+      if gc_budget_stage_tripped "retrieve"; then
+        local retrieve_limit_value
+        retrieve_limit_value="$(gc_budget_get_stage_limit "retrieve")"
+        task_notes+=("Retrieve stage exceeded budget limit (${retrieve_tokens}/${retrieve_limit_value})")
+        skip_codex=1
+        codex_ok=1
+        manual_followups=0
+        keep_output=0
+        task_tokens_total=$((prompt_token_estimate))
+        task_result_status="blocked-quota"
+        apply_status="prompt-blocked"
+        skip_codex_reason="stage-limit"
+        blocked_stop_run=1
+        run_blocked_quota=1
+      else
+        gc_budget_log_stage "plan" "$prompt_token_estimate" 0 "$prompt_token_estimate" 0 "$prompt_pruned_items" "{}" "false"
+        if gc_budget_stage_should_skip "patch"; then
+          skip_codex=1
+          codex_ok=1
+          task_needs_review=0
+          manual_followups=0
+          keep_output=0
+          task_tokens_total=$((prompt_token_estimate))
+          task_result_status="abandoned-for-budget"
+          apply_status="auto-abandon"
+          skip_codex_reason="$(gc_budget_stage_skip_reason "patch")"
+          [[ -z "$skip_codex_reason" ]] && skip_codex_reason="auto-abandon"
+        fi
+      fi
+
+      if [[ "${prompt_status,,}" != "blocked-quota" ]]; then
+        if [[ "$prompt_hard_limit_value" =~ ^[0-9]+$ ]] && (( prompt_hard_limit_value > 0 )) && [[ "$prompt_token_estimate" =~ ^[0-9]+$ ]] && (( prompt_token_estimate > prompt_hard_limit_value )); then
+          skip_codex=1
+          codex_ok=1
+          task_needs_review=0
+          manual_followups=0
+          keep_output=0
+          task_tokens_total=$((prompt_token_estimate))
+          task_result_status="blocked-quota"
+          apply_status="prompt-blocked"
+          skip_codex_reason="hard-cap"
+          local budget_note="${prompt_token_estimate}/${prompt_hard_limit_value}"
+          task_notes+=("Prompt estimate ${budget_note} exceeds hard token budget; halting before Codex call.")
+          gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$CODEX_MODEL"
+          run_blocked_quota=1
+          if [[ "$prompt_stop_flag" != "false" ]]; then
+            blocked_stop_run=1
+          else
+            manual_followups=1
+          fi
+        fi
+      fi
+
+      local prompt_stop_flag="${prompt_stop_on_overbudget,,}"
+      if [[ -n "$prompt_binder_status" ]]; then
+        case "${prompt_binder_status,,}" in
+          hit)
+            info "    Binder hit — cached context reused."
+            ;;
+          stale)
+            info "    Binder stale (${prompt_binder_reason:-reason unknown}); rebuilding context."
+            ;;
+          miss)
+            info "    Binder cache miss (${prompt_binder_reason:-})"
+            ;;
+        esac
+      fi
+
+      if [[ "${prompt_status,,}" == "blocked-quota" ]]; then
+        skip_codex=1
+        codex_ok=1
+        task_needs_review=0
+        manual_followups=0
+        keep_output=0
+        task_tokens_total=$((prompt_token_estimate))
+        task_result_status="blocked-quota"
+        apply_status="prompt-blocked"
+        local budget_note="${prompt_token_estimate}"
+        if [[ "$prompt_hard_limit_value" =~ ^[0-9]+$ ]] && (( prompt_hard_limit_value > 0 )); then
+          budget_note="${prompt_token_estimate}/${prompt_hard_limit_value}"
+        elif [[ "$prompt_soft_limit_value" =~ ^[0-9]+$ ]] && (( prompt_soft_limit_value > 0 )); then
+          budget_note="${prompt_token_estimate}/${prompt_soft_limit_value}"
+        fi
+        task_notes+=("Prompt exceeded token budgets after deterministic pruning; estimated ${budget_note} tokens.")
+        gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$CODEX_MODEL"
+        if [[ "$prompt_stop_flag" != "false" ]]; then
+          blocked_stop_run=1
+          run_blocked_quota=1
+        else
+          manual_followups=1
+        fi
+      fi
+
+      if (( skip_codex == 1 )); then
+        attempt=$max_attempts
+        gc_budget_log_stage "patch" 0 0 0 0 "$prompt_pruned_items" "{}" "true" "$skip_codex_reason"
+      fi
 
       while (( attempt < max_attempts )); do
         (( ++attempt ))
         (( ++diff_guard_global_attempt ))
         local diff_guard_current_step="$diff_guard_global_attempt"
         gc_touch_progress
-        if (( token_budget > 0 )); then
-          local token_budget_remaining=$(( token_budget - task_tokens_total ))
-          if (( token_soft_threshold > 0 )) && (( token_soft_warned == 0 )) && (( task_tokens_total >= token_soft_threshold )); then
-            local token_usage_pct=0
-            if (( token_budget > 0 )); then
-              token_usage_pct=$(( (task_tokens_total * 100) / token_budget ))
-            fi
-            warn "  Token usage ${task_tokens_total}/${token_budget} (~${token_usage_pct}%%); nearing per-task budget."
-            token_soft_warned=1
-          fi
-          local token_required=$token_min_headroom
-          if (( token_next_estimate > token_required )); then
-            token_required=$token_next_estimate
-          fi
-          if (( token_budget_remaining <= token_required )); then
-            if (( token_lean_attempted == 0 )); then
-              warn "  Token budget nearly exhausted; pruning prompt for lean retry."
-              gc_trim_prompt_file_lean "$prompt_path"
-              token_lean_attempted=1
-              task_notes+=("Lean retry initiated after trimming prompt context for token budget.")
-              (( attempt-- ))
-              continue
-            fi
-            warn "  Token budget hit; stopping this task early → Status: BLOCKED_BUDGET."
-            task_result_status="blocked-budget"
-            task_notes+=("Token budget exhausted after lean retry; trim scope or increase CODEX_MAX_PROMPT_TOKENS.")
-            codex_ok=1
-            break_after_update=1
-            break
-          fi
-        fi
+        codex_attempted=1
         local diff_before=""
         task_change_sizes=""
         if (( diff_guard_enabled )); then
           diff_before="$(gc_diff_fingerprint)"
         fi
-        if codex_call "$call_name" --prompt "$prompt_path" --output "$output_path"; then
-          local attempt_tokens="${GC_CODEX_CALL_TOKEN_ACCUM:-${GC_LAST_CODEX_TOTAL_TOKENS:-0}}"
+        if codex_call "$call_name" --step patch --prompt "$prompt_path" --output "$output_path"; then
+          attempt_tokens="${GC_CODEX_CALL_TOKEN_ACCUM:-${GC_LAST_CODEX_TOTAL_TOKENS:-0}}"
           if [[ "$attempt_tokens" =~ ^[0-9]+$ ]]; then
             task_tokens_total=$((task_tokens_total + attempt_tokens))
           fi
@@ -7378,18 +8840,30 @@ PY
               info "    Recorded empty-apply checkpoint ${checkpoint_rel} (no repository changes)."
               task_notes+=("Codex returned no output; recorded checkpoint ${checkpoint_rel} for follow-up.")
             fi
-            warn "  Codex produced no output for ${call_name}; marking task as skipped."
-            task_needs_review=0
-            manual_followups=0
-            keep_output=0
-            task_result_status="skipped-no-changes"
-            apply_status="no-changes"
-            task_notes+=("Codex returned no output; no changes applied.")
-            codex_ok=1
+            if (( task_locked_migration )) && [[ "$task_status_lower" =~ $terminal_locked_regex ]]; then
+              warn "  Codex produced no output for ${call_name}; preserving locked status ${task_status_original:-unknown}."
+              task_result_status="${task_status_original:-complete}"
+              apply_status="locked-no-output"
+              task_notes+=("Migration lock active; retained status ${task_result_status} despite empty output.")
+              codex_ok=1
+            else
+              warn "  Codex produced no output for ${call_name}; marking task as apply-failed-migration-context."
+              task_needs_review=1
+              manual_followups=1
+              keep_output=1
+              task_result_status="apply-failed-migration-context"
+              apply_status="no-output"
+              task_notes+=("No agent output; requires manual follow-up.")
+              codex_ok=1
+            fi
             break
           fi
           local apply_output
-          if ! apply_output="$(gc_apply_codex_changes "$output_path" "$PROJECT_ROOT")"; then
+          local patch_artifact_dir="${PROJECT_ROOT}/.gpt-creator/artifacts/patches"
+          local patch_label="${banner_task_id:-${slug:-story}-${task_number}}"
+          patch_label="${patch_label//[^A-Za-z0-9_.-]/_}"
+          local patch_artifact_path="${patch_artifact_dir}/${patch_label}.patch"
+          if ! apply_output="$(gc_apply_codex_changes "$output_path" "$PROJECT_ROOT" "$patch_artifact_path")"; then
             warn "  Failed to apply changes for ${call_name}; manual review required (see ${output_path})."
             task_needs_review=1
             manual_followups=1
@@ -7400,13 +8874,21 @@ PY
             break
           fi
           if [[ "$apply_output" == "no-output" || "$apply_output" == "empty-output" ]]; then
-            warn "  Codex produced no actionable JSON for ${call_name}; skipping task."
-            task_needs_review=0
-            manual_followups=0
-            keep_output=0
-            task_result_status="skipped-no-changes"
-            task_notes+=("No actionable changes; auto-skip.")
-            codex_ok=1
+            warn "  Codex produced no actionable JSON for ${call_name}."
+            if (( task_locked_migration )) && [[ "$task_status_lower" =~ $terminal_locked_regex ]]; then
+              task_result_status="${task_status_original:-complete}"
+              task_notes+=("Migration lock active; retained status ${task_result_status} after empty apply result.")
+              apply_status="locked-no-output"
+              codex_ok=1
+            else
+              task_needs_review=1
+              manual_followups=1
+              keep_output=1
+              task_result_status="apply-failed-migration-context"
+              apply_status="empty-apply"
+              task_notes+=("No actionable JSON returned; marked apply-failed-migration-context.")
+              codex_ok=1
+            fi
             break
           fi
           apply_status="ok"
@@ -7431,6 +8913,12 @@ PY
                 any_changes=1
                 task_changes_applied=1
                 task_patched_paths+=("$patched_path")
+                ;;
+              ARTIFACT\ *)
+                local artifact_entry="${change_line#ARTIFACT }"
+                local artifact_path="" artifact_hunks="" artifact_lines=""
+                IFS=$'\t' read -r artifact_path artifact_hunks artifact_lines <<<"$artifact_entry"
+                info "    Patch artifact: ${artifact_path} (hunks=${artifact_hunks:-0}, lines=${artifact_lines:-0})"
                 ;;
               SIZE\ *)
                 local size_entry="${change_line#SIZE }"
@@ -7493,14 +8981,21 @@ REM
                 task_patched_paths=()
                 continue
               fi
-              warn "  Codex produced no actionable changes; skipping task."
-              task_needs_review=0
-              manual_followups=0
-              keep_output=0
-              task_result_status="skipped-no-changes"
-              apply_status="no-changes"
-              task_notes+=("No actionable changes; auto-skip.")
-              codex_ok=1
+              warn "  Codex produced no actionable changes."
+              if (( task_locked_migration )) && [[ "$task_status_lower" =~ $terminal_locked_regex ]]; then
+                task_result_status="${task_status_original:-complete}"
+                apply_status="locked-no-output"
+                task_notes+=("Migration lock active; retained status ${task_result_status} despite empty diff.")
+                codex_ok=1
+              else
+                task_needs_review=1
+                manual_followups=1
+                keep_output=1
+                task_result_status="apply-failed-migration-context"
+                apply_status="no-changes"
+                task_notes+=("No actionable changes after retries; requires manual follow-up.")
+                codex_ok=1
+              fi
               break_after_update=1
               break
             fi
@@ -7824,13 +9319,14 @@ PY
         task_notes+=("Codex execution did not complete; no changes were applied.")
       fi
 
-      if (( codex_ok )) && (( context_lines_current > context_lines_min || context_file_lines_current > context_file_lines_min )); then
+      if (( codex_attempted )) && (( codex_ok )) && (( context_lines_current > context_lines_min || context_file_lines_current > context_file_lines_min )); then
         local last_tokens="${GC_LAST_CODEX_TOTAL_TOKENS:-0}"
         local shrink_threshold="$context_auto_shrink_threshold"
+        if [[ "$prompt_soft_limit_value" =~ ^[0-9]+$ ]] && (( prompt_soft_limit_value > 0 )); then
+          shrink_threshold="$prompt_soft_limit_value"
+        fi
         local trigger_shrink=0
         if [[ "$last_tokens" =~ ^[0-9]+$ ]] && (( last_tokens > shrink_threshold )); then
-          trigger_shrink=1
-        elif (( token_limit > 0 )) && [[ "$last_tokens" =~ ^[0-9]+$ ]] && (( last_tokens >= token_limit )); then
           trigger_shrink=1
         fi
         if (( trigger_shrink )); then
@@ -7895,6 +9391,80 @@ PY
         fi
       fi
 
+      # Register documentation changes in the registry and guard against rejects.
+      if (( ${#task_written_paths[@]} > 0 || ${#task_patched_paths[@]} > 0 )); then
+        local -A gc_doc_changed=()
+        local gc_doc_path=""
+        for gc_doc_path in "${task_written_paths[@]}" "${task_patched_paths[@]}"; do
+          [[ -z "$gc_doc_path" ]] && continue
+          gc_doc_path="${gc_doc_path%% (*}"
+          if [[ "$gc_doc_path" == docs/* ]]; then
+            gc_doc_changed["$gc_doc_path"]=1
+          fi
+        done
+        if (( ${#gc_doc_changed[@]} > 0 )); then
+          local doc_registry_python="${PYTHON_BIN:-python3}"
+          local doc_registry_tool="${CLI_ROOT}/src/lib/doc_registry.py"
+          if command -v "$doc_registry_python" >/dev/null 2>&1 && [[ -f "$doc_registry_tool" ]]; then
+            local gc_doc_register_ok=1
+            local -a gc_doc_sorted=()
+            while IFS= read -r gc_doc_line; do
+              gc_doc_sorted+=("$gc_doc_line")
+            done < <(printf '%s\n' "${!gc_doc_changed[@]}" | LC_ALL=C sort)
+            local gc_doc_reg_path=""
+            for gc_doc_reg_path in "${gc_doc_sorted[@]}"; do
+              local gc_doc_abs="${PROJECT_ROOT}/${gc_doc_reg_path}"
+              if [[ ! -f "$gc_doc_abs" ]]; then
+                task_notes+=("Doc registry skipped ${gc_doc_reg_path} (file missing after apply).")
+                continue
+              fi
+              local gc_doc_id=""
+              if ! gc_doc_id="$("$doc_registry_python" - <<'PY' "$gc_doc_abs"
+import hashlib, pathlib, sys
+target = pathlib.Path(sys.argv[1]).resolve()
+digest = hashlib.sha256(str(target).encode("utf-8", "replace")).hexdigest().upper()
+print("DOC-" + digest[:8])
+PY
+)"; then
+                gc_doc_register_ok=0
+                task_notes+=("Failed to compute documentation id for ${gc_doc_reg_path}; register manually.")
+                continue
+              fi
+              if ! "$doc_registry_python" "$doc_registry_tool" register "$gc_doc_id" "$gc_doc_abs" "updated trace link(s)"; then
+                gc_doc_register_ok=0
+                task_notes+=("Doc registry update failed for ${gc_doc_reg_path}; rerun `python3 src/lib/doc_registry.py register ${gc_doc_id} ${gc_doc_reg_path}`.")
+              fi
+            done
+            if (( gc_doc_register_ok == 0 )); then
+              task_needs_review=1
+              manual_followups=1
+            fi
+          else
+            local -a gc_doc_missing=()
+            while IFS= read -r gc_doc_line; do
+              gc_doc_missing+=("$gc_doc_line")
+            done < <(printf '%s\n' "${!gc_doc_changed[@]}" | LC_ALL=C sort)
+            task_notes+=("Doc registry tooling unavailable; queue manual register for: ${gc_doc_missing[*]}")
+          fi
+        fi
+      fi
+
+      local -a gc_doc_rejects=()
+      if [[ -d "${PROJECT_ROOT}/docs" ]]; then
+        while IFS= read -r -d '' gc_reject; do
+          gc_reject="${gc_reject#"${PROJECT_ROOT}/"}"
+          gc_doc_rejects+=("$gc_reject")
+        done < <(find "${PROJECT_ROOT}/docs" -type f -name '*.rej' -print0 2>/dev/null)
+      fi
+      if (( ${#gc_doc_rejects[@]} > 0 )); then
+        task_result_status="blocked-merge-conflict"
+        apply_status="blocked-merge-conflict"
+        task_needs_review=1
+        manual_followups=1
+        keep_output=1
+        task_notes+=("Documentation patch rejects present: ${gc_doc_rejects[*]}. Resolve before rerunning work-on-tasks.")
+      fi
+
       if [[ "$task_result_status" == "in-progress" ]]; then
         task_result_status="complete"
       fi
@@ -7910,30 +9480,17 @@ PY
 
       local story_status_hint="in-progress"
       case "$task_result_status" in
-        blocked|blocked-budget) story_status_hint="blocked" ;;
+        blocked|blocked-budget|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)) story_status_hint="blocked" ;;
         on-hold) story_status_hint="on-hold" ;;
       esac
 
       local completed_hint="$task_index"
-      if [[ "$task_result_status" == "complete" ]]; then
+      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
         completed_hint=$((task_index + 1))
       fi
 
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "$task_result_status" "$run_stamp"
       gc_update_work_state "$tasks_db" "$slug" "$story_status_hint" "$completed_hint" "$total_tasks_int" "$run_stamp"
-
-      if [[ "$task_result_status" == "complete" ]]; then
-        local throughput_task_msg=""
-        if throughput_task_msg="$(gc_update_throughput_metrics "$tasks_db" "task-complete" "$slug" "$task_index")"; then
-          if [[ -n "$throughput_task_msg" ]]; then
-            info "  ${throughput_task_msg}"
-            now_ts="$(date +%s)"
-            throughput_next_checkpoint=$((now_ts + throughput_checkpoint_interval))
-          fi
-        else
-          warn "  Failed to record throughput metrics for task ${task_number}."
-        fi
-      fi
 
       if [[ "$task_result_status" == "complete" && $task_changes_applied -gt 0 ]]; then
         local -a commit_targets=("${task_written_paths[@]}")
@@ -7966,6 +9523,11 @@ PY
             warn "  Auto finalize failed; inspect git status."
           fi
         fi
+      fi
+
+      if (( blocked_stop_run )); then
+        story_failed=1
+        work_failed=1
       fi
 
       local timestamp_utc
@@ -8030,7 +9592,48 @@ PY
         commands_payload="$(printf '%s\n' "${task_commands[@]}")"
       fi
 
-      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$timestamp_utc"
+      local observation_hash=""
+      if (( task_tokens_total > 0 )); then
+        local observation_seed="${task_id:-}:${stdout_hash:-}:${apply_status:-}:${task_result_status:-}:${task_tokens_total:-0}"
+        if observation_hash="$(gc_make_observation_hash "$observation_seed" 2>/dev/null)"; then
+          :
+        else
+          observation_hash=""
+        fi
+      fi
+      local stage_retrieve_after_int stage_plan_after_int stage_patch_after_int stage_verify_after_int
+      stage_retrieve_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_RETRIEVE:-0}" 0)"
+      stage_plan_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_PLAN:-0}" 0)"
+      stage_patch_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_PATCH:-0}" 0)"
+      stage_verify_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_VERIFY:-0}" 0)"
+      local stage_retrieve_start_int stage_plan_start_int stage_patch_start_int stage_verify_start_int
+      stage_retrieve_start_int="$(gc_parse_int "$stage_baseline_retrieve" 0)"
+      stage_plan_start_int="$(gc_parse_int "$stage_baseline_plan" 0)"
+      stage_patch_start_int="$(gc_parse_int "$stage_baseline_patch" 0)"
+      stage_verify_start_int="$(gc_parse_int "$stage_baseline_verify" 0)"
+      local task_stage_tokens_retrieve=$((stage_retrieve_after_int - stage_retrieve_start_int))
+      local task_stage_tokens_plan=$((stage_plan_after_int - stage_plan_start_int))
+      local task_stage_tokens_patch=$((stage_patch_after_int - stage_patch_start_int))
+      local task_stage_tokens_verify=$((stage_verify_after_int - stage_verify_start_int))
+      (( task_stage_tokens_retrieve < 0 )) && task_stage_tokens_retrieve=0
+      (( task_stage_tokens_plan < 0 )) && task_stage_tokens_plan=0
+      (( task_stage_tokens_patch < 0 )) && task_stage_tokens_patch=0
+      (( task_stage_tokens_verify < 0 )) && task_stage_tokens_verify=0
+
+      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$observation_hash" "$timestamp_utc" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_story_points"
+
+      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
+        local throughput_task_msg=""
+        if throughput_task_msg="$(gc_update_throughput_metrics "$tasks_db" "task-complete" "$slug" "$task_index")"; then
+          if [[ -n "$throughput_task_msg" ]]; then
+            info "  ${throughput_task_msg}"
+            now_ts="$(date +%s)"
+            throughput_next_checkpoint=$((now_ts + throughput_checkpoint_interval))
+          fi
+        else
+          warn "  Failed to record throughput metrics for task ${task_number}."
+        fi
+      fi
 
       {
         printf 'task_number: %s\n' "$task_number"
@@ -8083,8 +9686,11 @@ PY
         on-hold)
           warn "  Task ${task_number} (${task_id:-no-id}) marked ${task_result_status}; review ${report_entry_display}."
           ;;
-        blocked|blocked-budget)
+        blocked|blocked-budget|blocked-quota|blocked-migration-transition|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\))
           warn "  Task ${task_number} (${task_id:-no-id}) blocked; see ${report_entry_display}."
+          ;;
+        apply-failed-migration-context)
+          warn "  Task ${task_number} (${task_id:-no-id}) flagged apply-failed-migration-context; inspect ${report_entry_display}."
           ;;
         *)
           info "  Task ${task_number} (${task_id:-no-id}) finished with status: ${task_result_status}"
@@ -8112,10 +9718,12 @@ PY
       (( ++processed_total ))
       (( ++iteration_processed ))
 
-      if [[ "$task_result_status" == "blocked" || "$task_result_status" == "blocked-budget" ]]; then
-        story_failed=1
-        break
-      fi
+      case "$task_result_status" in
+        blocked|blocked-budget|blocked-quota|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\))
+          story_failed=1
+          break
+          ;;
+      esac
 
       if (( break_after_update )); then
         continue
@@ -8146,134 +9754,11 @@ PY
       rmdir "${story_run_dir}/prompts" 2>/dev/null || true
       rmdir "${story_run_dir}/out" 2>/dev/null || true
     fi
-  done < <(
-    python3 - "$tasks_db" "${story_filter}" "$resume_flag" <<'PY'
-import sqlite3
-import sys
-import re
+  done < <(python3 "$story_plan_helper" "$tasks_db" "${story_filter}" "$resume_flag")
 
-DB_PATH = sys.argv[1]
-story_filter = (sys.argv[2] or '').strip().lower()
-resume_flag = sys.argv[3] == "1"
-
-conn = sqlite3.connect(DB_PATH)
-conn.row_factory = sqlite3.Row
-cur = conn.cursor()
-
-stories = cur.execute('SELECT story_slug, story_id, story_title, epic_key, epic_title, sequence, status FROM stories ORDER BY sequence ASC, story_slug ASC').fetchall()
-
-def norm(value):
-    return (value or "").strip().lower()
-
-def normalize(value):
-    return (value or "").strip()
-
-def slug_norm(value):
-    value = norm(value)
-    if not value:
-        return ""
-    return re.sub(r'[^a-z0-9]+', '-', value).strip('-')
-
-start_allowed = not story_filter
-
-for story in stories:
-    slug = normalize(story["story_slug"])
-    sequence = story["sequence"] or 0
-    story_id = normalize(story["story_id"])
-    epic_key = normalize(story["epic_key"])
-    epic_title = normalize(story["epic_title"])
-    story_title = normalize(story["story_title"])
-
-    story_title_clean = story_title.replace('\t', ' ').replace('\n', ' ')
-    epic_title_clean = epic_title.replace('\t', ' ').replace('\n', ' ')
-    epic_key_clean = epic_key.replace('\t', ' ').replace('\n', ' ')
-    story_id_clean = story_id.replace('\t', ' ').replace('\n', ' ')
-
-    if story_filter and not start_allowed:
-        keys = {norm(story_id), norm(slug), norm(epic_key), norm(str(sequence))}
-        if story_filter in keys:
-            start_allowed = True
-        else:
-            continue
-
-    task_rows = []
-    slug_lower = norm(slug)
-    if slug_lower:
-        task_rows = cur.execute(
-            'SELECT position, status FROM tasks WHERE LOWER(COALESCE(story_slug, "")) = ? ORDER BY position ASC',
-            (slug_lower,),
-        ).fetchall()
-
-    if not task_rows and story_id:
-        story_id_lower = norm(story_id)
-        if story_id_lower:
-            rows = cur.execute(
-                'SELECT id, position, status, story_slug FROM tasks WHERE LOWER(COALESCE(story_id, "")) = ? ORDER BY position ASC',
-                (story_id_lower,),
-            ).fetchall()
-            if rows:
-                task_rows = [(row["position"], row["status"]) for row in rows]
-                if slug_lower:
-                    cur.execute(
-                        'UPDATE tasks SET story_slug = ? WHERE LOWER(COALESCE(story_id, "")) = ?',
-                        (slug, story_id_lower),
-                    )
-                    conn.commit()
-
-    if not task_rows and slug_lower:
-        slug_key = slug_norm(slug)
-        if slug_key:
-            rows = cur.execute(
-                'SELECT position, status FROM tasks WHERE LOWER(COALESCE(story_slug, "")) = ? ORDER BY position ASC',
-                (slug_key,),
-            ).fetchall()
-            task_rows = rows
-
-    total = len(task_rows)
-    completed = 0
-    next_index = 0
-    for row in task_rows:
-        status = (row[1] or "").strip().lower()
-        if status == "complete":
-            completed += 1
-            continue
-        next_index = row[0] or 0
-        break
-    else:
-        next_index = total
-
-    current_status = (story["status"] or "").strip()
-
-    if resume_flag and not story_filter and current_status.lower() == "complete":
-        continue
-
-    if resume_flag:
-        if total == 0:
-            next_index = 0
-        elif completed >= total:
-            if story_filter:
-                next_index = total
-            else:
-                continue
-    else:
-        next_index = 0 if total > 0 else 0
-
-    print("	".join([
-        str(sequence),
-        slug,
-        story_id_clean,
-        story_title_clean,
-        epic_key_clean,
-        epic_title_clean,
-        str(total),
-        str(next_index),
-        str(completed),
-        current_status,
-    ]))
-
-conn.close()
-PY
-  )
+    if (( migration_transition_triggered )); then
+      break
+    fi
 
     if (( idle_timeout_triggered )); then
       break
@@ -8365,15 +9850,63 @@ PY
     warn "Failed to finalise throughput metrics."
   fi
 
+  if (( backlog_guard_enabled )); then
+    local backlog_guard_snapshot_output_after=""
+    backlog_snapshot_after_path="${run_dir}/backlog-after.json"
+    if backlog_guard_snapshot_output_after="$(gc_backlog_guard_snapshot "$tasks_db" "" "$backlog_guard_window_value" "$backlog_guard_wip_limit" 2>/dev/null)"; then
+      if [[ -n "$backlog_guard_snapshot_output_after" ]]; then
+        printf '%s\n' "$backlog_guard_snapshot_output_after" >"$backlog_snapshot_after_path"
+        local backlog_guard_messages=""
+        if backlog_guard_messages="$(gc_backlog_guard_compare "$backlog_snapshot_before_path" "$backlog_snapshot_after_path" "$backlog_guard_wip_limit" 2>/dev/null)"; then
+          if [[ -n "$backlog_guard_messages" ]]; then
+            local backlog_alerts_path="${run_dir}/backlog-alerts.log"
+            printf '%s\n' "$backlog_guard_messages" >"$backlog_alerts_path"
+            while IFS=$'\t' read -r backlog_level backlog_message; do
+              if [[ -z "$backlog_level" && -z "$backlog_message" ]]; then
+                continue
+              fi
+              case "${backlog_level}" in
+                WARN)
+                  warn "$backlog_message"
+                  ;;
+                INFO)
+                  info "$backlog_message"
+                  ;;
+                FREEZE)
+                  warn "$backlog_message"
+                  if [[ -n "$intake_lock_path" && ! -f "$intake_lock_path" ]]; then
+                    {
+                      printf 'frozen_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+                      printf 'frozen_by=work-on-tasks\n'
+                      printf 'reason=%s\n' "$backlog_message"
+                    } >"$intake_lock_path"
+                    warn "Intake frozen to contain duplicate ingress → ${intake_lock_path#${PROJECT_ROOT:-$PWD}/}"
+                  fi
+                  ;;
+                *)
+                  info "$backlog_message"
+                  ;;
+              esac
+            done <<<"$backlog_guard_messages"
+          fi
+        fi
+      fi
+    fi
+  fi
+
   if [[ $work_failed -eq 0 && $batch_limit_reached -eq 0 && $no_verify -eq 0 && $remaining_tasks -eq 0 ]]; then
     if (( any_changes == 0 )); then
       info "No repository changes detected; skipping verify."
     else
       info "Re-running verify after work run"
+      local verify_start_ts verify_duration_ms
+      verify_start_ts="$(date +%s)"
       if ! cmd_verify all --project "$PROJECT_ROOT"; then
         warn "Verify command reported failures."
         work_failed=1
       fi
+      verify_duration_ms=$(( ( $(date +%s) - verify_start_ts ) * 1000 ))
+      gc_budget_log_stage "verify" 0 0 0 "$verify_duration_ms" "[]" "{}" "false"
     fi
   fi
 
@@ -8388,6 +9921,27 @@ PY
   if (( loop_guard_triggered )); then
     warn "LOOP_GUARD_TRIPPED: work-on-tasks halted to avoid infinite loop."
     return "$loop_guard_exit_code"
+  fi
+
+  if (( run_blocked_quota )); then
+    warn "Run terminated because a prompt exceeded the configured token budget (status: blocked-quota)."
+  fi
+
+  if (( migration_transition_triggered )); then
+    warn "Run paused because migration_epoch changed mid-execution; rerun work-on-tasks to continue with the updated task mapping."
+  fi
+
+  local budget_report_helper
+  local budget_report_path="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/budget-report.md"
+  if budget_report_helper="$(gc_clone_python_tool "generate_budget_report.py" "$PROJECT_ROOT" 2>/dev/null)"; then
+    local budget_tool_actions_json
+    budget_tool_actions_json="$(gc_budget_collect_tool_actions_json)"
+    python3 "$budget_report_helper" \
+      --usage-file "${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/codex-usage.ndjson" \
+      --run-id "$run_stamp" \
+      --stage-limits "${GC_BUDGET_STAGE_LIMITS_JSON:-{}}" \
+      --tool-actions "$budget_tool_actions_json" \
+      --output "$budget_report_path" || warn "Failed to generate budget-report.md"
   fi
 
   if [[ $work_failed -eq 0 ]]; then
@@ -8496,8 +10050,78 @@ PROMPT
 
   if [[ "$reverify" -eq 1 ]]; then
     info "Re-running verify after iteration"
+    local iter_verify_start
+    iter_verify_start="$(date +%s)"
     cmd_verify all --project "$PROJECT_ROOT"
+    local iter_verify_duration=$(( ( $(date +%s) - iter_verify_start ) * 1000 ))
+    gc_budget_log_stage "verify" 0 0 0 "$iter_verify_duration" "[]" "{}" "false"
   fi
+}
+
+cmd_binder() {
+  local action="${1:-}"
+  if [[ -z "$action" || "$action" == "-h" || "$action" == "--help" ]]; then
+    cat <<'EOF'
+Usage: gpt-creator binder clear --story SLUG [--project PATH] [--epic EPIC] [--task TASK]
+
+Manage task binder cache entries. The 'clear' subcommand removes cached binders for a story
+or a specific task.
+EOF
+    return 0
+  fi
+  shift || true
+  case "$action" in
+    clear)
+      local project="${PROJECT_ROOT:-$PWD}"
+      local epic=""
+      local story=""
+      local task=""
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --project|-p)
+            project="$(abs_path "${2:?project path required}")"
+            shift 2
+            ;;
+          --story)
+            story="${2:?story slug required}"
+            shift 2
+            ;;
+          --epic)
+            epic="${2:-}"
+            shift 2
+            ;;
+          --task)
+            task="${2:-}"
+            shift 2
+            ;;
+          -h|--help)
+            cat <<'EOF'
+Usage: gpt-creator binder clear --story SLUG [--project PATH] [--epic EPIC] [--task TASK]
+EOF
+            return 0
+            ;;
+          --)
+            shift
+            break
+            ;;
+          *)
+            die "Unknown option for binder clear: $1"
+            ;;
+        esac
+      done
+      [[ -n "$story" ]] || die "--story is required for binder clear"
+      local helper_path
+      helper_path="$(gc_clone_python_tool "task_binder.py" "$project")" || return 1
+      if [[ -n "$task" ]]; then
+        python3 "$helper_path" clear --project "$project" --epic "${epic:-$story}" --story "$story" --task "$task"
+      else
+        python3 "$helper_path" clear --project "$project" --epic "${epic:-$story}" --story "$story"
+      fi
+      ;;
+    *)
+      die "Unknown binder subcommand: ${action}"
+      ;;
+  esac
 }
 
 cmd_estimate() {
@@ -9773,6 +11397,7 @@ Usage:
   ${APP_NAME} refine-tasks [--project <path>] [--story SLUG] [--model NAME] [--dry-run]
   ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
   ${APP_NAME} backlog [--project <path>] [--type epics|stories] [--item-children ID] [--progress] [--task-details ID]
+  ${APP_NAME} dag validate [--project <path>] [--story SLUG]
   ${APP_NAME} estimate [--project <path>]
   ${APP_NAME} tokens [--project <path>] [--details] [--json]
   ${APP_NAME} reports [--project <path>] [list|backlog|show|work] [--branch NAME] [--no-push] [--prompt-only] [--open] [slug]
@@ -9780,6 +11405,8 @@ Usage:
   ${APP_NAME} task-convert [options] (deprecated; runs create-tasks)
   ${APP_NAME} sweep-artifacts [--project <path>] [path...]
   ${APP_NAME} tidy-progress [--project <path>] [path...] (deprecated alias of sweep-artifacts)
+  ${APP_NAME} next [--project <path>] [--story SLUG]
+  ${APP_NAME} why --task TASK_ID [--project <path>] [--story SLUG]
   ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]
   ${APP_NAME} iterate [--project <path>] [--jira <file>] [--no-verify] (deprecated)
   ${APP_NAME} keys [list|set <service>]
@@ -9822,6 +11449,7 @@ main() {
     create-db-dump) "$shell_bin" "$CLI_ROOT/src/cli/create-db-dump.sh" "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
     backlog)        cmd_backlog "$@" ;;
+    dag)            cmd_dag "$@" ;;
     estimate)       cmd_estimate "$@" ;;
     tokens)         cmd_tokens "$@" ;;
     reports)        cmd_reports "$@" ;;
@@ -9829,9 +11457,12 @@ main() {
     show-file)      cmd_show_file "$@" ;;
     sweep-artifacts)  cmd_sweep_artifacts "$@" ;;
     tidy-progress)  cmd_tidy_progress "$@" ;;
+    next)           cmd_next "$@" ;;
+    why)            cmd_why "$@" ;;
     work-on-tasks)  cmd_work_on_tasks "$@" ;;
     iterate)        cmd_iterate "$@" ;;
     keys)           cmd_keys "$@" ;;
+    binder)         cmd_binder "$@" ;;
     tui)            cmd_tui "$@" ;;
     update)         cmd_update "$@" ;;
     *) die "Unknown command: ${cmd}. See '${APP_NAME} help'" ;;

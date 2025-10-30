@@ -1,0 +1,13 @@
+metrics:
+  exclude_statuses:
+    - skip-already-complete
+    - blocked-*
+    - test-env-failed
+  window_hours: 6
+  alpha: 0.3
+  dedupe_minutes: 15
+quota:
+  hard_limit_per_task: 60000
+eta:
+  min_throughput_floor: 2.0
+  stall_runs: 3

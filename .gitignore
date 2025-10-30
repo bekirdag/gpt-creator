@@ -24,6 +24,11 @@ coverage/
 !.env.example
 
 # Logs & temps
+.gpt-creator/tmp/
+.gpt-creator/logs/
+.gpt-creator/state/
+.gpt-creator/state/**
+.gpt-creator/staging/plan/.runtime/
 logs/
 *.log
 *.log.*
@@ -44,6 +49,9 @@ temp/
 **/.gpt-creator/staging/
 **/.gpt-creator/staging/**
 apps/**/dist-tests/
+
+# Patch leftovers
+**/*.rej
 
 # Docker (local volumes/artifacts)
 docker/.data/

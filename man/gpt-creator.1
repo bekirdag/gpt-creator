@@ -59,7 +59,7 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 [\-\-project DIR] [\-\-root DIR] [\-\-type epics|stories] [\-\-item-children ID] [\-\-progress] [\-\-task-details ID]
 .br
 .B gpt-creator work-on-tasks
-[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-force] [\-\-no-verify] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC] [\-\-context-lines NUM] [\-\-context-none] [\-\-context-file-lines NUM] [\-\-context-skip GLOB] [\-\-prompt-compact] [\-\-prompt-expanded] [\-\-context-doc-snippets] [\-\-sample-lines NUM]
+[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-force] [\-\-no-verify] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC] [\-\-context-lines NUM] [\-\-context-none] [\-\-context-file-lines NUM] [\-\-context-skip GLOB] [\-\-prompt-compact] [\-\-prompt-expanded] [\-\-context-doc-snippets] [\-\-sample-lines NUM] [\-\-max-tokens NUM] [\-\-soft-limit RATIO] [\-\-reserve-output NUM] [\-\-stop-on-overbudget[=true|false]]
 .br
 .B gpt-creator reports
 [\-\-project DIR] [list|backlog|auto|show|work] [\-\-open] [\-\-branch NAME] [\-\-no-push] [\-\-prompt-only] [\-\-reporter NAME] [slug]
@@ -191,9 +191,17 @@ Codex invocations are also capped by the \fBGC_CODEX_EXEC_MAX_DURATION\fR watchd
 \fB--context-doc-snippets\fR resolves known document references/endpoints to staged files and injects compact hashed summaries in place of broad shared-context dumps.
 Set \fBGC_CONTEXT_INCLUDE_UI=1\fR when you need the legacy raw UI dumps preserved in the generated context file.
 `work-on-tasks` now assumes `.gpt-creator/staging/plan/tasks/tasks.db` already exists; populate it with \fBgpt-creator create-tasks\fR (or `create-jira-tasks` + `migrate-tasks`) before invoking the loop.
+The runner now performs a git/prisma preflight, halting with statuses such as `blocked-merge-conflict`, `blocked-dirty-tree`, or the new `blocked-schema-drift` when merge conflicts, dirty trees, or Prisma schema drift (`prisma migrate diff`) are detected prior to execution.
 \fB--fresh\fR restarts from the first story without mutating stored progress, while \fB--force\fR additionally resets every story/task status in the database back to `pending` before the loop begins.
 \fB--from-task\fR (and its aliases \fB--fresh-from\fR/\fB--task\fR) rewinds backlog progress starting from the referenced task id or `story-slug:position`, marking that task and everything after it as `pending` before the loop resumes.
 \fB--sample-lines\fR (default 0) streams minified sample payload chunks on demand; increase the value when a task needs raw request/response bodies beyond the default digest.
+\fB--max-tokens\fR overrides the per-task hard token budget (default derived from the active model minus reserved output tokens).
+\fB--soft-limit\fR adjusts the pruning target ratio (0 < ratio \(le 1; default 0.85) so prompts are aggressively trimmed before hitting the hard cap.
+\fB--reserve-output\fR reserves the specified number of tokens for Codex responses (default 1024) to avoid exhausting the reply window with context alone.
+\fB--stop-on-overbudget\fR (optional =true/false) controls whether `work-on-tasks` halts the run when a prompt still exceeds the hard budget after deterministic pruning (default true).
+\fB--plan-max-out\fR, \fB--status-max-out\fR, \fB--verify-max-out\fR, \fB--patch-max-out\fR, and \fB--out-hard-cap\fR cap Codex responses per phase; defaults originate from the \fIllm.output_limits\fR stanza in \fI.gpt-creator/config.yml\fR.
+\fB--max-tokens-per-stage\fR stage=NUM sets hard ceilings for retrieve/plan/patch/verify stages, while \fB--auto-abandon-top-offenders\fR (or \fB--no-auto-abandon-top-offenders\fR) decides whether stages that exceeded those limits last run should be skipped automatically.
+Large unified diffs are written to \fI.gpt-creator/artifacts/patches/<task>.patch\fR and summarised inline; every Codex turn appends telemetry to \fI.gpt-creator/logs/codex-usage.ndjson\fR and the runner produces a human-readable \fI.gpt-creator/logs/budget-report.md\fR at the end of each run.
 \fB--memory-cycle\fR processes one task per invocation, performs a best-effort memory trim (including Docker cache pruning), and automatically restarts the command so long backlogs stay within bounded RAM.
 .TP
 .B reports

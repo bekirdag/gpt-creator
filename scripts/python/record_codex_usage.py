@@ -76,7 +76,7 @@ if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
 if len(sys.argv) < 8:
     raise SystemExit(
         "usage: record_codex_usage.py <log_path> <usage_path> <timestamp> <task> <model> "
-        "<prompt_file> <exit_code> [<cmd_cache> <stream_cache> <file_cache> <scan_cache>]"
+        "<prompt_file> <exit_code> [<cmd_cache> <stream_cache> <file_cache> <scan_cache> <step> <max_out> <duration_ms>]"
     )
 
 log_path = pathlib.Path(sys.argv[1])
@@ -94,6 +94,9 @@ file_cache_arg = sys.argv[10] if len(sys.argv) > 10 else ""
 file_cache_path = pathlib.Path(file_cache_arg) if file_cache_arg else None
 scan_cache_arg = sys.argv[11] if len(sys.argv) > 11 else ""
 scan_cache_path = pathlib.Path(scan_cache_arg) if scan_cache_arg else None
+step_arg = sys.argv[12] if len(sys.argv) > 12 else ""
+max_out_arg = sys.argv[13] if len(sys.argv) > 13 else ""
+duration_arg = sys.argv[14] if len(sys.argv) > 14 else ""
 
 if log_path.exists():
     raw_text = log_path.read_text(encoding="utf-8", errors="ignore")
@@ -181,6 +184,28 @@ record = {
 for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "billable_units", "request_units"):
     if key in fields:
         record[key] = fields[key]
+        if key == "prompt_tokens":
+            record["tokens_in"] = fields[key]
+        if key == "completion_tokens":
+            record["tokens_out"] = fields[key]
+
+step_arg = step_arg.strip()
+if step_arg:
+    record["step"] = step_arg
+
+max_out_arg = max_out_arg.strip()
+if max_out_arg:
+    try:
+        record["max_output_tokens"] = int(max_out_arg)
+    except ValueError:
+        pass
+
+duration_arg = duration_arg.strip()
+if duration_arg:
+    try:
+        record["duration_ms"] = int(float(duration_arg))
+    except ValueError:
+        pass
 
 limit_needles = [
     "usage limit",
@@ -1075,10 +1100,12 @@ def normalise_candidate_path(raw: str, cwd: str) -> Optional[pathlib.Path]:
         except Exception:
             pass
 
-usage_path.parent.mkdir(parents=True, exist_ok=True)
-with usage_path.open("a", encoding="utf-8") as fh:
-    fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
-    fh.write("\n")
+suppress_write = os.environ.get("GC_USAGE_SUPPRESS_WRITE", "").strip().lower() in {"1", "true", "yes", "on"}
+if not suppress_write:
+    usage_path.parent.mkdir(parents=True, exist_ok=True)
+    with usage_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
+        fh.write("\n")
 
 for entry_line in command_failure_lines:
     print(entry_line)

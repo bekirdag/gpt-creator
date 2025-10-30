@@ -161,6 +161,9 @@ def ensure_table(cur: sqlite3.Cursor) -> None:
           refined INTEGER DEFAULT 0,
           refined_at TEXT,
           status TEXT NOT NULL DEFAULT 'pending',
+          locked_by TEXT,
+          reopened_by_migration_at TEXT,
+          reopened_by_migration INTEGER DEFAULT 0,
           started_at TEXT,
           completed_at TEXT,
           last_run TEXT,
@@ -469,10 +472,11 @@ def build_database(tasks: List[Dict[str, object]], db_path: Path, force: bool, s
                   acceptance_text, endpoints, sample_create_request,
                   sample_create_response, user_story_ref_id, epic_ref_id,
                   refined, refined_at,
-                  status, started_at, completed_at, last_run,
+                  status, locked_by, reopened_by_migration_at, reopened_by_migration,
+                  started_at, completed_at, last_run,
                   story_id, story_title, epic_key, epic_title,
                   updated_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     story_slug,
@@ -505,6 +509,9 @@ def build_database(tasks: List[Dict[str, object]], db_path: Path, force: bool, s
                     refined_flag,
                     refined_at,
                     status,
+                    None,
+                    None,
+                    0,
                     started_at,
                     completed_at,
                     last_run,

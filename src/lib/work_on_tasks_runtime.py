@@ -1511,7 +1511,8 @@ def main():
         DEFAULT_WORK_PROMPT = """## work-on-tasks Prompt
         - Load the task details and acceptance criteria from the context section.
         - Consult the documentation catalog or search hits before modifying files.
-        - Outline a concise plan, execute the required edits, and capture verification steps.
+        - Outline a concise plan (≤3 bullets focused on actions), execute the required edits, and capture verification steps with clear pass/fail decisions.
+        - Produce only unified diffs in `changes`, referencing the patch artifact path plus hunk/line counts in `notes` instead of pasting full files.
         - Record follow-up actions when blockers remain.
         """
 
@@ -2759,7 +2760,7 @@ def main():
             lines.append('Return a JSON object: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
             lines.append("- Populate `plan` with the concrete steps you will take for this task.")
             lines.append("- List the files or symbols you edit in `focus`; you may include diffs in the same reply.")
-            lines.append("- Provide actual code edits through `changes` (unified diffs or full file bodies).")
+            lines.append("- Provide actual code edits through `changes` using unified diffs only (no full file bodies).")
             lines.append("- Record shell commands you executed or recommend in `commands`.")
             lines.append("- Use `notes` for blockers, follow-up actions, or verification reminders.")
             lines.append("- Keep internal narration tight (≤3 short sentences) and focused on the current task.")
@@ -2779,7 +2780,8 @@ def main():
 
             lines.append("")
             lines.append("## Change Format")
-            lines.append("- Use unified diffs or full file bodies inside the `changes` array.")
+            lines.append("- Emit unified diffs inside the `changes` array (no full file bodies).")
+            lines.append("- Large diffs are stored under `.gpt-creator/artifacts/patches/`; include the artifact path plus hunk/line counts in `notes`.")
             lines.append("- Omit keys with no content; no markdown fences or extra prose.")
         else:
             lines.append("### Output Contract — STRICT")
@@ -2791,7 +2793,7 @@ def main():
             lines.append('Return a JSON object: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
             lines.append("- Populate `plan` with concise steps that lead to the fix or feature.")
             lines.append("- List touched files or symbols in `focus`; include diffs in the same response.")
-            lines.append("- Supply code updates through `changes` using unified diffs or full file bodies; do not omit required edits.")
+            lines.append("- Supply code updates through `changes` using unified diffs only; do not omit required edits.")
             lines.append("- Record executed or recommended shell commands in `commands`.")
             lines.append("- Use `notes` for blockers, verification needs, or follow-up actions.")
             lines.append("- Prefer pnpm for install/build scripts; avoid npm/yarn unless explicitly required.")

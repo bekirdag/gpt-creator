@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -559,16 +560,47 @@ def _runtime_db_path(runtime_dir: Path) -> Path:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Manage documentation indexes.")
-    parser.add_argument("--runtime-dir", required=True, help="Runtime directory (e.g., .gpt-creator).")
+    parser.add_argument("--runtime-dir", help="Runtime directory (e.g., .gpt-creator).")
     parser.add_argument("--doc-id", action="append", help="Limit operations to specific document IDs.")
     parser.add_argument("--skip-full-text", action="store_true", help="Skip rebuilding the FTS index.")
     parser.add_argument("--skip-vector", action="store_true", help="Skip rebuilding the vector index.")
+    parser.add_argument("--check", action="store_true", help="Print index health summary and exit.")
     return parser
+
+
+def _resolve_db_path(runtime_dir: Optional[str]) -> Path:
+    if runtime_dir:
+        return _runtime_db_path(Path(runtime_dir).expanduser())
+    env_path = os.environ.get("GC_DOCUMENTATION_DB_PATH")
+    if env_path:
+        return Path(env_path).expanduser()
+    return Path(".gpt-creator/staging/plan/tasks/tasks.db")
+
+
+def _print_index_health(db_path: Path) -> int:
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            total_row = conn.execute("SELECT count(*) FROM documentation;").fetchone()
+            fts_row = conn.execute("SELECT count(*) FROM documentation_search;").fetchone()
+        total = total_row[0] if total_row else 0
+        fts = fts_row[0] if fts_row else 0
+        print(f"documentation rows={total}, documentation_search rows={fts}")
+        return 0
+    except sqlite3.Error as exc:
+        print(f"Doc index check failed: {exc}", file=sys.stderr)
+        return 2
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.check:
+        db_path = _resolve_db_path(args.runtime_dir)
+        return _print_index_health(db_path)
+
+    if not args.runtime_dir:
+        parser.error("--runtime-dir is required when rebuilding indexes (use --check for health summary).")
+
     runtime_dir = Path(args.runtime_dir).resolve()
     db_path = _runtime_db_path(runtime_dir)
     indexer = DocIndexer(db_path)

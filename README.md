@@ -157,7 +157,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
   - `migrate-tasks` regenerates `.gpt-creator/staging/plan/tasks/tasks.db` directly from the JSON artifacts — ideal when you want to sync the DB without re-running Codex.
   - `refine-tasks` streams tasks from `tasks.db` one at a time, rehydrates the original story context, runs Codex against the staged docs, writes the refined JSON to `json/refined`, and updates the task row in SQLite immediately after each successful response. Use `--force` to reset refinement flags and reprocess every task.
   - `create-tasks` snapshots a Jira markdown export into the same database if you already maintain backlog files.
-  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, `--from-task TASK` (or `--fresh-from`) to rewind the backlog so execution resumes from that task id or `story-slug:position` reference, and `--force` to reset all story/task statuses to `pending` before the run.
+  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, `--from-task TASK` (or `--fresh-from`) to rewind the backlog so execution resumes from that task id or `story-slug:position` reference, and `--force` to reset all story/task statuses to `pending` before the run. The command now blocks early if the workspace has merge conflicts, dirty/untracked files, or Prisma schema drift (detected via `prisma migrate diff`), so resolve those issues before retrying.
   - `backlog` renders summaries directly to the terminal: run it with no extra flags (or `--type epics`) to list each epic with progress metrics, `--type stories` for an all-story table, `--item-children <slug>` to drill into an epic or story, `--task-details <id>` to print a single task, and `--progress` to draw an overall task progress bar. Use `--project` (or legacy `--root`) to point at a different workspace.
   - The legacy `iterate` command is deprecated.
 
@@ -340,6 +340,13 @@ gpt-creator work-on-tasks --project /path/to/project
 - Prompts default to the compact instruction/schema block; use `--prompt-expanded` to restore the legacy verbose guidance.
 - Sample payloads now default to a short digest; raise `--sample-lines N` to stream the first N minified chunks when you truly need the raw body.
 - Surface targeted excerpts from referenced docs/endpoints with `--context-doc-snippets`; the CLI now condenses matches into short summaries with hashes so prompts stay lean.
+- Guard prompt budgets up front with `--max-tokens <int>` (hard cap), `--soft-limit <ratio>` (soft budget), `--reserve-output <int>` (completion reservation), and `--stop-on-overbudget[=true|false]` (whether to abort the run when pruning cannot meet the hard cap).
+- Tune Codex response sizes by step with `--plan-max-out`, `--status-max-out`, `--verify-max-out`, `--patch-max-out`, and the global `--out-hard-cap`; defaults come from `llm.output_limits` in `.gpt-creator/config.yml`.
+- Large apply diffs are written to `.gpt-creator/artifacts/patches/<task>.patch` and summarised with an `ARTIFACT` line (hunks + lines) so the terminal never truncates critical context.
+- Use `--max-tokens-per-stage stage=NUM` together with `--auto-abandon-top-offenders` / `--no-auto-abandon-top-offenders` to carry stage budgets forward from previous runs or opt-out when experimenting.
+- Migrations are now two-phased and idempotent: plans land in `.gpt-creator/logs/progress-migration.plan.json`, mappings append to `.gpt-creator/logs/progress-migration.map.ndjson`, and terminal task states are preserved via deterministic `uid` hashes.
+- If the migration epoch changes mid-run, the runner records a `blocked-migration-transition` status and halts so you can resume cleanly once the backlog stabilises.
+- Empty or invalid agent output during migration is surfaced as `apply-failed-migration-context` (instead of a silent skip) so follow-ups are obvious.
 - `.gpt-creator/staging` context files collapse tables, SQL spam, JSON blobs, and markup dumps automatically; set `GC_CONTEXT_INCLUDE_UI=1` if you need the raw UI assets restored.
 - Stray Codex progress files from older runs (e.g., `tmp_*`, `final_*`, `diff*`, `qaDoc.json`) are swept into `.gpt-creator/artifacts/**`; inspect `.gpt-creator/logs/progress-migration.log` for the relocation manifest.
 - Use `gpt-creator sweep-artifacts --project /path/to/project` (or pass multiple paths) to run the sweep manually for legacy workspaces or after external scripts deposit artifacts in the repo root.
@@ -347,6 +354,60 @@ gpt-creator work-on-tasks --project /path/to/project
 - When memory pressure is a concern, `--memory-cycle` processes one task per run, prunes caches (Codex artifacts + Docker leftovers), and automatically restarts to continue from the next pending task while keeping peak RSS low.
 - Automatically installs Node.js dependencies before the first task when a pnpm workspace or package manifest is present; inspect `/tmp/gc_deps_install.log` if installation fails.
 - Review the generated commits/diffs afterwards and run project tests as needed.
+
+Prompt budgeting defaults live alongside your workspace at `.gpt-creator/config.yml`; set the per-task budgets and runner behaviour once and share them with collaborators:
+
+```yaml
+perTask:
+  hardLimit: 100000        # model context (tokens) minus reserved output
+  softLimitRatio: 0.85     # percentage of the hard limit to trigger pruning
+  minOutputTokens: 1024    # reserved completion tokens
+runner:
+  stopOnOverbudget: true   # stop the run when pruning still exceeds the hard cap
+```
+
+Codex response caps live alongside the prompt budgets:
+
+```yaml
+llm:
+  output_limits:
+    plan: 450     # planning / status turns
+    status: 350   # per-task summary line
+    verify: 500   # post-apply verification summary
+    patch: 7000   # unified diff/code generation
+    hard_cap: 12000
+```
+
+Pass any of the `--*-max-out` overrides (or `--out-hard-cap`) when you need temporary headroom; the CLI clamps every call to the lower of the step limit and the hard cap.
+
+Stage budgets and offender handling are also declarative:
+
+```yaml
+budget:
+  per_stage_limits:
+    retrieve: 8000
+    plan: 10000
+    patch: 20000
+    verify: 8000
+  offenders:
+    window_runs: 10
+    top_k: 3
+    dominance_threshold: 0.5
+    auto_abandon: true
+    actions:
+      show-file: range-only
+      rg: narrow
+      tests: summary
+```
+
+Every Codex phase logs telemetry to `.gpt-creator/logs/codex-usage.ndjson`; the runner aggregates the latest run into `.gpt-creator/logs/budget-report.md`, highlights over-budget stages, and records which remedial actions (`range-only`, `narrow`, `summary`, etc.) were enforced next time.
+
+Temporary overrides are also available via environment variables:
+
+- `GC_PER_TASK_HARD_LIMIT_OVERRIDE`, `GC_PER_TASK_SOFT_RATIO_OVERRIDE`, `GC_PER_TASK_MIN_OUTPUT_OVERRIDE`
+- `GC_STOP_ON_OVERBUDGET_OVERRIDE`
+
+Use these when running ad-hoc experiments or tightening budgets in CI without editing the shared config.
 
 ### Backlog ETA
 ```

@@ -38,3 +38,52 @@ jobs:
           set -e
           cd examples/sample-project
           npx -y @apidevtools/swagger-cli@4.0.4 validate openapi.yaml
+
+  i18n-guard:
+    name: i18n Locale Guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Check for locale merge rejects
+        run: |
+          set -e
+          if [ -d apps ]; then
+            if find apps -type f -path '*/locales/*.rej' -print -quit | grep -q .; then
+              echo "Locale merge rejects detected under apps/**/locales."
+              exit 1
+            fi
+          else
+            echo "No apps directory detected; skipping merge reject scan."
+          fi
+      - name: Run i18n:check
+        run: |
+          set -e
+          if [ -d apps ]; then
+            node scripts/i18n-check.js
+          else
+            echo "No apps directory detected; skipping i18n-check."
+          fi
+      - name: Verify i18n key coverage
+        run: |
+          set -e
+          if [ -d apps ]; then
+            node scripts/i18n-coverage.js
+          else
+            echo "No apps directory detected; skipping i18n coverage check."
+          fi
+      - name: Ensure i18n:sync idempotence
+        run: |
+          set -e
+          if [ -d apps ]; then
+            node scripts/i18n-sync.js
+            if ! git diff --quiet -- apps; then
+              echo "i18n:sync produced locale changes; commit them before merging."
+              git --no-pager diff -- apps
+              exit 1
+            fi
+          else
+            echo "No apps directory detected; skipping i18n-sync idempotence check."
+          fi

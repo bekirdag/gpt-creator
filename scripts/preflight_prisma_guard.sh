@@ -22,7 +22,8 @@ if (( BASH_VERSINFO[0] < 4 )); then
       if [[ "$candidate" != "$BASH" && -x "$candidate" ]]; then
         if "$candidate" -c '[[ ${BASH_VERSINFO[0]} -ge 4 ]]' >/dev/null 2>&1; then
           export GC_BASH_BOOTSTRAP=1
-          export PATH="$(dirname "$candidate"):$PATH"
+          PATH="$(dirname "$candidate"):$PATH"
+          export PATH
           exec "$candidate" "$0" "$@"
         fi
       fi

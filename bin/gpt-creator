@@ -6750,7 +6750,34 @@ EOHELP
     snapshot_timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     snapshot_label="work-on-tasks auto snapshot ${snapshot_timestamp}"
 
-    info "Dirty working tree detected; attempting auto stash before run."
+    local commit_message="chore(gpt-creator): auto snapshot before work-on-tasks ${snapshot_timestamp}"
+    info "Dirty working tree detected; attempting auto snapshot commit before run."
+    if (cd "$git_root" && git add --all >/dev/null 2>&1); then
+      if (cd "$git_root" && git diff --cached --quiet); then
+        info "Working tree clean after staging; nothing to snapshot."
+        return 0
+      fi
+      if (cd "$git_root" && GIT_AUTHOR_NAME="gpt-creator automation" GIT_AUTHOR_EMAIL="automation@gpt-creator" GIT_COMMITTER_NAME="gpt-creator automation" GIT_COMMITTER_EMAIL="automation@gpt-creator" git commit -m "$commit_message" >/dev/null 2>&1); then
+        local commit_hash
+        commit_hash="$(cd "$git_root" && git rev-parse HEAD 2>/dev/null | head -n1)"
+        if [[ -n "$commit_hash" ]]; then
+          info "Auto commit created (${commit_message}) [${commit_hash:0:7}]."
+        else
+          info "Auto commit created (${commit_message})."
+        fi
+        return 0
+      fi
+      warn "Auto commit snapshot failed; falling back to stash."
+      if (cd "$git_root" && git rev-parse --verify HEAD >/dev/null 2>&1); then
+        (cd "$git_root" && git reset --mixed HEAD >/dev/null 2>&1 || true)
+      else
+        (cd "$git_root" && git reset --mixed >/dev/null 2>&1 || true)
+      fi
+    else
+      warn "Auto snapshot staging failed; falling back to stash."
+    fi
+
+    info "Attempting auto stash before run."
     if stash_output="$(cd "$git_root" && git stash push --include-untracked --message "$snapshot_label" 2>&1)"; then
       post_status="$(cd "$git_root" && git status --porcelain=v1 --untracked-files=all 2>/dev/null || true)"
       if [[ -z "$post_status" ]]; then
@@ -6761,29 +6788,6 @@ EOHELP
     else
       stash_output="${stash_output//$'\n'/ }"
       warn "Auto stash failed; ${stash_output}"
-    fi
-
-    info "Attempting auto-commit snapshot to clear dirty tree."
-    if ! (cd "$git_root" && git add --all >/dev/null 2>&1); then
-      warn "Auto snapshot staging failed."
-      return 1
-    fi
-    if (cd "$git_root" && git diff --cached --quiet); then
-      info "Working tree clean after staging; nothing to snapshot."
-      return 0
-    fi
-
-    local commit_message="chore(gpt-creator): auto snapshot before work-on-tasks ${snapshot_timestamp}"
-    if (cd "$git_root" && GIT_AUTHOR_NAME="gpt-creator automation" GIT_AUTHOR_EMAIL="automation@gpt-creator" GIT_COMMITTER_NAME="gpt-creator automation" GIT_COMMITTER_EMAIL="automation@gpt-creator" git commit -m "$commit_message" >/dev/null 2>&1); then
-      info "Auto commit created (${commit_message})."
-      return 0
-    fi
-
-    warn "Auto commit snapshot failed; inspect git status."
-    if (cd "$git_root" && git rev-parse --verify HEAD >/dev/null 2>&1); then
-      (cd "$git_root" && git reset --mixed HEAD >/dev/null 2>&1 || true)
-    else
-      (cd "$git_root" && git reset --mixed >/dev/null 2>&1 || true)
     fi
     return 1
   }

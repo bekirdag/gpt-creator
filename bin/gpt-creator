@@ -6728,50 +6728,66 @@ EOHELP
   ensure_ctx "$root"
 
   local preflight_script="${CLI_ROOT}/scripts/preflight_git_blockers.sh"
+  local auto_conflict_script="${CLI_ROOT}/scripts/auto_resolve_conflicts.sh"
+  local preflight_conflict_autofix_attempted=0
   if [[ -x "$preflight_script" ]]; then
-    local preflight_output="" preflight_code=0 preflight_outcome=""
-    if [[ -n "${PROJECT_ROOT:-}" ]]; then
-      set +e
-      preflight_output="$(cd "$PROJECT_ROOT" && "$preflight_script")"
-      preflight_code=$?
-      set -e
-    else
-      set +e
-      preflight_output="$("$preflight_script")"
-      preflight_code=$?
-      set -e
-    fi
-    preflight_outcome="${preflight_output//[$'\r\n']}"
-    if [[ -z "$preflight_outcome" ]]; then
-      if (( preflight_code == 3 )); then
-        preflight_outcome="blocked-merge-conflict"
-      elif (( preflight_code == 2 )); then
-        preflight_outcome="blocked-dirty-tree"
+    while true; do
+      local preflight_output="" preflight_code=0 preflight_outcome=""
+      if [[ -n "${PROJECT_ROOT:-}" ]]; then
+        set +e
+        preflight_output="$(cd "$PROJECT_ROOT" && "$preflight_script")"
+        preflight_code=$?
+        set -e
       else
-        preflight_outcome="ok"
+        set +e
+        preflight_output="$("$preflight_script")"
+        preflight_code=$?
+        set -e
       fi
-    fi
-    case "$preflight_outcome" in
-      blocked-merge-conflict)
-        warn "Git merge conflicts detected; resolve before running work-on-tasks."
-        printf '%s\n' "$preflight_outcome"
-        return 3
-        ;;
-      blocked-dirty-tree)
-        warn "Dirty working tree detected; commit or stash changes before running work-on-tasks."
-        printf '%s\n' "$preflight_outcome"
-        return 2
-        ;;
-      ok)
-        ;;
-      *)
-        if (( preflight_code != 0 )); then
-          warn "Preflight git blockers returned '${preflight_outcome:-?}' (exit ${preflight_code}); treating as dirty tree."
-          printf '%s\n' "${preflight_outcome:-blocked-dirty-tree}"
-          return 2
+      preflight_outcome="${preflight_output//[$'\r\n']}"
+      if [[ -z "$preflight_outcome" ]]; then
+        if (( preflight_code == 3 )); then
+          preflight_outcome="blocked-merge-conflict"
+        elif (( preflight_code == 2 )); then
+          preflight_outcome="blocked-dirty-tree"
+        else
+          preflight_outcome="ok"
         fi
-        ;;
-    esac
+      fi
+      case "$preflight_outcome" in
+        blocked-merge-conflict)
+          if (( preflight_conflict_autofix_attempted == 0 )) && [[ -x "$auto_conflict_script" ]]; then
+            info "Merge artifacts detected; attempting automatic cleanup."
+            if [[ -n "${PROJECT_ROOT:-}" ]]; then
+              (cd "$PROJECT_ROOT" && "$auto_conflict_script" "$PROJECT_ROOT") || true
+            else
+              "$auto_conflict_script" "$PWD" || true
+            fi
+            preflight_conflict_autofix_attempted=1
+            continue
+          fi
+          warn "Git merge conflicts detected; resolve before running work-on-tasks."
+          printf '%s\n' "$preflight_outcome"
+          return 3
+          ;;
+        blocked-dirty-tree)
+          warn "Dirty working tree detected; commit or stash changes before running work-on-tasks."
+          printf '%s\n' "$preflight_outcome"
+          return 2
+          ;;
+        ok)
+          break
+          ;;
+        *)
+          if (( preflight_code != 0 )); then
+            warn "Preflight git blockers returned '${preflight_outcome:-?}' (exit ${preflight_code}); treating as dirty tree."
+            printf '%s\n' "${preflight_outcome:-blocked-dirty-tree}"
+            return 2
+          fi
+          break
+          ;;
+      esac
+    done
   fi
 
   local i18n_guard_script="${CLI_ROOT}/scripts/preflight_i18n_guard.sh"

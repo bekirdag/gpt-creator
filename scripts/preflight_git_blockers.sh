@@ -2,11 +2,24 @@
 set -euo pipefail
 
 # 1) Conflicts → blocked-merge-conflict
-if [[ -n "$(git ls-files -u || true)" ]]; then
+log_conflict_hint() {
+  printf '[git-preflight] %s\n' "$*" >&2
+}
+
+conflict_index_output="$(git ls-files -u || true)"
+if [[ -n "$conflict_index_output" ]]; then
+  first_conflict_path="$(printf '%s\n' "$conflict_index_output" | cut -f4- | head -n1)"
+  if [[ -n "${first_conflict_path:-}" ]]; then
+    log_conflict_hint "Merge markers present in index for ${first_conflict_path}"
+  else
+    log_conflict_hint "Merge markers present in index (unable to resolve path)"
+  fi
   echo blocked-merge-conflict
   exit 3
 fi
-if find . -type f -name '*.rej' -print -quit | grep -q .; then
+first_reject="$(find . -type f -name '*.rej' -print -quit || true)"
+if [[ -n "$first_reject" ]]; then
+  log_conflict_hint "Found unresolved patch reject file ${first_reject#./}"
   echo blocked-merge-conflict
   exit 3
 fi
@@ -28,7 +41,15 @@ declare -a conflict_pathspecs=()
 if ((${#conflict_excludes[@]})); then
   conflict_pathspecs+=(-- "${conflict_excludes[@]}")
 fi
-if git ls-files -z "${conflict_pathspecs[@]}" | xargs -0 --no-run-if-empty grep -nE '^(<<<<<<<|=======|>>>>>>>)' --color=never >/dev/null 2>&1; then
+conflict_marker_file=""
+while IFS= read -r -d '' tracked_file; do
+  if grep -nE '^(<<<<<<<|=======|>>>>>>>)' --color=never -- "$tracked_file" >/dev/null 2>&1; then
+    conflict_marker_file="$tracked_file"
+    break
+  fi
+done < <(git ls-files -z "${conflict_pathspecs[@]}")
+if [[ -n "$conflict_marker_file" ]]; then
+  log_conflict_hint "Detected conflict markers (<<<<<<<) in ${conflict_marker_file}"
   echo blocked-merge-conflict
   exit 3
 fi

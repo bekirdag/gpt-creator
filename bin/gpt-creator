@@ -6793,7 +6793,11 @@ EOHELP
   local preflight_script="${CLI_ROOT}/scripts/preflight_git_blockers.sh"
   local auto_conflict_script="${CLI_ROOT}/scripts/auto_resolve_conflicts.sh"
   local preflight_conflict_autofix_attempted=0
-  local preflight_dirty_tree_autofix_attempted=0
+  local preflight_dirty_tree_autofix_attempts=0
+  local preflight_dirty_tree_autofix_limit="${GC_PREFLIGHT_DIRTY_TREE_AUTO_FIX_LIMIT:-3}"
+  if ! [[ "$preflight_dirty_tree_autofix_limit" =~ ^[0-9]+$ ]]; then
+    preflight_dirty_tree_autofix_limit=3
+  fi
   if [[ -x "$preflight_script" ]]; then
     while true; do
       local preflight_output="" preflight_code=0 preflight_outcome=""
@@ -6835,8 +6839,8 @@ EOHELP
           return 3
           ;;
         blocked-dirty-tree)
-          if (( preflight_dirty_tree_autofix_attempted == 0 )); then
-            preflight_dirty_tree_autofix_attempted=1
+          if (( preflight_dirty_tree_autofix_attempts < preflight_dirty_tree_autofix_limit )); then
+            ((preflight_dirty_tree_autofix_attempts+=1))
             if gc_auto_clean_dirty_tree; then
               continue
             fi

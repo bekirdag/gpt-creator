@@ -7468,7 +7468,6 @@ PY
       local prompt_token_estimate=0
       local prompt_pruned_bytes=0
       local prompt_pruned_items="[]"
-      local prompt_reserved_output_value=0
       local prompt_binder_status=""
       local prompt_binder_reason=""
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
@@ -7489,7 +7488,8 @@ PY
         local prompt_meta_helper
         prompt_meta_helper="$(gc_clone_python_tool \"prompt_meta_summary.py\" \"${PROJECT_ROOT:-$PWD}\")" || prompt_meta_helper=""
         if [[ -n "$prompt_meta_helper" ]]; then
-          read -r prompt_status prompt_soft_limit_value prompt_hard_limit_value prompt_stop_on_overbudget prompt_token_estimate prompt_pruned_bytes prompt_pruned_items prompt_reserved_output_value prompt_binder_status prompt_binder_reason < <(
+          local _
+          read -r prompt_status prompt_soft_limit_value prompt_hard_limit_value prompt_stop_on_overbudget prompt_token_estimate prompt_pruned_bytes prompt_pruned_items _ prompt_binder_status prompt_binder_reason < <(
             "$python_bin" "$prompt_meta_helper" "$prompt_meta_path"
           )
         fi

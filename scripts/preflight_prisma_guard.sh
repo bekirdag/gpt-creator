@@ -21,6 +21,7 @@ normalize_path() {
   printf '%s' "$path"
 }
 
+# shellcheck disable=SC2034  # out_ref provides output to caller via nameref
 select_runner() {
   local -n out_ref=$1
   out_ref=()

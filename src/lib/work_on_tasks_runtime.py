@@ -1464,6 +1464,9 @@ def main():
             documentation_asset_lines.append(
                 f"- JSON catalog (doc/snippet map) at `{doc_catalog_path_str}` keeps scripted lookups fast while prompts stay lean."
             )
+            documentation_asset_lines.append(
+                "- Path is also exported as `$GC_DOC_CATALOG_PATH`; quick listing: `python3 -c \"import json, os; data=json.load(open(os.environ['GC_DOC_CATALOG_PATH'])); print('\\n'.join(sorted(data.get('documents', {}))))\"`"
+            )
 
         if catalog_reference_docs:
             documentation_asset_lines.append(

@@ -404,6 +404,12 @@ gc_populate_doc_catalog_shims() {
   local staging_dir="${runtime_dir}/staging"
   local doc_library="${staging_dir}/doc-library.md"
   local doc_index="${staging_dir}/doc-index.md"
+  local doc_catalog="${staging_dir}/doc-catalog.json"
+  local plan_docs_dir="${staging_dir}/plan/docs"
+  local plan_work_dir="${staging_dir}/plan/work"
+  local plan_doc_library="${plan_docs_dir}/doc-library.md"
+  local plan_doc_index="${plan_docs_dir}/doc-index.md"
+  local plan_doc_catalog="${plan_work_dir}/doc-catalog.json"
   local fallback_library="${root}/docs/doc-library.md"
   local fallback_index="${root}/docs/doc-index.md"
 
@@ -411,7 +417,7 @@ gc_populate_doc_catalog_shims() {
     return 0
   fi
 
-  mkdir -p "$(dirname "$doc_library")" "$(dirname "$doc_index")"
+  mkdir -p "$(dirname "$doc_library")" "$(dirname "$doc_index")" "$plan_docs_dir" "$plan_work_dir"
 
   if [[ ! -s "$doc_library" && -s "$fallback_library" ]]; then
     cp -f "$fallback_library" "$doc_library" 2>/dev/null || true
@@ -420,6 +426,24 @@ gc_populate_doc_catalog_shims() {
   if [[ ! -s "$doc_index" && -s "$fallback_index" ]]; then
     cp -f "$fallback_index" "$doc_index" 2>/dev/null || true
     info "Seeded doc-index.md from docs directory."
+  fi
+
+  if [[ -s "$doc_library" ]]; then
+    if [[ ! -f "$plan_doc_library" || "$doc_library" -nt "$plan_doc_library" ]]; then
+      cp -f "$doc_library" "$plan_doc_library" 2>/dev/null || true
+    fi
+  fi
+
+  if [[ -s "$doc_index" ]]; then
+    if [[ ! -f "$plan_doc_index" || "$doc_index" -nt "$plan_doc_index" ]]; then
+      cp -f "$doc_index" "$plan_doc_index" 2>/dev/null || true
+    fi
+  fi
+
+  if [[ -s "$doc_catalog" ]]; then
+    if [[ ! -f "$plan_doc_catalog" || "$doc_catalog" -nt "$plan_doc_catalog" ]]; then
+      cp -f "$doc_catalog" "$plan_doc_catalog" 2>/dev/null || true
+    fi
   fi
 }
 

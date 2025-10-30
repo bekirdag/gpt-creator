@@ -1,8 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if (( BASH_VERSINFO[0] < 4 )); then
+  if [[ -z "${GC_BASH_BOOTSTRAP:-}" ]]; then
+    bash_candidates=()
+    if [[ -n "${GC_PREFERRED_BASH:-}" ]]; then
+      bash_candidates+=("${GC_PREFERRED_BASH}")
+    fi
+    if [[ -n "${GC_BASH:-}" ]]; then
+      bash_candidates+=("${GC_BASH}")
+    fi
+    if command -v brew >/dev/null 2>&1; then
+      brew_bash="$(brew --prefix 2>/dev/null)/bin/bash"
+      if [[ -x "${brew_bash:-}" ]]; then
+        bash_candidates+=("$brew_bash")
+      fi
+    fi
+    bash_candidates+=("/opt/homebrew/bin/bash" "/usr/local/bin/bash")
+    for candidate in "${bash_candidates[@]}"; do
+      [[ -n "$candidate" ]] || continue
+      if [[ "$candidate" != "$BASH" && -x "$candidate" ]]; then
+        if "$candidate" -c '[[ ${BASH_VERSINFO[0]} -ge 4 ]]' >/dev/null 2>&1; then
+          export GC_BASH_BOOTSTRAP=1
+          export PATH="$(dirname "$candidate"):$PATH"
+          exec "$candidate" "$0" "$@"
+        fi
+      fi
+    done
+  fi
+  printf 'run_tasks_sigint_safe requires Bash 4 or newer. Install via `brew install bash` and retry, or set GC_PREFERRED_BASH to a modern shell.\n' >&2
+  exit 1
+fi
+
 PROJECT_ROOT=${PROJECT_ROOT:-$(pwd)}
-CMD=(gpt-creator work-on-tasks --project "$PROJECT_ROOT")
+cli_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CMD=("${GC_CLI_BIN:-${cli_root}/bin/gpt-creator}" work-on-tasks --project "$PROJECT_ROOT")
+python_bin="${PYTHON_BIN:-python3}"
 
 run_pid=
 
@@ -57,12 +90,21 @@ mark_interrupted() {
   if [[ -f "$work_root/state.json" ]]; then
     local helper_path
     helper_path="$(clone_python_tool "mark_work_interrupted_state.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-    python3 "$helper_path" "$work_root/state.json"
+    "$python_bin" "$helper_path" "$work_root/state.json"
   fi
 
-  # Snapshot WIP so the run is traceable
-  git add -A || true
-  git commit -m "chore(gpt-creator): WIP snapshot after signal; mark apply_status=aborted" || true
+  # Snapshot Codex artifacts so the run is traceable without touching user edits
+  local work_dir_name snapshot_dir
+  work_dir_name="${GC_WORK_DIR_NAME:-.gpt-creator}"
+  snapshot_dir="${PROJECT_ROOT}/${work_dir_name}"
+  if command -v git >/dev/null 2>&1 && git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [[ -d "$snapshot_dir" ]]; then
+      git -C "$PROJECT_ROOT" add -A -- "$work_dir_name" || true
+      if ! git -C "$PROJECT_ROOT" diff --cached --quiet -- "$work_dir_name"; then
+        git -C "$PROJECT_ROOT" commit -m "chore(gpt-creator): WIP snapshot after signal; mark apply_status=aborted" -- "$work_dir_name" || true
+      fi
+    fi
+  fi
 
   # Ask child to exit gracefully
   if [[ -n "${run_pid:-}" ]]; then

@@ -5,6 +5,37 @@
 
 set -Eeuo pipefail
 
+if (( BASH_VERSINFO[0] < 4 )); then
+  if [[ -z "${GC_BASH_BOOTSTRAP:-}" ]]; then
+    bash_candidates=()
+    if [[ -n "${GC_PREFERRED_BASH:-}" ]]; then
+      bash_candidates+=("${GC_PREFERRED_BASH}")
+    fi
+    if [[ -n "${GC_BASH:-}" ]]; then
+      bash_candidates+=("${GC_BASH}")
+    fi
+    if command -v brew >/dev/null 2>&1; then
+      brew_bash="$(brew --prefix 2>/dev/null)/bin/bash"
+      if [[ -x "${brew_bash:-}" ]]; then
+        bash_candidates+=("$brew_bash")
+      fi
+    fi
+    bash_candidates+=("/opt/homebrew/bin/bash" "/usr/local/bin/bash")
+    for candidate in "${bash_candidates[@]}"; do
+      [[ -n "$candidate" ]] || continue
+      if [[ "$candidate" != "$BASH" && -x "$candidate" ]]; then
+        if "$candidate" -c '[[ ${BASH_VERSINFO[0]} -ge 4 ]]' >/dev/null 2>&1; then
+          export GC_BASH_BOOTSTRAP=1
+          export PATH="$(dirname "$candidate"):$PATH"
+          exec "$candidate" "$0" "$@"
+        fi
+      fi
+    done
+  fi
+  printf 'gpt-creator requires Bash 4 or newer. Install via `brew install bash` and re-run, or set GC_PREFERRED_BASH to a modern shell.\n' >&2
+  exit 1
+fi
+
 mkdir -p "${PWD}/.gpt-creator/shims" 2>/dev/null || true
 export BASH_ENV="${BASH_ENV:-$PWD/.gpt-creator/shims/bash_env.sh}"
 
@@ -5557,6 +5588,79 @@ ensure_node_dependencies() {
   die "Dependency bootstrap failed; see the bootstrap log for details."
 }
 
+gc_wot_normalize_sleep_between() {
+  local python_bin="${1:-python3}"
+  local raw_value="${2:-0}"
+
+  if [[ -z "$raw_value" ]]; then
+    raw_value="0"
+  fi
+
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    if [[ "$raw_value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      printf '%s\n' "$raw_value"
+      return 0
+    fi
+    return 1
+  fi
+
+  local helper_path
+  helper_path="$(gc_clone_python_tool "normalize_sleep_between.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+
+  local normalized=""
+  if ! normalized="$("$python_bin" "$helper_path" "$raw_value" 2>/dev/null)"; then
+    return 1
+  fi
+
+  printf '%s\n' "$normalized"
+}
+
+gc_wot_run_verify_if_needed() {
+  local reason="${1:-completion}"
+  local project_root="${2:?project root required}"
+  local any_changes="${3:-0}"
+  local work_failed="${4:-0}"
+
+  local reason_label=""
+  local skip_message=""
+  case "$reason" in
+    completion)
+      reason_label="work run"
+      skip_message="No repository changes detected; skipping verify."
+      ;;
+    batch-limit)
+      reason_label="batch pause"
+      skip_message="Batch limit reached with no repository changes; skipping verify."
+      ;;
+    *)
+      reason_label="$reason"
+      skip_message="No repository changes detected; skipping verify."
+      ;;
+  esac
+
+  if (( any_changes == 0 )); then
+    info "$skip_message"
+    printf '%s\n' "$work_failed"
+    return 0
+  fi
+
+  local verify_start_ts verify_duration_ms verify_failed=0
+  info "Re-running verify after ${reason_label}"
+  verify_start_ts="$(date +%s)"
+  if ! cmd_verify all --project "$project_root"; then
+    verify_failed=1
+    warn "Verify command reported failures."
+  fi
+  verify_duration_ms=$(( ( $(date +%s) - verify_start_ts ) * 1000 ))
+  gc_budget_log_stage "verify" 0 0 0 "$verify_duration_ms" "[]" "{}" "false"
+
+  if (( verify_failed )); then
+    printf '%s\n' "1"
+  else
+    printf '%s\n' "$work_failed"
+  fi
+}
+
 gc_apply_codex_changes() {
   local output_file="${1:?output file required}"
   local project_root="${2:?project root required}"
@@ -6175,7 +6279,7 @@ gc_note_requires_followup() {
 
 cmd_work_on_tasks() {
   local root="" resume=1 story_filter="" start_task_ref="" no_verify=0 keep_artifacts=0 memory_cycle=0 force_reset=0
-  local batch_size=0 sleep_between=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=1
+  local batch_size=0 sleep_between=0 sleep_between_positive=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=1
   local -a context_skip_patterns=()
   local override_max_tokens=""
   local override_soft_limit=""
@@ -6469,7 +6573,9 @@ EOHELP
   fi
 
   [[ "$batch_size" =~ ^[0-9]+$ ]] || die "Invalid --batch-size value: ${batch_size}"
-  [[ "$sleep_between" =~ ^[0-9]+$ ]] || die "Invalid --sleep-between value: ${sleep_between}"
+  if ! sleep_between="$(gc_wot_normalize_sleep_between "$python_bin" "$sleep_between")"; then
+    die "Invalid --sleep-between value: ${sleep_between}"
+  fi
   [[ "$context_lines" =~ ^[0-9]+$ ]] || die "Invalid --context-lines value: ${context_lines}"
   [[ "$context_file_lines" =~ ^[0-9]+$ ]] || die "Invalid --context-file-lines value: ${context_file_lines}"
   [[ "$sample_lines" =~ ^-?[0-9]+$ ]] || die "Invalid --sample-lines value: ${sample_lines}"
@@ -6481,12 +6587,14 @@ EOHELP
     die "Invalid --idle-timeout value: ${idle_timeout}"
   fi
   batch_size=$((batch_size))
-  sleep_between=$((sleep_between))
   context_lines=$((context_lines))
   context_file_lines=$((context_file_lines))
   sample_lines=$((sample_lines))
   idle_timeout=$((idle_timeout))
   (( sample_lines >= 0 )) || die "--sample-lines must be zero or positive (got ${sample_lines})"
+  if [[ "$sleep_between" != "0" ]]; then
+    sleep_between_positive=1
+  fi
 
   backlog_guard_window_value="$backlog_guard_window_days"
   if [[ -z "$backlog_guard_window_value" ]]; then
@@ -6511,14 +6619,16 @@ EOHELP
   if [[ -n "$override_reserved_output" && ! "$override_reserved_output" =~ ^[0-9]+$ ]]; then
     die "Invalid --reserve-output value: ${override_reserved_output}"
   fi
-  local entry
-  for entry in "${stage_limit_overrides[@]}"; do
-    [[ -n "$entry" && "$entry" == *"="* ]] || die "--max-tokens-per-stage expects stage=value (received: ${entry})"
-    local stage_name="${entry%%=*}"
-    local stage_value="${entry#*=}"
-    [[ -n "$stage_name" ]] || die "--max-tokens-per-stage requires a stage name"
-    [[ "$stage_value" =~ ^[0-9]+$ ]] || die "Invalid stage limit '${entry}'; value must be numeric"
-  done
+  if ((${#stage_limit_overrides[@]})); then
+    local entry
+    for entry in "${stage_limit_overrides[@]}"; do
+      [[ -n "$entry" && "$entry" == *"="* ]] || die "--max-tokens-per-stage expects stage=value (received: ${entry})"
+      local stage_name="${entry%%=*}"
+      local stage_value="${entry#*=}"
+      [[ -n "$stage_name" ]] || die "--max-tokens-per-stage requires a stage name"
+      [[ "$stage_value" =~ ^[0-9]+$ ]] || die "Invalid stage limit '${entry}'; value must be numeric"
+    done
+  fi
   if [[ -n "$override_plan_max_out" && ! "$override_plan_max_out" =~ ^[0-9]+$ ]]; then
     die "Invalid --plan-max-out value: ${override_plan_max_out}"
   fi
@@ -7239,7 +7349,6 @@ EOF
       checkpoint_rel="$checkpoint_file"
     fi
     printf '%s\n' "$checkpoint_rel"
-PY
   }
 
   gc_touch_progress
@@ -8526,7 +8635,7 @@ REM
         continue
       fi
 
-      if (( sleep_between > 0 )); then
+      if (( sleep_between_positive )); then
         sleep "$sleep_between"
       fi
 
@@ -8691,19 +8800,13 @@ REM
     fi
   fi
 
-  if [[ $work_failed -eq 0 && $batch_limit_reached -eq 0 && $no_verify -eq 0 && $remaining_tasks -eq 0 ]]; then
-    if (( any_changes == 0 )); then
-      info "No repository changes detected; skipping verify."
-    else
-      info "Re-running verify after work run"
-      local verify_start_ts verify_duration_ms
-      verify_start_ts="$(date +%s)"
-      if ! cmd_verify all --project "$PROJECT_ROOT"; then
-        warn "Verify command reported failures."
-        work_failed=1
-      fi
-      verify_duration_ms=$(( ( $(date +%s) - verify_start_ts ) * 1000 ))
-      gc_budget_log_stage "verify" 0 0 0 "$verify_duration_ms" "[]" "{}" "false"
+  if (( work_failed == 0 && no_verify == 0 )); then
+    if (( remaining_tasks == 0 )); then
+      work_failed="$(gc_wot_run_verify_if_needed "completion" "$PROJECT_ROOT" "$any_changes" "$work_failed")"
+      work_failed=$((work_failed))
+    elif (( batch_limit_reached )); then
+      work_failed="$(gc_wot_run_verify_if_needed "batch-limit" "$PROJECT_ROOT" "$any_changes" "$work_failed")"
+      work_failed=$((work_failed))
     fi
   fi
 

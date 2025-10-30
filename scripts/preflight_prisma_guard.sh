@@ -1,6 +1,37 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if (( BASH_VERSINFO[0] < 4 )); then
+  if [[ -z "${GC_BASH_BOOTSTRAP:-}" ]]; then
+    bash_candidates=()
+    if [[ -n "${GC_PREFERRED_BASH:-}" ]]; then
+      bash_candidates+=("${GC_PREFERRED_BASH}")
+    fi
+    if [[ -n "${GC_BASH:-}" ]]; then
+      bash_candidates+=("${GC_BASH}")
+    fi
+    if command -v brew >/dev/null 2>&1; then
+      brew_bash="$(brew --prefix 2>/dev/null)/bin/bash"
+      if [[ -x "${brew_bash:-}" ]]; then
+        bash_candidates+=("$brew_bash")
+      fi
+    fi
+    bash_candidates+=("/opt/homebrew/bin/bash" "/usr/local/bin/bash")
+    for candidate in "${bash_candidates[@]}"; do
+      [[ -n "$candidate" ]] || continue
+      if [[ "$candidate" != "$BASH" && -x "$candidate" ]]; then
+        if "$candidate" -c '[[ ${BASH_VERSINFO[0]} -ge 4 ]]' >/dev/null 2>&1; then
+          export GC_BASH_BOOTSTRAP=1
+          export PATH="$(dirname "$candidate"):$PATH"
+          exec "$candidate" "$0" "$@"
+        fi
+      fi
+    done
+  fi
+  printf 'preflight-prisma-guard requires Bash 4 or newer. Install via `brew install bash` and retry, or set GC_PREFERRED_BASH to a modern shell.\n' >&2
+  exit 1
+fi
+
 # Guard invoked before work-on-tasks to detect Prisma schema drift.
 
 project_root="${1:-${GC_PROJECT_ROOT:-${PROJECT_ROOT:-$PWD}}}"

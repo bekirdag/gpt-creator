@@ -143,6 +143,11 @@ for schema_path in "${schema_paths[@]}"; do
       schema_ok=1
       break
     fi
+    if [[ "$prisma_output" == *"shadow-database-url"* ]]; then
+      printf 'preflight-prisma-guard: skipping %s (shadow database required by prisma migrate diff).\n' "$(normalize_path "$schema_path")" >&2
+      schema_ok=1
+      break
+    fi
     if is_missing_prisma_cmd "$status" "$prisma_output"; then
       continue
     fi

@@ -1046,10 +1046,19 @@ else:
 
 task_identifier = (task["task_id"] or "").strip()
 task_title = (task["title"] or "").strip()
+
+
+def _row_get(row: sqlite3.Row, key: str) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
 epic_slug_source = (
-    (story_row.get("epic_key") or "").strip()
-    or (story_row.get("epic_title") or "").strip()
-    or (story_row.get("story_id") or "").strip()
+    (_row_get(story_row, "epic_key") or "").strip()
+    or (_row_get(story_row, "epic_title") or "").strip()
+    or (_row_get(story_row, "story_id") or "").strip()
     or STORY_SLUG
 )
 

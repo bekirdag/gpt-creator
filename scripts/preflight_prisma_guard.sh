@@ -54,15 +54,33 @@ normalize_path() {
 }
 
 # shellcheck disable=SC2034  # out_ref provides output to caller via nameref
-select_runner() {
+build_prisma_runners() {
   local -n out_ref=$1
   out_ref=()
   if command_exists pnpm && [[ -f pnpm-lock.yaml || -f pnpm-workspace.yaml ]]; then
-    out_ref=(pnpm exec -- prisma)
-    return 0
+    out_ref+=("pnpm exec -- prisma")
   fi
   if command_exists npx; then
-    out_ref=(npx --yes prisma)
+    out_ref+=("npx --yes prisma")
+  fi
+  if command_exists prisma; then
+    out_ref+=("prisma")
+  fi
+}
+
+is_missing_prisma_cmd() {
+  local status="$1"
+  local output="$2"
+  if (( status == 127 )); then
+    return 0
+  fi
+  if [[ "$output" == *"ERR_PNPM_EXEC_FIRST_FAIL"* || "$output" == *"ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL"* ]]; then
+    return 0
+  fi
+  if [[ "$output" == *"Command \"prisma\" not found"* ]]; then
+    return 0
+  fi
+  if [[ "$output" == *"command not found"* ]]; then
     return 0
   fi
   return 1
@@ -80,8 +98,9 @@ if ((${#schema_paths[@]} == 0)); then
 fi
 
 runner=()
-if ! select_runner runner; then
-  printf 'preflight-prisma-guard: prisma CLI unavailable (install pnpm or ensure npx works)\n' >&2
+build_prisma_runners runner
+if ((${#runner[@]} == 0)); then
+  printf 'preflight-prisma-guard: prisma CLI unavailable (install pnpm, npm, or prisma) — skipping guard.\n' >&2
   printf 'ok\n'
   exit 0
 fi
@@ -101,17 +120,41 @@ for schema_path in "${schema_paths[@]}"; do
   if ! find "$migrations_dir" -mindepth 1 -maxdepth 1 -type d -print -quit >/dev/null 2>&1; then
     continue
   fi
-  if ! "${runner[@]}" migrate diff \
-    --from-migrations "$migrations_dir" \
-    --to-schema-datamodel "$schema_path" \
-    --exit-code >/dev/null 2>&1
-  then
+  schema_ok=0
+  for runner_cmd in "${runner[@]}"; do
+    if [[ -z "$runner_cmd" ]]; then
+      continue
+    fi
+    read -r -a runner_parts <<< "$runner_cmd"
+    set +e
+    prisma_output=""
+    prisma_output="$("${runner_parts[@]}" migrate diff \
+      --from-migrations "$migrations_dir" \
+      --to-schema-datamodel "$schema_path" \
+      --exit-code 2>&1)"
     status=$?
+    set -e
+    if (( status == 0 )); then
+      schema_ok=1
+      break
+    fi
     if (( status == 2 )); then
       drift_paths+=("$(normalize_path "$schema_path")")
-    else
-      error_paths+=("$(normalize_path "$schema_path")")
+      schema_ok=1
+      break
     fi
+    if is_missing_prisma_cmd "$status" "$prisma_output"; then
+      continue
+    fi
+    if [[ -n "$prisma_output" ]]; then
+      printf '%s\n' "$prisma_output" >&2
+    fi
+    error_paths+=("$(normalize_path "$schema_path")")
+    schema_ok=1
+    break
+  done
+  if (( schema_ok == 0 )); then
+    printf 'preflight-prisma-guard: prisma CLI unavailable for %s; skipping.\n' "$(normalize_path "$schema_path")" >&2
   fi
 done
 

@@ -34,6 +34,12 @@ MODEL_CONTEXTS: Dict[str, int] = {
     "o4": 128000,
     "o4-mini": 128000,
 }
+
+DESCRIPTION_MAX_LINES = int(os.getenv("GC_PROMPT_DESCRIPTION_MAX_LINES", "400"))
+DESCRIPTION_MAX_CHARS = int(os.getenv("GC_PROMPT_DESCRIPTION_MAX_CHARS", "40000"))
+ACCEPTANCE_MAX_ITEMS = int(os.getenv("GC_PROMPT_ACCEPTANCE_MAX_ITEMS", "120"))
+ACCEPTANCE_MAX_CHARS = int(os.getenv("GC_PROMPT_ACCEPTANCE_MAX_CHARS", "32000"))
+FREEFORM_SECTION_MAX_CHARS = int(os.getenv("GC_PROMPT_FREEFORM_MAX_CHARS", "24000"))
 SEGMENT_TYPE_PRIORITY: Dict[str, Tuple[int, bool]] = {
     "lead-in": (100, True),
     "documentation-assets": (98, True),
@@ -1227,6 +1233,48 @@ def clamp_text(text: str, limit: int) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
+def _truncate_lines(lines: Sequence[str], *, max_lines: int, max_chars: int) -> Tuple[List[str], bool, int]:
+    if max_lines <= 0 and max_chars <= 0:
+        return list(lines), False, sum(len(line) + 1 for line in lines)
+    trimmed: List[str] = []
+    total_chars = 0
+    truncated = False
+    char_limit = max(max_chars, 0)
+    line_limit = max(max_lines, 0)
+    for line in lines:
+        prospective_chars = total_chars + len(line) + 1
+        if line_limit and len(trimmed) >= line_limit:
+            truncated = True
+            break
+        if char_limit and prospective_chars > char_limit:
+            truncated = True
+            break
+        trimmed.append(line)
+        total_chars = prospective_chars
+    return trimmed, truncated, total_chars
+
+
+def _truncate_bullets(items: Sequence[str], *, max_items: int, max_chars: int) -> Tuple[List[str], bool, int]:
+    if max_items <= 0 and max_chars <= 0:
+        return list(items), False, sum(len(item) + 1 for item in items)
+    trimmed: List[str] = []
+    total_chars = 0
+    truncated = False
+    item_limit = max(max_items, 0)
+    char_limit = max(max_chars, 0)
+    for item in items:
+        prospective_chars = total_chars + len(item) + 1
+        if item_limit and len(trimmed) >= item_limit:
+            truncated = True
+            break
+        if char_limit and prospective_chars > char_limit:
+            truncated = True
+            break
+        trimmed.append(item)
+        total_chars = prospective_chars
+    return trimmed, truncated, total_chars
+
+
 def collect_instruction_prompts(plan_dir: Optional[Path], project_root: Optional[Path]) -> List[Tuple[str, List[str]]]:
     prompts: List[Tuple[str, List[str]]] = []
     search_roots: List[Path] = []
@@ -1357,6 +1405,20 @@ if description:
 else:
     description_lines = []
 
+desc_trimmed, desc_truncated, _ = _truncate_lines(
+    description_lines,
+    max_lines=DESCRIPTION_MAX_LINES,
+    max_chars=DESCRIPTION_MAX_CHARS,
+)
+if desc_truncated:
+    truncated_sections["description"] = {
+        "original_lines": len(description_lines),
+        "original_chars": len(description),
+        "max_lines": DESCRIPTION_MAX_LINES,
+        "max_chars": DESCRIPTION_MAX_CHARS,
+    }
+description_lines = desc_trimmed
+
 tags_text = clean(task['tags_text'])
 story_points = clean(task['story_points'])
 dependencies_text = clean(task['dependencies_text'])
@@ -1408,6 +1470,8 @@ if sample_limit < 0:
     sample_limit = 0
 
 compact_mode = os.getenv("GC_PROMPT_COMPACT", "").strip().lower() not in {"", "0", "false"}
+
+truncated_sections: Dict[str, Dict[str, int]] = {}
 
 lines = []
 lines.append(f"# You are Codex (model: {MODEL_NAME})")
@@ -1544,18 +1608,45 @@ lines.append("")
 lines.append("### Description")
 if description_lines:
     lines.extend(description_lines)
+    if "description" in truncated_sections:
+        lines.append("(Description truncated for prompt budget; consult task backlog for full text.)")
 else:
     lines.append("(No additional description provided.)")
 
 if acceptance:
+    acceptance_trimmed, acceptance_truncated, _ = _truncate_bullets(
+        acceptance,
+        max_items=ACCEPTANCE_MAX_ITEMS,
+        max_chars=ACCEPTANCE_MAX_CHARS,
+    )
     lines.append("")
     lines.append("### Acceptance Criteria")
-    for item in acceptance:
+    for item in acceptance_trimmed:
         lines.append(f"- {item}")
+    if acceptance_truncated:
+        lines.append("- … (additional acceptance criteria omitted; see task backlog)")
+        truncated_sections["acceptance"] = {
+            "original_items": len(acceptance),
+            "max_items": ACCEPTANCE_MAX_ITEMS,
+            "max_chars": ACCEPTANCE_MAX_CHARS,
+        }
 elif acceptance_text_extra:
     lines.append("")
     lines.append("### Acceptance Criteria")
-    lines.extend(acceptance_text_extra.splitlines())
+    acceptance_extra_lines = acceptance_text_extra.splitlines()
+    acceptance_extra_trimmed, acceptance_extra_truncated, _ = _truncate_lines(
+        acceptance_extra_lines,
+        max_lines=ACCEPTANCE_MAX_ITEMS,
+        max_chars=ACCEPTANCE_MAX_CHARS,
+    )
+    lines.extend(acceptance_extra_trimmed)
+    if acceptance_extra_truncated:
+        lines.append("… (additional acceptance text omitted; see task backlog)")
+        truncated_sections["acceptance_text"] = {
+            "original_lines": len(acceptance_extra_lines),
+            "max_lines": ACCEPTANCE_MAX_ITEMS,
+            "max_chars": ACCEPTANCE_MAX_CHARS,
+        }
 
 if dependencies:
     lines.append("")
@@ -2857,6 +2948,9 @@ meta: Dict[str, Any] = {
     "hard_limit_triggered_initial": hard_limit_initial_trigger,
     "hard_limit_triggered_final": hard_limit_final_trigger,
 }
+
+if truncated_sections:
+    meta["truncated_sections"] = truncated_sections
 
 meta_path = Path(str(prompt_path) + ".meta.json")
 meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")

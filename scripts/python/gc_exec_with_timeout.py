@@ -12,6 +12,8 @@ import time
 from collections import deque
 from pathlib import Path
 
+import pty
+
 
 def to_int(value: str) -> int:
     try:
@@ -269,34 +271,51 @@ def process_text(text: str):
 
 preexec = os.setsid if hasattr(os, "setsid") else None
 
+master_fd = None
+slave_fd = None
+
 try:
+    master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(
         cmd,
         stdin=stdin,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stdout=slave_fd,
+        stderr=slave_fd,
         bufsize=0,
         preexec_fn=preexec,
+        close_fds=True,
     )
+    os.close(slave_fd)
+    slave_fd = None
 except FileNotFoundError:
+    if slave_fd is not None:
+        os.close(slave_fd)
+    if master_fd is not None:
+        os.close(master_fd)
     emit(f"{cmd[0]} not found\n")
     if log:
         log.close()
     sys.exit(127)
+except Exception:
+    if slave_fd is not None:
+        os.close(slave_fd)
+    if master_fd is not None:
+        os.close(master_fd)
+    raise
 
 start = time.monotonic()
 last_activity = start
 timed_out = False
 timeout_type = None
 
-if not proc.stdout:
+if master_fd is None:
     if stdin:
         stdin.close()
     if log:
         log.close()
     sys.exit(1)
 
-fd = proc.stdout.fileno()
+fd = master_fd
 
 interrupted = False
 
@@ -340,7 +359,10 @@ try:
             wait_time = 0.2
         ready, _, _ = select.select([fd], [], [], wait_time)
         if ready:
-            chunk = os.read(fd, 8192)
+            try:
+                chunk = os.read(fd, 8192)
+            except OSError:
+                chunk = b""
             if chunk:
                 text = chunk.decode("utf-8", errors="replace")
                 process_text(text)
@@ -359,7 +381,10 @@ try:
             break
     if not timed_out and not abort_now:
         while True:
-            chunk = os.read(fd, 8192)
+            try:
+                chunk = os.read(fd, 8192)
+            except OSError:
+                chunk = b""
             if not chunk:
                 break
             text = chunk.decode("utf-8", errors="replace")
@@ -392,8 +417,12 @@ except KeyboardInterrupt:
 finally:
     if stdin:
         stdin.close()
-
-proc.stdout.close()
+    if master_fd is not None:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        master_fd = None
 
 if buffer:
     process_line(buffer)

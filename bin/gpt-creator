@@ -6157,6 +6157,7 @@ gc_write_task_prompt() {
   local staging_dir="${8:-$GC_STAGING_DIR}"
   local task_binder_helper
   task_binder_helper="$(gc_clone_python_tool "task_binder.py" "$project_root")" || return 1
+  : "$task_binder_helper"
   local prompt_helper
   prompt_helper="$(gc_clone_python_tool "document_index.py" "$project_root")" || return 1
   python3 "$prompt_helper" "$db_path" "$story_slug" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" "$staging_dir"

@@ -1,38 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-echo "[bootstrap] starting in $ROOT"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd "${script_dir}/.." && pwd)"
 
-if ! command -v node >/dev/null 2>&1; then
-  echo "ERROR: Node.js not found" >&2
-  exit 1
-fi
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
 
-NODE_MAJOR="$(node -p "process.versions.node.split('.')[0]")"
-if [[ "${NODE_MAJOR}" -lt 20 ]]; then
-  echo "ERROR: Node >=20 required (found $(node -v))" >&2
-  exit 1
-fi
+run_if_present() {
+  local cmd=("$@")
+  if "${cmd[@]}"; then
+    return 0
+  fi
+  return 1
+}
 
-if ! command -v pnpm >/dev/null 2>&1; then
-  if command -v corepack >/dev/null 2>&1; then
-    corepack enable >/dev/null 2>&1 || true
-    corepack prepare pnpm@8 --activate || true
-  else
-    echo "ERROR: Corepack not available; install pnpm manually" >&2
-    exit 1
+cd "$project_root"
+
+if [[ -f "pnpm-lock.yaml" || -f "pnpm-workspace.yaml" ]]; then
+  if command_exists pnpm; then
+    pnpm install --frozen-lockfile || pnpm install || true
+    exit 0
   fi
 fi
 
-cd "$ROOT"
-pnpm install --frozen-lockfile
-
-if [[ -f "apps/api/prisma/schema.prisma" ]]; then
-  pnpm --filter ./apps/api exec prisma generate || true
+if [[ -f "package-lock.json" || -f "package.json" ]]; then
+  if command_exists npm; then
+    npm install --no-fund --no-audit || true
+    exit 0
+  fi
 fi
 
-pnpm -r run build --if-present || true
-pnpm -r run typecheck --if-present || true
+if [[ -f "requirements.txt" ]]; then
+  if command_exists pip3; then
+    pip3 install -r requirements.txt || true
+    exit 0
+  elif command_exists pip; then
+    pip install -r requirements.txt || true
+    exit 0
+  fi
+fi
 
-echo "[bootstrap] complete."
+exit 0

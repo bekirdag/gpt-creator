@@ -6591,7 +6591,8 @@ cmd_work_on_tasks() {
   local binder_clear_on_migration=0
   local python_bin="${PYTHON_BIN:-python3}"
   prompt_safeguard_helper="$(gc_clone_python_tool "prompt_safeguard.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  export GC_PY_HELPERS_DIR="$(dirname "$prompt_safeguard_helper")"
+  GC_PY_HELPERS_DIR="$(dirname "$prompt_safeguard_helper")"
+  export GC_PY_HELPERS_DIR
   if [[ -n "${GC_BINDER_ENABLED:-}" ]]; then
     case "${GC_BINDER_ENABLED,,}" in
       0|false|no|off) binder_enabled=0;;
@@ -7454,12 +7455,22 @@ EOHELP
 
   local doc_registry=""
   local doc_indexer=""
-  doc_registry="$(gc_clone_python_tool "doc_registry.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  doc_indexer="$(gc_clone_python_tool "doc_indexer.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  export GC_DOC_REGISTRY_HELPER="$doc_registry"
-  export GC_DOC_INDEXER_HELPER="$doc_indexer"
-  export doc_registry="$doc_registry"
-  export doc_indexer="$doc_indexer"
+  if doc_registry="$(gc_clone_python_tool "doc_registry.py" "${PROJECT_ROOT:-$PWD}")"; then
+    export GC_DOC_REGISTRY_HELPER="$doc_registry"
+    export doc_registry="$doc_registry"
+  else
+    unset GC_DOC_REGISTRY_HELPER
+    unset doc_registry
+    warn "Doc registry helper unavailable; prompts will fall back to SQLite/JSON catalog guidance."
+  fi
+  if doc_indexer="$(gc_clone_python_tool "doc_indexer.py" "${PROJECT_ROOT:-$PWD}")"; then
+    export GC_DOC_INDEXER_HELPER="$doc_indexer"
+    export doc_indexer="$doc_indexer"
+  else
+    unset GC_DOC_INDEXER_HELPER
+    unset doc_indexer
+    warn "Doc indexer helper unavailable; semantic rebuild instructions disabled."
+  fi
 
   local tasks_dir="${PLAN_DIR}/tasks"
   mkdir -p "$tasks_dir"

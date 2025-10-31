@@ -443,6 +443,7 @@ gpt-creator iterate --project /path/to/project --jira docs/jira.md
 | `GC_WEB_URL`, `GC_ADMIN_URL` | Web/Admin URLs used during verification. | `http://localhost:8080/`, `http://localhost:8080/admin/` |
 | `GC_DB_NAME`, `GC_DB_USER`, `GC_DB_PASSWORD` | Injected into rendered DB templates. | `app`, `app`, `app_pass` |
 | `GC_SKIP_PROGRESS_MIGRATION` | Set to `1` to opt out of the automatic sweep that relocates legacy Codex artifacts into `.gpt-creator/`. | `0` |
+| `GC_AUTO_REVIEW` | Leave unset (default) or set to `1`/`true`/`on` to let `work-on-tasks` synthesize review artifacts automatically and clear review-required flags; set to `0`/`false` to disable. | `1` |
 | `CODEX_BIN`, `CODEX_MODEL` | Override Codex executable/model. | `codex`, `gpt-5-codex` |
 | `CODEX_MODEL_CODE`, `CODEX_MODEL_NON_CODE` | Stage-specific Codex models (code-writing vs. planning/doc tasks). | `CODEX_MODEL`, `CODEX_MODEL` |
 | `CODEX_REASONING_EFFORT_CODE`, `CODEX_REASONING_EFFORT_NON_CODE` | Reasoning effort per stage (code stays high, non-code drops to low). | `high`, `low` |
@@ -457,6 +458,8 @@ gpt-creator iterate --project /path/to/project --jira docs/jira.md
 Run `gpt-creator keys` to see the supported third-party integrations (OpenAI, Jira, GitHub) and store their API keys in `~/.config/gpt-creator/api-keys.env`. Use `gpt-creator keys set <service>` (for example, `openai`, `jira`, or `github`) to add or update credentials without editing files manually.
 
 You can also create `~/.config/gpt-creator/config.sh` to export persistent overrides.
+
+By default `GC_AUTO_REVIEW` is active; the CLI drops automated review stubs under `.gpt-creator/staging/plan/work/runs/<run>/story_*/review/` so long-running automated loops can mark tasks complete without waiting for manual sign-off. Export `GC_AUTO_REVIEW=0` (or `false`) to skip generating these files.
 
 ---
 

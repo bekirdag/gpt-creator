@@ -1548,6 +1548,7 @@ DEFAULT_WORK_PROMPT = """## work-on-tasks Prompt
 - Consult the documentation catalog or search hits before modifying files.
 - Outline a concise plan, execute the required edits, and capture verification steps.
 - Record follow-up actions when blockers remain.
+- When done, emit **only** the final minified JSON object exactly once (no prose, no logs, no code fences).
 """
 
 def clamp_text(text: str, limit: int) -> str:

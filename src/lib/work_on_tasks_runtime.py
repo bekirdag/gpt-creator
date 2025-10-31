@@ -253,57 +253,49 @@ def main():
             suffix = raw[end+1:].strip()
             has_extra_text = bool(prefix) or bool(suffix)
 
-            if has_extra_text:
-                raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
-                raw_dump.parent.mkdir(parents=True, exist_ok=True)
-                raw_dump.write_text(raw, encoding='utf-8')
-                rel_dump = raw_dump
-                try:
-                    rel_dump = raw_dump.relative_to(project_root)
-                except ValueError:
-                    rel_dump = raw_dump
-                payload = {
-                    'plan': [],
-                    'changes': [],
-                    'commands': [],
-                    'notes': [
-                        f"Codex output contained extra text outside the JSON envelope; review {rel_dump}."
-                    ],
-                }
-                print('STATUS parse-error')
-                print(f"RAW {rel_dump}")
-            else:
-                fragment = re.sub(r'\\"(?=[}\]\n])', r'\\""', fragment)
+            fragment = re.sub(r'\\"(?=[}\]\n])', r'\\""', fragment)
 
-                while True:
+            while True:
+                try:
+                    payload = json.loads(fragment)
+                    break
+                except json.JSONDecodeError as exc:
+                    if 'Invalid \\escape' in exc.msg:
+                        fragment = fragment[:exc.pos] + '\\' + fragment[exc.pos:]
+                        continue
+                    decoder = json.JSONDecoder(strict=False)
                     try:
-                        payload = json.loads(fragment)
+                        payload = decoder.decode(fragment)
                         break
-                    except json.JSONDecodeError as exc:
-                        if 'Invalid \\escape' in exc.msg:
-                            fragment = fragment[:exc.pos] + '\\' + fragment[exc.pos:]
-                            continue
-                        decoder = json.JSONDecoder(strict=False)
+                    except json.JSONDecodeError:
+                        raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
+                        raw_dump.parent.mkdir(parents=True, exist_ok=True)
+                        raw_dump.write_text(raw, encoding='utf-8')
+                        fragment_dump = output_path.with_suffix(output_path.suffix + '.fragment.json')
+                        fragment_dump.parent.mkdir(parents=True, exist_ok=True)
+                        fragment_dump.write_text(fragment, encoding='utf-8')
+                        rel_dump = raw_dump
                         try:
-                            payload = decoder.decode(fragment)
-                            break
-                        except json.JSONDecodeError:
-                            raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
-                            raw_dump.parent.mkdir(parents=True, exist_ok=True)
-                            raw_dump.write_text(raw, encoding='utf-8')
-                            fragment_dump = output_path.with_suffix(output_path.suffix + '.fragment.json')
-                            fragment_dump.parent.mkdir(parents=True, exist_ok=True)
-                            fragment_dump.write_text(fragment, encoding='utf-8')
+                            rel_dump = raw_dump.relative_to(project_root)
+                        except ValueError:
                             rel_dump = raw_dump
-                            try:
-                                rel_dump = raw_dump.relative_to(project_root)
-                            except ValueError:
-                                rel_dump = raw_dump
+                        rel_fragment = fragment_dump
+                        try:
+                            rel_fragment = fragment_dump.relative_to(project_root)
+                        except ValueError:
                             rel_fragment = fragment_dump
-                            try:
-                                rel_fragment = fragment_dump.relative_to(project_root)
-                            except ValueError:
-                                rel_fragment = fragment_dump
+                        if has_extra_text:
+                            payload = {
+                                'plan': [],
+                                'changes': [],
+                                'commands': [],
+                                'notes': [
+                                    "Codex output included non-JSON pre/postface; inner JSON failed to decode.",
+                                    f"Raw stream saved at {rel_dump}. Invalid fragment at {rel_fragment}."
+                                ],
+                                'invalid_json_path': str(rel_fragment),
+                            }
+                        else:
                             payload = {
                                 'plan': [],
                                 'changes': [],
@@ -314,9 +306,9 @@ def main():
                                 ],
                                 'invalid_json_path': str(rel_fragment),
                             }
-                            print('STATUS parse-error')
-                            print(f"RAW {rel_dump}")
-                            break
+                        print('STATUS parse-error')
+                        print(f"RAW {rel_dump}")
+                        break
 
         def _normalize_focus(items):
             normalized = []
@@ -480,6 +472,28 @@ def main():
             if not isinstance(entry, dict):
                 raise ValueError('Change entries must be objects or unified diff strings')
             normalized = dict(entry)
+            type_hint = normalized.get('type')
+            normalized_hint = type_hint.strip().lower() if isinstance(type_hint, str) else ''
+            diff_reference = None
+            if normalized_hint in ('patch_file', 'patch_path'):
+                diff_reference = (
+                    normalized.get('diff_path')
+                    or normalized.get('path')
+                    or normalized.get('file')
+                )
+                normalized.pop('file', None)
+                if diff_reference and normalized.get('path') == diff_reference:
+                    normalized.pop('path', None)
+            elif normalized.get('diff_path'):
+                diff_reference = normalized.get('diff_path')
+            if diff_reference:
+                diff_path = Path(diff_reference)
+                if not diff_path.is_absolute():
+                    diff_path = project_root / diff_path
+                text = diff_path.read_text(encoding='utf-8')
+                normalized['type'] = 'patch'
+                normalized['diff'] = text if text.endswith('\n') else text + '\n'
+                normalized.pop('diff_path', None)
             ctype = normalized.get('type')
             if not ctype:
                 if normalized.get('diff'):

@@ -1668,6 +1668,7 @@ def collect_instruction_prompts(
         return prompts
 
     seen: Set[Path] = set()
+    skipped_excluded = 0
     for base_dir in search_roots:
         try:
             iterator = sorted(base_dir.rglob("*prompt.md"))
@@ -1681,7 +1682,7 @@ def collect_instruction_prompts(
             if resolved in seen or not candidate.is_file():
                 continue
             if _instruction_prompt_is_excluded(candidate, plan_dir, project_root):
-                emit_progress(f"Skipping instruction prompt {candidate} (excluded path)")
+                skipped_excluded += 1
                 continue
             try:
                 size_bytes = candidate.stat().st_size
@@ -1712,6 +1713,8 @@ def collect_instruction_prompts(
                 except ValueError:
                     rel_repr = candidate.name
             prompts.append((rel_repr, text.splitlines()))
+    if skipped_excluded:
+        emit_progress(f"Skipped {skipped_excluded} instruction prompt(s) due to excluded path patterns.")
     return prompts
 
 instruction_prompts = collect_instruction_prompts(plan_instruction_dir, project_root_path, registry_candidate)

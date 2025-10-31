@@ -2946,11 +2946,14 @@ gc_build_tasks_db() {
 
 GC_CONTEXT_SKIP_SUBSTRINGS=(
   "/.gpt-creator/staging/plan/work/runs/"
+  "/.gpt-creator/staging/plan/create-jira-tasks/prompts/"
+  "/.gpt-creator/staging/plan/create-sds/prompts/"
   "/.gpt-creator/logs/"
   "/.git/"
   "/node_modules/"
   "/dist/"
   "/build/"
+  "/docs/automation/prompts/"
 )
 GC_CONTEXT_SKIP_SUFFIXES=(
   ".meta.json"
@@ -6545,12 +6548,16 @@ cmd_work_on_tasks() {
   local backlog_snapshot_after_path=""
   local backlog_guard_enabled=0
   local backlog_guard_window_value=""
+  local prompt_slim_helper=""
+  local prompt_safeguard_helper=""
 
   local binder_enabled=1
   local binder_ttl_seconds=604800
   local binder_max_size_bytes=209715200
   local binder_clear_on_migration=0
   local python_bin="${PYTHON_BIN:-python3}"
+  prompt_safeguard_helper="$(gc_clone_python_tool "prompt_safeguard.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  export GC_PY_HELPERS_DIR="$(dirname "$prompt_safeguard_helper")"
   if [[ -n "${GC_BINDER_ENABLED:-}" ]]; then
     case "${GC_BINDER_ENABLED,,}" in
       0|false|no|off) binder_enabled=0;;
@@ -7931,6 +7938,10 @@ EOF
         work_failed=1
         break
       fi
+      if [[ -z "$prompt_slim_helper" ]]; then
+        prompt_slim_helper="$(gc_clone_python_tool "wot_slim_prompt.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+      fi
+      "$python_bin" "$prompt_slim_helper" "$prompt_path"
 
       local task_id="" task_title="" task_story_points="" task_status_current="" task_locked_flag="0" task_status_reason=""
       IFS=$'\t' read -r task_id task_title task_story_points task_status_current task_locked_flag task_status_reason <<<"$prompt_meta"

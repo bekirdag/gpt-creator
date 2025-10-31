@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Runtime helpers extracted from bin/gpt-creator."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -9,6 +10,16 @@ if _HELPER_DIR.exists():
     helper_str = str(_HELPER_DIR)
     if helper_str not in sys.path:
         sys.path.insert(0, helper_str)
+
+_EXTRA_HELPER_DIR = os.getenv("GC_PY_HELPERS_DIR", "")
+if _EXTRA_HELPER_DIR:
+    try:
+        extra_path = Path(_EXTRA_HELPER_DIR).resolve()
+        extra_str = str(extra_path)
+        if extra_path.exists() and extra_str not in sys.path:
+            sys.path.insert(0, extra_str)
+    except Exception:
+        pass
 
 def main():
     if len(sys.argv) < 2:
@@ -966,11 +977,17 @@ def main():
         except ModuleNotFoundError:
             def publish_prompt(*_args, **_kwargs):
                 return None
+        try:
+            from prompt_safeguard import slim_prompt_markdown  # type: ignore
+        except Exception:
+            def slim_prompt_markdown(text: str) -> str:
+                return text
 
         FREEFORM_SECTION_MAX_CHARS = int(os.getenv("GC_PROMPT_FREEFORM_MAX_CHARS", "12000") or "12000")
         PROMPT_SOURCE_MAX_BYTES = int(os.getenv("GC_PROMPT_SOURCE_MAX_BYTES", "262144") or "262144")
         INSTRUCTION_PROMPT_RUN_MARKER = "/.gpt-creator/staging/plan/work/"
         INSTRUCTION_PROMPT_CREATE_SDS_MARKER = "/.gpt-creator/staging/plan/create-sds/"
+        INSTRUCTION_PROMPT_CREATE_JIRA_TASKS_MARKER = "/.gpt-creator/staging/plan/create-jira-tasks/"
         INSTRUCTION_PROMPT_BINDER_MARKER = "/.gpt-creator/cache/task-binder/"
         PROMPT_SNAPSHOT_MARKER = "/docs/automation/prompts/"
         HEAVY_SECTION_PATTERNS = [
@@ -1722,6 +1739,8 @@ def main():
             if INSTRUCTION_PROMPT_RUN_MARKER in candidate_str and "/runs/" in candidate_str:
                 return True
             if INSTRUCTION_PROMPT_CREATE_SDS_MARKER in candidate_str:
+                return True
+            if INSTRUCTION_PROMPT_CREATE_JIRA_TASKS_MARKER in candidate_str:
                 return True
             if INSTRUCTION_PROMPT_BINDER_MARKER in candidate_str:
                 return True
@@ -3105,6 +3124,7 @@ def main():
         lines = formatted_sections.rstrip("\n").split("\n") if formatted_sections.strip() else []
 
         final_prompt_text = "\n".join(lines) + "\n"
+        final_prompt_text = slim_prompt_markdown(final_prompt_text)
         prompt_path = Path(PROMPT_PATH)
         meta_path = Path(str(prompt_path) + ".meta.json")
         input_digest = _compute_input_digest(

@@ -13,6 +13,24 @@ import time
 from pathlib import Path
 from typing import Optional, List, Tuple, Set, Dict, Sequence, Any
 
+_helpers_dir_env = os.getenv("GC_PY_HELPERS_DIR", "")
+if _helpers_dir_env:
+    try:
+        _helpers_dir_path = Path(_helpers_dir_env).resolve()
+        _helpers_dir_str = str(_helpers_dir_path)
+        if _helpers_dir_path.exists() and _helpers_dir_str not in sys.path:
+            sys.path.insert(0, _helpers_dir_str)
+    except Exception:
+        _helpers_dir_str = ""
+else:
+    _helpers_dir_str = ""
+
+try:
+    from prompt_safeguard import slim_prompt_markdown  # type: ignore
+except Exception:
+    def slim_prompt_markdown(text: str) -> str:
+        return text
+
 from compose_sections import dedupe_and_coalesce, emit_preamble_once, format_sections
 
 try:
@@ -79,6 +97,7 @@ SEARCH_SNIPPET_MAX_CHARS = int(os.getenv("GC_PROMPT_DOC_SNIPPET_MAX_CHARS", "500
 PROMPT_WARN_TOKENS = int(os.getenv("GC_PROMPT_WARN_TOKENS", "200000"))
 INSTRUCTION_PROMPT_RUN_MARKER = "/.gpt-creator/staging/plan/work/"
 INSTRUCTION_PROMPT_CREATE_SDS_MARKER = "/.gpt-creator/staging/plan/create-sds/"
+INSTRUCTION_PROMPT_CREATE_JIRA_TASKS_MARKER = "/.gpt-creator/staging/plan/create-jira-tasks/"
 INSTRUCTION_PROMPT_BINDER_MARKER = "/.gpt-creator/cache/task-binder/"
 PROMPT_SNAPSHOT_MARKER = "/docs/automation/prompts/"
 HEAVY_SECTION_PATTERNS = [
@@ -1603,6 +1622,8 @@ def _instruction_prompt_is_excluded(path_obj: Path, plan_dir: Optional[Path], pr
     if INSTRUCTION_PROMPT_RUN_MARKER in candidate_str and "/runs/" in candidate_str:
         return True
     if INSTRUCTION_PROMPT_CREATE_SDS_MARKER in candidate_str:
+        return True
+    if INSTRUCTION_PROMPT_CREATE_JIRA_TASKS_MARKER in candidate_str:
         return True
     if INSTRUCTION_PROMPT_BINDER_MARKER in candidate_str:
         return True
@@ -3266,6 +3287,7 @@ else:
     else:
         final_prompt_text = "\n".join(lines).rstrip() + "\n"
 
+final_prompt_text = slim_prompt_markdown(final_prompt_text)
 final_prompt_text = _clean_prompt_text(final_prompt_text)
 
 prompt_path = Path(PROMPT_PATH)

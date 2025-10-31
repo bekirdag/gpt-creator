@@ -5,6 +5,8 @@ from pathlib import Path
 
 DEFAULT_GLOB_EXCLUDES = [
     ".gpt-creator/staging/plan/work/runs/**",
+    ".gpt-creator/staging/plan/create-jira-tasks/prompts/**",
+    ".gpt-creator/staging/plan/create-sds/prompts/**",
     ".gpt-creator/logs/**",
     ".git/**",
     "node_modules/**",
@@ -23,6 +25,7 @@ DEFAULT_GLOB_EXCLUDES = [
     "docs/**/evidence/**",
     "docs/**/uat-evidence/**",
     "docs/qa/assets/**",
+    "docs/automation/prompts/**",
     "ops/lighthouse/**",
     "ops/pa11y/**",
     "ops/monitoring/**",

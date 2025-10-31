@@ -113,8 +113,7 @@ mark_interrupted() {
     local target="-${run_pgid:-$run_pid}"
     kill -TERM "$target" 2>/dev/null || true
 
-    local attempt
-    for attempt in {1..50}; do
+    for _ in {1..50}; do
       if ! kill -0 "$run_pid" 2>/dev/null; then
         break
       fi

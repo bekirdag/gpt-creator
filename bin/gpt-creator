@@ -5888,156 +5888,11 @@ gc_apply_codex_changes() {
     fi
   fi
 
+  local summary_helper
+  summary_helper="$(gc_clone_python_tool "wot_summarize_envelope.py" "$helper_root")" || return 1
+
   local summary
-  if ! summary="$(WOT_IDENTICAL="$identical_envelope" python3 - "$payload_json" "$project_root" <<'PY'
-import base64
-import json
-import os
-import sys
-from collections import OrderedDict
-from pathlib import Path
-
-payload_path = Path(sys.argv[1])
-project_root = Path(sys.argv[2]) if len(sys.argv) > 2 else payload_path.parent
-data = json.loads(payload_path.read_text(encoding="utf-8"))
-
-changes = data.get("changes") or []
-commands = data.get("commands") or []
-notes = data.get("notes") or []
-
-written_order = []
-written_seen = set()
-patched_order = []
-patched_seen = set()
-change_sizes = OrderedDict()
-
-def normalise(path_fragment: str) -> str:
-    fragment = path_fragment.strip()
-    if fragment.startswith("a/") or fragment.startswith("b/"):
-        fragment = fragment[2:]
-    if fragment.startswith("./"):
-        fragment = fragment[2:]
-    return fragment
-
-def patch_text_from_file(rel_path: str) -> str:
-    try:
-        patch_file = (project_root / rel_path).resolve()
-        return patch_file.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
-        return ""
-
-def blob_size_from_file(rel_path: str) -> int:
-    try:
-        blob_file = (project_root / rel_path).resolve()
-        return len(blob_file.read_bytes())
-    except Exception:
-        return 0
-
-def diff_target(diff_text: str) -> str:
-    lhs = None
-    rhs = None
-    for line in diff_text.splitlines():
-        if line.startswith("--- "):
-            lhs = line[4:].strip()
-        elif line.startswith("+++ "):
-            rhs = line[4:].strip()
-        if lhs is not None and rhs is not None:
-            break
-    candidate = rhs
-    if candidate in {None, "/dev/null", "b/dev/null"}:
-        candidate = lhs
-    if candidate is None:
-        return ""
-    return normalise(candidate)
-
-for change in changes:
-    if isinstance(change, str):
-        if not change.startswith("--- "):
-            continue
-        target = diff_target(change)
-        if not target:
-            continue
-        if target not in patched_seen:
-            patched_order.append(target)
-            patched_seen.add(target)
-        size = len(change.encode("utf-8"))
-        change_sizes[target] = change_sizes.get(target, 0) + size
-    elif isinstance(change, dict):
-        if change.get("type") == "patch" and "patch_path" in change:
-            patch_text = patch_text_from_file(str(change.get("patch_path", "")).strip())
-            target = diff_target(patch_text) or str(change.get("patch_path", "")).strip()
-            target = normalise(target)
-            if target and target not in patched_seen:
-                patched_order.append(target)
-                patched_seen.add(target)
-            size = len(patch_text.encode("utf-8"))
-            if target:
-                change_sizes[target] = change_sizes.get(target, 0) + size
-            continue
-
-        if "path" in change and "contents" in change:
-            target = normalise(str(change.get("path", "")).strip())
-            if not target:
-                continue
-            if target not in written_seen:
-                written_order.append(target)
-                written_seen.add(target)
-            contents = change.get("contents")
-            if change.get("encoding") == "base64":
-                try:
-                    decoded = base64.b64decode(contents)
-                except Exception:
-                    decoded = b""
-                size = len(decoded)
-            else:
-                if isinstance(contents, str):
-                    text_payload = contents
-                else:
-                    text_payload = json.dumps(contents, ensure_ascii=False)
-                size = len(text_payload.encode("utf-8"))
-            change_sizes[target] = change_sizes.get(target, 0) + size
-            continue
-
-        if "path" in change and "contents_path" in change:
-            target = normalise(str(change.get("path", "")).strip())
-            if not target:
-                continue
-            if target not in written_seen:
-                written_order.append(target)
-                written_seen.add(target)
-            size = blob_size_from_file(str(change.get("contents_path", "")).strip())
-            change_sizes[target] = change_sizes.get(target, 0) + size
-            continue
-
-if not isinstance(commands, list):
-    commands = []
-if not isinstance(notes, list):
-    notes = []
-
-status = "ok" if (written_order or patched_order) else "noop"
-if os.environ.get("WOT_IDENTICAL") == "1":
-    status = "identical-envelope"
-    notes = list(notes)
-    notes.append("Envelope already applied previously; skipping changes.")
-
-print(f"STATUS {status}")
-print("APPLIED")
-for path in written_order:
-    print(f"WRITE {path}")
-for path in patched_order:
-    print(f"PATCH {path}")
-for path, size in change_sizes.items():
-    print(f"SIZE {path}\t{size}")
-for cmd in commands:
-    cmd_str = str(cmd).strip()
-    if cmd_str:
-        print(f"CMD {cmd_str.replace('\n', ' ')}")
-for note in notes:
-    note_str = str(note).strip()
-    if note_str:
-        print(f"NOTE {note_str.replace('\n', ' ')}")
-PY
-)"; then
+  if ! summary="$(WOT_IDENTICAL="$identical_envelope" python3 "$summary_helper" "$payload_json" "$project_root")"; then
     return 2
   fi
 
@@ -6529,6 +6384,7 @@ gc_write_task_prompt() {
   : "$task_binder_helper"
   local compose_helper
   compose_helper="$(gc_clone_python_tool "compose_sections.py" "$project_root")" || return 1
+  : "$compose_helper"
   local prompt_helper
   prompt_helper="$(gc_clone_python_tool "document_index.py" "$project_root")" || return 1
   python3 "$prompt_helper" "$db_path" "$story_slug" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" "$staging_dir"

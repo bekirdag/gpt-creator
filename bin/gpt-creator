@@ -1108,18 +1108,7 @@ gc_format_tokens_compact() {
   if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
     raw=0
   fi
-  if (( raw >= 1000000000 )); then
-    local rounded=$(( (raw + 500000000) / 1000000000 ))
-    printf '%dB' "$rounded"
-  elif (( raw >= 1000000 )); then
-    local rounded=$(( (raw + 500000) / 1000000 ))
-    printf '%dM' "$rounded"
-  elif (( raw >= 1000 )); then
-    local rounded=$(( (raw + 500) / 1000 ))
-    printf '%dK' "$rounded"
-  else
-    printf '%d' "$raw"
-  fi
+  printf '%s' "$(printf '%d' "$raw" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"
 }
 
 gc_render_task_banner() {
@@ -5576,13 +5565,18 @@ ensure_node_dependencies() {
   fi
 
   local bootstrap_script="${PROJECT_ROOT}/scripts/bootstrap_dependencies.sh"
-  if [[ ! -x "$bootstrap_script" ]]; then
-    local default_bootstrap="${CLI_ROOT}/scripts/bootstrap_dependencies.sh"
-    if [[ -f "$default_bootstrap" ]]; then
-      mkdir -p "${PROJECT_ROOT}/scripts"
+  local default_bootstrap="${CLI_ROOT}/scripts/bootstrap_dependencies.sh"
+  if [[ -f "$default_bootstrap" ]]; then
+    mkdir -p "${PROJECT_ROOT}/scripts"
+    if [[ ! -f "$bootstrap_script" ]]; then
       if cp "$default_bootstrap" "$bootstrap_script"; then
         chmod +x "$bootstrap_script"
         info "Seeded dependency bootstrap script at ${bootstrap_script}."
+      fi
+    elif ! cmp -s "$default_bootstrap" "$bootstrap_script"; then
+      if cp "$default_bootstrap" "$bootstrap_script"; then
+        chmod +x "$bootstrap_script"
+        info "Updated dependency bootstrap script at ${bootstrap_script}."
       fi
     fi
   fi

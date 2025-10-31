@@ -378,13 +378,14 @@ gc::normalize_to_staging() {
   for f in ${GC_FOUND_MMD[@]+"${GC_FOUND_MMD[@]}"}; do
     [[ -f "$f" ]] || continue
     base="$(basename "$f")"
-    install -m 0644 "$f" "$stage/diagrams/$base"
+    gc::_stage_install_copy "$f" "$stage/diagrams/$base"
   done
 
   # samples (preserve relative subdirs if under known sample dirs)
   for f in ${GC_FOUND_SAMPLES[@]+"${GC_FOUND_SAMPLES[@]}"}; do
     [[ -f "$f" ]] || continue
     base="$(basename "$f")"
+    local destdir=""
     case "$base" in
       *backoffice*|*admin*) destdir="$stage/samples/backoffice_pages" ;;
       *website*|*site*|*public*) destdir="$stage/samples/website_pages" ;;
@@ -392,8 +393,7 @@ gc::normalize_to_staging() {
          if echo "$base" | grep -Eiq "(ABO1|AUTH1|PRG1|EVT1|CTN1)"; then destdir="$stage/samples/website_pages"; else destdir="$stage/samples/misc"; fi
       ;;
     esac
-    mkdir -p "$destdir"
-    install -m 0644 "$f" "$destdir/$base"
+    gc::_stage_install_copy "$f" "$destdir/$base"
   done
 
   gc::refresh_doc_catalog "$project_root" "$stage"

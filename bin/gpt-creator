@@ -5577,6 +5577,17 @@ ensure_node_dependencies() {
 
   local bootstrap_script="${PROJECT_ROOT}/scripts/bootstrap_dependencies.sh"
   if [[ ! -x "$bootstrap_script" ]]; then
+    local default_bootstrap="${CLI_ROOT}/scripts/bootstrap_dependencies.sh"
+    if [[ -f "$default_bootstrap" ]]; then
+      mkdir -p "${PROJECT_ROOT}/scripts"
+      if cp "$default_bootstrap" "$bootstrap_script"; then
+        chmod +x "$bootstrap_script"
+        info "Seeded dependency bootstrap script at ${bootstrap_script}."
+      fi
+    fi
+  fi
+
+  if [[ ! -x "$bootstrap_script" ]]; then
     warn "Dependency bootstrap script missing at ${bootstrap_script}; skipping automatic install."
     return
   fi

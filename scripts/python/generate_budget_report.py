@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+from json import JSONDecoder
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -18,6 +19,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tool-actions", default="{}")
     parser.add_argument("--output", required=True)
     return parser.parse_args()
+
+
+def parse_json_object(payload: str) -> Dict[str, Any]:
+    text = (payload or "").strip()
+    if not text:
+        return {}
+    decoder = JSONDecoder()
+    try:
+        value, _ = decoder.raw_decode(text)
+    except json.JSONDecodeError:
+        # Fall back to first non-empty line if multi-line payload is present
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                value, _ = decoder.raw_decode(line)
+                break
+            except json.JSONDecodeError:
+                continue
+        else:
+            return {}
+    if isinstance(value, dict):
+        return value
+    return {}
 
 
 def load_entries(path: Path) -> Iterable[Dict[str, Any]]:
@@ -139,12 +165,8 @@ def build_report(entries: Iterable[Dict[str, Any]], run_id: str, stage_limits: D
 def main() -> int:
     args = parse_args()
     usage_path = Path(args.usage_file)
-    stage_limits = json.loads(args.stage_limits)
-    if not isinstance(stage_limits, dict):
-        stage_limits = {}
-    tool_actions = json.loads(args.tool_actions)
-    if not isinstance(tool_actions, dict):
-        tool_actions = {}
+    stage_limits = parse_json_object(args.stage_limits)
+    tool_actions = parse_json_object(args.tool_actions)
 
     report = build_report(load_entries(usage_path), args.run_id, stage_limits, tool_actions)
     output_path = Path(args.output)

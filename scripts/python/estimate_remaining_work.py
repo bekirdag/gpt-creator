@@ -203,6 +203,28 @@ def fmt_tokens(value: float) -> str:
     return f"{int(round(value)):,}"
 
 
+def fmt_number(value: float) -> str:
+    if math.isclose(value, round(value), rel_tol=1e-9, abs_tol=1e-9):
+        return f"{int(round(value)):,}"
+    return f"{value:,.2f}".rstrip("0").rstrip(".")
+
+
+def print_section(title: str, rows: list[tuple[str, str]]) -> None:
+    visible_rows = [
+        (label, value)
+        for label, value in rows
+        if value is not None and str(value).strip()
+    ]
+    if not visible_rows:
+        return
+    print(title)
+    print("=" * len(title))
+    label_width = max(len(label) for label, _ in visible_rows)
+    for label, value in visible_rows:
+        print(f"{label:<{label_width}}  {value}")
+    print()
+
+
 def estimate(db_path: Path) -> int:
     project_root = infer_project_root(db_path)
     eta_cfg = load_eta_config(project_root)
@@ -333,51 +355,95 @@ def estimate(db_path: Path) -> int:
         parts.append(f"{minutes}m")
     estimate_str = " ".join(parts)
 
-    print(f"Remaining tasks: {remaining_tasks}")
-    print(f"Remaining story points: {fmt_float(total_points)}")
-    if blocked_ratio > 0:
-        blocked_note = f"Recent blocked runs: {blocked_ratio * 100:.0f}%"
-        if blocked_dominant:
-            blocked_note += f" ({blocked_dominant})"
-        print(blocked_note)
-    if contamination_ratio > 0:
-        print(f"Window contamination: {contamination_ratio * 100:.0f}%")
+    summary_rows = [
+        ("Remaining tasks", f"{remaining_tasks:,}"),
+        ("Remaining story points", fmt_number(total_points)),
+    ]
+    if eta_stalled_reason is not None:
+        summary_rows.append(("Estimated completion", f"Stalled ({eta_stalled_reason})"))
+    else:
+        summary_rows.append(
+            ("Estimated completion", f"{estimate_str} @{fmt_float(effective_rate)} SP/hour")
+        )
+    print_section("Remaining Work Summary", summary_rows)
+
+    throughput_rows: list[tuple[str, str]] = []
     if rate_samples > 0 and effective_rate > 0:
-        sample_label = "sample" if rate_samples == 1 else "samples"
-        print(
-            f"Measured throughput: {fmt_float(ewma_rate)} SP/hour (based on {rate_samples} {sample_label})."
+        sample_label = "run" if rate_samples == 1 else "runs"
+        throughput_rows.append(
+            ("Throughput basis", f"Measured from {rate_samples} {sample_label}")
+        )
+        throughput_rows.append(
+            ("Effective throughput", f"{fmt_float(effective_rate)} SP/hour (EWMA)")
         )
     else:
-        print("Using default throughput assumption: 15 SP/hour.")
+        throughput_rows.append(
+            ("Throughput basis", f"Default assumption ({fmt_float(DEFAULT_RATE)} SP/hour)")
+        )
+        throughput_rows.append(
+            ("Effective throughput", f"{fmt_float(effective_rate)} SP/hour")
+        )
     if eta_stalled_reason is not None:
-        print(f"Estimated completion time: stalled ({eta_stalled_reason}).")
-    else:
-        print(f"Estimated completion time @{fmt_float(effective_rate)} SP/hour: {estimate_str}")
+        throughput_rows.append(("Run status", f"Stalled ({eta_stalled_reason})"))
+    if blocked_ratio > 0:
+        blocked_value = f"{blocked_ratio * 100:.0f}% of recent runs"
+        if blocked_dominant:
+            blocked_value += f" ({blocked_dominant})"
+        throughput_rows.append(("Blocked signal", blocked_value))
+    if contamination_ratio > 0:
+        throughput_rows.append(
+            ("Window contamination", f"{contamination_ratio * 100:.0f}%")
+        )
+    print_section("Throughput", throughput_rows)
 
+    token_rows: list[tuple[str, str]] = []
     if tokens_total > 0 and token_samples > 0:
-        print(f"Tokens observed: {fmt_tokens(tokens_total)} across {token_samples} task(s).")
+        token_rows.append(
+            ("Observed tokens", f"{fmt_tokens(tokens_total)} across {token_samples} task(s)")
+        )
         if covered_points > 0:
             avg_tokens_per_point = tokens_total / covered_points
-            print(
-                f"Average tokens per story point: {fmt_float(avg_tokens_per_point)} tokens/SP "
-                f"(based on {fmt_float(covered_points)} SP)."
-            )
-            estimated_tokens_hour = avg_tokens_per_point * effective_rate if effective_rate > 0 else 0.0
-            if estimated_tokens_hour > 0:
-                print(
-                    f"Estimated token burn @{fmt_float(effective_rate)} SP/hour: "
-                    f"{fmt_tokens(estimated_tokens_hour)} tokens/hour."
+            token_rows.append(
+                (
+                    "Average tokens per story point",
+                    f"{fmt_number(avg_tokens_per_point)} tokens/SP (based on {fmt_number(covered_points)} SP)",
                 )
-            projected_remaining = avg_tokens_per_point * total_points if total_points > 0 else 0.0
+            )
+            estimated_tokens_hour = (
+                avg_tokens_per_point * effective_rate if effective_rate > 0 else 0.0
+            )
+            if estimated_tokens_hour > 0:
+                token_rows.append(
+                    (
+                        "Estimated token burn",
+                        f"{fmt_tokens(estimated_tokens_hour)} tokens/hour @{fmt_float(effective_rate)} SP/hour",
+                    )
+                )
+            projected_remaining = (
+                avg_tokens_per_point * total_points if total_points > 0 else 0.0
+            )
             if projected_remaining > 0:
-                print(
-                    f"Projected remaining tokens: {fmt_tokens(projected_remaining)} tokens for "
-                    f"{fmt_float(total_points)} SP."
+                token_rows.append(
+                    (
+                        "Projected remaining tokens",
+                        f"{fmt_tokens(projected_remaining)} tokens for {fmt_number(total_points)} SP",
+                    )
                 )
         else:
-            print("Average tokens per story point: insufficient data (no story points recorded on tokenized tasks).")
+            token_rows.append(
+                (
+                    "Average tokens per story point",
+                    "Insufficient data (no story points recorded on tokenized tasks)",
+                )
+            )
     else:
-        print("Token usage data unavailable; run work-on-tasks to capture token telemetry.")
+        token_rows.append(
+            (
+                "Status",
+                "Token usage data unavailable; run work-on-tasks to capture token telemetry.",
+            )
+        )
+    print_section("Token Telemetry", token_rows)
 
     return 0
 

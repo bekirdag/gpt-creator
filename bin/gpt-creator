@@ -221,6 +221,17 @@ gc_budget_collect_tool_actions_json() {
   python3 "$helper_path" "${GC_BUDGET_TOOL_ACTIONS_JSON:-}"
 }
 
+gc_env_truthy() {
+  local value="${1:-}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  value="${value,,}"
+  case "$value" in
+    1|true|yes|on) return 0 ;;
+  esac
+  return 1
+}
+
 resolve_cli_root() {
   local source="${BASH_SOURCE[0]}"
   while [[ -L "$source" ]]; do
@@ -7412,6 +7423,9 @@ EOHELP
   elif [[ "$auto_abandon_override" == "false" ]]; then
     auto_abandon_flag=0
   fi
+  if gc_env_truthy "${GC_DISABLE_AUTO_ABANDON:-}"; then
+    auto_abandon_flag=0
+  fi
 
   local budget_usage_file="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/codex-usage.ndjson"
   local budget_offenders_json="{}"
@@ -7428,6 +7442,9 @@ EOHELP
 
   local last_offender_run=""
   local offenders_auto_flag=$auto_abandon_flag
+  if gc_env_truthy "${GC_DISABLE_AUTO_ABANDON:-}"; then
+    offenders_auto_flag=0
+  fi
   if [[ -n "$budget_offenders_json" && "$budget_offenders_json" != "{}" ]]; then
     local budget_off_iter_helper
     budget_off_iter_helper="$(gc_clone_python_tool "budget_offenders_iter.py" "${PROJECT_ROOT:-$PWD}")" || budget_off_iter_helper=""
@@ -8177,6 +8194,29 @@ EOF
         run_blocked_quota=1
       else
         gc_budget_log_stage "plan" "$prompt_token_estimate" 0 "$prompt_token_estimate" 0 "$prompt_pruned_items" "{}" "false"
+        local guard_safe_limit="${GC_SAFE_PROMPT_TOKENS:-8000}"
+        if ! [[ "$guard_safe_limit" =~ ^[0-9]+$ ]]; then
+          guard_safe_limit=8000
+        fi
+        guard_safe_limit=$((guard_safe_limit))
+        local guard_prompt_estimate=0
+        if [[ "$prompt_token_estimate" =~ ^[0-9]+$ ]]; then
+          guard_prompt_estimate=$((prompt_token_estimate))
+        elif [[ "$prompt_est_tokens_raw" =~ ^[0-9]+$ ]]; then
+          guard_prompt_estimate=$((prompt_est_tokens_raw))
+        fi
+        if gc_budget_stage_should_skip "patch"; then
+          local guard_skip_reason
+          guard_skip_reason="$(gc_budget_stage_skip_reason "patch")"
+          [[ -z "$guard_skip_reason" ]] && guard_skip_reason="auto-abandon"
+          if [[ "$guard_skip_reason" == auto-abandon* ]] && (( guard_prompt_estimate >= 0 && guard_prompt_estimate <= guard_safe_limit )); then
+            if ! gc_env_truthy "${GC_DISABLE_AUTO_ABANDON:-}"; then
+              export GC_DISABLE_AUTO_ABANDON=1
+            fi
+            gc_budget_set_stage_skip "patch" 0 ""
+            offenders_auto_flag=0
+          fi
+        fi
         if gc_budget_stage_should_skip "patch"; then
           skip_codex=1
           codex_ok=1

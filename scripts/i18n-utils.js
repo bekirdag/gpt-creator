@@ -289,38 +289,41 @@ function mergeLocaleTrees(baseNode, targetNode) {
 
   if (isPlainObject(baseNode)) {
     const result = {};
-    const keys = new Set(Object.keys(baseNode));
+    let changed = false;
     if (isPlainObject(targetNode)) {
       for (const key of Object.keys(targetNode)) {
-        keys.add(key);
+        if (!Object.prototype.hasOwnProperty.call(baseNode, key)) {
+          changed = true;
+        }
       }
+    } else if (targetNode !== undefined) {
+      changed = true;
     }
-    let changed = false;
-    for (const key of Array.from(keys).sort((a, b) => a.localeCompare(b))) {
-      const baseHas = Object.prototype.hasOwnProperty.call(baseNode, key);
-      const targetHas = isPlainObject(targetNode) && Object.prototype.hasOwnProperty.call(targetNode, key);
-      const baseValue = baseHas ? baseNode[key] : undefined;
-      const targetValue = targetHas ? targetNode[key] : undefined;
 
-      if (baseHas && isPlainObject(baseValue)) {
+    const orderedKeys = Object.keys(baseNode).sort((a, b) => a.localeCompare(b));
+    for (const key of orderedKeys) {
+      const baseValue = baseNode[key];
+      const targetValue =
+        isPlainObject(targetNode) && Object.prototype.hasOwnProperty.call(targetNode, key)
+          ? targetNode[key]
+          : undefined;
+
+      if (isPlainObject(baseValue)) {
         const childTarget = isPlainObject(targetValue) ? targetValue : {};
         const childResult = mergeLocaleTrees(baseValue, childTarget);
         result[key] = childResult.value;
-        if (childResult.changed || (!targetHas || !isPlainObject(targetValue))) {
+        if (childResult.changed || (!isPlainObject(targetValue) && targetValue !== undefined)) {
           changed = true;
         }
-      } else if (baseHas) {
-        if (!targetHas) {
+      } else {
+        if (targetValue === undefined || isPlainObject(targetValue) || Array.isArray(targetValue)) {
           result[key] = `TODO_${baseValue == null ? '' : String(baseValue)}`;
-          changed = true;
-        } else if (isPlainObject(targetValue)) {
-          result[key] = `TODO_${baseValue == null ? '' : String(baseValue)}`;
-          changed = true;
+          if (targetValue !== undefined) {
+            changed = true;
+          }
         } else {
           result[key] = targetValue;
         }
-      } else if (targetHas) {
-        result[key] = targetValue;
       }
     }
     return { value: result, changed };

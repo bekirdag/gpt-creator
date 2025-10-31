@@ -1388,9 +1388,9 @@ last_duration_seconds = parse_int_field(task['last_duration_seconds'])
 last_notes = parse_json_list(task['last_notes_json'])
 last_commands = parse_json_list(task['last_commands_json'])
 locked_by_migration = int(task['locked_by_migration'] or 0)
-migration_epoch = parse_int_field(task.get('migration_epoch'))
-last_verified_commit = clean(task.get('last_verified_commit'))
-status_reason = clean(task.get('status_reason'))
+migration_epoch = parse_int_field(_row_get(task, 'migration_epoch'))
+last_verified_commit = clean(_row_get(task, 'last_verified_commit'))
+status_reason = clean(_row_get(task, 'status_reason'))
 
 project_display = project_display_name(PROJECT_ROOT)
 repo_path = PROJECT_ROOT or '.'

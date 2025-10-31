@@ -8811,7 +8811,8 @@ REM
       fi
       task_duration_display="$(gc_format_duration_compact "$task_duration_seconds")"
       task_tokens_display="$(gc_format_tokens_compact "$task_tokens_total")"
-      local task_prompt_estimate_display="$(gc_format_tokens_compact "$task_prompt_estimate")"
+      local task_prompt_estimate_display
+      task_prompt_estimate_display="$(gc_format_tokens_compact "$task_prompt_estimate")"
 
       local story_status_hint="in-progress"
       case "$task_result_status" in

@@ -14,12 +14,33 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Set, Dict, Sequence, Any
 
 from compose_sections import dedupe_and_coalesce, emit_preamble_once, format_sections
-from prompt_registry import (
-    DEFAULT_REGISTRY_SUBDIR,
-    ensure_prompt_registry,
-    parse_source_env,
-)
-from wot_publish_prompt import publish_prompt
+
+try:
+    from prompt_registry import (
+        DEFAULT_REGISTRY_SUBDIR,
+        ensure_prompt_registry,
+        parse_source_env,
+    )
+except ModuleNotFoundError:
+    DEFAULT_REGISTRY_SUBDIR = Path("src") / "prompts" / "_registry"
+
+    def ensure_prompt_registry(
+        project_root: Path,
+        *,
+        registry_dir: Path | None = None,
+        source_dirs=None,
+        clean: bool = False,
+    ) -> Path:
+        return (registry_dir or (project_root / DEFAULT_REGISTRY_SUBDIR)).resolve()
+
+    def parse_source_env(project_root: Path, env_value: str | None):
+        return []
+
+try:
+    from wot_publish_prompt import publish_prompt
+except ModuleNotFoundError:
+    def publish_prompt(*args, **kwargs):
+        return Path()
 
 from task_binder import (
     DEFAULT_MAX_BYTES as BINDER_DEFAULT_MAX_BYTES,

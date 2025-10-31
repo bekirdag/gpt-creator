@@ -148,7 +148,8 @@ cjt::derive_project_title() {
 
 cjt::init() {
   CJT_PROJECT_ROOT="${1:?project root required}"
-  CJT_MODEL="${2:-${CODEX_MODEL:-gpt-5-codex}}"
+  local cjt_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5-codex}}}"
+  CJT_MODEL="${2:-$cjt_default_model}"
   CJT_FORCE="${3:-0}"
   CJT_SKIP_REFINE="${4:-0}"
   CJT_DRY_RUN="${5:-0}"
@@ -467,6 +468,7 @@ cjt::run_codex() {
   local prompt_file="${1:?prompt file required}"
   local output_file="${2:?output file required}"
   local label="${3:-codex}"
+  local codex_reasoning="${CODEX_REASONING_EFFORT:-${CODEX_REASONING_EFFORT_NON_CODE:-low}}"
 
   if [[ "$CJT_DRY_RUN" == "1" ]]; then
     cjt::warn "[dry-run] Skipping Codex invocation for $label"
@@ -479,7 +481,7 @@ cjt::run_codex() {
 
   if cjt::codex_has_subcommand chat; then
     local cmd=("$CJT_CODEX_CMD" chat --model "$model" --prompt-file "$prompt_file" --output "$output_file")
-    cjt::log "Running Codex (${label}) with model $CJT_MODEL"
+    cjt::log "Running Codex (${label}) with model $CJT_MODEL (reasoning=${codex_reasoning})"
     if ! "${cmd[@]}"; then
       cjt::warn "Codex invocation failed for ${label}."
       return 1
@@ -495,11 +497,11 @@ cjt::run_codex() {
     if [[ -n "$CJT_PROJECT_ROOT" ]]; then
       args+=(--cd "$CJT_PROJECT_ROOT")
     fi
-    if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
-      args+=(-c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"")
+    if [[ -n "$codex_reasoning" ]]; then
+      args+=(-c "model_reasoning_effort=\"${codex_reasoning}\"")
     fi
     args+=(--output-last-message "$output_file")
-    cjt::log "Running Codex (${label}) with model $CJT_MODEL via exec"
+    cjt::log "Running Codex (${label}) with model $CJT_MODEL via exec (reasoning=${codex_reasoning})"
     if ! "${args[@]}" < "$prompt_file"; then
       cjt::warn "Codex invocation failed for ${label}."
       return 1
@@ -509,7 +511,7 @@ cjt::run_codex() {
 
   if cjt::codex_has_subcommand generate; then
     local cmd=("$CJT_CODEX_CMD" generate --model "$model" --prompt-file "$prompt_file" --output "$output_file")
-    cjt::log "Running Codex (${label}) with model $CJT_MODEL via generate"
+    cjt::log "Running Codex (${label}) with model $CJT_MODEL via generate (reasoning=${codex_reasoning})"
     if ! "${cmd[@]}"; then
       cjt::warn "Codex invocation failed for ${label}."
       return 1

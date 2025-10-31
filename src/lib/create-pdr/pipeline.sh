@@ -45,6 +45,7 @@ cpdr::run_codex() {
   local prompt_file="${1:?prompt file required}"
   local output_file="${2:?output file required}"
   local label="${3:-codex}"
+  local codex_reasoning="${CODEX_REASONING_EFFORT:-${CODEX_REASONING_EFFORT_NON_CODE:-low}}"
 
   if [[ "$CPDR_DRY_RUN" == "1" ]]; then
     cpdr::warn "[dry-run] Skipping Codex invocation for ${label}"
@@ -56,7 +57,7 @@ cpdr::run_codex() {
 
   if cpdr::codex_has_subcommand chat; then
     local cmd=("$CPDR_CODEX_CMD" chat --model "$CPDR_MODEL" --prompt-file "$prompt_file" --output "$output_file")
-    cpdr::log "Running Codex (${label}) with model ${CPDR_MODEL}"
+    cpdr::log "Running Codex (${label}) with model ${CPDR_MODEL} (reasoning=${codex_reasoning})"
     if ! "${cmd[@]}"; then
       cpdr::warn "Codex invocation failed for ${label}."
       return 1
@@ -72,11 +73,11 @@ cpdr::run_codex() {
     if [[ -n "$CPDR_PROJECT_ROOT" ]]; then
       args+=(--cd "$CPDR_PROJECT_ROOT")
     fi
-    if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
-      args+=(-c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"")
+    if [[ -n "$codex_reasoning" ]]; then
+      args+=(-c "model_reasoning_effort=\"${codex_reasoning}\"")
     fi
     args+=(--output-last-message "$output_file")
-    cpdr::log "Running Codex (${label}) with model ${CPDR_MODEL} via exec"
+    cpdr::log "Running Codex (${label}) with model ${CPDR_MODEL} via exec (reasoning=${codex_reasoning})"
     if ! "${args[@]}" < "$prompt_file"; then
       cpdr::warn "Codex invocation failed for ${label}."
       return 1
@@ -86,7 +87,7 @@ cpdr::run_codex() {
 
   if cpdr::codex_has_subcommand generate; then
     local cmd=("$CPDR_CODEX_CMD" generate --model "$CPDR_MODEL" --prompt-file "$prompt_file" --output "$output_file")
-    cpdr::log "Running Codex (${label}) with model ${CPDR_MODEL} via generate"
+    cpdr::log "Running Codex (${label}) with model ${CPDR_MODEL} via generate (reasoning=${codex_reasoning})"
     if ! "${cmd[@]}"; then
       cpdr::warn "Codex invocation failed for ${label}."
       return 1
@@ -146,7 +147,8 @@ cpdr::extract_json() {
 
 cpdr::init() {
   CPDR_PROJECT_ROOT="${1:?project root required}"
-  CPDR_MODEL="${2:-${CODEX_MODEL:-gpt-5-codex}}"
+  local cpdr_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5-codex}}}"
+  CPDR_MODEL="${2:-$cpdr_default_model}"
   CPDR_DRY_RUN="${3:-0}"
   CPDR_FORCE="${4:-0}"
 

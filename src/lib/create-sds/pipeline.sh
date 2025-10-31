@@ -45,6 +45,7 @@ csds::run_codex() {
   local prompt_file="${1:?prompt file required}"
   local output_file="${2:?output file required}"
   local label="${3:-codex}"
+  local codex_reasoning="${CODEX_REASONING_EFFORT:-${CODEX_REASONING_EFFORT_NON_CODE:-low}}"
 
   if [[ "$CSDS_DRY_RUN" == "1" ]]; then
     csds::warn "[dry-run] Skipping Codex invocation for ${label}"
@@ -56,7 +57,7 @@ csds::run_codex() {
 
   if csds::codex_has_subcommand chat; then
     local cmd=("$CSDS_CODEX_CMD" chat --model "$CSDS_MODEL" --prompt-file "$prompt_file" --output "$output_file")
-    csds::log "Running Codex (${label}) with model ${CSDS_MODEL}"
+    csds::log "Running Codex (${label}) with model ${CSDS_MODEL} (reasoning=${codex_reasoning})"
     if ! "${cmd[@]}"; then
       csds::warn "Codex invocation failed for ${label}."
       return 1
@@ -72,11 +73,11 @@ csds::run_codex() {
     if [[ -n "$CSDS_PROJECT_ROOT" ]]; then
       args+=(--cd "$CSDS_PROJECT_ROOT")
     fi
-    if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
-      args+=(-c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"")
+    if [[ -n "$codex_reasoning" ]]; then
+      args+=(-c "model_reasoning_effort=\"${codex_reasoning}\"")
     fi
     args+=(--output-last-message "$output_file")
-    csds::log "Running Codex (${label}) with model ${CSDS_MODEL} via exec"
+    csds::log "Running Codex (${label}) with model ${CSDS_MODEL} via exec (reasoning=${codex_reasoning})"
     if ! "${args[@]}" < "$prompt_file"; then
       csds::warn "Codex invocation failed for ${label}."
       return 1
@@ -86,7 +87,7 @@ csds::run_codex() {
 
   if csds::codex_has_subcommand generate; then
     local cmd=("$CSDS_CODEX_CMD" generate --model "$CSDS_MODEL" --prompt-file "$prompt_file" --output "$output_file")
-    csds::log "Running Codex (${label}) with model ${CSDS_MODEL} via generate"
+    csds::log "Running Codex (${label}) with model ${CSDS_MODEL} via generate (reasoning=${codex_reasoning})"
     if ! "${cmd[@]}"; then
       csds::warn "Codex invocation failed for ${label}."
       return 1
@@ -146,7 +147,8 @@ csds::extract_json() {
 
 csds::init() {
   CSDS_PROJECT_ROOT="${1:?project root required}"
-  CSDS_MODEL="${2:-${CODEX_MODEL:-gpt-5-codex}}"
+  local csds_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5-codex}}}"
+  CSDS_MODEL="${2:-$csds_default_model}"
   CSDS_DRY_RUN="${3:-0}"
   CSDS_FORCE="${4:-0}"
 

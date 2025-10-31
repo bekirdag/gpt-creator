@@ -149,11 +149,13 @@ def summarize(envelope_path: Path, project_root: Path) -> str:
     for cmd in commands:
         cmd_str = str(cmd).strip()
         if cmd_str:
-            output_lines.append(f"CMD {cmd_str.replace('\n', ' ')}")
+            safe_cmd = cmd_str.replace("\r", " ").replace("\n", " ")
+            output_lines.append(f"CMD {safe_cmd}")
     for note in notes:
         note_str = str(note).strip()
         if note_str:
-            output_lines.append(f"NOTE {note_str.replace('\n', ' ')}")
+            safe_note = note_str.replace("\r", " ").replace("\n", " ")
+            output_lines.append(f"NOTE {safe_note}")
 
     return "\n".join(output_lines)
 

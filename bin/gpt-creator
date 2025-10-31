@@ -1065,7 +1065,19 @@ APP_NAME="gpt-creator"
 CODEX_BIN="${CODEX_BIN:-codex}"
 CODEX_MODEL="${CODEX_MODEL:-gpt-5-codex}"
 CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-gpt-5-codex}"
+
+# Stage-aware model selection (defaults fall back to CODEX_MODEL for compatibility)
+CODEX_MODEL_LOW="${CODEX_MODEL_LOW:-${CODEX_MODEL}}"
+CODEX_MODEL_NON_CODE="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW}}"
+CODEX_MODEL_CODE="${CODEX_MODEL_CODE:-${CODEX_MODEL}}"
+
+# Reasoning effort defaults (non-code work drops to low effort unless overridden)
 CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-high}"
+CODEX_REASONING_EFFORT_NON_CODE="${CODEX_REASONING_EFFORT_NON_CODE:-low}"
+CODEX_REASONING_EFFORT_CODE="${CODEX_REASONING_EFFORT_CODE:-${CODEX_REASONING_EFFORT}}"
+
+export CODEX_MODEL CODEX_MODEL_LOW CODEX_MODEL_NON_CODE CODEX_MODEL_CODE
+export CODEX_FALLBACK_MODEL CODEX_REASONING_EFFORT CODEX_REASONING_EFFORT_NON_CODE CODEX_REASONING_EFFORT_CODE
 EDITOR_CMD="${EDITOR_CMD:-code}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 MYSQL_BIN="${MYSQL_BIN:-mysql}"
@@ -5377,18 +5389,38 @@ PROMPT
   # shellcheck disable=SC2034  # exposed for observability in external tooling
   GC_CURRENT_CODEX_MAX_OUT="$call_max_output"
 
+  local codex_model_for_step=""
+  local codex_reasoning_for_step=""
+  case "$call_step" in
+    patch|apply|code|implement)
+      codex_model_for_step="${CODEX_MODEL_CODE:-${CODEX_MODEL}}"
+      if [[ -n "${CODEX_REASONING_EFFORT_CODE:-}" ]]; then
+        codex_reasoning_for_step="${CODEX_REASONING_EFFORT_CODE}"
+      fi
+      ;;
+    *)
+      codex_model_for_step="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL}}"
+      if [[ -n "${CODEX_REASONING_EFFORT_NON_CODE:-}" ]]; then
+        codex_reasoning_for_step="${CODEX_REASONING_EFFORT_NON_CODE}"
+      fi
+      ;;
+  esac
+  [[ -n "$codex_model_for_step" ]] || codex_model_for_step="$CODEX_MODEL"
+
   if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" && "${GC_CODEX_USAGE_LIMIT_CONFIRMED:-0}" == "1" ]]; then
     warn "Codex usage limit previously reached; skipping ${task}."
     return 95
   fi
 
   if command -v "$CODEX_BIN" >/dev/null 2>&1; then
-    info "Codex ${task} (step=${call_step}) → model=${CODEX_MODEL}"
-    local fallback_model="${CODEX_FALLBACK_MODEL:-gpt-5-codex}"
+    local fallback_model="${CODEX_FALLBACK_MODEL:-$codex_model_for_step}"
+    info "Codex ${task} (step=${call_step}) → model=${codex_model_for_step} (reasoning=${codex_reasoning_for_step:-default})"
     # shellcheck disable=SC2034  # local function assigned below for lexical scoping
     local run_codex_model
     run_codex_model() {
       local model="$1"
+      shift || true
+      local step_reasoning="${1:-}"
       shift || true
       local args=(exec --model "$model")
       if [[ -n "${CODEX_PROFILE:-}" ]]; then
@@ -5397,7 +5429,9 @@ PROMPT
       if [[ -n "${PROJECT_ROOT:-}" ]]; then
         args+=(--cd "$PROJECT_ROOT")
       fi
-      if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
+      if [[ -n "$step_reasoning" ]]; then
+        args+=(-c "model_reasoning_effort=\"${step_reasoning}\"")
+      elif [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
         args+=(-c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"")
       fi
       if (( call_max_output > 0 )); then
@@ -5469,16 +5503,16 @@ PROMPT
         return "$cmd_status"
       fi
     }
-    if run_codex_model "$CODEX_MODEL"; then
+    if run_codex_model "$codex_model_for_step" "$codex_reasoning_for_step"; then
       return 0
     fi
     local primary_status="$?"
     if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
       return "$primary_status"
     fi
-    if [[ "$CODEX_MODEL" != "$fallback_model" ]]; then
-      warn "Codex model ${CODEX_MODEL} failed; retrying with ${fallback_model}."
-      if run_codex_model "$fallback_model"; then
+    if [[ "$codex_model_for_step" != "$fallback_model" ]]; then
+      warn "Codex model ${codex_model_for_step} failed; retrying with ${fallback_model}."
+      if run_codex_model "$fallback_model" "$codex_reasoning_for_step"; then
         return 0
       fi
       primary_status="$?"
@@ -7418,12 +7452,24 @@ EOHELP
 
   info "LLM output limits → plan=${GC_LLM_OUTPUT_LIMIT_PLAN}, status=${GC_LLM_OUTPUT_LIMIT_STATUS}, verify=${GC_LLM_OUTPUT_LIMIT_VERIFY}, patch=${GC_LLM_OUTPUT_LIMIT_PATCH}, hard_cap=${GC_LLM_OUTPUT_LIMIT_HARD_CAP}"
 
+  local doc_registry=""
+  local doc_indexer=""
+  doc_registry="$(gc_clone_python_tool "doc_registry.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  doc_indexer="$(gc_clone_python_tool "doc_indexer.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  export GC_DOC_REGISTRY_HELPER="$doc_registry"
+  export GC_DOC_INDEXER_HELPER="$doc_indexer"
+  export doc_registry="$doc_registry"
+  export doc_indexer="$doc_indexer"
+
   local tasks_dir="${PLAN_DIR}/tasks"
-  local tasks_db="${tasks_dir}/tasks.db"
-  local intake_lock_path="${tasks_dir}/.intake-frozen"
   mkdir -p "$tasks_dir"
+  local canonical_tasks_dir="${PROJECT_ROOT:-$PWD}/.gpt-creator/staging/plan/tasks"
+  mkdir -p "$canonical_tasks_dir"
+  local tasks_db="${canonical_tasks_dir}/tasks.db"
+  local intake_lock_path="${canonical_tasks_dir}/.intake-frozen"
+  local doc_vector_path="${canonical_tasks_dir}/documentation-vector-index.sqlite"
   export GC_DOCUMENTATION_DB_PATH="$tasks_db"
-  local doc_vector_path="${tasks_dir}/documentation-vector-index.sqlite"
+  export GC_DOCUMENTATION_INDEX_PATH="$doc_vector_path"
   export GC_DOC_VECTOR_INDEX_PATH="$doc_vector_path"
   if command -v sqlite3 >/dev/null 2>&1; then
     if ! sqlite3 "$GC_DOCUMENTATION_DB_PATH" 'SELECT count(*) FROM documentation;' >/dev/null 2>&1; then
@@ -7933,7 +7979,7 @@ EOF
       local stage_baseline_verify="${GC_BUDGET_STAGE_TOTAL_VERIFY:-0}"
 
       local prompt_meta
-      if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$task_index" "$prompt_path" "$context_tail" "$CODEX_MODEL" "$PROJECT_ROOT" "$STAGING_DIR")"; then
+      if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$task_index" "$prompt_path" "$context_tail" "$CODEX_MODEL_CODE" "$PROJECT_ROOT" "$STAGING_DIR")"; then
         warn "  Failed to build prompt for task index ${task_index}"
         work_failed=1
         break
@@ -8104,7 +8150,7 @@ EOF
           skip_codex_reason="hard-cap"
           local budget_note="${prompt_token_estimate}/${prompt_hard_limit_value}"
           task_notes+=("Prompt estimate ${budget_note} exceeds hard token budget; halting before Codex call.")
-          gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$CODEX_MODEL"
+          gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$codex_model_for_step"
           run_blocked_quota=1
           if [[ "$prompt_stop_flag" != "false" ]]; then
             blocked_stop_run=1
@@ -8144,7 +8190,7 @@ EOF
           budget_note="${prompt_token_estimate}/${prompt_soft_limit_value}"
         fi
         task_notes+=("Prompt exceeded token budgets after deterministic pruning; estimated ${budget_note} tokens.")
-        gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$CODEX_MODEL"
+        gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$codex_model_for_step"
         if [[ "$prompt_stop_flag" != "false" ]]; then
           blocked_stop_run=1
           run_blocked_quota=1

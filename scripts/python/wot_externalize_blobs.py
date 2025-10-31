@@ -3,6 +3,7 @@ import base64
 import json
 import sys
 from pathlib import Path
+from json import JSONDecodeError
 
 
 def sha256(data: bytes) -> str:
@@ -26,8 +27,66 @@ def relpath(path: Path, root: Path) -> str:
         return path.as_posix()
 
 
+def repair_json_string(payload: str) -> str:
+    """Attempt to repair common JSON issues in LLM envelopes."""
+    repaired: list[str] = []
+    in_string = False
+    escaping = False
+    for idx, ch in enumerate(payload):
+        next_ch = payload[idx + 1] if idx + 1 < len(payload) else ""
+        if in_string:
+            if escaping:
+                repaired.append(ch)
+                escaping = False
+                continue
+            if ch == "\\":
+                repaired.append(ch)
+                escaping = True
+                continue
+            if ch == '"':
+                if next_ch and next_ch not in " \t\r\n,]}:":
+                    repaired.append("\\\"")
+                    continue
+                repaired.append(ch)
+                in_string = False
+                continue
+            if ch == "\n":
+                repaired.append("\\n")
+                continue
+            if ch == "\r":
+                repaired.append("\\r")
+                continue
+            if ch == "\t":
+                repaired.append("\\t")
+                continue
+            if ord(ch) < 0x20:
+                repaired.append(f"\\u{ord(ch):04x}")
+                continue
+            repaired.append(ch)
+            continue
+        if ch == '"':
+            repaired.append(ch)
+            in_string = True
+            continue
+        repaired.append(ch)
+    if escaping:
+        repaired.append("\\")
+    if in_string:
+        repaired.append('"')
+    return "".join(repaired)
+
+
+def load_envelope(json_path: Path) -> dict:
+    raw = json_path.read_text(encoding="utf-8", errors="ignore")
+    try:
+        return json.loads(raw)
+    except JSONDecodeError:
+        repaired = repair_json_string(raw)
+        return json.loads(repaired)
+
+
 def externalize(json_path: Path, run_dir: Path, project_root: Path) -> None:
-    data = json.loads(json_path.read_text(encoding="utf-8", errors="ignore"))
+    data = load_envelope(json_path)
     changes = data.get("changes") or []
     out_changes = []
 

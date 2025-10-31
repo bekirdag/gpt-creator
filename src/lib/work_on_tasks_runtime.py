@@ -1588,10 +1588,16 @@ def main():
         task = task_rows[TASK_INDEX]
         documentation_db_path = os.getenv("GC_DOCUMENTATION_DB_PATH", "").strip()
         doc_catalog_env_raw = os.getenv("GC_DOC_CATALOG_PATH", "").strip()
+        doc_registry_helper = os.getenv("doc_registry", "").strip() or os.getenv("GC_DOC_REGISTRY_HELPER", "").strip()
+        doc_indexer_helper = os.getenv("doc_indexer", "").strip() or os.getenv("GC_DOC_INDEXER_HELPER", "").strip()
+        has_doc_registry_helper = bool(doc_registry_helper)
+        has_doc_indexer_helper = bool(doc_indexer_helper)
 
         doc_library_candidates: List[Path] = []
         doc_index_candidates: List[Path] = []
         doc_catalog_candidates: List[Path] = []
+
+        fallback_catalog_literal = ".gpt-creator/staging/plan/work/doc-catalog.json"
 
         if doc_catalog_env_raw:
             doc_catalog_candidates.append(Path(doc_catalog_env_raw))
@@ -1962,17 +1968,41 @@ def main():
         lines.append("")
         lines.append(f"You are assisting the {project_display} delivery team. Implement the task precisely using the repository at: {repo_path}")
         lines.append("")
+        fallback_catalog_display = _select_display_path([project_root_path / fallback_catalog_literal]) or fallback_catalog_literal
+
         lines.append("## Documentation Assets")
+        lines.append("We have a documentatio catalog sqllite db and related assets to help you find relevant information quickly. Instead of searching in files directly, prefer querying the catalog for accurate and efficient lookups.")
+        lines.append("Documentation catalog:")
+        db_line = "- DB: $GC_DOCUMENTATION_DB_PATH (tables: documentation, documentation_changes; FTS: documentation_search)"
         if documentation_db_display:
-            lines.append(f"- Central catalogue lives in `{documentation_db_display}` (tables `documentation` and `documentation_changes`).")
-            lines.append("- Use it to locate PDR/SDS/RFP/OpenAPI/SQL dumps, diagrams, and samples before making changes.")
-            lines.append("- After modifying a document, update the registry (e.g. `python3 src/lib/doc_registry.py register --runtime-dir .gpt-creator …`) so change history stays accurate.")
-            lines.append("- Capture relevant doc references from the registry in your summary so the team can follow up.")
-            lines.append(f"- Keyword search via `documentation_search` FTS (e.g. `{example_query}`).")
-            if vector_index_path_str:
-                lines.append(f"- Semantic index lives at `{vector_index_path_str}`; refresh with `python3 src/lib/doc_indexer.py --runtime-dir .gpt-creator` after major doc edits.")
+            db_line += f" → `{documentation_db_display}`"
         else:
-            lines.append("- Documentation registry database not detected; rely on the reference files below and register new/updated docs with `python3 src/lib/doc_registry.py register --runtime-dir .gpt-creator …` when possible.")
+            db_line += " (not detected; run `gpt-creator scan` to regenerate if needed)"
+        lines.append(db_line)
+        vector_line = "- Vector index: $GC_DOCUMENTATION_INDEX_PATH"
+        if vector_index_path_str:
+            vector_line += f" → `{vector_index_path_str}`"
+        else:
+            vector_line += " (create via documentation scan when semantic lookup is required)"
+        lines.append(vector_line)
+        lines.append(f"- Query (example): sqlite3 \"$GC_DOCUMENTATION_DB_PATH\" \\")
+        lines.append('  "SELECT doc_id,surface FROM documentation_search WHERE documentation_search MATCH \'lockout\' LIMIT 5;"')
+        lines.append("- Table `documentation`: one row per doc with metadata (doc_type, rel_path, title, tags_json, metadata_json, status, change_count).")
+        lines.append("- Table `documentation_changes`: append-only audit history keyed by doc_id (change_type, sha256, description, context, recorded_at).")
+        lines.append("- Table `documentation_sections`: hierarchical headings per doc (section_id, parent_section_id, order_index, anchor, byte/token spans, summary).")
+        lines.append("- Table `documentation_excerpts`: curated snippets for prompts (content, justification, token_length, optional embedding_id).")
+        lines.append("- Table `documentation_summaries`: cached descriptions per doc (summary_short/long, key_points_json, keywords_json, embedding_id).")
+        lines.append("- Table `documentation_index_state`: surfaces awaiting semantic rebuild (status, indexed_at, usage_score, metadata_json).")
+        lines.append("- FTS `documentation_search`: searchable text (surface, content) with doc_id/section_id; combine MATCH with snippet(documentation_search,1,'[',']',' ... ',32) or ORDER BY bm25(documentation_search).")
+        lines.append('- Schema quicklook: sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables" or ".schema documentation" to inspect columns quickly.')
+        lines.append("- Vector DB ($GC_DOCUMENTATION_INDEX_PATH) table `vectors`: embeddings per surface (embedding_id PK, doc_id, section_id, vector_json, dims, metadata_json, updated_at).")
+        if has_doc_registry_helper and has_doc_indexer_helper:
+            registry_note = f" (resolved `{doc_registry_helper}`)" if doc_registry_helper else ""
+            indexer_note = f" (resolved `{doc_indexer_helper}`)" if doc_indexer_helper else ""
+            lines.append(f'- Update registry: python3 "$doc_registry" register --runtime-dir .gpt-creator <path> --tags "<k=v,...>"{registry_note}')
+            lines.append(f'- Rebuild vector index: python3 "$doc_indexer" --runtime-dir .gpt-creator{indexer_note}')
+        else:
+            lines.append(f"- JSON catalog fallback: `{fallback_catalog_display}` — use this to map `documentation` IDs when helper scripts are unavailable.")
 
         if documentation_asset_lines:
             lines.extend(documentation_asset_lines)

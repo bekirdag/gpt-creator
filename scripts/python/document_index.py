@@ -91,6 +91,7 @@ ACCEPTANCE_MAX_ITEMS = int(os.getenv("GC_PROMPT_ACCEPTANCE_MAX_ITEMS", "120"))
 ACCEPTANCE_MAX_CHARS = int(os.getenv("GC_PROMPT_ACCEPTANCE_MAX_CHARS", "32000"))
 FREEFORM_SECTION_MAX_CHARS = int(os.getenv("GC_PROMPT_FREEFORM_MAX_CHARS", "12000"))
 PROMPT_SOURCE_MAX_BYTES = int(os.getenv("GC_PROMPT_SOURCE_MAX_BYTES", "262144"))
+MAX_PROMPT_BYTES = int(os.getenv("GC_PROMPT_MAX_BYTES", "180000"))
 DOC_SEARCH_MAX_RESULTS = int(os.getenv("GC_PROMPT_DOC_SEARCH_MAX_RESULTS", "12"))
 DOC_CATALOG_MAX_ENTRIES = int(os.getenv("GC_PROMPT_DOC_CATALOG_MAX_ENTRIES", "6"))
 SEARCH_SNIPPET_MAX_CHARS = int(os.getenv("GC_PROMPT_DOC_SNIPPET_MAX_CHARS", "500"))
@@ -1393,6 +1394,24 @@ if binder_hit:
     binder_doc_refs = _dedupe_doc_refs(binder_data.get("doc_refs") or [], DOC_SEARCH_MAX_RESULTS)
 documentation_db_path = os.getenv("GC_DOCUMENTATION_DB_PATH", "").strip()
 doc_catalog_env_raw = os.getenv("GC_DOC_CATALOG_PATH", "").strip()
+doc_catalog_helper = (
+    os.getenv("GC_DOC_CATALOG_PY", "").strip()
+    or os.getenv("GC_DOC_CATALOG_HELPER", "").strip()
+    or os.getenv("doc_catalog", "").strip()
+)
+doc_registry_helper = (
+    os.getenv("GC_DOC_REGISTRY_PY", "").strip()
+    or os.getenv("GC_DOC_REGISTRY_HELPER", "").strip()
+    or os.getenv("doc_registry", "").strip()
+)
+doc_indexer_helper = (
+    os.getenv("GC_DOC_INDEXER_PY", "").strip()
+    or os.getenv("GC_DOC_INDEXER_HELPER", "").strip()
+    or os.getenv("doc_indexer", "").strip()
+)
+has_doc_catalog_helper = bool(doc_catalog_helper)
+has_doc_registry_helper = bool(doc_registry_helper)
+has_doc_indexer_helper = bool(doc_indexer_helper)
 
 doc_library_candidates: List[Path] = []
 doc_index_candidates: List[Path] = []
@@ -1420,6 +1439,7 @@ if not doc_catalog_candidates:
 doc_library_path_str = _select_display_path(doc_library_candidates)
 doc_index_path_str = _select_display_path(doc_index_candidates)
 doc_catalog_path_str = _select_display_path(doc_catalog_candidates)
+doc_catalog_pointer = doc_catalog_path_str or ".gpt-creator/staging/plan/work/doc-catalog.json"
 doc_library_shim_str = _select_display_path([project_root_path / "docs" / "doc-library.md"])
 doc_index_shim_str = _select_display_path([project_root_path / "docs" / "doc-index.md"])
 
@@ -1427,16 +1447,21 @@ documentation_db_display = _select_display_path([Path(documentation_db_path)]) i
 
 vector_index_path = None
 vector_index_path_str = ""
+vector_index_env_raw = os.getenv("GC_DOC_VECTOR_INDEX_PATH", "").strip()
+vector_index_candidates: List[Path] = []
+if vector_index_env_raw:
+    try:
+        vector_index_candidates.append(Path(vector_index_env_raw))
+    except Exception:
+        pass
 if documentation_db_path:
     db_path_obj = Path(documentation_db_path)
-    vector_index_candidates = []
     resolved_db = _resolve_display_path(db_path_obj)
     vector_index_candidates.append(resolved_db.parent / "documentation-vector-index.sqlite")
     vector_index_candidates.append(db_path_obj.parent / "documentation-vector-index.sqlite")
+if vector_index_candidates:
     vector_index_path = _first_existing_path(vector_index_candidates)
     vector_index_path_str = _select_display_path(vector_index_candidates)
-
-example_query = "sqlite3 \"$GC_DOCUMENTATION_DB_PATH\" \"SELECT doc_id,surface FROM documentation_search WHERE documentation_search MATCH 'lockout' LIMIT 5;\""
 
 catalog_reference_docs: List[str] = []
 for filename in ("document-catalog-indexing.md", "document-catalog-metadata.md", "document-catalog-pipeline.md"):
@@ -1469,6 +1494,10 @@ elif doc_index_shim_str:
 if doc_catalog_path_str:
     documentation_asset_lines.append(
         f"- JSON catalog (doc/snippet map) at `{doc_catalog_path_str}` keeps scripted lookups fast while prompts stay lean."
+    )
+else:
+    documentation_asset_lines.append(
+        f"- JSON catalog (doc/snippet map) at `{doc_catalog_pointer}` keeps scripted lookups fast while prompts stay lean."
     )
 
 if catalog_reference_docs:
@@ -1870,17 +1899,58 @@ lines.append(f"# You are Codex (model: {MODEL_NAME})")
 lines.append("")
 lines.append(f"You are assisting the {project_display} delivery team. Implement the task precisely using the repository at: {repo_path}")
 lines.append("")
-lines.append("## Documentation Assets")
-if documentation_db_display:
-    lines.append(f"- Central catalogue lives in `{documentation_db_display}` (tables `documentation` and `documentation_changes`).")
-    lines.append("- Use it to locate PDR/SDS/RFP/OpenAPI/SQL dumps, diagrams, and samples before making changes.")
-    lines.append("- After modifying a document, update the registry (e.g. `python3 src/lib/doc_registry.py register --runtime-dir .gpt-creator …`) so change history stays accurate.")
-    lines.append("- Capture relevant doc references from the registry in your summary so the team can follow up.")
-    lines.append(f"- Keyword search via `documentation_search` FTS (e.g. `{example_query}`).")
+doc_helpers_available = bool(
+    documentation_db_path
+    and has_doc_catalog_helper
+    and has_doc_registry_helper
+    and has_doc_indexer_helper
+)
+if doc_helpers_available:
+    lines.append("## Documentation Assets (local helpers)")
+    lines.append("")
+    catalog_line = "- Catalog DB: $GC_DOCUMENTATION_DB_PATH"
+    if documentation_db_display:
+        catalog_line += f" → `{documentation_db_display}`"
+    lines.append(catalog_line)
+    vector_line = "- Vector/semantic index: $GC_DOC_VECTOR_INDEX_PATH"
     if vector_index_path_str:
-        lines.append(f"- Semantic index lives at `{vector_index_path_str}`; refresh with `python3 src/lib/doc_indexer.py --runtime-dir .gpt-creator` after major doc edits.")
+        vector_line += f" → `{vector_index_path_str}`"
+    else:
+        vector_line += " (generate via documentation scan when semantic lookup is required)"
+    lines.append(vector_line)
+    lines.append("")
+    lines.append("### Quick catalog commands")
+    lines.append("- List recent docs:")
+    lines.append('  python3 "$GC_DOC_CATALOG_PY" list --db "$GC_DOCUMENTATION_DB_PATH" --limit 10')
+    lines.append("- Full-text search (FTS5):")
+    lines.append('  python3 "$GC_DOC_CATALOG_PY" search --db "$GC_DOCUMENTATION_DB_PATH" --query "lockout" --limit 15')
+    lines.append("- Show document by id:")
+    lines.append('  python3 "$GC_DOC_CATALOG_PY" show --db "$GC_DOCUMENTATION_DB_PATH" --doc-id <id>')
+    lines.append("- Rebuild semantic index (if needed):")
+    lines.append('  python3 "$GC_DOC_INDEXER_PY" rebuild --db "$GC_DOCUMENTATION_DB_PATH" --out "$GC_DOC_VECTOR_INDEX_PATH"')
+    lines.append("- Register/sync discovery TSV (scan step already does this):")
+    lines.append('  python3 "$GC_DOC_REGISTRY_PY" register --db "$GC_DOCUMENTATION_DB_PATH" --tsv ".gpt-creator/manifests/<latest>.tsv"')
 else:
-    lines.append("- Documentation registry database not detected; rely on the reference files below and register new/updated docs with `python3 src/lib/doc_registry.py register --runtime-dir .gpt-creator …` when possible.")
+    lines.append("## Documentation Assets (sqlite3 fallback)")
+    lines.append("")
+    catalog_line = "- Catalog DB: $GC_DOCUMENTATION_DB_PATH"
+    if documentation_db_display:
+        catalog_line += f" → `{documentation_db_display}`"
+    else:
+        catalog_line += " (run `gpt-creator scan` if the catalog needs to be regenerated)"
+    lines.append(catalog_line)
+    vector_line = "- Vector/semantic index: $GC_DOC_VECTOR_INDEX_PATH"
+    if vector_index_path_str:
+        vector_line += f" → `{vector_index_path_str}`"
+    lines.append(vector_line)
+    lines.append("- FTS example:")
+    lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" \\')
+    lines.append('    "SELECT doc_id, surface FROM documentation_search WHERE documentation_search MATCH \'lockout\' LIMIT 15;"')
+    lines.append("- Latest changes:")
+    lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" \\')
+    lines.append('    "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"')
+
+lines.append("")
 
 if documentation_asset_lines:
     lines.extend(documentation_asset_lines)
@@ -3124,14 +3194,10 @@ else:
 
 if instruction_prompts:
     lines.append("")
-    lines.append("## Supplemental Instruction Prompts")
-    for rel_path, prompt_lines in instruction_prompts:
-        lines.append(f"### {rel_path}")
-        lines.extend(prompt_lines)
-        if not prompt_lines or prompt_lines[-1].strip():
-            lines.append("")
-    if lines and lines[-1] == "":
-        lines.pop()
+    lines.append("### Supplemental Instructions (pointers only)")
+    pointer_target = doc_catalog_pointer or ".gpt-creator/staging/plan/work/doc-catalog.json"
+    lines.append(f"See JSON catalog at: `{pointer_target}`")
+    lines.append("Use the catalog + FTS search to pull only the slices you need; do not inline entire instruction prompts.")
 
 if CONTEXT_TAIL_PATH:
     context_path = Path(CONTEXT_TAIL_PATH)
@@ -3237,6 +3303,7 @@ if soft_limit > 0 or hard_limit > 0:
     )
 
 _enforce_prompt_size_limit(segments, PROMPT_SOURCE_MAX_BYTES)
+_enforce_prompt_size_limit(segments, MAX_PROMPT_BYTES)
 
 final_tokens_raw = _recalculate_total_tokens(segments)
 final_token_estimate = math.ceil(final_tokens_raw * ESTIMATE_MARGIN)
@@ -3292,6 +3359,14 @@ else:
 
 final_prompt_text = slim_prompt_markdown(final_prompt_text)
 final_prompt_text = _clean_prompt_text(final_prompt_text)
+if MAX_PROMPT_BYTES > 0:
+    prompt_bytes = final_prompt_text.encode("utf-8", "ignore")
+    if len(prompt_bytes) > MAX_PROMPT_BYTES:
+        emit_progress(
+            f"Prompt {len(prompt_bytes):,} bytes exceeds GC_PROMPT_MAX_BYTES={MAX_PROMPT_BYTES:,}; truncating tail."
+        )
+        trimmed = prompt_bytes[:MAX_PROMPT_BYTES]
+        final_prompt_text = trimmed.decode("utf-8", "ignore").rstrip() + "\n"
 
 prompt_path = Path(PROMPT_PATH)
 meta_path = Path(str(prompt_path) + ".meta.json")

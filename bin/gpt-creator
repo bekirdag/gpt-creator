@@ -430,6 +430,18 @@ gc_doc_catalog_ready() {
   return 0
 }
 
+gc_setup_doc_catalog_helpers() {
+  local helper_path=""
+  helper_path="$(gc_clone_python_tool "doc_catalog.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  export GC_DOC_CATALOG_PY="$helper_path"
+
+  helper_path="$(gc_clone_python_tool "doc_registry.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  export GC_DOC_REGISTRY_PY="$helper_path"
+
+  helper_path="$(gc_clone_python_tool "doc_indexer.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  export GC_DOC_INDEXER_PY="$helper_path"
+}
+
 gc_populate_doc_catalog_shims() {
   local root="${1:-${PROJECT_ROOT:-$PWD}}"
   local runtime_dir="${root}/.gpt-creator"
@@ -554,6 +566,25 @@ gc_parse_int() {
   else
     printf '%s\n' "$fallback"
   fi
+}
+
+gc_estimate_tokens_from_bytes() {
+  local prompt_file="${1:?prompt path required}"
+  if [[ ! -f "$prompt_file" ]]; then
+    printf '0\n'
+    return 0
+  fi
+  local bytes
+  if ! bytes="$(wc -c <"$prompt_file" 2>/dev/null)"; then
+    printf '0\n'
+    return 0
+  fi
+  if ! [[ "$bytes" =~ ^[0-9]+$ ]]; then
+    printf '0\n'
+    return 0
+  fi
+  local approx=$(( (bytes + 3) / 4 ))
+  printf '%s\n' "$approx"
 }
 
 gc_trim_prompt_file() {
@@ -3349,6 +3380,14 @@ gc_update_task_state() {
   local helper_path
   helper_path="$(gc_clone_python_tool "update_task_state.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   python3 "$helper_path" "$db_path" "$story_slug" "$position" "$status" "$run_stamp"
+}
+
+gc_mark_task_abandoned_for_budget() {
+  local db_path="${1:?tasks database path required}"
+  local story_slug="${2:?story slug required}"
+  local position="${3:?task position required}"
+  local run_stamp="${4:-manual}"
+  gc_update_task_state "$db_path" "$story_slug" "$position" "abandoned-for-budget" "$run_stamp"
 }
 
 gc_record_task_progress() {
@@ -7453,25 +7492,6 @@ EOHELP
 
   info "LLM output limits → plan=${GC_LLM_OUTPUT_LIMIT_PLAN}, status=${GC_LLM_OUTPUT_LIMIT_STATUS}, verify=${GC_LLM_OUTPUT_LIMIT_VERIFY}, patch=${GC_LLM_OUTPUT_LIMIT_PATCH}, hard_cap=${GC_LLM_OUTPUT_LIMIT_HARD_CAP}"
 
-  local doc_registry=""
-  local doc_indexer=""
-  if doc_registry="$(gc_clone_python_tool "doc_registry.py" "${PROJECT_ROOT:-$PWD}")"; then
-    export GC_DOC_REGISTRY_HELPER="$doc_registry"
-    export doc_registry="$doc_registry"
-  else
-    unset GC_DOC_REGISTRY_HELPER
-    unset doc_registry
-    warn "Doc registry helper unavailable; prompts will fall back to SQLite/JSON catalog guidance."
-  fi
-  if doc_indexer="$(gc_clone_python_tool "doc_indexer.py" "${PROJECT_ROOT:-$PWD}")"; then
-    export GC_DOC_INDEXER_HELPER="$doc_indexer"
-    export doc_indexer="$doc_indexer"
-  else
-    unset GC_DOC_INDEXER_HELPER
-    unset doc_indexer
-    warn "Doc indexer helper unavailable; semantic rebuild instructions disabled."
-  fi
-
   local tasks_dir="${PLAN_DIR}/tasks"
   mkdir -p "$tasks_dir"
   local canonical_tasks_dir="${PROJECT_ROOT:-$PWD}/.gpt-creator/staging/plan/tasks"
@@ -7480,8 +7500,8 @@ EOHELP
   local intake_lock_path="${canonical_tasks_dir}/.intake-frozen"
   local doc_vector_path="${canonical_tasks_dir}/documentation-vector-index.sqlite"
   export GC_DOCUMENTATION_DB_PATH="$tasks_db"
-  export GC_DOCUMENTATION_INDEX_PATH="$doc_vector_path"
   export GC_DOC_VECTOR_INDEX_PATH="$doc_vector_path"
+  export GC_DOCUMENTATION_INDEX_PATH="$doc_vector_path"
   if command -v sqlite3 >/dev/null 2>&1; then
     if ! sqlite3 "$GC_DOCUMENTATION_DB_PATH" 'SELECT count(*) FROM documentation;' >/dev/null 2>&1; then
       die "Documentation database missing or invalid at ${GC_DOCUMENTATION_DB_PATH}; run 'gpt-creator scan --project \"${PROJECT_ROOT:-$PWD}\"' and retry."
@@ -7623,6 +7643,21 @@ EOHELP
     printf '{"version":1,"documents":{}}\n' >"$doc_catalog_path"
   fi
   export GC_DOC_CATALOG_PATH="$doc_catalog_path"
+
+  if gc_setup_doc_catalog_helpers; then
+    export GC_DOC_CATALOG_HELPER="${GC_DOC_CATALOG_PY}"
+    export GC_DOC_REGISTRY_HELPER="${GC_DOC_REGISTRY_PY}"
+    export GC_DOC_INDEXER_HELPER="${GC_DOC_INDEXER_PY}"
+    export doc_catalog="${GC_DOC_CATALOG_PY}"
+    export doc_registry="${GC_DOC_REGISTRY_PY}"
+    export doc_indexer="${GC_DOC_INDEXER_PY}"
+  else
+    warn "Doc helpers unavailable; header will fall back to raw sqlite3."
+    unset GC_DOC_CATALOG_PY GC_DOC_REGISTRY_PY GC_DOC_INDEXER_PY
+    unset GC_DOC_CATALOG_HELPER GC_DOC_REGISTRY_HELPER GC_DOC_INDEXER_HELPER
+    unset doc_catalog doc_registry doc_indexer
+  fi
+
   local last_progress_ts
   local idle_timeout_triggered=0
   local ctx_file="${run_dir}/context.md"
@@ -8000,6 +8035,12 @@ EOF
       fi
       "$python_bin" "$prompt_slim_helper" "$prompt_path"
 
+      local prompt_est_tokens_raw
+      prompt_est_tokens_raw="$(gc_estimate_tokens_from_bytes "$prompt_path")"
+      if ! [[ "$prompt_est_tokens_raw" =~ ^[0-9]+$ ]]; then
+        prompt_est_tokens_raw=0
+      fi
+
       local task_id="" task_title="" task_story_points="" task_status_current="" task_locked_flag="0" task_status_reason=""
       IFS=$'\t' read -r task_id task_title task_story_points task_status_current task_locked_flag task_status_reason <<<"$prompt_meta"
       local banner_task_id="${task_id:-no-id}"
@@ -8147,6 +8188,34 @@ EOF
           skip_codex_reason="$(gc_budget_stage_skip_reason "patch")"
           [[ -z "$skip_codex_reason" ]] && skip_codex_reason="auto-abandon"
         fi
+      fi
+
+      : "${GC_TASK_TOKEN_HARD_LIMIT:=60000}"
+      local prompt_token_hard_cap
+      prompt_token_hard_cap="$(gc_parse_int "${GC_TASK_TOKEN_HARD_LIMIT}" 60000)"
+      if ! [[ "$prompt_token_hard_cap" =~ ^[0-9]+$ ]]; then
+        prompt_token_hard_cap=60000
+      else
+        prompt_token_hard_cap=$((prompt_token_hard_cap))
+      fi
+      local prompt_estimate_tokens=$((prompt_est_tokens_raw))
+      if (( prompt_token_hard_cap > 0 )) && (( prompt_estimate_tokens > prompt_token_hard_cap )) && (( skip_codex == 0 )); then
+        warn "    Prompt ~${prompt_estimate_tokens} tokens exceeds hard cap ${prompt_token_hard_cap}; skipping task (abandoned-for-budget)."
+        gc_mark_task_abandoned_for_budget "$tasks_db" "$slug" "$task_index" "$run_stamp" || true
+        skip_codex=1
+        codex_ok=1
+        manual_followups=1
+        keep_output=0
+        task_result_status="abandoned-for-budget"
+        apply_status="prompt-blocked"
+        skip_codex_reason="hard-cap"
+        prompt_status="blocked-quota"
+        prompt_hard_limit_value="$prompt_token_hard_cap"
+        prompt_token_estimate="$prompt_estimate_tokens"
+        prompt_stop_on_overbudget="true"
+        run_blocked_quota=1
+        task_prompt_estimate=$((prompt_estimate_tokens))
+        task_notes+=("Prompt estimated at ~${prompt_estimate_tokens} tokens exceeds hard cap ${prompt_token_hard_cap}; not sent to LLM.")
       fi
 
       if [[ "${prompt_status,,}" != "blocked-quota" ]]; then

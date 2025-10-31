@@ -1588,8 +1588,22 @@ def main():
         task = task_rows[TASK_INDEX]
         documentation_db_path = os.getenv("GC_DOCUMENTATION_DB_PATH", "").strip()
         doc_catalog_env_raw = os.getenv("GC_DOC_CATALOG_PATH", "").strip()
-        doc_registry_helper = os.getenv("doc_registry", "").strip() or os.getenv("GC_DOC_REGISTRY_HELPER", "").strip()
-        doc_indexer_helper = os.getenv("doc_indexer", "").strip() or os.getenv("GC_DOC_INDEXER_HELPER", "").strip()
+        doc_catalog_helper = (
+            os.getenv("GC_DOC_CATALOG_PY", "").strip()
+            or os.getenv("GC_DOC_CATALOG_HELPER", "").strip()
+            or os.getenv("doc_catalog", "").strip()
+        )
+        doc_registry_helper = (
+            os.getenv("GC_DOC_REGISTRY_PY", "").strip()
+            or os.getenv("GC_DOC_REGISTRY_HELPER", "").strip()
+            or os.getenv("doc_registry", "").strip()
+        )
+        doc_indexer_helper = (
+            os.getenv("GC_DOC_INDEXER_PY", "").strip()
+            or os.getenv("GC_DOC_INDEXER_HELPER", "").strip()
+            or os.getenv("doc_indexer", "").strip()
+        )
+        has_doc_catalog_helper = bool(doc_catalog_helper)
         has_doc_registry_helper = bool(doc_registry_helper)
         has_doc_indexer_helper = bool(doc_indexer_helper)
 
@@ -1621,6 +1635,7 @@ def main():
         doc_library_path_str = _select_display_path(doc_library_candidates)
         doc_index_path_str = _select_display_path(doc_index_candidates)
         doc_catalog_path_str = _select_display_path(doc_catalog_candidates)
+        doc_catalog_pointer = doc_catalog_path_str or fallback_catalog_literal
         doc_library_shim_str = _select_display_path([project_root_path / "docs" / "doc-library.md"])
         doc_index_shim_str = _select_display_path([project_root_path / "docs" / "doc-index.md"])
 
@@ -1628,16 +1643,21 @@ def main():
 
         vector_index_path = None
         vector_index_path_str = ""
+        vector_index_env_raw = os.getenv("GC_DOC_VECTOR_INDEX_PATH", "").strip()
+        vector_index_candidates: List[Path] = []
+        if vector_index_env_raw:
+            try:
+                vector_index_candidates.append(Path(vector_index_env_raw))
+            except Exception:
+                pass
         if documentation_db_path:
             db_path_obj = Path(documentation_db_path)
-            vector_index_candidates = []
             resolved_db = _resolve_display_path(db_path_obj)
             vector_index_candidates.append(resolved_db.parent / "documentation-vector-index.sqlite")
             vector_index_candidates.append(db_path_obj.parent / "documentation-vector-index.sqlite")
+        if vector_index_candidates:
             vector_index_path = _first_existing_path(vector_index_candidates)
             vector_index_path_str = _select_display_path(vector_index_candidates)
-
-        example_query = "sqlite3 \"$GC_DOCUMENTATION_DB_PATH\" \"SELECT doc_id,surface FROM documentation_search WHERE documentation_search MATCH 'lockout' LIMIT 5;\""
 
         catalog_reference_docs: List[str] = []
         for filename in ("document-catalog-indexing.md", "document-catalog-metadata.md", "document-catalog-pipeline.md"):
@@ -1673,6 +1693,10 @@ def main():
             )
             documentation_asset_lines.append(
                 "- Path is also exported as `$GC_DOC_CATALOG_PATH`; quick listing: `python3 -c \"import json, os; data=json.load(open(os.environ['GC_DOC_CATALOG_PATH'])); print('\\n'.join(sorted(data.get('documents', {}))))\"`"
+            )
+        else:
+            documentation_asset_lines.append(
+                f"- JSON catalog (doc/snippet map) at `{doc_catalog_pointer}` keeps scripted lookups fast while prompts stay lean."
             )
 
         if catalog_reference_docs:
@@ -1968,41 +1992,58 @@ def main():
         lines.append("")
         lines.append(f"You are assisting the {project_display} delivery team. Implement the task precisely using the repository at: {repo_path}")
         lines.append("")
-        fallback_catalog_display = _select_display_path([project_root_path / fallback_catalog_literal]) or fallback_catalog_literal
+        doc_helpers_available = bool(
+            documentation_db_path
+            and has_doc_catalog_helper
+            and has_doc_registry_helper
+            and has_doc_indexer_helper
+        )
+        if doc_helpers_available:
+            lines.append("## Documentation Assets (local helpers)")
+            lines.append("")
+            catalog_line = "- Catalog DB: $GC_DOCUMENTATION_DB_PATH"
+            if documentation_db_display:
+                catalog_line += f" → `{documentation_db_display}`"
+            lines.append(catalog_line)
+            vector_line = "- Vector/semantic index: $GC_DOC_VECTOR_INDEX_PATH"
+            if vector_index_path_str:
+                vector_line += f" → `{vector_index_path_str}`"
+            else:
+                vector_line += " (generate via documentation scan when semantic lookup is required)"
+            lines.append(vector_line)
+            lines.append("")
+            lines.append("### Quick catalog commands")
+            lines.append("- List recent docs:")
+            lines.append('  python3 "$GC_DOC_CATALOG_PY" list --db "$GC_DOCUMENTATION_DB_PATH" --limit 10')
+            lines.append("- Full-text search (FTS5):")
+            lines.append('  python3 "$GC_DOC_CATALOG_PY" search --db "$GC_DOCUMENTATION_DB_PATH" --query "lockout" --limit 15')
+            lines.append("- Show document by id:")
+            lines.append('  python3 "$GC_DOC_CATALOG_PY" show --db "$GC_DOCUMENTATION_DB_PATH" --doc-id <id>')
+            lines.append("- Rebuild semantic index (if needed):")
+            lines.append('  python3 "$GC_DOC_INDEXER_PY" rebuild --db "$GC_DOCUMENTATION_DB_PATH" --out "$GC_DOC_VECTOR_INDEX_PATH"')
+            lines.append("- Register/sync discovery TSV (scan step already does this):")
+            lines.append('  python3 "$GC_DOC_REGISTRY_PY" register --db "$GC_DOCUMENTATION_DB_PATH" --tsv ".gpt-creator/manifests/<latest>.tsv"')
+        else:
+            lines.append("## Documentation Assets (sqlite3 fallback)")
+            lines.append("")
+            catalog_line = "- Catalog DB: $GC_DOCUMENTATION_DB_PATH"
+            if documentation_db_display:
+                catalog_line += f" → `{documentation_db_display}`"
+            else:
+                catalog_line += " (run `gpt-creator scan` if the catalog needs to be regenerated)"
+            lines.append(catalog_line)
+            vector_line = "- Vector/semantic index: $GC_DOC_VECTOR_INDEX_PATH"
+            if vector_index_path_str:
+                vector_line += f" → `{vector_index_path_str}`"
+            lines.append(vector_line)
+            lines.append("- FTS example:")
+            lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" \\')
+            lines.append('    "SELECT doc_id, surface FROM documentation_search WHERE documentation_search MATCH \'lockout\' LIMIT 15;"')
+            lines.append("- Latest changes:")
+            lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" \\')
+            lines.append('    "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"')
 
-        lines.append("## Documentation Assets")
-        lines.append("We have a documentatio catalog sqllite db and related assets to help you find relevant information quickly. Instead of searching in files directly, prefer querying the catalog for accurate and efficient lookups.")
-        lines.append("Documentation catalog:")
-        db_line = "- DB: $GC_DOCUMENTATION_DB_PATH (tables: documentation, documentation_changes; FTS: documentation_search)"
-        if documentation_db_display:
-            db_line += f" → `{documentation_db_display}`"
-        else:
-            db_line += " (not detected; run `gpt-creator scan` to regenerate if needed)"
-        lines.append(db_line)
-        vector_line = "- Vector index: $GC_DOCUMENTATION_INDEX_PATH"
-        if vector_index_path_str:
-            vector_line += f" → `{vector_index_path_str}`"
-        else:
-            vector_line += " (create via documentation scan when semantic lookup is required)"
-        lines.append(vector_line)
-        lines.append(f"- Query (example): sqlite3 \"$GC_DOCUMENTATION_DB_PATH\" \\")
-        lines.append('  "SELECT doc_id,surface FROM documentation_search WHERE documentation_search MATCH \'lockout\' LIMIT 5;"')
-        lines.append("- Table `documentation`: one row per doc with metadata (doc_type, rel_path, title, tags_json, metadata_json, status, change_count).")
-        lines.append("- Table `documentation_changes`: append-only audit history keyed by doc_id (change_type, sha256, description, context, recorded_at).")
-        lines.append("- Table `documentation_sections`: hierarchical headings per doc (section_id, parent_section_id, order_index, anchor, byte/token spans, summary).")
-        lines.append("- Table `documentation_excerpts`: curated snippets for prompts (content, justification, token_length, optional embedding_id).")
-        lines.append("- Table `documentation_summaries`: cached descriptions per doc (summary_short/long, key_points_json, keywords_json, embedding_id).")
-        lines.append("- Table `documentation_index_state`: surfaces awaiting semantic rebuild (status, indexed_at, usage_score, metadata_json).")
-        lines.append("- FTS `documentation_search`: searchable text (surface, content) with doc_id/section_id; combine MATCH with snippet(documentation_search,1,'[',']',' ... ',32) or ORDER BY bm25(documentation_search).")
-        lines.append('- Schema quicklook: sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables" or ".schema documentation" to inspect columns quickly.')
-        lines.append("- Vector DB ($GC_DOCUMENTATION_INDEX_PATH) table `vectors`: embeddings per surface (embedding_id PK, doc_id, section_id, vector_json, dims, metadata_json, updated_at).")
-        if has_doc_registry_helper and has_doc_indexer_helper:
-            registry_note = f" (resolved `{doc_registry_helper}`)" if doc_registry_helper else ""
-            indexer_note = f" (resolved `{doc_indexer_helper}`)" if doc_indexer_helper else ""
-            lines.append(f'- Update registry: python3 "$doc_registry" register --runtime-dir .gpt-creator <path> --tags "<k=v,...>"{registry_note}')
-            lines.append(f'- Rebuild vector index: python3 "$doc_indexer" --runtime-dir .gpt-creator{indexer_note}')
-        else:
-            lines.append(f"- JSON catalog fallback: `{fallback_catalog_display}` — use this to map `documentation` IDs when helper scripts are unavailable.")
+        lines.append("")
 
         if documentation_asset_lines:
             lines.extend(documentation_asset_lines)
@@ -3119,14 +3160,10 @@ def main():
 
         if instruction_prompts:
             lines.append("")
-            lines.append("## Supplemental Instruction Prompts")
-            for rel_path, prompt_lines in instruction_prompts:
-                lines.append(f"### {rel_path}")
-                lines.extend(prompt_lines)
-                if not prompt_lines or prompt_lines[-1].strip():
-                    lines.append("")
-            if lines and lines[-1] == "":
-                lines.pop()
+            lines.append("### Supplemental Instructions (pointers only)")
+            pointer_target = doc_catalog_pointer or fallback_catalog_literal
+            lines.append(f"See JSON catalog at: `{pointer_target}`")
+            lines.append("Use the catalog + FTS search to pull only the slices you need; do not inline entire instruction prompts.")
 
         if CONTEXT_TAIL_PATH:
             context_path = Path(CONTEXT_TAIL_PATH)

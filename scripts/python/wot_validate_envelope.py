@@ -29,8 +29,11 @@ def main(path: str) -> int:
         return 2
     for idx, change in enumerate(changes, 1):
         valid = False
-        if isinstance(change, str) and change.startswith("--- "):
-            valid = True
+        if isinstance(change, str):
+            if change.startswith("--- "):
+                valid = True
+            elif change.startswith("diff --git "):
+                valid = True
         elif isinstance(change, dict):
             if "path" in change and "contents" in change:
                 valid = True

@@ -6801,25 +6801,37 @@ EOHELP
 
     local sync_cmd_output=""
 
-    if command -v pnpm >/dev/null 2>&1; then
-      info "Attempting auto locale sync via 'pnpm i18n:sync'."
-      if sync_cmd_output="$(cd "$project_root" && pnpm i18n:sync 2>&1)"; then
-        info "Locale sync completed (pnpm)."
-        return 0
+    if [[ -f "${project_root}/package.json" ]] && grep -q '"i18n:sync"' "${project_root}/package.json"; then
+      if command -v pnpm >/dev/null 2>&1; then
+        info "Attempting auto locale sync via 'pnpm run i18n:sync'."
+        if sync_cmd_output="$(cd "$project_root" && pnpm run i18n:sync 2>&1)"; then
+          info "Locale sync completed (pnpm)."
+          return 0
+        fi
+        warn "Locale sync via pnpm failed: ${sync_cmd_output//$'\n'/ }"
       fi
-      warn "Locale sync via pnpm failed: ${sync_cmd_output//$'\n'/ }"
+
+      if command -v npm >/dev/null 2>&1; then
+        info "Attempting auto locale sync via 'npm run i18n:sync'."
+        if sync_cmd_output="$(cd "$project_root" && npm run i18n:sync --silent 2>&1)"; then
+          info "Locale sync completed (npm)."
+          return 0
+        fi
+        warn "Locale sync via npm failed: ${sync_cmd_output//$'\n'/ }"
+      fi
     fi
 
-    if command -v npm >/dev/null 2>&1; then
-      info "Attempting auto locale sync via 'npm run i18n:sync'."
-      if sync_cmd_output="$(cd "$project_root" && npm run i18n:sync --silent 2>&1)"; then
-        info "Locale sync completed (npm)."
+    local i18n_script="${CLI_ROOT}/scripts/i18n-sync.js"
+    if [[ -f "$i18n_script" ]] && command -v node >/dev/null 2>&1; then
+      info "Attempting auto locale sync via local i18n-sync.js."
+      if sync_cmd_output="$(cd "$project_root" && node "$i18n_script" 2>&1)"; then
+        info "Locale sync completed (node)."
         return 0
       fi
-      warn "Locale sync via npm failed: ${sync_cmd_output//$'\n'/ }"
+      warn "Locale sync via node script failed: ${sync_cmd_output//$'\n'/ }"
     fi
 
-    warn "Auto locale sync failed; pnpm/npm not available or commands returned errors."
+    warn "Auto locale sync failed; tooling unavailable or commands returned errors."
     return 1
   }
 

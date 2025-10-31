@@ -532,6 +532,106 @@ cjt::wrap_json_extractor() {
   python3 "$helper_path" "$infile" "$outfile"
 }
 
+cjt::write_epics_prompt() {
+  local prompt_file="${1:?prompt file required}"
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "write_epics_prompt.py")" || return 1
+  local project_label="${CJT_PROJECT_TITLE:-the project}"
+  CJT_PROMPT_TITLE="$project_label" python3 "$helper_path" "$prompt_file" "$CJT_CONTEXT_EPIC_FILE" "$CJT_CONTEXT_SNIPPET_FILE"
+}
+
+cjt::generate_epics() {
+  if cjt::state_stage_is_completed "epics"; then
+    cjt::log "Epics already generated; skipping"
+    return
+  fi
+
+  cjt::state_mark_stage_pending "epics"
+
+  local prompt_file="$CJT_PROMPTS_DIR/epics.prompt.md"
+  local raw_file="$CJT_OUTPUT_DIR/epics.raw.txt"
+  local json_file="$CJT_JSON_DIR/epics.json"
+
+  cjt::write_epics_prompt "$prompt_file"
+  cjt::log "Generating Jira epics backlog"
+  if cjt::run_codex "$prompt_file" "$raw_file" "epics"; then
+    if cjt::wrap_json_extractor "$raw_file" "$json_file"; then
+      if [[ "${CJT_DRY_RUN:-0}" != "1" && ! -s "$json_file" ]]; then
+        cjt::die "Epics generation produced empty output"
+      fi
+      cjt::state_mark_stage_completed "epics"
+      return
+    fi
+    cjt::die "Failed to parse epics output into JSON"
+  fi
+  cjt::die "Codex failed while generating epics"
+}
+
+cjt::generate_stories() {
+  if cjt::state_stage_is_completed "stories"; then
+    cjt::log "Stories already generated; skipping"
+    return
+  fi
+  if [[ ! -f "$CJT_JSON_DIR/epics.json" ]]; then
+    cjt::die "Epics JSON not found; run epics generation first."
+  fi
+
+  cjt::state_mark_stage_pending "stories"
+
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "list_epic_ids.py")" || return 1
+  local -a epic_ids=()
+  if ! mapfile -t epic_ids < <(python3 "$helper_path" "$CJT_JSON_DIR/epics.json"); then
+    cjt::die "Failed to enumerate epics from ${CJT_JSON_DIR}/epics.json"
+  fi
+  local -a filtered_epic_ids=()
+  local raw_epic_id
+  for raw_epic_id in "${epic_ids[@]}"; do
+    local trimmed="${raw_epic_id//$'\r'/}"
+    trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [[ -n "$trimmed" ]] || continue
+    filtered_epic_ids+=("$trimmed")
+  done
+  epic_ids=("${filtered_epic_ids[@]}")
+
+  if (( ${#epic_ids[@]} == 0 )); then
+    cjt::warn "No epics found in epics.json; skipping story generation."
+    cjt::state_mark_stage_completed "stories"
+    return
+  fi
+
+  local epic_id
+  for epic_id in "${epic_ids[@]}"; do
+    local slug
+    slug="$(cjt::slugify "$epic_id")"
+    local prompt_file="$CJT_PROMPTS_DIR/stories_${slug}.prompt.md"
+    local raw_file="$CJT_OUTPUT_DIR/stories_${slug}.raw.txt"
+    local json_file="$CJT_JSON_STORIES_DIR/${slug}.json"
+
+    if cjt::state_story_is_completed "stories" "$slug" "$json_file"; then
+      cjt::log "Stories already generated for epic ${epic_id} (${slug}); skipping"
+      continue
+    fi
+
+    cjt::write_story_prompt "$epic_id" "$prompt_file"
+    cjt::log "Generating stories for epic ${epic_id}"
+    if cjt::run_codex "$prompt_file" "$raw_file" "stories-${slug}"; then
+      if cjt::wrap_json_extractor "$raw_file" "$json_file"; then
+        if [[ "${CJT_DRY_RUN:-0}" != "1" && ! -s "$json_file" ]]; then
+          cjt::die "Stories generation produced empty output for ${epic_id}"
+        fi
+        cjt::state_mark_story_completed "stories" "$slug"
+        continue
+      fi
+      cjt::die "Failed to parse stories output into JSON for ${epic_id}"
+    fi
+    cjt::die "Codex failed while generating stories for ${epic_id}"
+  done
+
+  cjt::state_mark_stage_completed "stories"
+}
+
 cjt::write_story_prompt() {
   local epic_id="${1:?epic id required}"
   local prompt_file="${2:?prompt file required}"

@@ -18,7 +18,6 @@ import json
 import os
 import sqlite3
 import sys
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1026,7 +1025,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     register_parser = subparsers.add_parser(
         "register",
-        help="Record a documentation change in the registry.",
+        help="Record or update a documentation row in the registry.",
         add_help=True,
         allow_abbrev=False,
     )
@@ -1036,20 +1035,81 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Runtime directory containing the tasks catalog (fallbacks to GC_DOCUMENTATION_DB_PATH).",
     )
     register_parser.add_argument(
+        "--doc-id",
+        dest="doc_id_opt",
+        help="Explicit document identifier (defaults to a stable hash of the provided path).",
+    )
+    register_parser.add_argument(
+        "--doc-type",
+        help="Document type/category label (e.g. pdr, sds, openapi).",
+    )
+    register_parser.add_argument(
+        "--source-path",
+        help="Absolute path to the source document.",
+    )
+    register_parser.add_argument(
+        "--staging-path",
+        help="Path to the staged copy stored under the runtime directory.",
+    )
+    register_parser.add_argument(
+        "--rel-path",
+        help="Relative path recorded in the registry.",
+    )
+    register_parser.add_argument(
+        "--title",
+        help="Optional human-readable title override.",
+    )
+    register_parser.add_argument(
+        "--tags",
+        help="JSON array (or comma-separated list) of tags to associate with the document.",
+    )
+    register_parser.add_argument(
+        "--metadata",
+        help="JSON object with additional metadata to store alongside the document row.",
+    )
+    register_parser.add_argument(
+        "--context",
+        help="Context label describing how this entry was produced (e.g. normalize, scan).",
+    )
+    register_parser.add_argument(
+        "--status",
+        default="active",
+        help="Document status flag (default: active).",
+    )
+    register_parser.add_argument(
+        "--sha256",
+        help="Precomputed SHA-256 digest for the document.",
+    )
+    register_parser.add_argument(
+        "--size-bytes",
+        type=int,
+        help="File size in bytes (auto-detected when omitted).",
+    )
+    register_parser.add_argument(
+        "--mtime-ns",
+        type=int,
+        help="File modification time in nanoseconds (auto-detected when omitted).",
+    )
+    register_parser.add_argument(
+        "--compute-hash",
+        action="store_true",
+        help="Compute the SHA-256 digest from the provided source/staging path when missing.",
+    )
+    register_parser.add_argument(
         "doc_id",
         nargs="?",
-        help="Document identifier (required to log a change).",
+        help="(Legacy) document identifier positional argument.",
     )
     register_parser.add_argument(
         "path",
         nargs="?",
-        help="Path to the updated document or section.",
+        help="(Legacy) path positional argument used when older invocations still rely on positional syntax.",
     )
     register_parser.add_argument(
         "summary",
         nargs="?",
         default="",
-        help="Short summary describing the change.",
+        help="(Legacy) short summary describing the change.",
     )
 
     search_parser = subparsers.add_parser(
@@ -1100,34 +1160,148 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _handle_register(args: argparse.Namespace) -> int:
-    doc_id = getattr(args, "doc_id", None)
-    if not doc_id:
-        print("doc_registry: register OK (compatibility shim).", flush=True)
+    def _parse_tags(raw: Optional[str]) -> List[str]:
+        if not raw:
+            return []
+        parsed: Optional[object]
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        tags: List[str] = []
+        if isinstance(parsed, (list, tuple)):
+            tags = [str(item).strip() for item in parsed if str(item).strip()]
+        elif isinstance(parsed, str):
+            if parsed.strip():
+                tags = [parsed.strip()]
+        else:
+            tags = [part.strip() for part in raw.split(",") if part.strip()]
+        return _normalize_tags(tags)
+
+    def _parse_metadata(raw: Optional[str]) -> Optional[Dict[str, object]]:
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"raw": raw}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"value": parsed}
+
+    runtime_dir = getattr(args, "runtime_dir", None)
+    db_path = _db_path_from_runtime(runtime_dir)
+    doc_id = getattr(args, "doc_id_opt", None) or getattr(args, "doc_id", None)
+    source_path_str = getattr(args, "source_path", None) or getattr(args, "path", None)
+    staging_path_str = getattr(args, "staging_path", None)
+    rel_path = getattr(args, "rel_path", None) or None
+    title = getattr(args, "title", None) or ""
+    doc_type = getattr(args, "doc_type", None) or ""
+    context = getattr(args, "context", None) or ""
+    status = (getattr(args, "status", None) or "active").strip() or "active"
+    summary = getattr(args, "summary", None)
+    tags = _parse_tags(getattr(args, "tags", None))
+    metadata = _parse_metadata(getattr(args, "metadata", None))
+    if summary:
+        if metadata is None:
+            metadata = {"summary": summary}
+        else:
+            metadata.setdefault("summary", summary)
+
+    if not doc_id and not source_path_str and not staging_path_str and not rel_path:
+        print("doc_registry: register OK (no-op).", flush=True)
         return 0
 
-    path_arg = getattr(args, "path", None)
-    if not path_arg:
-        print("doc_registry: register requires DOC_ID and PATH arguments.", file=sys.stderr)
+    source_path = Path(source_path_str).expanduser() if source_path_str else None
+    staging_path = Path(staging_path_str).expanduser() if staging_path_str else None
+    primary_path = staging_path or source_path
+    stat_path = primary_path or source_path
+
+    if not doc_id:
+        for candidate in (staging_path, source_path):
+            if candidate:
+                doc_id = _stable_doc_id(candidate)
+                break
+    if not doc_id and rel_path:
+        doc_id = _stable_doc_id(Path(rel_path))
+    if not doc_id:
+        print("doc_registry: register requires a document identifier or path.", file=sys.stderr)
         return 2
 
-    summary = getattr(args, "summary", "") or ""
-    db_path = _db_path_from_runtime(getattr(args, "runtime_dir", None))
+    sha256 = getattr(args, "sha256", None) or ""
+    compute_hash = bool(getattr(args, "compute_hash", False))
+    if compute_hash and not sha256:
+        candidate_paths = [p for p in (staging_path, source_path) if p is not None]
+        for candidate in candidate_paths:
+            digest = _sha256(candidate)
+            if digest:
+                sha256 = digest
+                break
+        if not sha256 and candidate_paths:
+            sha256 = ""
+
+    file_stat = None
+    if stat_path is not None:
+        try:
+            file_stat = stat_path.stat()
+        except OSError:
+            file_stat = None
+
+    size_bytes = getattr(args, "size_bytes", None)
+    if size_bytes is None and file_stat is not None:
+        size_bytes = int(file_stat.st_size)
+
+    mtime_ns = getattr(args, "mtime_ns", None)
+    if mtime_ns is None and file_stat is not None:
+        mtime_ns = int(getattr(file_stat, "st_mtime_ns", int(file_stat.st_mtime * 1_000_000_000)))
+
+    if not doc_type:
+        doc_type = tags[0] if tags else "document"
+
+    if not title:
+        if rel_path:
+            title = Path(rel_path).stem
+        elif primary_path:
+            title = primary_path.stem
+        elif source_path:
+            title = source_path.stem
+        else:
+            title = doc_id
+        title = title.replace("_", " ").replace("-", " ").strip().title()
+
+    file_name = None
+    file_ext = None
+    name_source = staging_path or source_path
+    if name_source is not None:
+        file_name = name_source.name
+        ext = name_source.suffix.lstrip(".")
+        file_ext = ext.lower() or None
+
+    document = DocumentInput(
+        doc_id=doc_id,
+        doc_type=doc_type,
+        source_path=str(source_path.resolve(strict=False)) if source_path else None,
+        staging_path=str(staging_path.resolve(strict=False)) if staging_path else None,
+        rel_path=rel_path,
+        title=title,
+        size_bytes=size_bytes,
+        mtime_ns=mtime_ns,
+        sha256=sha256 or None,
+        tags=tags,
+        metadata=metadata,
+        context=context or "register",
+        status=status,
+        file_name=file_name,
+        file_ext=file_ext,
+    )
 
     try:
-        with sqlite3.connect(str(db_path)) as conn:
-            conn.execute("SELECT 1 FROM documentation_changes LIMIT 1;")
-            conn.execute(
-                "INSERT INTO documentation_changes(doc_id, path, summary, changed_at) VALUES(?,?,?,?)",
-                (doc_id, path_arg, summary, int(time.time())),
-            )
-            conn.commit()
-            print("registered", flush=True)
-            return 0
-    except sqlite3.OperationalError as exc:
-        print(f"documentation_changes table missing in {db_path}: {exc}", file=sys.stderr)
-        return 2
+        registry = DocRegistry(db_path)
+        registry.bulk_upsert([document])
+        print(f"doc_registry: registered {doc_id}", flush=True)
+        return 0
     except sqlite3.Error as exc:
-        print(f"doc_registry: failed to record change ({exc}).", file=sys.stderr)
+        print(f"doc_registry: failed to register document ({exc}).", file=sys.stderr)
         return 2
 
 

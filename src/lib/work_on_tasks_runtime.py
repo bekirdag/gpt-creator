@@ -565,18 +565,66 @@ def main():
                 raise ValueError(f"Path {path} escapes project root")
             return full
 
-        for change in changes:
-            ctype = change.get('type')
-            path = change.get('path')
-            if not path:
-                if ctype == 'patch':
-                    inferred = extract_path_from_diff(change.get('diff') or '')
+        for index, change in enumerate(changes):
+            if not isinstance(change, dict):
+                manual_notes.append(f"Skipping invalid change at index {index}; expected object payload.")
+                continue
+
+            raw_type = change.get('type')
+            if isinstance(raw_type, str):
+                normalized_type = raw_type.strip().lower()
+            else:
+                normalized_type = ''
+
+            if normalized_type in ('edit', 'patch'):
+                ctype = 'patch'
+            elif normalized_type in ('file', 'create'):
+                ctype = 'file'
+            else:
+                ctype = normalized_type
+
+            raw_path = change.get('path')
+            path = raw_path.strip() if isinstance(raw_path, str) else ''
+
+            if ctype == 'patch':
+                diff_value = change.get('diff')
+                if not isinstance(diff_value, str) or not diff_value.strip():
+                    manual_notes.append(
+                        f"Skipping invalid change at index {index}; patch diff missing or empty."
+                    )
+                    continue
+                if not path:
+                    inferred = extract_path_from_diff(diff_value or '')
                     if inferred:
                         path = inferred
                         change['path'] = path
-            if not path:
-                raise ValueError('Change entry missing path')
-            if ctype == 'file':
+                if not path:
+                    manual_notes.append(
+                        f"Skipping invalid change at index {index}; path missing or empty."
+                    )
+                    continue
+                change['type'] = 'patch'
+            elif ctype == 'file':
+                if not path:
+                    manual_notes.append(
+                        f"Skipping invalid change at index {index}; path missing or empty."
+                    )
+                    continue
+                content_value = change.get('content')
+                if not isinstance(content_value, str):
+                    manual_notes.append(
+                        f"Skipping invalid change at index {index}; file content missing or not text."
+                    )
+                    continue
+                change['type'] = 'file'
+            else:
+                descriptor = (raw_type.strip() if isinstance(raw_type, str) and raw_type.strip() else 'unknown')
+                manual_notes.append(
+                    f"Skipping invalid change at index {index}; unknown type '{descriptor}'."
+                )
+                continue
+
+            if change['type'] == 'file':
                 content = change.get('content', '')
                 dest = ensure_within_root(Path(path))
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -604,8 +652,6 @@ def main():
                 actual_changes += 1
             elif ctype == 'patch':
                 diff = change.get('diff')
-                if not diff:
-                    raise ValueError(f"Patch change for {path} missing diff")
                 diff = rewrite_patch_paths(diff)
                 diff = ensure_diff_headers(diff, path)
                 diff_bytes = len(diff.encode('utf-8'))
@@ -822,8 +868,6 @@ def main():
                     patched.append(path)
                     change_bytes[path] = diff_bytes
                     actual_changes += 1
-            else:
-                raise ValueError(f"Unknown change type: {ctype}")
 
         command_entries = payload.get('commands') or []
         executed_commands: List[str] = []

@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Set, Dict, Sequence, Any
 
 from compose_sections import dedupe_and_coalesce, emit_preamble_once, format_sections
+from prompt_registry import (
+    DEFAULT_REGISTRY_SUBDIR,
+    ensure_prompt_registry,
+    parse_source_env,
+)
+from wot_publish_prompt import publish_prompt
 
 from task_binder import (
     DEFAULT_MAX_BYTES as BINDER_DEFAULT_MAX_BYTES,
@@ -44,12 +50,23 @@ DESCRIPTION_MAX_LINES = int(os.getenv("GC_PROMPT_DESCRIPTION_MAX_LINES", "400"))
 DESCRIPTION_MAX_CHARS = int(os.getenv("GC_PROMPT_DESCRIPTION_MAX_CHARS", "40000"))
 ACCEPTANCE_MAX_ITEMS = int(os.getenv("GC_PROMPT_ACCEPTANCE_MAX_ITEMS", "120"))
 ACCEPTANCE_MAX_CHARS = int(os.getenv("GC_PROMPT_ACCEPTANCE_MAX_CHARS", "32000"))
-FREEFORM_SECTION_MAX_CHARS = int(os.getenv("GC_PROMPT_FREEFORM_MAX_CHARS", "24000"))
+FREEFORM_SECTION_MAX_CHARS = int(os.getenv("GC_PROMPT_FREEFORM_MAX_CHARS", "12000"))
 PROMPT_SOURCE_MAX_BYTES = int(os.getenv("GC_PROMPT_SOURCE_MAX_BYTES", "262144"))
 DOC_SEARCH_MAX_RESULTS = int(os.getenv("GC_PROMPT_DOC_SEARCH_MAX_RESULTS", "12"))
 DOC_CATALOG_MAX_ENTRIES = int(os.getenv("GC_PROMPT_DOC_CATALOG_MAX_ENTRIES", "6"))
 SEARCH_SNIPPET_MAX_CHARS = int(os.getenv("GC_PROMPT_DOC_SNIPPET_MAX_CHARS", "500"))
 PROMPT_WARN_TOKENS = int(os.getenv("GC_PROMPT_WARN_TOKENS", "200000"))
+INSTRUCTION_PROMPT_RUN_MARKER = "/.gpt-creator/staging/plan/work/"
+INSTRUCTION_PROMPT_CREATE_SDS_MARKER = "/.gpt-creator/staging/plan/create-sds/"
+INSTRUCTION_PROMPT_BINDER_MARKER = "/.gpt-creator/cache/task-binder/"
+PROMPT_SNAPSHOT_MARKER = "/docs/automation/prompts/"
+HEAVY_SECTION_PATTERNS = [
+    re.compile(r"^jira tasks$", re.IGNORECASE),
+    re.compile(r"^0[\W_]*document control", re.IGNORECASE),
+    re.compile(r"^product scope\s*&\s*functional requirements", re.IGNORECASE),
+    re.compile(r"^data[, ]+integrations? [&and]+ interfaces", re.IGNORECASE),
+    re.compile(r"acceptance\s*\(mem-a\)", re.IGNORECASE),
+]
 
 _progress_enabled = os.getenv("GC_PROMPT_PROGRESS", "1").strip().lower() not in {"0", "false", "off"}
 
@@ -89,7 +106,7 @@ SEGMENT_TYPE_PRIORITY: Dict[str, Tuple[int, bool]] = {
     "guardrails": (90, True),
     "output-contract": (90, True),
     "supplemental": (82, True),
-    "section": (80, True),
+    "section": (80, False),
     "doc-search": (60, False),
     "doc-catalog-intro": (58, False),
     "doc-catalog-entry": (55, False),
@@ -415,6 +432,18 @@ def _lines_to_sections(lines: List[str]) -> List[Tuple[str, str]]:
                 continue
             body_lines.append(value)
         body_text = "\n".join(body_lines).strip()
+        normalized_heading = _normalize_heading(heading)
+        heavy_section = False
+        if heading:
+            for pattern in HEAVY_SECTION_PATTERNS:
+                if pattern.search(heading) or pattern.search(normalized_heading):
+                    heavy_section = True
+                    break
+        if heavy_section:
+            body_text = "(omitted; consult the documentation catalog for the full content.)"
+        elif body_text and FREEFORM_SECTION_MAX_CHARS > 0 and len(body_text) > FREEFORM_SECTION_MAX_CHARS:
+            truncated = body_text[:FREEFORM_SECTION_MAX_CHARS].rstrip()
+            body_text = f"{truncated}\n... (section truncated; open source documentation for full details.)"
         result.append((heading, body_text))
     return result
 
@@ -561,16 +590,38 @@ def _build_generic_segment(section: Dict[str, Any], order: int) -> Dict[str, Any
     lines = section["lines"]
     if not lines:
         return {}
-    seg_type, score, must_keep = _resolve_section_type(section["heading"])
-    text = "\n".join(_strip_empty_ends(lines)).rstrip()
-    heading_key = _normalize_heading(section["heading"]) or "lead-in"
+    heading_raw = section.get("heading") or ""
+    trimmed_lines = _strip_empty_ends(lines)
+    heading_line = trimmed_lines[0] if trimmed_lines else (f"## {heading_raw}" if heading_raw else "## Section")
+    seg_type, score, must_keep = _resolve_section_type(heading_raw)
+    heading_key = _normalize_heading(heading_raw) or "lead-in"
+    heavy_section = False
+    if heading_raw:
+        normalized_heading = _normalize_heading(heading_raw)
+        for pattern in HEAVY_SECTION_PATTERNS:
+            if pattern.search(heading_raw) or pattern.search(normalized_heading):
+                heavy_section = True
+                break
+    if heavy_section:
+        text = f"{heading_line}\n(omitted; consult the documentation catalog for the full content.)"
+        fallback_text = text
+    else:
+        text = "\n".join(trimmed_lines).rstrip()
+        fallback_text = None
+        max_chars = FREEFORM_SECTION_MAX_CHARS
+        if max_chars > 0 and len(text) > max_chars:
+            truncated = text[:max_chars].rstrip()
+            text = f"{truncated}\n... (section truncated; open source documentation for full details.)"
+            fallback_text = f"{heading_line}\n(omitted; open source documentation for full details.)"
+    if not text:
+        return {}
     return {
         "id": f"{seg_type}:{order:02d}:{heading_key}",
         "type": seg_type,
         "score": score,
         "must_keep": must_keep,
         "full_text": text,
-        "fallback_text": None,
+        "fallback_text": fallback_text,
         "path": None,
         "doc_id": None,
         "order": order,
@@ -1173,6 +1224,27 @@ if staging_root:
     if plan_candidate.exists():
         plan_instruction_dir = plan_candidate
 
+registry_env_raw = os.getenv("GC_PROMPT_REGISTRY_DIR", "").strip()
+source_env_raw = os.getenv("GC_PROMPT_SOURCE_DIRS", "").strip()
+registry_candidate: Optional[Path]
+if registry_env_raw:
+    registry_candidate = Path(registry_env_raw)
+    if not registry_candidate.is_absolute():
+        registry_candidate = project_root_path / registry_candidate
+else:
+    registry_candidate = project_root_path / DEFAULT_REGISTRY_SUBDIR
+
+source_roots = parse_source_env(project_root_path, source_env_raw)
+try:
+    ensure_prompt_registry(
+        project_root_path,
+        registry_dir=registry_candidate,
+        source_dirs=source_roots,
+        clean=os.getenv("GC_PROMPT_REGISTRY_REFRESH", "").strip().lower() in {"1", "true", "yes", "force"},
+    )
+except Exception:
+    registry_candidate = None
+
 instruction_prompts: List[Tuple[str, List[str]]] = []
 runner_config = _load_runner_config(project_root_path)
 
@@ -1499,12 +1571,53 @@ def _enforce_prompt_size_limit(segments: List[Dict[str, Any]], limit_bytes: int)
         emit_progress(f"Prompt still {current_bytes:,} bytes after pruning; consider reducing GC_PROMPT_SOURCE_MAX_BYTES")
 
 
-def collect_instruction_prompts(plan_dir: Optional[Path], project_root: Optional[Path]) -> List[Tuple[str, List[str]]]:
+def _instruction_prompt_is_excluded(path_obj: Path, plan_dir: Optional[Path], project_root: Optional[Path]) -> bool:
+    try:
+        resolved = path_obj.resolve()
+    except OSError:
+        resolved = path_obj
+    candidate_str = str(resolved).replace("\\", "/")
+    if "/prompts/" not in candidate_str:
+        return False
+    if INSTRUCTION_PROMPT_RUN_MARKER in candidate_str and "/runs/" in candidate_str:
+        return True
+    if INSTRUCTION_PROMPT_CREATE_SDS_MARKER in candidate_str:
+        return True
+    if INSTRUCTION_PROMPT_BINDER_MARKER in candidate_str:
+        return True
+    if PROMPT_SNAPSHOT_MARKER in candidate_str:
+        return True
+    if plan_dir:
+        try:
+            rel_plan = resolved.relative_to(plan_dir.resolve())
+            rel_parts = [part.lower() for part in rel_plan.parts]
+            if "runs" in rel_parts and "prompts" in rel_parts:
+                return True
+        except Exception:
+            pass
+    if project_root:
+        try:
+            rel_project = resolved.relative_to(project_root.resolve())
+            rel_parts = [part.lower() for part in rel_project.parts]
+            if rel_parts[:3] == [".gpt-creator", "cache", "task-binder"]:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def collect_instruction_prompts(
+    plan_dir: Optional[Path],
+    project_root: Optional[Path],
+    registry_dir: Optional[Path],
+) -> List[Tuple[str, List[str]]]:
     prompts: List[Tuple[str, List[str]]] = []
     search_roots: List[Path] = []
+    if registry_dir and registry_dir.exists():
+        search_roots.append(registry_dir)
     if plan_dir and plan_dir.exists():
         search_roots.append(plan_dir)
-    if project_root:
+    if not search_roots and project_root:
         for relative in ("src/prompts", "docs/prompts", ".gpt-creator/prompts"):
             candidate = project_root / relative
             if candidate.exists():
@@ -1524,6 +1637,9 @@ def collect_instruction_prompts(plan_dir: Optional[Path], project_root: Optional
             except OSError:
                 resolved = candidate
             if resolved in seen or not candidate.is_file():
+                continue
+            if _instruction_prompt_is_excluded(candidate, plan_dir, project_root):
+                emit_progress(f"Skipping instruction prompt {candidate} (excluded path)")
                 continue
             try:
                 size_bytes = candidate.stat().st_size
@@ -1556,7 +1672,7 @@ def collect_instruction_prompts(plan_dir: Optional[Path], project_root: Optional
             prompts.append((rel_repr, text.splitlines()))
     return prompts
 
-instruction_prompts = collect_instruction_prompts(plan_instruction_dir, project_root_path)
+instruction_prompts = collect_instruction_prompts(plan_instruction_dir, project_root_path, registry_candidate)
 
 if not instruction_prompts:
     fallback_prompt_paths = [
@@ -3110,10 +3226,24 @@ for segment in segments:
     if text:
         final_segment_texts.append(text)
 
-if final_segment_texts:
-    final_prompt_text = "\n\n".join(final_segment_texts).rstrip() + "\n"
+stub_reason = ""
+if hard_limit_final_trigger and stop_on_overbudget:
+    stub_reason = (
+        f"blocked-quota: estimated {final_token_estimate} tokens exceeds hard limit {hard_limit}"
+    )
+    emit_progress(f"{stub_reason}; writing stub prompt.")
+    for segment in segments:
+        segment["dropped"] = True
+        segment["current_text"] = ""
+        segment["current_tokens"] = 0
+        segment["fallback_used"] = False
+    final_segment_texts = []
+    final_prompt_text = stub_reason.rstrip() + "\n"
 else:
-    final_prompt_text = "\n".join(lines).rstrip() + "\n"
+    if final_segment_texts:
+        final_prompt_text = "\n\n".join(final_segment_texts).rstrip() + "\n"
+    else:
+        final_prompt_text = "\n".join(lines).rstrip() + "\n"
 
 final_prompt_text = _clean_prompt_text(final_prompt_text)
 
@@ -3252,6 +3382,11 @@ meta: Dict[str, Any] = {
 
 if truncated_sections:
     meta["truncated_sections"] = truncated_sections
+if stub_reason:
+    meta["prompt_stub"] = {
+        "reason": stub_reason,
+        "stop_on_overbudget": bool(stop_on_overbudget),
+    }
 
 meta["input_digest"] = input_digest
 
@@ -3264,6 +3399,13 @@ else:
     emit_progress(f"Wrote prompt → {prompt_path}")
     _atomic_write_text(meta_path, json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
 emit_progress(f"Prompt size ≈ {final_token_estimate} tokens ({len(final_prompt_text):,} bytes)")
+
+if os.getenv("GC_PROMPT_PUBLISH_DISABLE", "").strip().lower() not in {"1", "true", "yes"}:
+    try:
+        publish_prompt(prompt_path, meta_path, project_root_path)
+        emit_progress(f"Published prompt snapshot for {prompt_path}")
+    except Exception as exc:
+        emit_progress(f"Prompt publish failed: {exc}")
 
 story_points_meta = story_points or ""
 status_output = task_status or ""

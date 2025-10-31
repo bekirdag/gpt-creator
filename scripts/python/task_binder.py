@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,7 @@ VERSION = 1
 
 _DIGEST_MAX_BYTES = max(1024, int(os.getenv("GC_BINDER_DIGEST_MAX_BYTES", "8192")))
 _DIGEST_MAX_LINES = max(16, int(os.getenv("GC_BINDER_DIGEST_MAX_LINES", "120")))
+_AUTO_SNAPSHOT_RE = re.compile(r"^chore\(gpt-creator\):\s*auto snapshot", re.IGNORECASE)
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -107,6 +109,27 @@ def _git_changed_paths(project_root: Path, base_commit: str) -> List[str]:
     if result.returncode != 0:
         return []
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _commits_are_auto_snapshot(project_root: Path, base_commit: str, head_commit: str) -> bool:
+    if not base_commit or not head_commit or base_commit == head_commit:
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "log", "--format=%s", f"{base_commit}..{head_commit}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=6,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    subjects = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not subjects:
+        return False
+    return all(_AUTO_SNAPSHOT_RE.match(subject) for subject in subjects)
 
 
 def _collect_cache_size(root: Path) -> int:
@@ -237,21 +260,23 @@ def load_for_prompt(
     binder_git = (binder.get("git") or {}).get("head") or ""
     current_git = _current_git_head(project_root)
     if binder_git and current_git and binder_git != current_git:
-        changed_paths = _git_changed_paths(project_root, binder_git)
-        files_section = binder.get("files") or {}
-        allowed = set()
-        for key in ("primary", "related", "deps"):
-            for item in files_section.get(key) or []:
-                allowed.add((item or "").strip())
-        invalidated = False
-        for path_changed in changed_paths:
-            if not path_changed:
-                continue
-            if path_changed not in allowed:
-                invalidated = True
-                break
-        if invalidated:
-            return BinderLoadResult("stale", path, binder, "git-diverged")
+        auto_snapshot_only = _commits_are_auto_snapshot(project_root, binder_git, current_git)
+        changed_paths = [] if auto_snapshot_only else _git_changed_paths(project_root, binder_git)
+        if not auto_snapshot_only:
+            files_section = binder.get("files") or {}
+            allowed = set()
+            for key in ("primary", "related", "deps"):
+                for item in files_section.get(key) or []:
+                    allowed.add((item or "").strip())
+            invalidated = False
+            for path_changed in changed_paths:
+                if not path_changed:
+                    continue
+                if path_changed not in allowed:
+                    invalidated = True
+                    break
+            if invalidated:
+                return BinderLoadResult("stale", path, binder, "git-diverged")
 
     cache_root = _binder_root(project_root)
     if max_bytes > 0 and _collect_cache_size(cache_root) > max_bytes:

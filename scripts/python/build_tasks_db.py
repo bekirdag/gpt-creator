@@ -208,6 +208,9 @@ def main() -> int:
               output_path TEXT,
               attempts INTEGER,
               tokens_total INTEGER,
+              tokens_prompt_estimate INTEGER,
+              llm_prompt_tokens INTEGER,
+              llm_completion_tokens INTEGER,
               duration_seconds INTEGER,
               apply_status TEXT,
               changes_applied INTEGER,
@@ -245,6 +248,10 @@ def main() -> int:
         if not column_exists(table, column):
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
+    ensure_column("task_progress", "tokens_prompt_estimate", "INTEGER")
+    ensure_column("task_progress", "llm_prompt_tokens", "INTEGER")
+    ensure_column("task_progress", "llm_completion_tokens", "INTEGER")
+
     ensure_column("stories", "completed_tasks", "INTEGER")
     ensure_column("stories", "total_tasks", "INTEGER")
     ensure_column("stories", "status", "TEXT DEFAULT 'pending'")
@@ -281,6 +288,9 @@ def main() -> int:
     ensure_column("tasks", "last_output_path", "TEXT")
     ensure_column("tasks", "last_attempts", "INTEGER")
     ensure_column("tasks", "last_tokens_total", "INTEGER")
+    ensure_column("tasks", "last_prompt_tokens_estimate", "INTEGER")
+    ensure_column("tasks", "last_llm_prompt_tokens", "INTEGER")
+    ensure_column("tasks", "last_llm_completion_tokens", "INTEGER")
     ensure_column("tasks", "last_duration_seconds", "INTEGER")
     ensure_column("tasks", "last_apply_status", "TEXT")
     ensure_column("tasks", "last_changes_applied", "INTEGER")

@@ -83,6 +83,9 @@ def record_task_progress(
     output_path: str,
     attempts: str,
     tokens_total: str,
+    tokens_estimate: str,
+    llm_prompt_tokens: str,
+    llm_completion_tokens: str,
     duration_seconds: str,
     apply_status: str,
     changes_applied: str,
@@ -101,6 +104,9 @@ def record_task_progress(
     position_int = int(position)
     attempts_int = parse_int(attempts) or 0
     tokens_int = parse_int(tokens_total)
+    tokens_estimate_int = parse_int(tokens_estimate) or 0
+    llm_prompt_tokens_int = parse_int(llm_prompt_tokens) or 0
+    llm_completion_tokens_int = parse_int(llm_completion_tokens) or 0
     duration_int = parse_int(duration_seconds)
     changes_int = parse_bool(changes_applied)
     run_stamp = (run_stamp or "manual").strip() or "manual"
@@ -168,6 +174,9 @@ def record_task_progress(
           output_path TEXT,
           attempts INTEGER,
           tokens_total INTEGER,
+          tokens_prompt_estimate INTEGER,
+          llm_prompt_tokens INTEGER,
+          llm_completion_tokens INTEGER,
           tokens_retrieve INTEGER,
           tokens_plan INTEGER,
           tokens_patch INTEGER,
@@ -198,6 +207,9 @@ def record_task_progress(
         ("tokens_per_sp", "REAL"),
         ("story_points", "REAL"),
         ("hotspot_phase", "TEXT"),
+        ("tokens_prompt_estimate", "INTEGER"),
+        ("llm_prompt_tokens", "INTEGER"),
+        ("llm_completion_tokens", "INTEGER"),
     ):
         ensure_column(cur, "task_progress", column, definition)
 
@@ -207,6 +219,9 @@ def record_task_progress(
         ("last_output_path", "TEXT"),
         ("last_attempts", "INTEGER"),
         ("last_tokens_total", "INTEGER"),
+        ("last_prompt_tokens_estimate", "INTEGER"),
+        ("last_llm_prompt_tokens", "INTEGER"),
+        ("last_llm_completion_tokens", "INTEGER"),
         ("last_duration_seconds", "INTEGER"),
         ("last_apply_status", "TEXT"),
         ("last_changes_applied", "INTEGER"),
@@ -289,6 +304,9 @@ def record_task_progress(
         output_path,
         attempts_int,
         tokens_int,
+        tokens_estimate_int,
+        llm_prompt_tokens_int,
+        llm_completion_tokens_int,
         tokens_retrieve_int,
         tokens_plan_int,
         tokens_patch_int,
@@ -312,14 +330,15 @@ def record_task_progress(
         """
         INSERT INTO task_progress (
           task_id, story_slug, task_position, run_stamp, status, log_path,
-          prompt_path, output_path, attempts, tokens_total, tokens_retrieve,
-          tokens_plan, tokens_patch, tokens_verify, tokens_per_sp, story_points,
+          prompt_path, output_path, attempts, tokens_total, tokens_prompt_estimate,
+          llm_prompt_tokens, llm_completion_tokens, tokens_retrieve, tokens_plan,
+          tokens_patch, tokens_verify, tokens_per_sp, story_points,
           hotspot_phase, duration_seconds, apply_status, changes_applied,
           notes_json, written_json, patched_json, commands_json, occurred_at,
           created_at, updated_at
         )
         VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         """,
         progress_row,
@@ -337,6 +356,9 @@ def record_task_progress(
     set_field("last_output_path", output_path)
     set_field("last_attempts", attempts_int)
     set_field("last_tokens_total", tokens_int)
+    set_field("last_prompt_tokens_estimate", tokens_estimate_int)
+    set_field("last_llm_prompt_tokens", llm_prompt_tokens_int)
+    set_field("last_llm_completion_tokens", llm_completion_tokens_int)
     set_field("last_duration_seconds", duration_int)
     set_field("last_apply_status", apply_status)
     set_field("last_changes_applied", changes_int)
@@ -421,7 +443,7 @@ def record_task_progress(
 
 
 def main() -> int:
-    if len(sys.argv) < 25:
+    if len(sys.argv) < 28:
         return 1
 
     db_path = Path(sys.argv[1])
@@ -434,20 +456,23 @@ def main() -> int:
     output_path = sys.argv[8]
     attempts = sys.argv[9]
     tokens_total = sys.argv[10]
-    duration_seconds = sys.argv[11]
-    apply_status = sys.argv[12]
-    changes_applied = sys.argv[13]
-    notes_text = sys.argv[14]
-    written_text = sys.argv[15]
-    patched_text = sys.argv[16]
-    commands_text = sys.argv[17]
-    observation_hash = sys.argv[18]
-    occurred_at = sys.argv[19]
-    stage_tokens_retrieve = sys.argv[20]
-    stage_tokens_plan = sys.argv[21]
-    stage_tokens_patch = sys.argv[22]
-    stage_tokens_verify = sys.argv[23]
-    story_points_raw = sys.argv[24]
+    tokens_estimate = sys.argv[11]
+    llm_prompt_tokens = sys.argv[12]
+    llm_completion_tokens = sys.argv[13]
+    duration_seconds = sys.argv[14]
+    apply_status = sys.argv[15]
+    changes_applied = sys.argv[16]
+    notes_text = sys.argv[17]
+    written_text = sys.argv[18]
+    patched_text = sys.argv[19]
+    commands_text = sys.argv[20]
+    observation_hash = sys.argv[21]
+    occurred_at = sys.argv[22]
+    stage_tokens_retrieve = sys.argv[23]
+    stage_tokens_plan = sys.argv[24]
+    stage_tokens_patch = sys.argv[25]
+    stage_tokens_verify = sys.argv[26]
+    story_points_raw = sys.argv[27]
 
     record_task_progress(
         db_path=db_path,
@@ -460,6 +485,9 @@ def main() -> int:
         output_path=output_path,
         attempts=attempts,
         tokens_total=tokens_total,
+        tokens_estimate=tokens_estimate,
+        llm_prompt_tokens=llm_prompt_tokens,
+        llm_completion_tokens=llm_completion_tokens,
         duration_seconds=duration_seconds,
         apply_status=apply_status,
         changes_applied=changes_applied,

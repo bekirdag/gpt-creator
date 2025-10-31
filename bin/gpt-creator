@@ -2759,6 +2759,9 @@ gc_log_task_metrics() {
   local tokens_plan="${8:-0}"
   local tokens_patch="${9:-0}"
   local tokens_verify="${10:-0}"
+  local tokens_prompt_estimate="${11:-0}"
+  local llm_prompt_tokens="${12:-0}"
+  local llm_completion_tokens="${13:-0}"
 
   local helper_path
   helper_path="$(gc_clone_python_tool "log_task_metrics.py" "${PROJECT_ROOT:-$PWD}")" || return 0
@@ -2777,7 +2780,10 @@ gc_log_task_metrics() {
     --tokens-retrieve "$tokens_retrieve" \
     --tokens-plan "$tokens_plan" \
     --tokens-patch "$tokens_patch" \
-    --tokens-verify "$tokens_verify"
+    --tokens-verify "$tokens_verify" \
+    --prompt-estimate "$tokens_prompt_estimate" \
+    --llm-prompt "$llm_prompt_tokens" \
+    --llm-completion "$llm_completion_tokens"
 }
 
 gc_bootstrap_reset_state() {
@@ -3227,7 +3233,7 @@ gc_finalize_active_task() {
     local prompt_db="$prompt_entry"
     local output_db="$output_entry"
     local notes_payload="Interrupted by signal ${signal}; rerun work-on-tasks to resume."
-    gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "on-hold" "$report_entry_db" "$prompt_db" "$output_db" "0" "0" "0" "interrupted" "false" "$notes_payload" "" "" "" "" "$timestamp" "0" "0" "0" "0" ""
+    gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "on-hold" "$report_entry_db" "$prompt_db" "$output_db" "0" "0" "0" "0" "0" "interrupted" "false" "$notes_payload" "" "" "" "" "$timestamp" "0" "0" "0" "0" ""
     gc_update_task_state "$tasks_db" "$slug" "$task_index" "on-hold" "$run_stamp"
   fi
 
@@ -3341,20 +3347,23 @@ gc_record_task_progress() {
   local output_path="${8:-}"
   local attempts="${9:-0}"
   local tokens_total="${10:-0}"
-  local duration_seconds="${11:-0}"
-  local apply_status="${12:-}"
-  local changes_applied="${13:-0}"
-  local notes_text="${14:-}"
-  local written_text="${15:-}"
-  local patched_text="${16:-}"
-  local commands_text="${17:-}"
-  local observation_hash="${18:-}"
-  local occurred_at="${19:-}"
-  local tokens_retrieve="${20:-0}"
-  local tokens_plan="${21:-0}"
-  local tokens_patch="${22:-0}"
-  local tokens_verify="${23:-0}"
-  local story_points="${24:-}"
+  local tokens_estimate="${11:-0}"
+  local llm_prompt_tokens="${12:-0}"
+  local llm_completion_tokens="${13:-0}"
+  local duration_seconds="${14:-0}"
+  local apply_status="${15:-}"
+  local changes_applied="${16:-0}"
+  local notes_text="${17:-}"
+  local written_text="${18:-}"
+  local patched_text="${19:-}"
+  local commands_text="${20:-}"
+  local observation_hash="${21:-}"
+  local occurred_at="${22:-}"
+  local tokens_retrieve="${23:-0}"
+  local tokens_plan="${24:-0}"
+  local tokens_patch="${25:-0}"
+  local tokens_verify="${26:-0}"
+  local story_points="${27:-}"
   local helper_path
   helper_path="$(gc_clone_python_tool "record_task_progress.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   python3 "$helper_path" \
@@ -3368,6 +3377,9 @@ gc_record_task_progress() {
     "$output_path" \
     "$attempts" \
     "$tokens_total" \
+    "$tokens_estimate" \
+    "$llm_prompt_tokens" \
+    "$llm_completion_tokens" \
     "$duration_seconds" \
     "$apply_status" \
     "$changes_applied" \
@@ -7926,6 +7938,9 @@ EOF
       local task_start_epoch
       task_start_epoch="$(date +%s)"
       local task_tokens_total=0
+      local task_llm_prompt_tokens=0
+      local task_llm_completion_tokens=0
+      local task_prompt_estimate=0
       local task_duration_seconds=0
       local task_duration_display=""
       local task_tokens_display=""
@@ -8024,6 +8039,11 @@ EOF
         fi
       fi
       GC_CURRENT_PRUNED_ITEMS="$prompt_pruned_items"
+      if [[ "$prompt_token_estimate" =~ ^[0-9]+$ ]]; then
+        task_prompt_estimate=$((prompt_token_estimate))
+      else
+        task_prompt_estimate=0
+      fi
       local retrieve_tokens=0
       if [[ "$prompt_pruned_bytes" =~ ^[0-9]+$ && prompt_pruned_bytes -gt 0 ]]; then
         retrieve_tokens=$((prompt_pruned_bytes / 4))
@@ -8041,7 +8061,6 @@ EOF
         codex_ok=1
         manual_followups=0
         keep_output=0
-        task_tokens_total=$((prompt_token_estimate))
         task_result_status="blocked-quota"
         apply_status="prompt-blocked"
         skip_codex_reason="stage-limit"
@@ -8055,7 +8074,6 @@ EOF
           task_needs_review=0
           manual_followups=0
           keep_output=0
-          task_tokens_total=$((prompt_token_estimate))
           task_result_status="abandoned-for-budget"
           apply_status="auto-abandon"
           skip_codex_reason="$(gc_budget_stage_skip_reason "patch")"
@@ -8070,7 +8088,6 @@ EOF
           task_needs_review=0
           manual_followups=0
           keep_output=0
-          task_tokens_total=$((prompt_token_estimate))
           task_result_status="blocked-quota"
           apply_status="prompt-blocked"
           skip_codex_reason="hard-cap"
@@ -8107,7 +8124,6 @@ EOF
         task_needs_review=0
         manual_followups=0
         keep_output=0
-        task_tokens_total=$((prompt_token_estimate))
         task_result_status="blocked-quota"
         apply_status="prompt-blocked"
         local budget_note="${prompt_token_estimate}"
@@ -8146,6 +8162,14 @@ EOF
           attempt_tokens="${GC_CODEX_CALL_TOKEN_ACCUM:-${GC_LAST_CODEX_TOTAL_TOKENS:-0}}"
           if [[ "$attempt_tokens" =~ ^[0-9]+$ ]]; then
             task_tokens_total=$((task_tokens_total + attempt_tokens))
+          fi
+          local attempt_prompt_tokens="${GC_LAST_CODEX_PROMPT_TOKENS:-0}"
+          local attempt_completion_tokens="${GC_LAST_CODEX_COMPLETION_TOKENS:-0}"
+          if [[ "$attempt_prompt_tokens" =~ ^[0-9]+$ ]]; then
+            task_llm_prompt_tokens=$((task_llm_prompt_tokens + attempt_prompt_tokens))
+          fi
+          if [[ "$attempt_completion_tokens" =~ ^[0-9]+$ ]]; then
+            task_llm_completion_tokens=$((task_llm_completion_tokens + attempt_completion_tokens))
           fi
           if [[ ! -s "$output_path" ]]; then
             local checkpoint_story="${story_id:-$slug}"
@@ -8496,6 +8520,14 @@ REM
           if [[ "$attempt_tokens" =~ ^[0-9]+$ ]]; then
             task_tokens_total=$((task_tokens_total + attempt_tokens))
           fi
+          local attempt_prompt_tokens="${GC_LAST_CODEX_PROMPT_TOKENS:-0}"
+          local attempt_completion_tokens="${GC_LAST_CODEX_COMPLETION_TOKENS:-0}"
+          if [[ "$attempt_prompt_tokens" =~ ^[0-9]+$ ]]; then
+            task_llm_prompt_tokens=$((task_llm_prompt_tokens + attempt_prompt_tokens))
+          fi
+          if [[ "$attempt_completion_tokens" =~ ^[0-9]+$ ]]; then
+            task_llm_completion_tokens=$((task_llm_completion_tokens + attempt_completion_tokens))
+          fi
           if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
             local limit_message="${GC_CODEX_USAGE_LIMIT_MESSAGE:-}"
             local tokens_this_task="$task_tokens_total"
@@ -8779,6 +8811,7 @@ REM
       fi
       task_duration_display="$(gc_format_duration_compact "$task_duration_seconds")"
       task_tokens_display="$(gc_format_tokens_compact "$task_tokens_total")"
+      local task_prompt_estimate_display="$(gc_format_tokens_compact "$task_prompt_estimate")"
 
       local story_status_hint="in-progress"
       case "$task_result_status" in
@@ -8922,7 +8955,9 @@ REM
       (( task_stage_tokens_patch < 0 )) && task_stage_tokens_patch=0
       (( task_stage_tokens_verify < 0 )) && task_stage_tokens_verify=0
 
-      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$observation_hash" "$timestamp_utc" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_story_points"
+      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$observation_hash" "$timestamp_utc" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_story_points"
+
+      gc_log_task_metrics "$run_stamp" "$slug" "$task_number" "$banner_task_id" "$task_result_status" "$task_story_points" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens"
 
       if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
         local throughput_task_msg=""
@@ -8947,6 +8982,10 @@ REM
         printf 'attempts: %s\n' "$attempt"
         printf 'apply_status: %s\n' "$apply_status"
         printf 'changes_applied: %s\n' "$changes_flag"
+        printf 'tokens_used: %s\n' "$task_tokens_total"
+        printf 'llm_prompt_tokens: %s\n' "$task_llm_prompt_tokens"
+        printf 'llm_completion_tokens: %s\n' "$task_llm_completion_tokens"
+        printf 'prompt_tokens_estimate: %s\n' "$task_prompt_estimate"
         printf 'prompt_path: %s\n' "$prompt_entry"
         printf 'output_path: %s\n' "$output_entry"
         if ((${#task_written_paths[@]} > 0)); then
@@ -9013,6 +9052,7 @@ REM
         "END TASK ID" "$banner_task_id" \
         "REPORT:" \
         "TOKENS USED: ${task_tokens_display}" \
+        "EST. TOKENS (PROMPT): ${task_prompt_estimate_display}" \
         "STORY POINTS: ${task_story_points_display}" \
         "TIME SPENT: ${task_duration_display}" \
         "STATUS: ${task_status_display}"

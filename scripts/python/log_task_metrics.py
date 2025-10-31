@@ -76,6 +76,9 @@ def main() -> int:
     parser.add_argument("--tokens-plan", default="0")
     parser.add_argument("--tokens-patch", default="0")
     parser.add_argument("--tokens-verify", default="0")
+    parser.add_argument("--prompt-estimate", default="0")
+    parser.add_argument("--llm-prompt", default="0")
+    parser.add_argument("--llm-completion", default="0")
 
     args = parser.parse_args()
 
@@ -86,6 +89,20 @@ def main() -> int:
         "verify": clamp_int(args.tokens_verify),
     }
     tokens_total = sum(tokens.values())
+
+    prompt_estimate = clamp_int(args.prompt_estimate)
+    llm_prompt_tokens = clamp_int(args.llm_prompt)
+    llm_completion_tokens = clamp_int(args.llm_completion)
+    llm_total_tokens = max(0, llm_prompt_tokens + llm_completion_tokens)
+
+    tokens.update(
+        {
+            "est_prompt_tokens": prompt_estimate,
+            "llm_prompt_tokens": llm_prompt_tokens,
+            "llm_completion_tokens": llm_completion_tokens,
+            "llm_total_tokens": llm_total_tokens,
+        }
+    )
 
     status_norm = normalize_status(args.status)
     story_points = parse_points(args.story_points)

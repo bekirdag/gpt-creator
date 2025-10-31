@@ -939,6 +939,26 @@ def main():
         from typing import Optional, List, Tuple, Set, Dict, Sequence
 
         from compose_sections import dedupe_and_coalesce, emit_preamble_once, format_sections
+        from prompt_registry import (
+            DEFAULT_REGISTRY_SUBDIR,
+            ensure_prompt_registry,
+            parse_source_env,
+        )
+        from wot_publish_prompt import publish_prompt
+
+        FREEFORM_SECTION_MAX_CHARS = int(os.getenv("GC_PROMPT_FREEFORM_MAX_CHARS", "12000") or "12000")
+        PROMPT_SOURCE_MAX_BYTES = int(os.getenv("GC_PROMPT_SOURCE_MAX_BYTES", "262144") or "262144")
+        INSTRUCTION_PROMPT_RUN_MARKER = "/.gpt-creator/staging/plan/work/"
+        INSTRUCTION_PROMPT_CREATE_SDS_MARKER = "/.gpt-creator/staging/plan/create-sds/"
+        INSTRUCTION_PROMPT_BINDER_MARKER = "/.gpt-creator/cache/task-binder/"
+        PROMPT_SNAPSHOT_MARKER = "/docs/automation/prompts/"
+        HEAVY_SECTION_PATTERNS = [
+            re.compile(r"^jira tasks$", re.IGNORECASE),
+            re.compile(r"^0[\W_]*document control", re.IGNORECASE),
+            re.compile(r"^product scope\s*&\s*functional requirements", re.IGNORECASE),
+            re.compile(r"^data[, ]+integrations? [&and]+ interfaces", re.IGNORECASE),
+            re.compile(r"acceptance\s*\(mem-a\)", re.IGNORECASE),
+        ]
 
         def _atomic_write_text(path: Path, data: str, *, encoding: str = "utf-8") -> None:
             target = Path(path)
@@ -1007,6 +1027,12 @@ def main():
             return isinstance(existing, str) and existing == sha_value
 
 
+        def _normalize_heading_runtime(value: Optional[str]) -> str:
+            if not value:
+                return ""
+            return re.sub(r"\s+", " ", value.strip()).lower()
+
+
         def _lines_to_sections(lines: List[str]) -> List[Tuple[str, str]]:
             sections: List[Tuple[str, str]] = []
             current_title: Optional[str] = None
@@ -1026,7 +1052,25 @@ def main():
                 sections.append((current_title, "\n".join(current_body)))
             elif current_body:
                 sections.append(("", "\n".join(current_body)))
-            return sections
+            processed: List[Tuple[str, str]] = []
+            for title, body in sections:
+                heading = title or ""
+                body_text = (body or "").strip()
+                normalized_heading = _normalize_heading_runtime(heading)
+                heavy_section = False
+                if heading:
+                    for pattern in HEAVY_SECTION_PATTERNS:
+                        if pattern.search(heading) or pattern.search(normalized_heading):
+                            heavy_section = True
+                            break
+                if heavy_section:
+                    processed.append((heading, "(omitted; consult the documentation catalog for the full content.)"))
+                    continue
+                if body_text and FREEFORM_SECTION_MAX_CHARS > 0 and len(body_text) > FREEFORM_SECTION_MAX_CHARS:
+                    truncated = body_text[:FREEFORM_SECTION_MAX_CHARS].rstrip()
+                    body_text = f"{truncated}\n... (section truncated; open source documentation for full details.)"
+                processed.append((heading, body_text))
+            return processed
 
 
         def _resolve_display_path(path_obj: Path) -> Path:
@@ -1459,6 +1503,26 @@ def main():
             if plan_candidate.exists():
                 plan_instruction_dir = plan_candidate
 
+        registry_env_raw = os.getenv("GC_PROMPT_REGISTRY_DIR", "").strip()
+        source_env_raw = os.getenv("GC_PROMPT_SOURCE_DIRS", "").strip()
+        if registry_env_raw:
+            registry_candidate = Path(registry_env_raw)
+            if not registry_candidate.is_absolute():
+                registry_candidate = project_root_path / registry_candidate
+        else:
+            registry_candidate = project_root_path / DEFAULT_REGISTRY_SUBDIR
+
+        source_roots = parse_source_env(project_root_path, source_env_raw)
+        try:
+            ensure_prompt_registry(
+                project_root_path,
+                registry_dir=registry_candidate,
+                source_dirs=source_roots,
+                clean=os.getenv("GC_PROMPT_REGISTRY_REFRESH", "").strip().lower() in {"1", "true", "yes", "force"},
+            )
+        except Exception:
+            registry_candidate = None
+
         instruction_prompts: List[Tuple[str, List[str]]] = []
 
         story_row = cur.execute(
@@ -1626,12 +1690,53 @@ def main():
             return text[: max(0, limit - 1)].rstrip() + "…"
 
 
-        def collect_instruction_prompts(plan_dir: Optional[Path], project_root: Optional[Path]) -> List[Tuple[str, List[str]]]:
+        def _instruction_prompt_is_excluded(path_obj: Path, plan_dir: Optional[Path], project_root: Optional[Path]) -> bool:
+            try:
+                resolved = path_obj.resolve()
+            except OSError:
+                resolved = path_obj
+            candidate_str = str(resolved).replace("\\", "/")
+            if "/prompts/" not in candidate_str:
+                return False
+            if INSTRUCTION_PROMPT_RUN_MARKER in candidate_str and "/runs/" in candidate_str:
+                return True
+            if INSTRUCTION_PROMPT_CREATE_SDS_MARKER in candidate_str:
+                return True
+            if INSTRUCTION_PROMPT_BINDER_MARKER in candidate_str:
+                return True
+            if PROMPT_SNAPSHOT_MARKER in candidate_str:
+                return True
+            if plan_dir:
+                try:
+                    rel_plan = resolved.relative_to(plan_dir.resolve())
+                    rel_parts = [part.lower() for part in rel_plan.parts]
+                    if "runs" in rel_parts and "prompts" in rel_parts:
+                        return True
+                except Exception:
+                    pass
+            if project_root:
+                try:
+                    rel_project = resolved.relative_to(project_root.resolve())
+                    rel_parts = [part.lower() for part in rel_project.parts]
+                    if rel_parts[:3] == [".gpt-creator", "cache", "task-binder"]:
+                        return True
+                except Exception:
+                    pass
+            return False
+
+
+        def collect_instruction_prompts(
+            plan_dir: Optional[Path],
+            project_root: Optional[Path],
+            registry_dir: Optional[Path],
+        ) -> List[Tuple[str, List[str]]]:
             prompts: List[Tuple[str, List[str]]] = []
             search_roots: List[Path] = []
+            if registry_dir and registry_dir.exists():
+                search_roots.append(registry_dir)
             if plan_dir and plan_dir.exists():
                 search_roots.append(plan_dir)
-            if project_root:
+            if not search_roots and project_root:
                 for relative in ("src/prompts", "docs/prompts", ".gpt-creator/prompts"):
                     candidate = project_root / relative
                     if candidate.exists():
@@ -1651,6 +1756,14 @@ def main():
                     except OSError:
                         resolved = candidate
                     if resolved in seen or not candidate.is_file():
+                        continue
+                    if _instruction_prompt_is_excluded(candidate, plan_dir, project_root):
+                        continue
+                    try:
+                        size_bytes = candidate.stat().st_size
+                    except OSError:
+                        size_bytes = 0
+                    if PROMPT_SOURCE_MAX_BYTES and size_bytes > PROMPT_SOURCE_MAX_BYTES:
                         continue
                     seen.add(resolved)
                     try:
@@ -1676,7 +1789,7 @@ def main():
                     prompts.append((rel_repr, text.splitlines()))
             return prompts
 
-        instruction_prompts = collect_instruction_prompts(plan_instruction_dir, project_root_path)
+        instruction_prompts = collect_instruction_prompts(plan_instruction_dir, project_root_path, registry_candidate)
 
         if not instruction_prompts:
             fallback_prompt_paths = [
@@ -2998,6 +3111,12 @@ def main():
                 "written_at": int(time.time()),
             }
             _atomic_write_text(meta_path, json.dumps(meta_payload, indent=2, ensure_ascii=False) + "\n")
+
+        if os.getenv("GC_PROMPT_PUBLISH_DISABLE", "").strip().lower() not in {"1", "true", "yes"}:
+            try:
+                publish_prompt(prompt_path, meta_path, project_root_path)
+            except Exception:
+                pass
 
         story_points_meta = story_points or ""
         print(f"{task_id}\t{task_title}\t{story_points_meta}")

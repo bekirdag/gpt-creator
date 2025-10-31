@@ -40,6 +40,18 @@ DESCRIPTION_MAX_CHARS = int(os.getenv("GC_PROMPT_DESCRIPTION_MAX_CHARS", "40000"
 ACCEPTANCE_MAX_ITEMS = int(os.getenv("GC_PROMPT_ACCEPTANCE_MAX_ITEMS", "120"))
 ACCEPTANCE_MAX_CHARS = int(os.getenv("GC_PROMPT_ACCEPTANCE_MAX_CHARS", "32000"))
 FREEFORM_SECTION_MAX_CHARS = int(os.getenv("GC_PROMPT_FREEFORM_MAX_CHARS", "24000"))
+
+_progress_enabled = os.getenv("GC_PROMPT_PROGRESS", "1").strip().lower() not in {"0", "false", "off"}
+
+
+def emit_progress(message: str) -> None:
+    if not _progress_enabled:
+        return
+    try:
+        sys.stderr.write(f"[prompt] {message}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
 SEGMENT_TYPE_PRIORITY: Dict[str, Tuple[int, bool]] = {
     "lead-in": (100, True),
     "documentation-assets": (98, True),
@@ -997,6 +1009,8 @@ if staging_root:
 instruction_prompts: List[Tuple[str, List[str]]] = []
 runner_config = _load_runner_config(project_root_path)
 
+emit_progress(f"Preparing prompt for story '{STORY_SLUG}' task index {TASK_INDEX}")
+
 story_row = cur.execute(
     'SELECT story_id, story_title, epic_key, epic_title, sequence FROM stories WHERE story_slug = ?',
     (STORY_SLUG,)
@@ -1074,6 +1088,7 @@ binder_data: Dict[str, Any] = {}
 binder_path: Optional[Path] = None
 current_git_head = _git_rev_parse(project_root_path)
 if binder_enabled and task_identifier:
+    emit_progress("Loading binder cache")
     binder_result = binder_load_for_prompt(
         project_root_path,
         epic_slug=epic_slug_source,
@@ -2226,6 +2241,7 @@ doc_search_hits: List[Dict[str, object]] = []
 search_summary_payload: List[Dict[str, object]] = []
 
 if binder_hit and binder_doc_refs:
+    emit_progress("Reusing binder documentation references")
     task_ref = task_identifier or f"{STORY_SLUG}:{TASK_INDEX + 1}"
     for ref in binder_doc_refs[:12]:
         entry = {
@@ -2242,6 +2258,7 @@ if binder_hit and binder_doc_refs:
         doc_catalog_changed["value"] = True
 else:
     if search_terms:
+        emit_progress("Running documentation search")
         seen_doc_ids: Set[str] = {
             entry.get("doc_id", "").strip()
             for entry in doc_catalog_entries
@@ -2275,6 +2292,7 @@ else:
     if doc_search_hits:
         lines.append("")
         lines.append("## Documentation Search Hits")
+        emit_progress(f"Found {len(doc_search_hits)} documentation search hit(s)")
         for hit in doc_search_hits[:12]:
             doc_id = (hit.get("doc_id") or "").strip()
             if not doc_id:
@@ -2304,6 +2322,7 @@ if doc_catalog_entries:
     lines.append("")
     lines.append("## Documentation Catalog")
     lines.append("Use the catalog below to pick a section, then run `gpt-creator show-file <path> --range START:END` for a narrow excerpt. Avoid cat/sed on these manuals.")
+    emit_progress(f"Including {len(doc_catalog_entries[:6])} documentation catalog entries")
     for entry in doc_catalog_entries[:6]:
         rel_path = entry['rel_path']
         lines.append(f"- {entry['doc_id']} — {rel_path}")
@@ -2835,6 +2854,7 @@ else:
 prompt_path = Path(PROMPT_PATH)
 prompt_path.parent.mkdir(parents=True, exist_ok=True)
 prompt_path.write_text(final_prompt_text, encoding='utf-8')
+emit_progress(f"Wrote prompt → {prompt_path}")
 
 binder_written_path = ""
 if binder_enabled:
@@ -2883,6 +2903,7 @@ if binder_enabled:
     )
     binder_write(binder_path_obj, binder_payload, max_bytes=binder_max_bytes)
     binder_written_path = str(binder_path_obj)
+    emit_progress(f"Binder updated → {binder_written_path}")
 elif binder_path:
     binder_written_path = str(binder_path)
 

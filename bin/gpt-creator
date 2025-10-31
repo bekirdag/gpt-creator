@@ -7645,6 +7645,7 @@ EOF
     gc_update_work_state "$tasks_db" "$slug" "in-progress" "$next_task_int" "$total_tasks_int" "$run_stamp"
 
     local task_index
+    info "  Preparing prompts and context…"
     local story_failed=0
     for (( task_index = next_task_int; task_index < total_tasks_int; task_index++ )); do
       gc_clear_active_task

@@ -2938,6 +2938,52 @@ gc_build_tasks_db() {
   python3 "$helper_path" "$tasks_json" "$db_path" "$force_flag"
 }
 
+GC_CONTEXT_SKIP_SUBSTRINGS=(
+  "/.gpt-creator/staging/plan/work/runs/"
+  "/.gpt-creator/logs/"
+  "/.git/"
+  "/node_modules/"
+  "/dist/"
+  "/build/"
+)
+GC_CONTEXT_SKIP_SUFFIXES=(
+  ".meta.json"
+  ".log"
+  ".log.gz"
+)
+
+gc_context_should_skip_path() {
+  local path="${1:-}"
+  [[ -n "$path" ]] || return 1
+  local normalized="${path//\\//}"
+  local pattern
+  for pattern in "${GC_CONTEXT_SKIP_SUBSTRINGS[@]}"; do
+    if [[ "$normalized" == *"$pattern"* ]]; then
+      return 0
+    fi
+  done
+  for pattern in "${GC_CONTEXT_SKIP_SUFFIXES[@]}"; do
+    if [[ "$normalized" == *"$pattern" ]]; then
+      return 0
+    fi
+  done
+  local -a extra_patterns=()
+  if declare -p GC_CONTEXT_EXCLUDES >/dev/null 2>&1; then
+    extra_patterns=("${GC_CONTEXT_EXCLUDES[@]}")
+  elif [[ -n "${GC_CONTEXT_EXCLUDES:-}" ]]; then
+    while IFS= read -r _gc_extra_pattern; do
+      [[ -n "$_gc_extra_pattern" ]] || continue
+      extra_patterns+=("$_gc_extra_pattern")
+    done <<<"$(printf '%s\n' "$GC_CONTEXT_EXCLUDES" | tr ':' '\n')"
+  fi
+  for pattern in "${extra_patterns[@]}"; do
+    if [[ "$normalized" == *"$pattern"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 gc_build_context_file() {
   local dest_file="${1:?context destination required}"
   local staging_dir="${2:-$GC_STAGING_DIR}"
@@ -2988,6 +3034,9 @@ gc_build_context_file() {
     fi
     for f in "${patterns[@]}"; do
       [[ -f "$f" ]] || continue
+      if gc_context_should_skip_path "$f"; then
+        continue
+      fi
       local base_name
       base_name="$(basename "$f")"
 
@@ -4080,6 +4129,81 @@ cmd_scan() {
     esac
   done
   ensure_ctx "$root"
+  root="${root:-$PROJECT_ROOT}"
+
+  local scan_json="${STAGING_DIR}/scan.json"
+  local catalog_dir="${STAGING_DIR}/inputs/catalog"
+  mkdir -p "$catalog_dir"
+
+  local -a default_scan_excludes=(
+    ".gpt-creator/**"
+    ".gpt-creator/staging/plan/work/runs/**"
+    ".gpt-creator/**/prompts/**"
+    ".gpt-creator/**/*.meta.json"
+    ".git/**"
+    "node_modules/**"
+    "dist/**"
+    "build/**"
+    "**/__pycache__/**"
+    "Library/**"
+    "apps/**/dist-tests/**"
+    "apps/**/{tests,test}/**"
+    "apps/**/cypress/**"
+    "apps/**/playwright/**"
+    "apps/**/fixtures/**"
+    "apps/**/public/**"
+    "apps/api/prisma/migrations/**"
+    "apps/api/prisma/fixtures/**"
+    "apps/api/openapi/**"
+    "ops/nginx/rendered/**"
+    "ops/systemd/rendered/**"
+    "ops/lighthouse/**"
+    "qa/**"
+    "docs/**/assets/**"
+    "docs/**/evidence/**"
+    "docs/**/screenshots/**"
+    "**/*.lock"
+    "apps/web/final_output.json"
+  )
+
+  local -a combined_excludes=("${default_scan_excludes[@]}")
+  if declare -p GC_CONTEXT_EXCLUDES >/dev/null 2>&1; then
+    combined_excludes+=("${GC_CONTEXT_EXCLUDES[@]}")
+  elif [[ -n "${GC_CONTEXT_EXCLUDES:-}" ]]; then
+    while IFS= read -r _scan_pattern; do
+      [[ -n "$_scan_pattern" ]] && combined_excludes+=("$_scan_pattern")
+    done <<<"$(printf '%s' "$GC_CONTEXT_EXCLUDES" | tr ':' '\n')"
+  fi
+
+  declare -A _scan_seen=()
+  local excludes_payload=""
+  local pattern
+  for pattern in "${combined_excludes[@]}"; do
+    [[ -z "$pattern" ]] && continue
+    if [[ -n "${_scan_seen[$pattern]:-}" ]]; then
+      continue
+    fi
+    _scan_seen[$pattern]=1
+    excludes_payload+="$pattern"$'\n'
+  done
+
+  local scan_helper
+  scan_helper="$(gc_clone_python_tool "scan_project.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+
+  local run_dir="${GC_RUN_DIR:-$root/.gpt-creator/staging/plan/work/runs/$(date +%Y%m%d%H%M%S)}"
+  export GC_RUN_DIR="$run_dir"
+
+  local scan_python="${PYTHON_BIN:-python3}"
+  if command -v "$scan_python" >/dev/null 2>&1; then
+    if GC_CONTEXT_EXCLUDES="$excludes_payload" "$scan_python" "$scan_helper" \
+      --project "$root" --out "$catalog_dir" --scan-json "$scan_json"; then
+      info "Catalog scan complete → ${catalog_dir}"
+    else
+      warn "scan_project.py failed; continuing with legacy scan pipeline outputs."
+    fi
+  else
+    warn "Skipping catalog scan; $scan_python not available."
+  fi
 
   local runtime_dir="$GC_DIR"
   local manifest_dir="${runtime_dir}/manifests"
@@ -4176,13 +4300,12 @@ cmd_scan() {
   fi
   info "Discovery TSV → ${manifest}"
 
-  local scan_json="${STAGING_DIR}/scan.json"
-  if (( python_available )); then
+  if (( python_available )) && [[ ! -s "$scan_json" ]]; then
     local scan_manifest_helper
     scan_manifest_helper="$(gc_clone_python_tool "scan_manifest_to_json.py" "${PROJECT_ROOT:-$PWD}")" || return 1
     "$python_bin" "$scan_manifest_helper" "$manifest" "$PROJECT_ROOT" "$scan_json"
   else
-    warn "Skipping scan.json export; ${python_bin} not available."
+    [[ -s "$scan_json" ]] || warn "Skipping scan.json export; ${python_bin} not available."
   fi
 
   if (( python_available )); then
@@ -5670,14 +5793,255 @@ gc_wot_run_verify_if_needed() {
 gc_apply_codex_changes() {
   local output_file="${1:?output file required}"
   local project_root="${2:?project root required}"
-  local artifact_path="${3:-}"
-  local helper_path
-  helper_path="$(gc_clone_python_tool "focus_text.py" "$project_root")" || return 1
-  if [[ -n "$artifact_path" ]]; then
-    GC_PATCH_ARTIFACT_PATH="$artifact_path" python3 "$helper_path" "$output_file" "$project_root"
-  else
-    python3 "$helper_path" "$output_file" "$project_root"
+  local _artifact_path="${3:-}" # reserved for future patch artifact support
+  : "${_artifact_path:=}"
+
+  local helper_root="${project_root}"
+  local extract_py="${GC_WOT_EXTRACT_HELPER:-}"
+  local validate_py="${GC_WOT_VALIDATE_HELPER:-}"
+  local apply_py="${GC_WOT_APPLY_HELPER:-}"
+  local placeholders_py="${GC_WOT_PLACEHOLDERS_HELPER:-}"
+  local externalize_py="${GC_WOT_EXTERNALIZE_HELPER:-}"
+  local sha_helper="${GC_WOT_SHA_HELPER:-}"
+
+  if [[ -z "$extract_py" ]]; then
+    extract_py="$(gc_clone_python_tool "wot_extract_first_json.py" "$helper_root")" || return 1
+    GC_WOT_EXTRACT_HELPER="$extract_py"
   fi
+  if [[ -z "$validate_py" ]]; then
+    validate_py="$(gc_clone_python_tool "wot_validate_envelope.py" "$helper_root")" || return 1
+    GC_WOT_VALIDATE_HELPER="$validate_py"
+  fi
+  if [[ -z "$apply_py" ]]; then
+    apply_py="$(gc_clone_python_tool "wot_apply_changes.py" "$helper_root")" || return 1
+    GC_WOT_APPLY_HELPER="$apply_py"
+  fi
+  if [[ -z "$placeholders_py" ]]; then
+    placeholders_py="$(gc_clone_python_tool "wot_ensure_placeholders.py" "$helper_root")" || return 1
+    GC_WOT_PLACEHOLDERS_HELPER="$placeholders_py"
+  fi
+  if [[ -z "$externalize_py" ]]; then
+    externalize_py="$(gc_clone_python_tool "wot_externalize_blobs.py" "$helper_root")" || return 1
+    GC_WOT_EXTERNALIZE_HELPER="$externalize_py"
+  fi
+  if [[ -z "$sha_helper" ]]; then
+    if sha_helper="$(gc_clone_python_tool "sha256_file.py" "$helper_root" 2>/dev/null)"; then
+      GC_WOT_SHA_HELPER="$sha_helper"
+    else
+      sha_helper=""
+    fi
+  fi
+
+  local run_dir="${RUN_DIR:-${project_root}/.gpt-creator/staging/plan/work/runs/$(date +%Y%m%d%H%M%S)}"
+  mkdir -p "$run_dir"
+
+  local payload_raw="${run_dir}/payload.raw"
+  local payload_json="${run_dir}/payload.json"
+  cp -f "$output_file" "$payload_raw" || return 1
+
+  if ! python3 "$extract_py" <"$payload_raw" >"$payload_json"; then
+    return 2
+  fi
+  if ! python3 "$externalize_py" "$payload_json" "$run_dir" "$project_root"; then
+    return 2
+  fi
+  if ! python3 "$validate_py" "$payload_json"; then
+    return 2
+  fi
+
+  while IFS= read -r placeholder_path; do
+    [[ -z "$placeholder_path" ]] && continue
+    (
+      cd "$project_root" || exit 0
+      "$CLI_ROOT/scripts/create-doc-placeholder.sh" \
+        "$placeholder_path" \
+        --owner "Work-on-Tasks" \
+        --summary "Auto-created placeholder"
+    ) || true
+  done < <(python3 "$placeholders_py" "$payload_json")
+
+  local envelope_sha=""
+  if [[ -n "$sha_helper" ]]; then
+    envelope_sha="$(python3 "$sha_helper" "$payload_json" 2>/dev/null || true)"
+  fi
+  if [[ -z "$envelope_sha" ]]; then
+    if command -v shasum >/dev/null 2>&1; then
+      envelope_sha="$(shasum -a 256 "$payload_json" 2>/dev/null | awk '{print $1}')"
+    elif command -v sha256sum >/dev/null 2>&1; then
+      envelope_sha="$(sha256sum "$payload_json" 2>/dev/null | awk '{print $1}')"
+    fi
+  fi
+
+  local meta_file="${run_dir}/.applied.json"
+  touch "$meta_file"
+  local identical_envelope=0
+  if [[ -n "$envelope_sha" ]] && grep -q "$envelope_sha" "$meta_file"; then
+    identical_envelope=1
+  fi
+
+  if (( identical_envelope == 0 )); then
+    if ! python3 "$apply_py" "$payload_json" "$project_root"; then
+      return 12
+    fi
+    if [[ -n "$envelope_sha" ]]; then
+      printf '%s %s\n' "$envelope_sha" "$(date -u +%FT%TZ)" >>"$meta_file"
+    fi
+  fi
+
+  local summary
+  if ! summary="$(WOT_IDENTICAL="$identical_envelope" python3 - "$payload_json" "$project_root" <<'PY'
+import base64
+import json
+import os
+import sys
+from collections import OrderedDict
+from pathlib import Path
+
+payload_path = Path(sys.argv[1])
+project_root = Path(sys.argv[2]) if len(sys.argv) > 2 else payload_path.parent
+data = json.loads(payload_path.read_text(encoding="utf-8"))
+
+changes = data.get("changes") or []
+commands = data.get("commands") or []
+notes = data.get("notes") or []
+
+written_order = []
+written_seen = set()
+patched_order = []
+patched_seen = set()
+change_sizes = OrderedDict()
+
+def normalise(path_fragment: str) -> str:
+    fragment = path_fragment.strip()
+    if fragment.startswith("a/") or fragment.startswith("b/"):
+        fragment = fragment[2:]
+    if fragment.startswith("./"):
+        fragment = fragment[2:]
+    return fragment
+
+def patch_text_from_file(rel_path: str) -> str:
+    try:
+        patch_file = (project_root / rel_path).resolve()
+        return patch_file.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+def blob_size_from_file(rel_path: str) -> int:
+    try:
+        blob_file = (project_root / rel_path).resolve()
+        return len(blob_file.read_bytes())
+    except Exception:
+        return 0
+
+def diff_target(diff_text: str) -> str:
+    lhs = None
+    rhs = None
+    for line in diff_text.splitlines():
+        if line.startswith("--- "):
+            lhs = line[4:].strip()
+        elif line.startswith("+++ "):
+            rhs = line[4:].strip()
+        if lhs is not None and rhs is not None:
+            break
+    candidate = rhs
+    if candidate in {None, "/dev/null", "b/dev/null"}:
+        candidate = lhs
+    if candidate is None:
+        return ""
+    return normalise(candidate)
+
+for change in changes:
+    if isinstance(change, str):
+        if not change.startswith("--- "):
+            continue
+        target = diff_target(change)
+        if not target:
+            continue
+        if target not in patched_seen:
+            patched_order.append(target)
+            patched_seen.add(target)
+        size = len(change.encode("utf-8"))
+        change_sizes[target] = change_sizes.get(target, 0) + size
+    elif isinstance(change, dict):
+        if change.get("type") == "patch" and "patch_path" in change:
+            patch_text = patch_text_from_file(str(change.get("patch_path", "")).strip())
+            target = diff_target(patch_text) or str(change.get("patch_path", "")).strip()
+            target = normalise(target)
+            if target and target not in patched_seen:
+                patched_order.append(target)
+                patched_seen.add(target)
+            size = len(patch_text.encode("utf-8"))
+            if target:
+                change_sizes[target] = change_sizes.get(target, 0) + size
+            continue
+
+        if "path" in change and "contents" in change:
+            target = normalise(str(change.get("path", "")).strip())
+            if not target:
+                continue
+            if target not in written_seen:
+                written_order.append(target)
+                written_seen.add(target)
+            contents = change.get("contents")
+            if change.get("encoding") == "base64":
+                try:
+                    decoded = base64.b64decode(contents)
+                except Exception:
+                    decoded = b""
+                size = len(decoded)
+            else:
+                if isinstance(contents, str):
+                    text_payload = contents
+                else:
+                    text_payload = json.dumps(contents, ensure_ascii=False)
+                size = len(text_payload.encode("utf-8"))
+            change_sizes[target] = change_sizes.get(target, 0) + size
+            continue
+
+        if "path" in change and "contents_path" in change:
+            target = normalise(str(change.get("path", "")).strip())
+            if not target:
+                continue
+            if target not in written_seen:
+                written_order.append(target)
+                written_seen.add(target)
+            size = blob_size_from_file(str(change.get("contents_path", "")).strip())
+            change_sizes[target] = change_sizes.get(target, 0) + size
+            continue
+
+if not isinstance(commands, list):
+    commands = []
+if not isinstance(notes, list):
+    notes = []
+
+status = "ok" if (written_order or patched_order) else "noop"
+if os.environ.get("WOT_IDENTICAL") == "1":
+    status = "identical-envelope"
+    notes = list(notes)
+    notes.append("Envelope already applied previously; skipping changes.")
+
+print(f"STATUS {status}")
+print("APPLIED")
+for path in written_order:
+    print(f"WRITE {path}")
+for path in patched_order:
+    print(f"PATCH {path}")
+for path, size in change_sizes.items():
+    print(f"SIZE {path}\t{size}")
+for cmd in commands:
+    cmd_str = str(cmd).strip()
+    if cmd_str:
+        print(f"CMD {cmd_str.replace('\n', ' ')}")
+for note in notes:
+    note_str = str(note).strip()
+    if note_str:
+        print(f"NOTE {note_str.replace('\n', ' ')}")
+PY
+)"; then
+    return 2
+  fi
+
+  printf '%s\n' "$summary"
 }
 
 cmd_create_jira_tasks() {
@@ -6163,6 +6527,8 @@ gc_write_task_prompt() {
   local task_binder_helper
   task_binder_helper="$(gc_clone_python_tool "task_binder.py" "$project_root")" || return 1
   : "$task_binder_helper"
+  local compose_helper
+  compose_helper="$(gc_clone_python_tool "compose_sections.py" "$project_root")" || return 1
   local prompt_helper
   prompt_helper="$(gc_clone_python_tool "document_index.py" "$project_root")" || return 1
   python3 "$prompt_helper" "$db_path" "$story_slug" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" "$staging_dir"
@@ -7297,6 +7663,18 @@ EOHELP
   local run_dir="${runs_dir}/${run_stamp}"
   local run_log_dir="${work_logs_root}/${run_stamp}"
   mkdir -p "$run_dir" "$run_log_dir"
+
+  RUN_DIR="${RUN_DIR:-$run_dir}"
+  export RUN_DIR
+  mkdir -p "$RUN_DIR"
+
+  if [[ -z "${TMUX:-}${STY:-}" ]]; then
+    echo "W: consider running inside tmux/screen" >&2
+  fi
+
+  export GC_HARD_TOKENS_PER_TASK="${GC_HARD_TOKENS_PER_TASK:-60000}"
+  WOT_EXCLUDE_STATUSES="${WOT_EXCLUDE_STATUSES:-skip-already-complete,blocked-*,test-env-failed}"
+
   local backlog_guard_snapshot_output=""
   backlog_snapshot_before_path="${run_dir}/backlog-before.json"
   if backlog_guard_snapshot_output="$(gc_backlog_guard_snapshot "$tasks_db" "" "$backlog_guard_window_value" "$backlog_guard_wip_limit" 2>/dev/null)"; then

@@ -1,6 +1,29 @@
 import hashlib
+import os
 import sys
 from pathlib import Path
+
+RUN_DIR = os.getenv("GC_RUN_DIR") or os.getenv("GC_STAGING_RUN_DIR") or ""
+RUN_DIR_REAL = os.path.realpath(RUN_DIR) if RUN_DIR else ""
+
+
+def _safe_walk(root: Path):
+    seen = set()
+    for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        try:
+            base_real = os.path.realpath(base)
+        except OSError:
+            dirs[:] = []
+            continue
+        if base_real in seen:
+            dirs[:] = []
+            continue
+        seen.add(base_real)
+        if RUN_DIR_REAL and (base_real == RUN_DIR_REAL or base_real.startswith(RUN_DIR_REAL + os.sep)):
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(base, d))]
+        yield base, dirs, files
 
 
 def build_digest(context_path: Path, limit: int) -> list[str]:

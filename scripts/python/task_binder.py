@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -17,6 +18,33 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 DEFAULT_TTL_SECONDS = 7 * 24 * 3600
 DEFAULT_MAX_BYTES = 200 * 1024 * 1024
 VERSION = 1
+
+_DIGEST_MAX_BYTES = max(1024, int(os.getenv("GC_BINDER_DIGEST_MAX_BYTES", "8192")))
+_DIGEST_MAX_LINES = max(16, int(os.getenv("GC_BINDER_DIGEST_MAX_LINES", "120")))
+
+
+def _sha256_bytes(data: bytes) -> str:
+    digest = hashlib.sha256()
+    digest.update(data)
+    return digest.hexdigest()
+
+
+def _make_text_digest(text: str) -> Dict[str, Any]:
+    material = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    encoded = material.encode("utf-8", "ignore")
+    preview_lines = material.splitlines()
+    clipped_lines = preview_lines[:_DIGEST_MAX_LINES]
+    preview = "\n".join(clipped_lines)
+    preview_bytes = preview.encode("utf-8", "ignore")
+    if len(preview_bytes) > _DIGEST_MAX_BYTES:
+        preview = preview_bytes[:_DIGEST_MAX_BYTES].decode("utf-8", "ignore")
+    return {
+        "sha256": _sha256_bytes(encoded),
+        "bytes": len(encoded),
+        "preview": preview,
+        "preview_lines": min(len(preview_lines), _DIGEST_MAX_LINES),
+        "truncated": len(encoded) > len(preview.encode("utf-8", "ignore")),
+    }
 
 
 def _slugify(value: str) -> str:
@@ -151,6 +179,31 @@ def _ensure_hit_counters(binder: Dict[str, Any]) -> None:
         stats.setdefault(key, 0)
 
 
+def export_prior_task_context(binding: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(binding, dict):
+        return {}
+    digest = binding.get("prompt_digest")
+    if not isinstance(digest, dict) or not digest.get("sha256"):
+        legacy = binding.get("prompt_text") or binding.get("context") or ""
+        if legacy:
+            digest = _make_text_digest(str(legacy))
+        else:
+            digest = None
+    result: Dict[str, Any] = {}
+    if isinstance(digest, dict) and digest.get("preview"):
+        result["prior_task_digest"] = {
+            "sha256": digest.get("sha256"),
+            "bytes": digest.get("bytes"),
+            "preview": digest.get("preview"),
+            "preview_lines": digest.get("preview_lines"),
+            "truncated": bool(digest.get("truncated")),
+        }
+    decisions = binding.get("decisions")
+    if isinstance(decisions, (list, dict)):
+        result["decisions"] = decisions
+    return result
+
+
 def load_for_prompt(
     project_root: Path,
     *,
@@ -225,6 +278,7 @@ def prepare_binder_payload(
     last_tokens: Optional[Dict[str, Any]] = None,
     previous: Optional[Dict[str, Any]] = None,
     binder_status: str = "miss",
+    prompt_snapshot: Optional[str] = None,
 ) -> Tuple[Path, Dict[str, Any]]:
     path = _binder_path(project_root, epic_slug, story_slug, task_id)
     now_ts = time.time()
@@ -241,6 +295,16 @@ def prepare_binder_payload(
     binder["files"] = files_section or binder.get("files") or {"primary": [], "related": [], "deps": []}
     binder["evidence"] = evidence or binder.get("evidence") or {}
     binder["last_tokens"] = last_tokens or binder.get("last_tokens") or {}
+    binder.pop("prompt_text", None)
+    binder.pop("context", None)
+    binder.pop("prior_prompt_text", None)
+    binder.pop("prompt_snapshot", None)
+    if prompt_snapshot:
+        binder["prompt_digest"] = _make_text_digest(prompt_snapshot)
+    elif isinstance(previous, dict) and isinstance(previous.get("prompt_digest"), dict):
+        binder["prompt_digest"] = dict(previous["prompt_digest"])
+    else:
+        binder.pop("prompt_digest", None)
     binder_meta = binder.setdefault("meta", {})
     binder_meta["updated_at"] = str(now_ts)
     binder_meta["status"] = binder_status

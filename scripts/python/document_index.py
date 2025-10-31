@@ -8,12 +8,17 @@ import sqlite3
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Optional, List, Tuple, Set, Dict, Sequence, Any
+
+from compose_sections import dedupe_and_coalesce, emit_preamble_once, format_sections
 
 from task_binder import (
     DEFAULT_MAX_BYTES as BINDER_DEFAULT_MAX_BYTES,
     DEFAULT_TTL_SECONDS as BINDER_DEFAULT_TTL_SECONDS,
+    export_prior_task_context,
     load_for_prompt as binder_load_for_prompt,
     prepare_binder_payload,
     write_binder as binder_write,
@@ -142,6 +147,129 @@ def _parse_int(value: Any, *, fallback: int) -> int:
     except (TypeError, ValueError):
         return fallback
     return result
+
+
+def _normalise_block(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip()).lower()
+
+
+def _normalize_body(text: str) -> str:
+    if not text:
+        return ""
+    normalised = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalised = re.sub(r"[ \t]+$", "", normalised, flags=re.MULTILINE)
+    normalised = re.sub(r"\n{3,}", "\n\n", normalised)
+    return normalised.strip()
+
+
+def _clean_prompt_text(text: str) -> str:
+    body = _normalize_body(text)
+    if not body:
+        return ""
+    cleaned_lines: List[str] = []
+    previous_heading = None
+    for line in body.split("\n"):
+        if line.startswith("## "):
+            if previous_heading == line:
+                continue
+            previous_heading = line
+        cleaned_lines.append(line)
+    cleaned = "\n".join(cleaned_lines).strip()
+    return cleaned + "\n"
+
+
+def _segment_is_digest(segment: Dict[str, Any]) -> bool:
+    id_text = str(segment.get("id") or "").lower()
+    body = _normalise_block(segment.get("full_text") or segment.get("current_text") or "")
+    return "digest" in id_text or "digest" in body or "pointer" in body
+
+
+def _dedupe_segments(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: Dict[str, int] = {}
+    deduped: List[Dict[str, Any]] = []
+    for segment in segments:
+        body = _normalise_block(segment.get("full_text") or segment.get("current_text") or "")
+        if not body:
+            deduped.append(segment)
+            continue
+        token = hashlib.sha256(body.encode("utf-8", "ignore")).hexdigest()[:16]
+        if token not in seen:
+            seen[token] = len(deduped)
+            deduped.append(segment)
+            continue
+        existing_index = seen[token]
+        existing_segment = deduped[existing_index]
+        if _segment_is_digest(segment) and not _segment_is_digest(existing_segment):
+            deduped[existing_index] = segment
+        # otherwise keep the existing segment and drop the duplicate
+    return deduped
+
+
+def _atomic_write_text(path: Path, data: str, *, encoding: str = "utf-8") -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        "w",
+        encoding=encoding,
+        newline="\n",
+        dir=str(destination.parent),
+        delete=False,
+    )
+    temp_name = handle.name
+    try:
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, destination)
+    finally:
+        try:
+            if os.path.exists(temp_name):
+                os.remove(temp_name)
+        except OSError:
+            pass
+
+
+def _read_existing_input_digest(meta_path: Path) -> str:
+    if not meta_path.exists():
+        return ""
+    try:
+        with meta_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    digest = payload.get("input_digest")
+    return digest if isinstance(digest, str) else ""
+
+
+def _read_existing_sha(meta_path: Path) -> str:
+    if not meta_path.exists():
+        return ""
+    try:
+        with meta_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    value = payload.get("sha256")
+    return value if isinstance(value, str) else ""
+
+
+def _compute_input_digest(*parts: Any) -> str:
+    hasher = hashlib.sha256()
+    for part in parts:
+        if part is None:
+            continue
+        if isinstance(part, bytes):
+            chunk = part
+        else:
+            chunk = str(part).encode("utf-8", "replace")
+        hasher.update(chunk)
+        hasher.update(b"\0")
+    return hasher.hexdigest()[:16]
 
 
 def _load_runner_config(project_root: Optional[Path]) -> Dict[str, Any]:
@@ -273,6 +401,22 @@ def _strip_empty_ends(block: List[str]) -> List[str]:
     while end > start and not block[end - 1].strip():
         end -= 1
     return block[start:end]
+
+
+def _lines_to_sections(lines: List[str]) -> List[Tuple[str, str]]:
+    sections = _split_sections(lines)
+    result: List[Tuple[str, str]] = []
+    for entry in sections:
+        heading = entry.get("heading") or ""
+        block_lines = entry.get("lines") or []
+        body_lines = []
+        for idx, value in enumerate(block_lines):
+            if idx == 0 and value.startswith("## "):
+                continue
+            body_lines.append(value)
+        body_text = "\n".join(body_lines).strip()
+        result.append((heading, body_text))
+    return result
 
 
 DOC_ENTRY_BULLET_RE = re.compile(r"^-+\s*(DOC-[A-Z0-9]+)\b")
@@ -1797,8 +1941,40 @@ if binder_hit:
         binder_summary_lines.append("### Evidence Notes")
         for note in evidence_section[:8]:
             binder_summary_lines.append(f"- {note}")
+    prior_context_payload = export_prior_task_context(binder_data)
+    digest_info = prior_context_payload.get("prior_task_digest")
+    if isinstance(digest_info, dict) and digest_info.get("preview"):
+        binder_summary_lines.append("")
+        binder_summary_lines.append("### Prior Task Snapshot")
+        digest_line = f"- Digest: sha256 {digest_info.get('sha256')} ({digest_info.get('bytes')} bytes total)"
+        binder_summary_lines.append(digest_line)
+        preview_text = str(digest_info.get("preview") or "").strip()
+        if preview_text:
+            binder_summary_lines.append("")
+            for preview_line in preview_text.splitlines()[:40]:
+                binder_summary_lines.append(preview_line)
+        if digest_info.get("truncated"):
+            binder_summary_lines.append("")
+            binder_summary_lines.append("(Preview truncated; open the previous run artifacts for full details.)")
+    decisions_payload = prior_context_payload.get("decisions")
+    if isinstance(decisions_payload, dict) and decisions_payload:
+        binder_summary_lines.append("")
+        binder_summary_lines.append("### Prior Decisions")
+        for key, value in decisions_payload.items():
+            binder_summary_lines.append(f"- {key}: {value}")
+    elif isinstance(decisions_payload, list) and decisions_payload:
+        binder_summary_lines.append("")
+        binder_summary_lines.append("### Prior Decisions")
+        for entry in decisions_payload[:12]:
+            binder_summary_lines.append(f"- {entry}")
 
 lines.extend(binder_summary_lines)
+
+section_pairs = _lines_to_sections(lines)
+section_pairs = emit_preamble_once(section_pairs)
+section_pairs = dedupe_and_coalesce(section_pairs)
+formatted_sections_text = format_sections(section_pairs)
+lines = formatted_sections_text.rstrip("\n").split("\n") if formatted_sections_text.strip() else []
 
 doc_snippets_enabled = os.getenv("GC_PROMPT_DOC_SNIPPETS", "").strip().lower() not in {"", "0", "false"}
 
@@ -2816,6 +2992,7 @@ if CONTEXT_TAIL_PATH:
         lines.extend(tail_text)
 
 segments = _build_segments_from_lines(lines)
+segments = _dedupe_segments(segments)
 _initialise_segment_metrics(segments)
 
 initial_tokens_raw = sum(segment["full_tokens"] for segment in segments)
@@ -2938,11 +3115,17 @@ if final_segment_texts:
 else:
     final_prompt_text = "\n".join(lines).rstrip() + "\n"
 
+final_prompt_text = _clean_prompt_text(final_prompt_text)
+
 prompt_path = Path(PROMPT_PATH)
-prompt_path.parent.mkdir(parents=True, exist_ok=True)
-prompt_path.write_text(final_prompt_text, encoding='utf-8')
-emit_progress(f"Wrote prompt → {prompt_path}")
-emit_progress(f"Prompt size ≈ {final_token_estimate} tokens ({len(final_prompt_text):,} bytes)")
+meta_path = Path(str(prompt_path) + ".meta.json")
+input_digest = _compute_input_digest(
+    STORY_SLUG,
+    TASK_INDEX,
+    task_identifier or task_id,
+    MODEL_NAME,
+    final_prompt_text,
+)
 
 binder_written_path = ""
 if binder_enabled:
@@ -2988,12 +3171,15 @@ if binder_enabled:
         last_tokens=binder_tokens_section,
         previous=binder_data if binder_hit else None,
         binder_status=binder_status,
+        prompt_snapshot=final_prompt_text,
     )
     binder_write(binder_path_obj, binder_payload, max_bytes=binder_max_bytes)
     binder_written_path = str(binder_path_obj)
     emit_progress(f"Binder updated → {binder_written_path}")
 elif binder_path:
     binder_written_path = str(binder_path)
+
+prompt_sha256 = hashlib.sha256(final_prompt_text.encode("utf-8", "ignore")).hexdigest()
 
 segments_meta: List[Dict[str, Any]] = []
 for segment in segments:
@@ -3056,13 +3242,28 @@ meta: Dict[str, Any] = {
     "soft_limit_triggered_initial": soft_limit_initial_trigger,
     "hard_limit_triggered_initial": hard_limit_initial_trigger,
     "hard_limit_triggered_final": hard_limit_final_trigger,
+    "sha256": prompt_sha256,
+    "bytes": len(final_prompt_text),
+    "created_at": int(time.time()),
+    "story_slug": STORY_SLUG,
+    "task_index": TASK_INDEX,
+    "prompt_path": str(prompt_path),
 }
 
 if truncated_sections:
     meta["truncated_sections"] = truncated_sections
 
-meta_path = Path(str(prompt_path) + ".meta.json")
-meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+meta["input_digest"] = input_digest
+
+existing_digest = _read_existing_input_digest(meta_path)
+existing_sha = _read_existing_sha(meta_path)
+if prompt_path.exists() and meta_path.exists() and existing_digest == input_digest and existing_sha == prompt_sha256:
+    emit_progress(f"Prompt unchanged; reusing existing cache → {prompt_path}")
+else:
+    _atomic_write_text(prompt_path, final_prompt_text)
+    emit_progress(f"Wrote prompt → {prompt_path}")
+    _atomic_write_text(meta_path, json.dumps(meta, indent=2, ensure_ascii=False) + "\n")
+emit_progress(f"Prompt size ≈ {final_token_estimate} tokens ({len(final_prompt_text):,} bytes)")
 
 story_points_meta = story_points or ""
 status_output = task_status or ""

@@ -22,6 +22,7 @@ def test_prepare_and_load_binder(tmp_path: Path):
     evidence = {"notes": ["Initial run"]}
     last_tokens = {"prompt": 1234}
 
+    prompt_snapshot = "Line 1\nLine 2\nLine 3"
     binder_path, payload = task_binder.prepare_binder_payload(
         project_root=project_root,
         epic_slug="epic-alpha",
@@ -38,6 +39,7 @@ def test_prepare_and_load_binder(tmp_path: Path):
         last_tokens=last_tokens,
         previous=None,
         binder_status="miss",
+        prompt_snapshot=prompt_snapshot,
     )
     task_binder.write_binder(binder_path, payload, max_bytes=task_binder.DEFAULT_MAX_BYTES)
 
@@ -53,6 +55,12 @@ def test_prepare_and_load_binder(tmp_path: Path):
     assert result.status == "hit"
     assert result.binder["problem"] == problem
     assert result.binder["doc_refs"][0]["doc_id"] == "DOC-1"
+    digest = result.binder.get("prompt_digest")
+    assert isinstance(digest, dict)
+    assert digest["sha256"]
+    context_excerpt = task_binder.export_prior_task_context(result.binder)
+    assert "prior_task_digest" in context_excerpt
+    assert context_excerpt["prior_task_digest"]["preview"]
 
 
 def test_binder_stale_when_ttl_expires(tmp_path: Path):

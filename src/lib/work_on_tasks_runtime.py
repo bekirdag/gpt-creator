@@ -2,6 +2,13 @@
 """Runtime helpers extracted from bin/gpt-creator."""
 
 import sys
+from pathlib import Path
+
+_HELPER_DIR = Path(__file__).resolve().parents[2] / "scripts" / "python"
+if _HELPER_DIR.exists():
+    helper_str = str(_HELPER_DIR)
+    if helper_str not in sys.path:
+        sys.path.insert(0, helper_str)
 
 def main():
     if len(sys.argv) < 2:
@@ -926,8 +933,100 @@ def main():
         import shutil
         import subprocess
         import sys
+        import tempfile
+        import time
         from pathlib import Path
         from typing import Optional, List, Tuple, Set, Dict, Sequence
+
+        from compose_sections import dedupe_and_coalesce, emit_preamble_once, format_sections
+
+        def _atomic_write_text(path: Path, data: str, *, encoding: str = "utf-8") -> None:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp_file = tempfile.NamedTemporaryFile(
+                "w",
+                encoding=encoding,
+                newline="\n",
+                dir=str(target.parent),
+                delete=False,
+            )
+            temp_name = temp_file.name
+            try:
+                with temp_file:
+                    temp_file.write(data)
+                    temp_file.flush()
+                    os.fsync(temp_file.fileno())
+                os.replace(temp_name, target)
+            finally:
+                if os.path.exists(temp_name):
+                    try:
+                        os.remove(temp_name)
+                    except OSError:
+                        pass
+
+
+        def _read_existing_input_digest(meta_path: Path) -> str:
+            if not meta_path.exists():
+                return ""
+            try:
+                with meta_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except Exception:
+                return ""
+            if not isinstance(payload, dict):
+                return ""
+            digest = payload.get("input_digest")
+            return digest if isinstance(digest, str) else ""
+
+
+        def _compute_input_digest(*parts) -> str:
+            hasher = hashlib.sha256()
+            for part in parts:
+                if part is None:
+                    continue
+                if isinstance(part, bytes):
+                    chunk = part
+                else:
+                    chunk = str(part).encode("utf-8", "replace")
+                hasher.update(chunk)
+                hasher.update(b"\0")
+            return hasher.hexdigest()[:16]
+
+
+        def _meta_same_as(meta_path: Path, sha_value: str) -> bool:
+            if not meta_path.exists():
+                return False
+            try:
+                with meta_path.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except Exception:
+                return False
+            if not isinstance(payload, dict):
+                return False
+            existing = payload.get("sha256")
+            return isinstance(existing, str) and existing == sha_value
+
+
+        def _lines_to_sections(lines: List[str]) -> List[Tuple[str, str]]:
+            sections: List[Tuple[str, str]] = []
+            current_title: Optional[str] = None
+            current_body: List[str] = []
+            for raw_line in lines:
+                if raw_line.startswith("## "):
+                    if current_title is None and current_body:
+                        sections.append(("", "\n".join(current_body)))
+                        current_body = []
+                    elif current_title is not None:
+                        sections.append((current_title, "\n".join(current_body)))
+                        current_body = []
+                    current_title = raw_line[3:].strip()
+                    continue
+                current_body.append(raw_line)
+            if current_title is not None:
+                sections.append((current_title, "\n".join(current_body)))
+            elif current_body:
+                sections.append(("", "\n".join(current_body)))
+            return sections
 
 
         def _resolve_display_path(path_obj: Path) -> Path:
@@ -2865,9 +2964,40 @@ def main():
                 lines.append("")
                 lines.extend(tail_text)
 
+        section_pairs = _lines_to_sections(lines)
+        section_pairs = emit_preamble_once(section_pairs)
+        section_pairs = dedupe_and_coalesce(section_pairs)
+        formatted_sections = format_sections(section_pairs)
+        lines = formatted_sections.rstrip("\n").split("\n") if formatted_sections.strip() else []
+
+        final_prompt_text = "\n".join(lines) + "\n"
         prompt_path = Path(PROMPT_PATH)
-        prompt_path.parent.mkdir(parents=True, exist_ok=True)
-        prompt_path.write_text("\n".join(lines) + "\n", encoding='utf-8')
+        meta_path = Path(str(prompt_path) + ".meta.json")
+        input_digest = _compute_input_digest(
+            STORY_SLUG,
+            TASK_INDEX,
+            task_id,
+            MODEL_NAME,
+            final_prompt_text,
+        )
+        prompt_sha = hashlib.sha256(final_prompt_text.encode("utf-8", "ignore")).hexdigest()
+        existing_digest = _read_existing_input_digest(meta_path)
+        meta_same = prompt_path.exists() and meta_path.exists() and _meta_same_as(meta_path, prompt_sha)
+        if not (prompt_path.exists() and existing_digest == input_digest and meta_same):
+            _atomic_write_text(prompt_path, final_prompt_text)
+            meta_payload = {
+                "story_slug": STORY_SLUG,
+                "task_id": task_id,
+                "task_title": task_title,
+                "task_index": TASK_INDEX,
+                "model": MODEL_NAME,
+                "bytes": len(final_prompt_text),
+                "input_digest": input_digest,
+                "prompt_path": str(prompt_path),
+                "sha256": prompt_sha,
+                "written_at": int(time.time()),
+            }
+            _atomic_write_text(meta_path, json.dumps(meta_payload, indent=2, ensure_ascii=False) + "\n")
 
         story_points_meta = story_points or ""
         print(f"{task_id}\t{task_title}\t{story_points_meta}")

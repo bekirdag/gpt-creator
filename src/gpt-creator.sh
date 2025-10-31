@@ -225,6 +225,19 @@ gc::discover() {
 }
 
 # ------------- Normalization (staging copy with canonical names) -------------
+gc::_stage_install_copy() {
+  local src="${1:?source path required}"
+  local dest="${2:?destination path required}"
+  local dest_dir
+  dest_dir="$(dirname "$dest")"
+  mkdir -p "$dest_dir"
+  if [[ -e "$dest" ]] && [[ "$src" -ef "$dest" ]]; then
+    # Source and destination already the same file; nothing to do.
+    return 0
+  fi
+  install -m 0644 "$src" "$dest"
+}
+
 gc::normalize_to_staging() {
   local project_root="$1"
   local work_dir; work_dir="$(gc::ensure_workspace "$project_root")"
@@ -240,7 +253,7 @@ gc::normalize_to_staging() {
   local doc_path
   doc_path="$(gc::_get_found_doc pdr)"
   if [[ -n "$doc_path" ]]; then
-    install -m 0644 "$doc_path" "$stage/docs/pdr.md"
+    gc::_stage_install_copy "$doc_path" "$stage/docs/pdr.md"
     if (( doc_registry_ready )); then
       python3 "$doc_registry_cli" register \
         --runtime-dir "$work_dir" \
@@ -255,7 +268,7 @@ gc::normalize_to_staging() {
   fi
   doc_path="$(gc::_get_found_doc sds)"
   if [[ -n "$doc_path" ]]; then
-    install -m 0644 "$doc_path" "$stage/docs/sds.md"
+    gc::_stage_install_copy "$doc_path" "$stage/docs/sds.md"
     if (( doc_registry_ready )); then
       python3 "$doc_registry_cli" register \
         --runtime-dir "$work_dir" \
@@ -270,7 +283,7 @@ gc::normalize_to_staging() {
   fi
   doc_path="$(gc::_get_found_doc rfp)"
   if [[ -n "$doc_path" ]]; then
-    install -m 0644 "$doc_path" "$stage/docs/rfp.md"
+    gc::_stage_install_copy "$doc_path" "$stage/docs/rfp.md"
     if (( doc_registry_ready )); then
       python3 "$doc_registry_cli" register \
         --runtime-dir "$work_dir" \
@@ -285,7 +298,7 @@ gc::normalize_to_staging() {
   fi
   doc_path="$(gc::_get_found_doc jira)"
   if [[ -n "$doc_path" ]]; then
-    install -m 0644 "$doc_path" "$stage/docs/jira.md"
+    gc::_stage_install_copy "$doc_path" "$stage/docs/jira.md"
     if (( doc_registry_ready )); then
       python3 "$doc_registry_cli" register \
         --runtime-dir "$work_dir" \
@@ -300,7 +313,7 @@ gc::normalize_to_staging() {
   fi
   doc_path="$(gc::_get_found_doc ui_pages)"
   if [[ -n "$doc_path" ]]; then
-    install -m 0644 "$doc_path" "$stage/docs/ui-pages.md"
+    gc::_stage_install_copy "$doc_path" "$stage/docs/ui-pages.md"
     if (( doc_registry_ready )); then
       python3 "$doc_registry_cli" register \
         --runtime-dir "$work_dir" \
@@ -326,7 +339,7 @@ gc::normalize_to_staging() {
       json)     openapi_dest="$stage/openapi/openapi.json" ;;
       *)        openapi_dest="$stage/openapi/openapi.src" ;;
     esac
-    install -m 0644 "$openapi_path" "$openapi_dest"
+    gc::_stage_install_copy "$openapi_path" "$openapi_dest"
     if (( doc_registry_ready )); then
       local openapi_rel
       openapi_rel="${openapi_dest##$stage/}"
@@ -346,7 +359,7 @@ gc::normalize_to_staging() {
   local sql_path
   sql_path="$(gc::_get_found_doc sql)"
   if [[ -n "$sql_path" ]]; then
-    install -m 0644 "$sql_path" "$stage/sql/dump.sql"
+    gc::_stage_install_copy "$sql_path" "$stage/sql/dump.sql"
     if (( doc_registry_ready )); then
       python3 "$doc_registry_cli" register \
         --runtime-dir "$work_dir" \

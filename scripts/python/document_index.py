@@ -40,6 +40,11 @@ DESCRIPTION_MAX_CHARS = int(os.getenv("GC_PROMPT_DESCRIPTION_MAX_CHARS", "40000"
 ACCEPTANCE_MAX_ITEMS = int(os.getenv("GC_PROMPT_ACCEPTANCE_MAX_ITEMS", "120"))
 ACCEPTANCE_MAX_CHARS = int(os.getenv("GC_PROMPT_ACCEPTANCE_MAX_CHARS", "32000"))
 FREEFORM_SECTION_MAX_CHARS = int(os.getenv("GC_PROMPT_FREEFORM_MAX_CHARS", "24000"))
+PROMPT_SOURCE_MAX_BYTES = int(os.getenv("GC_PROMPT_SOURCE_MAX_BYTES", "262144"))
+DOC_SEARCH_MAX_RESULTS = int(os.getenv("GC_PROMPT_DOC_SEARCH_MAX_RESULTS", "12"))
+DOC_CATALOG_MAX_ENTRIES = int(os.getenv("GC_PROMPT_DOC_CATALOG_MAX_ENTRIES", "6"))
+SEARCH_SNIPPET_MAX_CHARS = int(os.getenv("GC_PROMPT_DOC_SNIPPET_MAX_CHARS", "500"))
+PROMPT_WARN_TOKENS = int(os.getenv("GC_PROMPT_WARN_TOKENS", "200000"))
 
 _progress_enabled = os.getenv("GC_PROMPT_PROGRESS", "1").strip().lower() not in {"0", "false", "off"}
 
@@ -52,6 +57,24 @@ def emit_progress(message: str) -> None:
         sys.stderr.flush()
     except Exception:
         pass
+
+
+def _dedupe_doc_refs(entries: Sequence[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    deduped: List[Dict[str, Any]] = []
+    seen: Set[Tuple[str, str]] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        doc_id = (entry.get("doc_id") or "").strip()
+        rel_path = (entry.get("rel_path") or "").strip()
+        key = (doc_id, rel_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+        if limit and len(deduped) >= limit:
+            break
+    return deduped
 SEGMENT_TYPE_PRIORITY: Dict[str, Tuple[int, bool]] = {
     "lead-in": (100, True),
     "documentation-assets": (98, True),
@@ -1100,6 +1123,8 @@ if binder_enabled and task_identifier:
     binder_status = binder_result.status
     binder_reason = binder_result.reason
     binder_data = binder_result.binder or {}
+    if isinstance(binder_data, dict) and binder_data.get("doc_refs"):
+        binder_data["doc_refs"] = _dedupe_doc_refs(binder_data.get("doc_refs") or [], DOC_SEARCH_MAX_RESULTS)
     binder_path = binder_result.path
 else:
     binder_enabled = False
@@ -1109,7 +1134,7 @@ else:
 binder_hit = binder_status == "hit"
 binder_doc_refs = []
 if binder_hit:
-    binder_doc_refs = list(binder_data.get("doc_refs") or [])
+    binder_doc_refs = _dedupe_doc_refs(binder_data.get("doc_refs") or [], DOC_SEARCH_MAX_RESULTS)
 documentation_db_path = os.getenv("GC_DOCUMENTATION_DB_PATH", "").strip()
 doc_catalog_env_raw = os.getenv("GC_DOC_CATALOG_PATH", "").strip()
 
@@ -1290,6 +1315,46 @@ def _truncate_bullets(items: Sequence[str], *, max_items: int, max_chars: int) -
     return trimmed, truncated, total_chars
 
 
+def _estimate_prompt_bytes(segments: Sequence[Dict[str, Any]]) -> int:
+    parts: List[str] = []
+    for seg in segments:
+        if seg.get("dropped"):
+            continue
+        current = (seg.get("current_text") or "").rstrip()
+        if current:
+            parts.append(current)
+    if not parts:
+        return 0
+    combined = "\n\n".join(parts)
+    return len(combined)
+
+
+def _enforce_prompt_size_limit(segments: List[Dict[str, Any]], limit_bytes: int) -> None:
+    if limit_bytes <= 0:
+        return
+    current_bytes = _estimate_prompt_bytes(segments)
+    if current_bytes <= limit_bytes:
+        return
+    emit_progress(f"Prompt size {current_bytes:,} bytes exceeds limit {limit_bytes:,}; dropping low-priority sections")
+    optional_segments = [
+        seg for seg in segments
+        if not seg.get("must_keep") and not seg.get("dropped") and seg.get("current_text")
+    ]
+    optional_segments.sort(key=lambda seg: (seg.get("score", 0), seg.get("current_tokens", 0)))
+    for seg in optional_segments:
+        seg_id = seg.get("id") or seg.get("type") or "segment"
+        emit_progress(f"  → Removing segment {seg_id} (score={seg.get('score')}, tokens={seg.get('current_tokens')})")
+        seg["dropped"] = True
+        seg["current_text"] = ""
+        seg["current_tokens"] = 0
+        seg["fallback_used"] = False
+        current_bytes = _estimate_prompt_bytes(segments)
+        if current_bytes <= limit_bytes:
+            break
+    if current_bytes > limit_bytes:
+        emit_progress(f"Prompt still {current_bytes:,} bytes after pruning; consider reducing GC_PROMPT_SOURCE_MAX_BYTES")
+
+
 def collect_instruction_prompts(plan_dir: Optional[Path], project_root: Optional[Path]) -> List[Tuple[str, List[str]]]:
     prompts: List[Tuple[str, List[str]]] = []
     search_roots: List[Path] = []
@@ -1315,6 +1380,13 @@ def collect_instruction_prompts(plan_dir: Optional[Path], project_root: Optional
             except OSError:
                 resolved = candidate
             if resolved in seen or not candidate.is_file():
+                continue
+            try:
+                size_bytes = candidate.stat().st_size
+            except OSError:
+                size_bytes = 0
+            if PROMPT_SOURCE_MAX_BYTES and size_bytes > PROMPT_SOURCE_MAX_BYTES:
+                emit_progress(f"Skipping instruction prompt {candidate} (size {size_bytes} bytes > limit {PROMPT_SOURCE_MAX_BYTES})")
                 continue
             seen.add(resolved)
             try:
@@ -2243,7 +2315,7 @@ search_summary_payload: List[Dict[str, object]] = []
 if binder_hit and binder_doc_refs:
     emit_progress("Reusing binder documentation references")
     task_ref = task_identifier or f"{STORY_SLUG}:{TASK_INDEX + 1}"
-    for ref in binder_doc_refs[:12]:
+    for ref in binder_doc_refs[:DOC_SEARCH_MAX_RESULTS]:
         entry = {
             "doc_id": ref.get("doc_id"),
             "method": ref.get("method") or "binder",
@@ -2275,25 +2347,26 @@ else:
                     db_path_obj = None
             except Exception:
                 db_path_obj = Path(documentation_db_path)
-        doc_search_hits.extend(_run_fts_search(db_path_obj, search_terms, 12))
+        doc_search_hits.extend(_run_fts_search(db_path_obj, search_terms, DOC_SEARCH_MAX_RESULTS))
         for hit in list(doc_search_hits):
             doc_id = (hit.get("doc_id") or "").strip()
             if not doc_id:
                 doc_search_hits.remove(hit)
                 continue
             seen_doc_ids.add(doc_id)
-        remaining_hits = 12 - len(doc_search_hits)
+        remaining_hits = DOC_SEARCH_MAX_RESULTS - len(doc_search_hits)
         if remaining_hits > 0:
             doc_search_hits.extend(_run_vector_search(vector_index_path, search_terms, remaining_hits, seen_doc_ids))
-        remaining_hits = 12 - len(doc_search_hits)
+        remaining_hits = DOC_SEARCH_MAX_RESULTS - len(doc_search_hits)
         if remaining_hits > 0:
             doc_search_hits.extend(_run_ripgrep_search(project_root_path, search_terms, remaining_hits, seen_doc_ids))
 
     if doc_search_hits:
+        doc_search_hits = _dedupe_doc_refs(doc_search_hits, DOC_SEARCH_MAX_RESULTS)
         lines.append("")
         lines.append("## Documentation Search Hits")
         emit_progress(f"Found {len(doc_search_hits)} documentation search hit(s)")
-        for hit in doc_search_hits[:12]:
+        for hit in doc_search_hits[:DOC_SEARCH_MAX_RESULTS]:
             doc_id = (hit.get("doc_id") or "").strip()
             if not doc_id:
                 continue
@@ -2303,13 +2376,13 @@ else:
             snippet_text = _normalise_space(hit.get("snippet") or "")
             lines.append(f"- {doc_id} [{method}] — {rel_path}")
             if snippet_text:
-                lines.append(f"  Snippet: {snippet_text[:280]}")
+                lines.append(f"  Snippet: {snippet_text[:SEARCH_SNIPPET_MAX_CHARS]}")
             search_summary_payload.append(
                 {
                     "doc_id": doc_id,
                     "method": method,
                     "rel_path": rel_path,
-                    "snippet": snippet_text[:500],
+                    "snippet": snippet_text[:SEARCH_SNIPPET_MAX_CHARS],
                 }
             )
         task_ref = task_identifier or f"{STORY_SLUG}:{TASK_INDEX + 1}"
@@ -2322,8 +2395,8 @@ if doc_catalog_entries:
     lines.append("")
     lines.append("## Documentation Catalog")
     lines.append("Use the catalog below to pick a section, then run `gpt-creator show-file <path> --range START:END` for a narrow excerpt. Avoid cat/sed on these manuals.")
-    emit_progress(f"Including {len(doc_catalog_entries[:6])} documentation catalog entries")
-    for entry in doc_catalog_entries[:6]:
+    emit_progress(f"Including {len(doc_catalog_entries[:DOC_CATALOG_MAX_ENTRIES])} documentation catalog entries")
+    for entry in doc_catalog_entries[:DOC_CATALOG_MAX_ENTRIES]:
         rel_path = entry['rel_path']
         lines.append(f"- {entry['doc_id']} — {rel_path}")
         headings_preview = entry.get("headings") or []
@@ -2335,7 +2408,7 @@ if doc_catalog_entries:
             lines.append(f"  (No headings detected; use `gpt-creator show-file {rel_path} --range START:END` to inspect a specific slice.)")
         snippet_text = (entry.get("snippet") or "").strip()
         if snippet_text:
-            snippet_clean = _normalise_space(snippet_text)[:280].rstrip()
+            snippet_clean = _normalise_space(snippet_text)[:SEARCH_SNIPPET_MAX_CHARS].rstrip()
             lines.append(f"  Snippet: {snippet_clean}")
         lines.append("")
 
@@ -2825,6 +2898,8 @@ if soft_limit > 0 or hard_limit > 0:
         margin=ESTIMATE_MARGIN,
     )
 
+_enforce_prompt_size_limit(segments, PROMPT_SOURCE_MAX_BYTES)
+
 final_tokens_raw = _recalculate_total_tokens(segments)
 final_token_estimate = math.ceil(final_tokens_raw * ESTIMATE_MARGIN)
 
@@ -2832,6 +2907,18 @@ status = "ok"
 hard_limit_final_trigger = hard_limit > 0 and final_token_estimate > hard_limit
 if hard_limit_final_trigger:
     status = "blocked-quota"
+
+if PROMPT_WARN_TOKENS and final_token_estimate > PROMPT_WARN_TOKENS:
+    top_segments = sorted(
+        [segment for segment in segments if not segment.get("dropped")],
+        key=lambda seg: seg.get("current_tokens", 0),
+        reverse=True,
+    )[:5]
+    for seg in top_segments:
+        emit_progress(
+            "Heavy segment: "
+            + f"{seg.get('id')} type={seg.get('type')} tokens={seg.get('current_tokens')}"
+        )
 
 segments_retained = sum(1 for segment in segments if not segment["dropped"])
 segments_dropped = sum(1 for segment in segments if segment["dropped"])
@@ -2855,6 +2942,7 @@ prompt_path = Path(PROMPT_PATH)
 prompt_path.parent.mkdir(parents=True, exist_ok=True)
 prompt_path.write_text(final_prompt_text, encoding='utf-8')
 emit_progress(f"Wrote prompt → {prompt_path}")
+emit_progress(f"Prompt size ≈ {final_token_estimate} tokens ({len(final_prompt_text):,} bytes)")
 
 binder_written_path = ""
 if binder_enabled:

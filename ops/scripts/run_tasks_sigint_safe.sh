@@ -39,6 +39,7 @@ CMD=("${GC_CLI_BIN:-${cli_root}/bin/gpt-creator}" work-on-tasks --project "$PROJ
 python_bin="${PYTHON_BIN:-python3}"
 
 run_pid=
+run_pgid=
 
 clone_python_tool() {
   local script_name="${1:?python script name required}"
@@ -109,7 +110,21 @@ mark_interrupted() {
 
   # Ask child to exit gracefully
   if [[ -n "${run_pid:-}" ]]; then
-    kill -TERM "$run_pid" 2>/dev/null || true
+    local target="-${run_pgid:-$run_pid}"
+    kill -TERM "$target" 2>/dev/null || true
+
+    local attempt
+    for attempt in {1..50}; do
+      if ! kill -0 "$run_pid" 2>/dev/null; then
+        break
+      fi
+      sleep 0.1
+    done
+
+    if kill -0 "$run_pid" 2>/dev/null; then
+      kill -KILL "$target" 2>/dev/null || true
+    fi
+
     wait "$run_pid" 2>/dev/null || true
   fi
   exit 130
@@ -118,7 +133,18 @@ mark_interrupted() {
 trap 'mark_interrupted INT' INT
 trap 'mark_interrupted TERM' TERM
 
-"${CMD[@]}" "$@" &
+if command -v setsid >/dev/null 2>&1; then
+  setsid "${CMD[@]}" "$@" &
+else
+  "$python_bin" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "${CMD[@]}" "$@" &
+fi
 run_pid=$!
+if ! run_pgid="$(ps -o pgid= -p "$run_pid" 2>/dev/null)"; then
+  run_pgid=""
+fi
+run_pgid="${run_pgid//[[:space:]]/}"
+if [[ -z "${run_pgid:-}" ]]; then
+  run_pgid="$run_pid"
+fi
 wait "$run_pid"
 exit $?

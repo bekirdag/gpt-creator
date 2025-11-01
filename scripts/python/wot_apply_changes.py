@@ -10,17 +10,34 @@ from typing import Any
 
 
 def apply_patch(repo: Path, patch_text: str) -> None:
-    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".patch") as tf:
-        tf.write(patch_text)
-        tf.flush()
+    tmp = tempfile.NamedTemporaryFile("w", delete=False, suffix=".patch")
+    try:
+        tmp.write(patch_text)
+        tmp.flush()
+    finally:
+        tmp.close()
+
+    try:
         subprocess.run(
-            ["git", "-C", str(repo), "apply", "--check", tf.name],
+            ["git", "-C", str(repo), "apply", "--check", tmp.name],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        subprocess.run(["git", "-C", str(repo), "apply", tf.name], check=True)
-    os.unlink(tf.name)
+        subprocess.run(["git", "-C", str(repo), "apply", tmp.name], check=True)
+    except subprocess.CalledProcessError as exc:
+        fallback = subprocess.run(
+            ["git", "-C", str(repo), "apply", "--3way", "--reject", tmp.name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if fallback.returncode != 0:
+            if fallback.stderr:
+                sys.stderr.write(fallback.stderr)
+            raise exc
+    finally:
+        os.unlink(tmp.name)
 
 
 def write_file(repo: Path, rel: str, contents: Any, encoding: str | None = None) -> None:

@@ -9211,6 +9211,29 @@ REM
         fi
       fi
 
+      if (( task_needs_review )) && (( task_changes_applied == 0 )) && [[ "${GC_COMPLETE_ON_EMPTY:-0}" == "1" ]]; then
+        local _gc_note_text=""
+        local _gc_note_lower=""
+        local _gc_complete_on_empty=0
+        for _gc_note_text in "${task_notes[@]}"; do
+          _gc_note_lower="${_gc_note_text,,}"
+          if [[ "$_gc_note_lower" == *"already satisfies"* ]] || [[ "$_gc_note_lower" == *"no repository edits required"* ]] || [[ "$_gc_note_lower" == *"no changes needed"* ]] || [[ "$_gc_note_lower" == *"acceptance criteria met"* ]]; then
+            _gc_complete_on_empty=1
+            break
+          fi
+        done
+        if (( _gc_complete_on_empty )); then
+          task_needs_review=0
+          manual_followups=0
+          keep_output=0
+          task_result_status="completed-no-changes"
+          if [[ -z "$apply_status" || "$apply_status" == "pending" || "$apply_status" == "no-changes" ]]; then
+            apply_status="completed-no-changes"
+          fi
+          task_notes+=("Marked completed-no-changes via GC_COMPLETE_ON_EMPTY; existing artifacts satisfy the task.")
+        fi
+      fi
+
       if (( task_needs_review )); then
         manual_followups=1
         if [[ "$task_result_status" != "blocked" ]]; then

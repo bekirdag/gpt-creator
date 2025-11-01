@@ -6944,6 +6944,7 @@ cmd_work_on_tasks() {
   local backlog_guard_window_value=""
   local prompt_slim_helper=""
   local prompt_safeguard_helper=""
+  local empty_apply_mode=""
 
   local auto_review_enabled=1
   if [[ -n "${GC_AUTO_REVIEW:-}" ]]; then
@@ -7089,6 +7090,14 @@ cmd_work_on_tasks() {
         doc_snippets=0
         shift
         ;;
+      --on-empty-apply)
+        empty_apply_mode="${2:-}"
+        shift 2
+        ;;
+      --on-empty-apply=*)
+        empty_apply_mode="${1#--on-empty-apply=}"
+        shift
+        ;;
       --plan-max-out)
         override_plan_max_out="${2:-}"
         shift 2
@@ -7217,6 +7226,7 @@ Options:
                         (default) Pull scoped excerpts for referenced docs/endpoints when available
   --no-context-doc-snippets
                         Disable doc-snippet mode and include staged docs verbatim
+  --on-empty-apply MODE  Handle clean empty apply results: complete (default), retry, or fail
   --plan-max-out NUM    Max output tokens for planning/status updates (default: 450; respects config/overrides)
   --status-max-out NUM  Max output tokens for per-task status notes (default: 350)
   --verify-max-out NUM  Max output tokens for verification summaries (default: 500)
@@ -7291,6 +7301,27 @@ EOHELP
   if [[ "${GC_AUTO_PUSH_MAIN:-1}" == "1" && -z "${GC_AUTO_PUSH_BRANCH:-}" ]]; then
     GC_AUTO_PUSH_BRANCH="main"
   fi
+
+  if [[ -z "$empty_apply_mode" ]]; then
+    empty_apply_mode="${GC_ON_EMPTY_APPLY_MODE:-${GC_ON_EMPTY_APPLY:-}}"
+  fi
+  local empty_apply_mode_lower="${empty_apply_mode,,}"
+  case "$empty_apply_mode_lower" in
+    ""|complete|complete-and-next|complete_and_next|next|advance|auto)
+      empty_apply_mode="complete"
+      ;;
+    retry|repeat)
+      empty_apply_mode="retry"
+      ;;
+    fail|error|abort)
+      empty_apply_mode="fail"
+      ;;
+    *)
+      warn "Unknown on-empty-apply mode '${empty_apply_mode}'; defaulting to 'complete'."
+      empty_apply_mode="complete"
+      ;;
+  esac
+  export GC_ON_EMPTY_APPLY_MODE="$empty_apply_mode"
 
   if (( binder_enabled )); then
     export GC_BINDER_ENABLED=1
@@ -9414,9 +9445,20 @@ print(flag("notes_contains_already_satisfied"))'
               previous_attempt_signature="$attempt_signature"
             fi
 
-            if [[ "$validator_effective" == "pass" ]]; then
-              info "    Acceptance validators passed with no repository changes; marking task complete."
-              apply_status="noop-accepted"
+            local allow_noop_completion=0
+            if [[ "$validator_effective" != "fail" ]]; then
+              case "$empty_apply_mode" in
+                complete)
+                  allow_noop_completion=1
+                  ;;
+              esac
+            fi
+
+            if (( allow_noop_completion )); then
+              info "    No repository changes required; marking task complete."
+              if [[ -z "$apply_status" || "$apply_status" == "pending" || "$apply_status" == "ok" ]]; then
+                apply_status="noop-accepted"
+              fi
               task_result_status="completed-no-changes"
               gc_mark_terminal_state "NOOP_VERIFIED"
               task_needs_review=0
@@ -9427,14 +9469,34 @@ print(flag("notes_contains_already_satisfied"))'
               task_verify_summary="$validator_summary"
               task_verify_details="$validator_details"
               task_verify_report="$validator_report"
-              task_notes+=("Acceptance validators passed with no repository changes (COMPLETED_NOOP).")
+              local noop_note="No repository changes required; task marked complete."
               if [[ -n "$validator_summary" ]]; then
-                task_notes+=("Validator summary: ${validator_summary}")
+                noop_note+=" Validator summary: ${validator_summary}."
               fi
+              task_notes+=("${noop_note}")
               if [[ -n "$validator_report_display" ]]; then
                 task_notes+=("Validator report stored at ${validator_report_display}.")
               fi
-              task_outcome_reason="noop-verified"
+              if [[ -z "$task_outcome_reason" ]]; then
+                if [[ "$validator_effective" == "pass" ]]; then
+                  task_outcome_reason="noop-verified"
+                else
+                  task_outcome_reason="noop-auto"
+                fi
+              fi
+              break
+            fi
+
+            if [[ "$empty_apply_mode" == "fail" ]]; then
+              task_needs_review=1
+              manual_followups=1
+              keep_output=1
+              codex_ok=1
+              task_result_status="permanent-fail"
+              gc_mark_outcome "PERMANENT_FAIL" "NOOP"
+              apply_status="noop-rejected"
+              task_outcome_reason="noop-policy-fail"
+              task_notes+=("Empty apply rejected by policy (--on-empty-apply=fail); manual follow-up required.")
               break
             fi
 

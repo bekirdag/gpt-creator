@@ -331,6 +331,12 @@ def main():
                 return False
             return not any(tok.startswith('--range') for tok in tokens[2:])
 
+        def _normalize_command_wrapper(text: str) -> str:
+            normalized = text.strip()
+            while len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'`', '"', "'"}:
+                normalized = normalized[1:-1].strip()
+            return normalized
+
         def _sed_window_exceeds(command: str, *, threshold: int = SED_MAX_WINDOW) -> Tuple[bool, int]:
             try:
                 tokens = shlex.split(command)
@@ -1362,7 +1368,7 @@ def main():
             for raw_cmd in command_entries:
                 if not isinstance(raw_cmd, str):
                     continue
-                trimmed = raw_cmd.strip()
+                trimmed = _normalize_command_wrapper(raw_cmd)
                 if not trimmed:
                     continue
                 if not COMMAND_WHITELIST_PATTERN.match(trimmed):
@@ -1389,7 +1395,7 @@ def main():
             for raw_cmd in command_entries:
                 if not isinstance(raw_cmd, str):
                     continue
-                command = raw_cmd.strip()
+                command = _normalize_command_wrapper(raw_cmd)
                 if not command:
                     continue
                 lower_command = command.lower()

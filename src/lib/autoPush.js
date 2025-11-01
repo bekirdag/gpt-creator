@@ -61,7 +61,11 @@ async function performAutoPush(summary) {
 
   const taskRef = resolveTaskRef(summary) || 'task';
   const verifySuffix = resolveVerifySuffix();
-  const commitMessage = `chore(gpt-creator): complete ${taskRef}${verifySuffix}`;
+  const explicitCommitMessage = (process.env.GC_AUTOPUSH_COMMIT_MESSAGE || '').trim();
+  const commitMessage =
+    explicitCommitMessage.length > 0
+      ? explicitCommitMessage
+      : `chore(gpt-creator): complete ${taskRef}${verifySuffix}`;
 
   await git(['add', '-A'], cwd);
   const commitArgs = ['commit', '-m', commitMessage];
@@ -87,7 +91,10 @@ async function performAutoPush(summary) {
     }
   }
 
-  const branchAlias = `gc/${sanitizeSegment(taskRef) || taskRef}`;
+  const attemptRefRaw = (process.env.GC_AUTOPUSH_ATTEMPT_REF || '').trim();
+  const attemptRef = attemptRefRaw ? sanitizeSegment(attemptRefRaw) : '';
+  const taskRefSegment = sanitizeSegment(taskRef) || taskRef;
+  const branchAlias = attemptRef ? `gc/${taskRefSegment}/${attemptRef}` : `gc/${taskRefSegment}`;
   await git(['branch', '-f', branchAlias], cwd).catch(() => void 0);
 
   const currentBranch = await resolveCurrentBranch(cwd);

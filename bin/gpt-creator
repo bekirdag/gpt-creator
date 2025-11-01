@@ -5667,6 +5667,13 @@ PROMPT
       ;;
   esac
   [[ -n "$codex_model_for_step" ]] || codex_model_for_step="$CODEX_MODEL"
+  if [[ -z "$codex_reasoning_for_step" ]]; then
+    if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
+      codex_reasoning_for_step="${CODEX_REASONING_EFFORT}"
+    else
+      codex_reasoning_for_step="low"
+    fi
+  fi
 
   if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" && "${GC_CODEX_USAGE_LIMIT_CONFIRMED:-0}" == "1" ]]; then
     warn "Codex usage limit previously reached; skipping ${task}."
@@ -5694,6 +5701,13 @@ PROMPT
         args+=(-c "model_reasoning_effort=\"${step_reasoning}\"")
       elif [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
         args+=(-c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"")
+      else
+        args+=(-c "model_reasoning_effort=\"low\"")
+      fi
+      if [[ -n "${CODEX_REASONING_SUMMARIES:-}" ]]; then
+        args+=(-c "reasoning_summaries=\"${CODEX_REASONING_SUMMARIES}\"")
+      else
+        args+=(-c "reasoning_summaries=\"disabled\"")
       fi
       if (( call_max_output > 0 )); then
         args+=(-c "model_max_output_tokens=${call_max_output}")
@@ -7467,6 +7481,56 @@ EOHELP
     return 1
   }
 
+  gc_preserve_dirty_tree_for_attempt() {
+    local task_label="${1:-task}"
+    local attempt_label="${2:-}"
+    local git_root="${PROJECT_ROOT:-$PWD}"
+
+    if ! command -v git >/dev/null 2>&1; then
+      return 0
+    fi
+    if [[ -z "$git_root" || ! -d "$git_root" ]]; then
+      return 0
+    fi
+    if ! git -C "$git_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      return 0
+    fi
+
+    local dirty_status
+    dirty_status="$(git -C "$git_root" status --porcelain=v1 --untracked-files=all 2>/dev/null || true)"
+    if [[ -z "$dirty_status" ]]; then
+      return 0
+    fi
+
+    local commit_message="chore(gpt-creator): preserve pending edits before ${task_label}"
+    if [[ -n "$attempt_label" ]]; then
+      commit_message+=" attempt ${attempt_label}"
+    fi
+
+    info "    Pending edits detected; committing carry-over snapshot (${commit_message})."
+
+    if ! git -C "$git_root" add --all >/dev/null 2>&1; then
+      warn "    Failed to stage pending edits for snapshot."
+      return 1
+    fi
+
+    if git -C "$git_root" diff --cached --quiet >/dev/null 2>&1; then
+      info "    Snapshot staging resulted in no changes; continuing."
+      return 0
+    fi
+
+    if ! GIT_AUTHOR_NAME="gpt-creator automation" \
+         GIT_AUTHOR_EMAIL="automation@gpt-creator" \
+         GIT_COMMITTER_NAME="gpt-creator automation" \
+         GIT_COMMITTER_EMAIL="automation@gpt-creator" \
+         git -C "$git_root" commit -m "$commit_message" >/dev/null 2>&1; then
+      warn "    Carry-over snapshot commit failed."
+      return 1
+    fi
+
+    return 0
+  }
+
   gc_auto_sync_i18n() {
     local project_root="${PROJECT_ROOT:-$PWD}"
     if [[ -z "$project_root" || ! -d "$project_root" ]]; then
@@ -8398,6 +8462,118 @@ print(error)'
     return 0
   }
 
+  gc_finalize_task_snapshot() {
+    local label="${1:-task}"
+    local task_ref="${2:-task}"
+    local attempt_label="${3:-1}"
+    local status_label="${4:-unknown}"
+    local commit_mode="${5:-snapshot}"
+    shift 5
+    local -a change_records=("$@")
+
+    local project_root="${PROJECT_ROOT:-$PWD}"
+    if [[ -z "$project_root" || ! -d "$project_root" ]]; then
+      return 0
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+      return 0
+    fi
+    local pending_status
+    pending_status="$(git -C "$project_root" status --porcelain=v1 --untracked-files=all 2>/dev/null || true)"
+    if [[ -z "$pending_status" ]]; then
+      return 0
+    fi
+
+    local original_auto_push="${GC_AUTO_PUSH:-}"
+    local original_remote="${GC_AUTO_PUSH_REMOTE:-}"
+    local original_branch="${GC_AUTO_PUSH_BRANCH:-}"
+    local original_task_ref="${GC_AUTOPUSH_TASK_REF:-}"
+    local original_attempt_ref="${GC_AUTOPUSH_ATTEMPT_REF:-}"
+    local original_commit_message="${GC_AUTOPUSH_COMMIT_MESSAGE:-}"
+    local original_verify_status="${GC_AUTOPUSH_VERIFY_STATUS:-}"
+    local original_allow_empty="${GC_ALLOW_EMPTY_COMMIT:-}"
+
+    GC_AUTO_PUSH=1
+    unset GC_AUTO_PUSH_REMOTE
+    unset GC_AUTO_PUSH_BRANCH
+
+    export GC_AUTOPUSH_TASK_REF="$task_ref"
+    export GC_AUTOPUSH_ATTEMPT_REF="attempt-${attempt_label}"
+    if [[ "$commit_mode" == "snapshot" ]]; then
+      export GC_AUTOPUSH_COMMIT_MESSAGE="chore(gpt-creator): snapshot ${label} attempt ${attempt_label} (${status_label})"
+    else
+      unset GC_AUTOPUSH_COMMIT_MESSAGE
+    fi
+    export GC_AUTOPUSH_VERIFY_STATUS="${GC_AUTOPUSH_VERIFY_STATUS:-${status_label}}"
+    export GC_ALLOW_EMPTY_COMMIT=0
+
+    local finalize_attempt=1
+    local finalize_success=0
+    local finalize_error=""
+    local retry_cap="${GC_RETRY_PUSH_MAX:-3}"
+    if ! [[ "$retry_cap" =~ ^[0-9]+$ ]]; then
+      retry_cap=3
+    fi
+
+    while (( finalize_attempt <= retry_cap )); do
+      if gc_auto_push_helper "$label" "${change_records[@]}"; then
+        finalize_success=1
+        break
+      fi
+      finalize_error="${GC_LAST_AUTO_PUSH_ERROR:-auto-push failure}"
+      sleep $((finalize_attempt * 2))
+      ((finalize_attempt++))
+    done
+
+    if [[ -n "$original_auto_push" ]]; then
+      GC_AUTO_PUSH="$original_auto_push"
+    else
+      unset GC_AUTO_PUSH
+    fi
+    if [[ -n "$original_remote" ]]; then
+      GC_AUTO_PUSH_REMOTE="$original_remote"
+    else
+      unset GC_AUTO_PUSH_REMOTE
+    fi
+    if [[ -n "$original_branch" ]]; then
+      GC_AUTO_PUSH_BRANCH="$original_branch"
+    else
+      unset GC_AUTO_PUSH_BRANCH
+    fi
+    if [[ -n "$original_task_ref" ]]; then
+      export GC_AUTOPUSH_TASK_REF="$original_task_ref"
+    else
+      unset GC_AUTOPUSH_TASK_REF
+    fi
+    if [[ -n "$original_attempt_ref" ]]; then
+      export GC_AUTOPUSH_ATTEMPT_REF="$original_attempt_ref"
+    else
+      unset GC_AUTOPUSH_ATTEMPT_REF
+    fi
+    if [[ -n "$original_commit_message" ]]; then
+      export GC_AUTOPUSH_COMMIT_MESSAGE="$original_commit_message"
+    else
+      unset GC_AUTOPUSH_COMMIT_MESSAGE
+    fi
+    if [[ -n "$original_verify_status" ]]; then
+      export GC_AUTOPUSH_VERIFY_STATUS="$original_verify_status"
+    else
+      unset GC_AUTOPUSH_VERIFY_STATUS
+    fi
+    if [[ -n "$original_allow_empty" ]]; then
+      export GC_ALLOW_EMPTY_COMMIT="$original_allow_empty"
+    else
+      unset GC_ALLOW_EMPTY_COMMIT
+    fi
+
+    if (( finalize_success )); then
+      return 0
+    fi
+
+    warn "    Auto-finalize snapshot failed: ${finalize_error}"
+    return 1
+  }
+
   gc_auto_push_only() {
     GC_LAST_AUTO_PUSH_STATUS="skipped"
     GC_LAST_AUTO_PUSH_REMOTE=""
@@ -9085,6 +9261,20 @@ PYCODE
         task_change_operations=0
         local diff_before=""
         task_change_sizes=""
+
+        local carry_over_label="${banner_task_id:-${task_id:-${slug:-story}-${task_number}}}"
+        if ! gc_preserve_dirty_tree_for_attempt "$carry_over_label" "$attempt"; then
+          warn "  Unable to snapshot pending edits before attempt ${attempt}; aborting task."
+          task_needs_review=1
+          manual_followups=1
+          keep_output=1
+          task_result_status="blocked-dirty-tree"
+          gc_mark_outcome "PERMANENT_FAIL" "GIT"
+          apply_status="dirty-tree-snapshot-failed"
+          blocked_stop_run=1
+          break
+        fi
+
         if (( diff_guard_enabled )); then
           diff_before="$(gc_diff_fingerprint)"
         fi
@@ -10149,48 +10339,12 @@ REM
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "$task_result_status" "$run_stamp"
       gc_update_work_state "$tasks_db" "$slug" "$story_status_hint" "$completed_hint" "$total_tasks_int" "$run_stamp"
 
+      local attempt_label=$(( attempt > 0 ? attempt : 1 ))
+
       if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
         local commit_label="${banner_task_id}: ${task_title:-Task ${task_number}}"
-        local original_auto_push="${GC_AUTO_PUSH:-0}"
-        local original_remote="${GC_AUTO_PUSH_REMOTE:-}"
-        local original_branch="${GC_AUTO_PUSH_BRANCH:-}"
-        local auto_push_enabled="${GC_AUTO_PUSH:-0}"
-        if [[ "$auto_push_enabled" != "1" ]]; then
-          auto_push_enabled=0
-          GC_AUTO_PUSH=1
-          GC_AUTO_PUSH_REMOTE="__skip__"
-        else
-          auto_push_enabled=1
-        fi
-        export GC_AUTOPUSH_TASK_REF="$task_ref_for_verify"
         export GC_AUTOPUSH_VERIFY_STATUS="$task_verify_status"
-        export GC_ALLOW_EMPTY_COMMIT="${GC_ALLOW_EMPTY_COMMIT:-1}"
-
-        local finalize_attempt=1
-        local finalize_success=0
-        local finalize_error=""
-        local retry_cap="${GC_RETRY_PUSH_MAX:-3}"
-        if ! [[ "$retry_cap" =~ ^[0-9]+$ ]]; then
-          retry_cap=3
-        fi
-
-        while (( finalize_attempt <= retry_cap )); do
-          if gc_auto_push_helper "$commit_label" "${task_auto_push_records[@]}"; then
-            finalize_success=1
-            break
-          fi
-          finalize_error="${GC_LAST_AUTO_PUSH_ERROR:-auto-push failure}"
-          sleep $((finalize_attempt * 2))
-          ((finalize_attempt++))
-        done
-
-        if (( auto_push_enabled == 0 )); then
-          GC_AUTO_PUSH="$original_auto_push"
-          GC_AUTO_PUSH_REMOTE="$original_remote"
-          GC_AUTO_PUSH_BRANCH="$original_branch"
-        fi
-
-        if (( finalize_success )); then
+        if gc_finalize_task_snapshot "$commit_label" "$task_ref_for_verify" "$attempt_label" "$task_result_status" "complete" "${task_auto_push_records[@]}"; then
           if [[ "${GC_LAST_AUTO_COMMIT_STATUS:-}" == "committed" ]]; then
             local commit_hash="${GC_LAST_AUTO_COMMIT_HASH:0:7}"
             local push_desc=""
@@ -10205,18 +10359,42 @@ REM
             fi
             task_notes+=("Auto-finalized commit ${commit_hash} (${push_desc}).")
           fi
+          local finalize_script="${PROJECT_ROOT}/scripts/auto_finalize_task.sh"
+          if [[ -x "$finalize_script" ]]; then
+            if ! bash "$finalize_script"; then
+              warn "  Auto finalize failed; inspect git status."
+            fi
+          fi
         else
           task_result_status="blocked-push"
           manual_followups=1
-          task_notes+=("Auto-push failed after ${retry_cap} attempt(s): ${finalize_error}.")
           keep_output=1
+          blocked_stop_run=1
+          task_notes+=("Auto-push failed after ${GC_RETRY_PUSH_MAX:-3} attempt(s); review git state.")
         fi
-
-        local finalize_script="${PROJECT_ROOT}/scripts/auto_finalize_task.sh"
-        if (( finalize_success )) && [[ -x "$finalize_script" ]]; then
-          if ! bash "$finalize_script"; then
-            warn "  Auto finalize failed; inspect git status."
+      else
+        local snapshot_label="${banner_task_id:-${task_id:-${slug:-story}-${task_number}}}"
+        if gc_finalize_task_snapshot "$snapshot_label" "$task_ref_for_verify" "$attempt_label" "$task_result_status" "snapshot" "${task_auto_push_records[@]}"; then
+          if [[ "${GC_LAST_AUTO_COMMIT_STATUS:-}" == "committed" ]]; then
+            local commit_hash="${GC_LAST_AUTO_COMMIT_HASH:0:7}"
+            local push_desc=""
+            if [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "pushed" ]]; then
+              push_desc="pushed to ${GC_LAST_AUTO_PUSH_REMOTE:-origin}/${GC_LAST_AUTO_PUSH_BRANCH:-HEAD}"
+            elif [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "failed" ]]; then
+              push_desc="push failed"
+            elif [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "skipped" ]]; then
+              push_desc="push skipped"
+            else
+              push_desc="commit recorded"
+            fi
+            task_notes+=("Snapshot commit ${commit_hash} captured for attempt ${attempt_label} (${push_desc}).")
           fi
+        else
+          task_result_status="blocked-push"
+          manual_followups=1
+          keep_output=1
+          blocked_stop_run=1
+          task_notes+=("Snapshot auto-push failed after ${GC_RETRY_PUSH_MAX:-3} attempt(s); resolve manually.")
         fi
       fi
 

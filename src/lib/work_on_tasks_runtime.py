@@ -39,6 +39,7 @@ def main():
         import subprocess
         from pathlib import Path
         from subprocess import CompletedProcess
+        from collections import OrderedDict
         from typing import Optional, List, Tuple, Set, Dict, Sequence
 
         _original_re_compile = re.compile
@@ -222,6 +223,23 @@ def main():
             '--type-clear',
             '--type-not',
         }
+        SED_MAX_WINDOW = 40
+        NOTE_CHAR_LIMIT = 300
+        NOTE_REASONING_BUDGET_CHARS = 6000
+        MAX_CONSECUTIVE_NON_ACTION_NOTES = 2
+        COMMAND_LABEL_LIMIT = 96
+        MAX_BLOCKED_COMMAND_DETAILS = 5
+        BLOCK_REASON_LABELS = {
+            'heredoc': 'raw heredoc writes',
+            'python-non3': 'python (use python3)',
+            'missing-helper': 'missing apply-block helper',
+            'sed-window': 'oversized sed slices',
+            'doc-search': 'documentation search',
+            'show-file-range': 'show-file missing --range',
+            'duplicate': 'duplicate commands',
+            'policy': 'policy guardrails',
+            'non-whitelist': 'non-whitelisted commands',
+        }
 
         def _token_targets_doc(token: str) -> bool:
             candidate = token.strip().strip('\'"')
@@ -312,6 +330,67 @@ def main():
             if tokens[0] != 'gpt-creator' or tokens[1] != 'show-file':
                 return False
             return not any(tok.startswith('--range') for tok in tokens[2:])
+
+        def _sed_window_exceeds(command: str, *, threshold: int = SED_MAX_WINDOW) -> Tuple[bool, int]:
+            try:
+                tokens = shlex.split(command)
+            except ValueError:
+                tokens = command.split()
+            if not tokens or tokens[0] != 'sed':
+                return (False, 0)
+            max_window = 0
+
+            def consider_fragment(fragment: str) -> None:
+                nonlocal max_window
+                fragment = fragment.strip()
+                if not fragment:
+                    return
+                match = re.fullmatch(r'(\d+),(\d+)p', fragment)
+                if match:
+                    start = int(match.group(1))
+                    end = int(match.group(2))
+                    if end >= start:
+                        span = end - start + 1
+                        if span > max_window:
+                            max_window = span
+
+            for token in tokens[1:]:
+                token_stripped = token.strip().strip('\'"')
+                if not token_stripped:
+                    continue
+                # Multiple segments can be separated by ';'
+                for fragment in token_stripped.split(';'):
+                    consider_fragment(fragment)
+
+            if max_window > threshold:
+                return (True, max_window)
+            return (False, max_window)
+
+        def _summarize_stream(label: str, text: str, *, max_lines: int = 4) -> str:
+            if not text:
+                return ''
+            lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+            if not lines:
+                return ''
+            if len(lines) <= max_lines:
+                body = '\n'.join(lines)
+            else:
+                clipped = lines[:max_lines // 2] + ['…'] + lines[-(max_lines // 2):]
+                body = '\n'.join(clipped)
+            return f"{label}:\n{body}"
+
+        def _truncate_command_text(command: str, limit: int = COMMAND_LABEL_LIMIT) -> str:
+            snippet = command.strip()
+            if len(snippet) <= limit:
+                return snippet
+            return snippet[:limit - 1] + '…'
+
+        def _format_action_result(action: str, result: str) -> str:
+            return f"Action: {action.strip()} | Result: {result.strip()}"
+
+        def _has_action_token(text: str) -> bool:
+            lowered = text.lower()
+            return any(token in lowered for token in ('action:', 'result:', 'command', 'next:', 'plan:', 'test:'))
 
 
         def compile_safe(pattern: str, flags: int = 0):
@@ -748,6 +827,58 @@ def main():
         patched = []
         noop_entries = []
         manual_notes = []
+
+        existing_notes = payload.get('notes')
+        if isinstance(existing_notes, list):
+            cleaned_notes: List[str] = []
+            reasoning_chars = 0
+            longform_flag = False
+            non_action_streak = 0
+            stop_prompt_sent = False
+            for entry in existing_notes:
+                if not isinstance(entry, str):
+                    continue
+                text = entry.strip()
+                if not text:
+                    continue
+                reasoning_chars += len(text)
+                has_action = _has_action_token(text)
+                if len(text) > NOTE_CHAR_LIMIT and not has_action:
+                    longform_flag = True
+                    text = text[:NOTE_CHAR_LIMIT].rstrip() + '…'
+                cleaned_notes.append(text)
+                if has_action:
+                    non_action_streak = 0
+                else:
+                    non_action_streak += 1
+                    if (
+                        non_action_streak > MAX_CONSECUTIVE_NON_ACTION_NOTES
+                        and not stop_prompt_sent
+                    ):
+                        manual_notes.append(
+                            _format_action_result(
+                                "notes-stop-and-plan",
+                                "blocked — convert narration into actionable checklist tied to upcoming commands before continuing"
+                            )
+                        )
+                        stop_prompt_sent = True
+            payload['notes'] = cleaned_notes
+            if longform_flag:
+                manual_notes.append(
+                    _format_action_result(
+                        "notes-trim-longform",
+                        "blocked — narration trimmed (>300 chars); restate as Action/Result bullets referencing commands"
+                    )
+                )
+            if reasoning_chars > NOTE_REASONING_BUDGET_CHARS:
+                manual_notes.append(
+                    _format_action_result(
+                        "notes-reasoning-budget",
+                        "warning — cumulative reasoning exceeded ~1.5k tokens; keep subsequent updates concise and command-linked"
+                    )
+                )
+        elif existing_notes is not None:
+            payload['notes'] = []
         actual_changes = 0
         change_bytes = {}
 
@@ -823,7 +954,9 @@ def main():
 
         for index, change in enumerate(changes):
             if not isinstance(change, dict):
-                manual_notes.append(f"Skipping invalid change at index {index}; expected object payload.")
+                manual_notes.append(
+                    _format_action_result(f"change[{index}]", "blocked — expected object payload")
+                )
                 continue
 
             raw_type = change.get('type')
@@ -846,7 +979,7 @@ def main():
                 diff_value = change.get('diff')
                 if not isinstance(diff_value, str) or not diff_value.strip():
                     manual_notes.append(
-                        f"Skipping invalid change at index {index}; patch diff missing or empty."
+                        _format_action_result(f"change[{index}]", "blocked — patch diff missing or empty")
                     )
                     continue
                 if not path:
@@ -856,27 +989,27 @@ def main():
                         change['path'] = path
                 if not path:
                     manual_notes.append(
-                        f"Skipping invalid change at index {index}; path missing or empty."
+                        _format_action_result(f"change[{index}]", "blocked — path missing or empty")
                     )
                     continue
                 change['type'] = 'patch'
             elif ctype == 'file':
                 if not path:
                     manual_notes.append(
-                        f"Skipping invalid change at index {index}; path missing or empty."
+                        _format_action_result(f"change[{index}]", "blocked — path missing or empty")
                     )
                     continue
                 content_value = change.get('content')
                 if not isinstance(content_value, str):
                     manual_notes.append(
-                        f"Skipping invalid change at index {index}; file content missing or not text."
+                        _format_action_result(f"change[{index}]", "blocked — file content missing or not text")
                     )
                     continue
                 change['type'] = 'file'
             else:
                 descriptor = (raw_type.strip() if isinstance(raw_type, str) and raw_type.strip() else 'unknown')
                 manual_notes.append(
-                    f"Skipping invalid change at index {index}; unknown type '{descriptor}'."
+                    _format_action_result(f"change[{index}]", f"blocked — unknown type '{descriptor}'")
                 )
                 continue
 
@@ -890,7 +1023,7 @@ def main():
                     except ValueError:
                         rel_path = str(dest)
                     manual_notes.append(
-                        f"Skipped writing {rel_path} because that path already exists as a directory."
+                        _format_action_result(f"write {rel_path}", "blocked — destination is an existing directory")
                     )
                     continue
                 try:
@@ -900,7 +1033,7 @@ def main():
                 rel_path_lower = rel_path.lstrip("./").lower()
                 if rel_path_lower.startswith("docs/") or rel_path_lower.startswith(".gpt-creator/staging/docs"):
                     manual_notes.append(
-                        f"Skipped writing {rel_path} because documentation updates are out of scope; focus on code changes."
+                        _format_action_result(f"write {rel_path}", "blocked — documentation changes out of scope")
                     )
                     continue
                 if dest.exists():
@@ -914,7 +1047,7 @@ def main():
                 actual_changes += 1
                 if rel_path_lower.startswith("docs/") or rel_path_lower.startswith(".gpt-creator/staging/docs"):
                     manual_notes.append(
-                        "Documentation edited after code updates; ensure the related code changes landed before relying on this doc tweak."
+                        _format_action_result("doc-update-followup", "note — verify related code changes before letting doc edits stand")
                     )
             elif ctype == 'patch':
                 diff = change.get('diff')
@@ -948,7 +1081,10 @@ def main():
                     git_err = proc.stderr.decode('utf-8') if proc.stderr else ''
                     if timeout_err:
                         manual_notes.append(
-                            f"git apply timed out after {apply_timeout}s while processing {path}; patch queued for manual review."
+                            _format_action_result(
+                                _truncate_command_text(f"git apply {path}"),
+                                f"blocked — timed out after {apply_timeout}s; patch queued for manual review"
+                            )
                         )
 
                     try:
@@ -973,7 +1109,10 @@ def main():
 
                     if three_way_timeout:
                         manual_notes.append(
-                            f"git apply --3way timed out after {apply_timeout}s for {path}; attempting fallback."
+                            _format_action_result(
+                                _truncate_command_text(f"git apply --3way {path}"),
+                                f"blocked — timed out after {apply_timeout}s; attempting fallback"
+                            )
                         )
 
                     if not three_way_timeout and three_way.returncode == 0:
@@ -1004,7 +1143,10 @@ def main():
                             stderr=f'patch command timed out after {apply_timeout}s'.encode('utf-8'),
                         )
                         manual_notes.append(
-                            f"patch command timed out after {apply_timeout}s while applying {path}; manual intervention required."
+                            _format_action_result(
+                                _truncate_command_text(f"patch --forward {path}"),
+                                f"blocked — timed out after {apply_timeout}s; manual intervention required"
+                            )
                         )
                     if fallback.returncode != 0:
                         # check if patch already applied
@@ -1109,19 +1251,28 @@ def main():
                                     applied_via_helper = True
                                 elif result.returncode == 3:
                                     manual_notes.append(
-                                        f"Patch for {path} hit conflicts even after auto_apply_patch; see {relative_manual}."
+                                        _format_action_result(
+                                            _truncate_command_text(f"auto_apply_patch {path}"),
+                                            f"blocked — conflicts remained; review {relative_manual}"
+                                        )
                                     )
                             except Exception:
                                 applied_via_helper = False
 
                         if applied_via_helper:
                             manual_notes.append(
-                                f"Patch for {path} required manual context merge but was auto-applied via scripts/auto_apply_patch.sh."
+                                _format_action_result(
+                                    _truncate_command_text(f"auto_apply_patch {path}"),
+                                    "note — manual context merge succeeded via helper script"
+                                )
                             )
                             patched.append(path + ' (auto)')
                         else:
                             manual_notes.append(
-                                f"Patch for {path} could not be applied automatically. Review and apply {relative_manual} manually."
+                                _format_action_result(
+                                    _truncate_command_text(f"git apply {path}"),
+                                    f"blocked — auto-apply failed; review {relative_manual}"
+                                )
                             )
                             patched.append(path + ' (manual)')
                             sys.stderr.write(git_err)
@@ -1138,7 +1289,102 @@ def main():
         command_entries = payload.get('commands') or []
         executed_commands: List[str] = []
         seen_commands: Set[str] = set()
+        blocked_command_counts: Dict[str, Dict[str, object]] = {}
+        blocked_command_total = 0
+
+        def _git_diff_name_status(root: Path) -> Dict[str, str]:
+            try:
+                proc = subprocess.run(
+                    ['git', 'diff', '--name-status', 'HEAD'],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(root),
+                    check=False,
+                )
+            except Exception:
+                return {}
+            if proc.returncode != 0:
+                return {}
+            diff_map: Dict[str, str] = {}
+            for raw_line in proc.stdout.splitlines():
+                if not raw_line.strip():
+                    continue
+                parts = raw_line.split(maxsplit=1)
+                if len(parts) != 2:
+                    continue
+                status, path = parts
+                path = path.strip()
+                if path:
+                    diff_map[path] = status.strip()
+            return diff_map
+
+        def _git_untracked_files(root: Path) -> Set[str]:
+            try:
+                proc = subprocess.run(
+                    ['git', 'ls-files', '--others', '--exclude-standard'],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(root),
+                    check=False,
+                )
+            except Exception:
+                return set()
+            if proc.returncode != 0:
+                return set()
+            return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+        command_diff_before = _git_diff_name_status(project_root)
+        command_untracked_before = _git_untracked_files(project_root)
+
+        def _record_blocked_command(reason: str, command: str) -> None:
+            nonlocal blocked_command_total
+            blocked_command_total += 1
+            try:
+                tokens = shlex.split(command)
+            except ValueError:
+                tokens = command.split()
+            canonical = ' '.join(tokens) if tokens else command.strip()
+            bucket = blocked_command_counts.setdefault(
+                reason,
+                {'total': 0, 'examples': [], 'commands': OrderedDict()}
+            )
+            bucket['total'] = int(bucket['total']) + 1
+            commands_map: OrderedDict = bucket['commands']  # type: ignore[assignment]
+            commands_map[canonical] = commands_map.get(canonical, 0) + 1
+            examples: List[str] = bucket['examples']  # type: ignore[assignment]
+            label = _truncate_command_text(command)
+            if len(examples) < MAX_BLOCKED_COMMAND_DETAILS and label not in examples:
+                examples.append(label)
+
+        skip_command_processing = False
         if isinstance(command_entries, list) and command_entries:
+            precheck_non_whitelisted = []
+            for raw_cmd in command_entries:
+                if not isinstance(raw_cmd, str):
+                    continue
+                trimmed = raw_cmd.strip()
+                if not trimmed:
+                    continue
+                if not COMMAND_WHITELIST_PATTERN.match(trimmed):
+                    precheck_non_whitelisted.append(trimmed)
+            if precheck_non_whitelisted:
+                skip_command_processing = True
+                sample = _truncate_command_text(precheck_non_whitelisted[0])
+                manual_notes.append(
+                    _format_action_result(
+                        "command-precheck",
+                        f"blocked — {len(precheck_non_whitelisted)} command(s) not in whitelist (first: {sample})"
+                    )
+                )
+                manual_notes.append(
+                    _format_action_result(
+                        "command-precheck-remediation",
+                        "remove or replace non-whitelisted commands; allowed prefixes include bash, python3, pnpm, git, gpt-creator apply-block"
+                    )
+                )
+                command_entries = []
+
+        if isinstance(command_entries, list) and command_entries and not skip_command_processing:
             baseline_status = _git_status_porcelain(project_root)
             for raw_cmd in command_entries:
                 if not isinstance(raw_cmd, str):
@@ -1148,62 +1394,113 @@ def main():
                     continue
                 lower_command = command.lower()
                 first_token = command.split()[0] if command.split() else ""
+                if first_token == "cat":
+                    if '<<' in command:
+                        _record_blocked_command('heredoc', command)
+                        continue
                 if first_token == "python":
-                    manual_notes.append(
-                        f"Command '{command}' skipped (use python3 for all scripting)."
-                    )
+                    _record_blocked_command('python-non3', command)
                     continue
+                override_exec: Optional[Sequence[str]] = None
+                token_list: Optional[List[str]] = None
+                if first_token == "gpt-creator":
+                    try:
+                        token_list = shlex.split(command)
+                    except ValueError:
+                        token_list = None
+                    if token_list and len(token_list) >= 2 and token_list[1] == "apply-block":
+                        helper_path = project_root / "scripts" / "python" / "write_block.py"
+                        if not helper_path.exists():
+                            _record_blocked_command('missing-helper', command)
+                            continue
+                        override_exec = ['python3', str(helper_path)] + token_list[2:]
+                if first_token == "sed":
+                    exceeds_window, window_span = _sed_window_exceeds(command)
+                    if exceeds_window:
+                        _record_blocked_command('sed-window', command)
+                        continue
                 if first_token == "rg":
                     if _command_targets_docs(command):
-                        manual_notes.append(
-                            f"Command '{command}' skipped (documentation search must use the catalog helpers)."
-                        )
+                        _record_blocked_command('doc-search', command)
                         continue
                 if lower_command.startswith("gpt-creator show-file"):
                     if _command_targets_docs(command):
-                        manual_notes.append(
-                            f"Command '{command}' skipped (documentation search must use the catalog helpers)."
-                        )
+                        _record_blocked_command('doc-search', command)
                         continue
                     if _show_file_lacks_range(command):
-                        manual_notes.append(
-                            f"Command '{command}' skipped (specify a --range window when using gpt-creator show-file)."
-                        )
+                        _record_blocked_command('show-file-range', command)
                         continue
                 if command in seen_commands:
-                    manual_notes.append(
-                        f"Command '{command}' skipped (already executed earlier in this run)."
-                    )
+                    _record_blocked_command('duplicate', command)
                     continue
                 seen_commands.add(command)
                 if COMMAND_BLOCK_PATTERN.search(command):
-                    manual_notes.append(f"Command '{command}' skipped (blocked by policy).")
+                    _record_blocked_command('policy', command)
                     continue
                 if not COMMAND_WHITELIST_PATTERN.match(command):
-                    manual_notes.append(f"Command '{command}' skipped (not whitelisted).")
+                    _record_blocked_command('non-whitelist', command)
                     continue
-                try:
-                    proc_cmd = subprocess.run(
-                        ['bash', '-lc', command],
-                        capture_output=True,
-                        text=True,
-                        cwd=str(project_root),
-                        timeout=apply_timeout,
-                        check=False,
+                if first_token in {"python3"} and ".write_text(" in command:
+                    manual_notes.append(
+                        _format_action_result(
+                            _truncate_command_text(command),
+                            "warning — prefer gpt-creator apply-block or write_block.py for file rewrites"
+                        )
                     )
+                try:
+                    if override_exec is not None:
+                        proc_cmd = subprocess.run(
+                            list(override_exec),
+                            capture_output=True,
+                            text=True,
+                            cwd=str(project_root),
+                            timeout=apply_timeout,
+                            check=False,
+                        )
+                    else:
+                        proc_cmd = subprocess.run(
+                            ['bash', '-lc', command],
+                            capture_output=True,
+                            text=True,
+                            cwd=str(project_root),
+                            timeout=apply_timeout,
+                            check=False,
+                        )
                 except Exception as exc:
-                    manual_notes.append(f"Command '{command}' failed to run: {exc}")
+                    manual_notes.append(
+                        _format_action_result(
+                            _truncate_command_text(command),
+                            f"failed — {exc}"
+                        )
+                    )
                     continue
                 if proc_cmd.stdout:
                     sys.stdout.write(proc_cmd.stdout)
                 if proc_cmd.stderr:
                     sys.stderr.write(proc_cmd.stderr)
                 if proc_cmd.returncode != 0:
-                    manual_notes.append(
-                        f"Command '{command}' exited with status {proc_cmd.returncode}; review output."
+                    note = _format_action_result(
+                        _truncate_command_text(command),
+                        f"failed — exit {proc_cmd.returncode}; revise before retrying"
                     )
+                    summary_parts = []
+                    stdout_summary = _summarize_stream("stdout", proc_cmd.stdout)
+                    stderr_summary = _summarize_stream("stderr", proc_cmd.stderr)
+                    if stdout_summary:
+                        summary_parts.append(stdout_summary)
+                    if stderr_summary:
+                        summary_parts.append(stderr_summary)
+                    if summary_parts:
+                        manual_notes.append(note + "\n" + '\n'.join(summary_parts))
+                    else:
+                        manual_notes.append(note)
                 else:
-                    manual_notes.append(f"Command '{command}' executed successfully.")
+                    manual_notes.append(
+                        _format_action_result(
+                            _truncate_command_text(command),
+                            "success"
+                        )
+                    )
                     executed_commands.append(command)
             post_status = _git_status_porcelain(project_root)
             delta_status = _status_delta(baseline_status, post_status)
@@ -1229,8 +1526,83 @@ def main():
                 actual_changes += len(delta_status)
             elif executed_commands:
                 manual_notes.append(
-                    "Commands executed but produced no new tracked changes; verify if additional steps are required."
+                    _format_action_result(
+                        "post-command-delta",
+                        "warning — commands ran but produced no tracked changes; confirm if additional steps are required"
+                    )
                 )
+
+        command_diff_after = _git_diff_name_status(project_root)
+        command_untracked_after = _git_untracked_files(project_root)
+        extra_command_changes: Dict[str, str] = {}
+        for path, status in command_diff_after.items():
+            if command_diff_before.get(path) != status:
+                extra_command_changes[path] = status
+        extra_untracked = command_untracked_after.difference(command_untracked_before)
+
+        if extra_command_changes or extra_untracked:
+            written_set = set(written)
+            patched_set = set(patched)
+            for path, status in extra_command_changes.items():
+                label = f"{path} (command)"
+                if status.startswith('A'):
+                    if label not in written_set:
+                        written.append(label)
+                        written_set.add(label)
+                else:
+                    if label not in patched_set:
+                        patched.append(label)
+                        patched_set.add(label)
+                try:
+                    resolved_path = ensure_within_root(Path(path))
+                    if resolved_path.exists() and resolved_path.is_file():
+                        change_bytes[path] = resolved_path.stat().st_size
+                    else:
+                        change_bytes[path] = change_bytes.get(path, 0)
+                except Exception:
+                    change_bytes[path] = change_bytes.get(path, 0)
+            for path in sorted(extra_untracked):
+                label = f"{path} (command)"
+                if label in written_set:
+                    continue
+                written.append(label)
+                written_set.add(label)
+                try:
+                    resolved_path = ensure_within_root(Path(path))
+                    if resolved_path.exists() and resolved_path.is_file():
+                        change_bytes[path] = resolved_path.stat().st_size
+                    else:
+                        change_bytes[path] = change_bytes.get(path, 0)
+                except Exception:
+                    change_bytes[path] = change_bytes.get(path, 0)
+            actual_changes += len(extra_command_changes) + len(extra_untracked)
+
+        if blocked_command_total:
+            for reason, data in blocked_command_counts.items():
+                total = int(data.get('total', 0))  # type: ignore[arg-type]
+                examples: List[str] = list(data.get('examples', []))  # type: ignore[assignment]
+                label = BLOCK_REASON_LABELS.get(reason, reason.replace('-', ' '))
+                detail = ''
+                if examples:
+                    detail = '; '.join(examples)
+                extra = max(total - len(examples), 0)
+                if extra > 0:
+                    detail = (detail + f" (+{extra} more)") if detail else f"+{extra} more"
+                summary_text = f"{label}: {total} command(s) blocked"
+                if detail:
+                    summary_text = f"{summary_text} ({detail})"
+                manual_notes.append(
+                    _format_action_result(
+                        f"blocked-{reason}",
+                        summary_text
+                    )
+                )
+            manual_notes.append(
+                _format_action_result(
+                    "commands-remediation",
+                    "replace blocked commands with approved workflows (gpt-creator apply-block, python3 scripts/python/write_block.py, pnpm --filter …) before retrying"
+                )
+            )
 
         if invalid_regex_patterns:
             logged_patterns = []
@@ -1243,7 +1615,10 @@ def main():
                 if len(snippet) > 120:
                     snippet = snippet[:117] + "..."
                 manual_notes.append(
-                    f"Regex pattern {snippet!r} was invalid; treated as a literal text match instead."
+                    _format_action_result(
+                        "regex-guard",
+                        f"warning — pattern {snippet!r} invalid; treated as literal match"
+                    )
                 )
 
         summary = {

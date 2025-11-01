@@ -5883,7 +5883,13 @@ gc_wot_run_verify_if_needed() {
   gc_budget_log_stage "verify" 0 0 0 "$verify_duration_ms" "[]" "{}" "false"
 
   if (( verify_failed )); then
-    printf '%s\n' "1"
+    if (( ${GC_WOT_SOFT_VERIFY:-0} )); then
+      GC_WOT_SOFT_VERIFY_TRIGGERED=1
+      info "Verify failure tolerated via soft mode."
+      printf '%s\n' "$work_failed"
+    else
+      printf '%s\n' "1"
+    fi
   else
     printf '%s\n' "$work_failed"
   fi
@@ -6708,6 +6714,8 @@ cmd_work_on_tasks() {
   local override_verify_max_out=""
   local override_patch_max_out=""
   local override_hard_cap=""
+  local verify_mode="hard"
+  local complete_on_followup=0
   local backlog_guard_window_days="${GC_BACKLOG_GUARD_WINDOW_DAYS:-7}"
   local backlog_guard_wip_limit="${GC_BACKLOG_GUARD_WIP_LIMIT:-12}"
   local backlog_snapshot_before_path=""
@@ -6791,6 +6799,40 @@ cmd_work_on_tasks() {
         shift
         ;;
       --no-verify) no_verify=1; shift;;
+      --soft-verify|--verify-soft|--verify-soft-fail)
+        verify_mode="soft"
+        shift
+        ;;
+      --verify-mode)
+        verify_mode="${2:-}"
+        shift 2
+        ;;
+      --verify-mode=*)
+        verify_mode="${1#--verify-mode=}"
+        shift
+        ;;
+      --complete-on-followup|--keep-complete-on-followup)
+        complete_on_followup=1
+        shift
+        ;;
+      --auto-push)
+        export GC_AUTO_PUSH=1
+        shift
+        ;;
+      --auto-push=*)
+        export GC_AUTO_PUSH=1
+        local auto_push_arg="${1#--auto-push=}"
+        if [[ "$auto_push_arg" == *":"* ]]; then
+          export GC_AUTO_PUSH_REMOTE="${auto_push_arg%%:*}"
+          export GC_AUTO_PUSH_BRANCH="${auto_push_arg#*:}"
+        elif [[ "$auto_push_arg" == */* ]]; then
+          export GC_AUTO_PUSH_REMOTE="${auto_push_arg%%/*}"
+          export GC_AUTO_PUSH_BRANCH="${auto_push_arg#*/}"
+        else
+          export GC_AUTO_PUSH_REMOTE="$auto_push_arg"
+        fi
+        shift
+        ;;
       --keep-artifacts) keep_artifacts=1; shift;;
       --memory-cycle) memory_cycle=1; shift;;
       --batch-size) batch_size="${2:-0}"; shift 2;;
@@ -6934,6 +6976,12 @@ Options:
   --from-task REF      Resume from task REF (task id or story-slug:position) and continue forward
   --fresh              Ignore saved progress and start from the first story
   --no-verify          Skip running gpt-creator verify after tasks complete
+  --soft-verify        Allow verify failures but continue the run (soft gate)
+  --verify-mode MODE   Set verify policy: hard (default), soft, or skip
+  --complete-on-followup
+                        Keep task status as complete even when follow-up notes are recorded
+  --auto-push[=REMOTE/BRANCH]
+                        Push commits after each successful task (defaults to upstream or origin/current)
   --keep-artifacts     Retain Codex prompt/output files for each task (default cleans up)
   --memory-cycle       Process one task at a time, prune caches, and auto-resume to limit memory usage
   --batch-size NUM     Process at most NUM tasks this run, then pause (default: unlimited)
@@ -6983,6 +7031,28 @@ EOHELP
         ;;
     esac
   done
+
+  case "${verify_mode,,}" in
+    ""|hard)
+      verify_mode="hard"
+      ;;
+    soft)
+      ;;
+    skip)
+      no_verify=1
+      verify_mode="skip"
+      ;;
+    *)
+      die "Invalid --verify-mode value: ${verify_mode}"
+      ;;
+  esac
+
+  GC_WOT_SOFT_VERIFY=0
+  if [[ "$verify_mode" == "soft" ]]; then
+    GC_WOT_SOFT_VERIFY=1
+  fi
+  GC_WOT_SOFT_VERIFY_TRIGGERED=0
+  GC_WOT_COMPLETE_ON_FOLLOWUP="$complete_on_followup"
 
   if (( binder_enabled )); then
     export GC_BINDER_ENABLED=1
@@ -7893,6 +7963,197 @@ EOHELP
     return 0
   }
 
+  gc_auto_push_helper() {
+    local label="${1:-}"
+    shift || true
+    local -a change_records=("$@")
+
+    GC_LAST_AUTO_COMMIT_STATUS="failed"
+    GC_LAST_AUTO_COMMIT_HASH=""
+    GC_LAST_AUTO_PUSH_STATUS="skipped"
+    GC_LAST_AUTO_PUSH_REMOTE=""
+    GC_LAST_AUTO_PUSH_BRANCH=""
+
+    if [[ "${GC_AUTO_PUSH:-}" != "1" ]]; then
+      return 1
+    fi
+
+    local project_root="${PROJECT_ROOT:-$PWD}"
+    local node_bin="${NODE_BIN:-node}"
+    local helper_path="${CLI_ROOT}/src/lib/autoPush.js"
+
+    if [[ -z "$project_root" ]]; then
+      warn "    Auto-push skipped: project root unavailable."
+      return 1
+    fi
+    if [[ ! -f "$helper_path" ]]; then
+      warn "    Auto-push skipped: helper missing at ${helper_path}."
+      return 1
+    fi
+    if ! command -v "$node_bin" >/dev/null 2>&1; then
+      warn "    Auto-push skipped: node runtime not found."
+      return 1
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+      warn "    Auto-push skipped: git command not available."
+      return 1
+    fi
+    if ! git -C "$project_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      warn "    Auto-push skipped: not a git repository."
+      return 1
+    fi
+
+    local before_hash
+    before_hash="$(git -C "$project_root" rev-parse HEAD 2>/dev/null || true)"
+
+    local summary_path
+    summary_path="$(mktemp)" || return 1
+    if ! "$python_bin" - "$project_root" "$label" "${change_records[@]}" <<'PY' >"$summary_path"; then
+import json
+import sys
+
+repo = sys.argv[1]
+label = sys.argv[2]
+records = []
+for raw in sys.argv[3:]:
+    if "\t" in raw:
+        op, path = raw.split("\t", 1)
+    else:
+        op, path = "?", raw
+    op = op or "?"
+    records.append({"op": op, "path": path})
+
+summary = {"cwd": repo, "files": records}
+if label:
+    summary["label"] = label
+
+print(json.dumps(summary))
+PY
+      rm -f "$summary_path"
+      warn "    Auto-push skipped: failed to prepare summary payload."
+      return 1
+    fi
+
+    if ! "$node_bin" "$helper_path" "$summary_path"; then
+      rm -f "$summary_path"
+      return 1
+    fi
+    rm -f "$summary_path"
+
+    local after_hash
+    after_hash="$(git -C "$project_root" rev-parse HEAD 2>/dev/null || true)"
+    if [[ -n "$after_hash" && "$after_hash" != "$before_hash" ]]; then
+      GC_LAST_AUTO_COMMIT_STATUS="committed"
+      GC_LAST_AUTO_COMMIT_HASH="$after_hash"
+    else
+      GC_LAST_AUTO_COMMIT_STATUS="clean"
+      GC_LAST_AUTO_COMMIT_HASH=""
+    fi
+
+    local current_branch
+    current_branch="$(git -C "$project_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    local resolved_branch="${GC_AUTO_PUSH_BRANCH:-$current_branch}"
+    local resolved_remote="${GC_AUTO_PUSH_REMOTE:-}"
+
+    if [[ -z "$resolved_remote" && -n "$resolved_branch" ]]; then
+      resolved_remote="$(git -C "$project_root" config --get "branch.${resolved_branch}.remote" 2>/dev/null || true)"
+    fi
+    if [[ -z "$resolved_remote" && -n "$current_branch" ]]; then
+      resolved_remote="$(git -C "$project_root" config --get "branch.${current_branch}.remote" 2>/dev/null || true)"
+    fi
+    if [[ -z "$resolved_remote" ]]; then
+      resolved_remote="origin"
+    fi
+
+    if [[ -z "$resolved_branch" || "$resolved_branch" == "HEAD" ]]; then
+      resolved_branch="$current_branch"
+    fi
+
+    GC_LAST_AUTO_PUSH_REMOTE="$resolved_remote"
+    GC_LAST_AUTO_PUSH_BRANCH="$resolved_branch"
+
+    if [[ "$resolved_remote" == "__skip__" ]]; then
+      GC_LAST_AUTO_PUSH_STATUS="skipped"
+    elif git -C "$project_root" remote get-url "$resolved_remote" >/dev/null 2>&1; then
+      GC_LAST_AUTO_PUSH_STATUS="attempted"
+    else
+      GC_LAST_AUTO_PUSH_STATUS="skipped"
+    fi
+
+    return 0
+  }
+
+  gc_auto_push_only() {
+    GC_LAST_AUTO_PUSH_STATUS="skipped"
+    GC_LAST_AUTO_PUSH_REMOTE=""
+    GC_LAST_AUTO_PUSH_BRANCH=""
+
+    if [[ "${GC_AUTO_PUSH:-}" != "1" ]]; then
+      return 0
+    fi
+
+    local project_root="${PROJECT_ROOT:-$PWD}"
+    if [[ -z "$project_root" ]]; then
+      warn "    Auto-push skipped: project root unavailable."
+      return 1
+    fi
+    if ! command -v git >/dev/null 2>&1; then
+      warn "    Auto-push skipped: git command not available."
+      return 1
+    fi
+    if ! git -C "$project_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      warn "    Auto-push skipped: not a git repository."
+      return 1
+    fi
+
+    local current_branch
+    current_branch="$(git -C "$project_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    local resolved_branch="${GC_AUTO_PUSH_BRANCH:-$current_branch}"
+    local resolved_remote="${GC_AUTO_PUSH_REMOTE:-}"
+
+    if [[ -z "$resolved_remote" && -n "$resolved_branch" ]]; then
+      resolved_remote="$(git -C "$project_root" config --get "branch.${resolved_branch}.remote" 2>/dev/null || true)"
+    fi
+    if [[ -z "$resolved_remote" && -n "$current_branch" ]]; then
+      resolved_remote="$(git -C "$project_root" config --get "branch.${current_branch}.remote" 2>/dev/null || true)"
+    fi
+    if [[ -z "$resolved_remote" ]]; then
+      resolved_remote="origin"
+    fi
+
+    local push_branch="$resolved_branch"
+    if [[ -z "$push_branch" || "$push_branch" == "HEAD" ]]; then
+      push_branch="$current_branch"
+    fi
+
+    GC_LAST_AUTO_PUSH_REMOTE="$resolved_remote"
+    GC_LAST_AUTO_PUSH_BRANCH="$push_branch"
+
+    if [[ "$resolved_remote" == "__skip__" ]]; then
+      GC_LAST_AUTO_PUSH_STATUS="skipped"
+      return 0
+    fi
+    if ! git -C "$project_root" remote get-url "$resolved_remote" >/dev/null 2>&1; then
+      warn "    Auto-push skipped: remote ${resolved_remote} not configured."
+      GC_LAST_AUTO_PUSH_STATUS="skipped"
+      return 1
+    fi
+
+    local -a push_args=("$resolved_remote")
+    if [[ -n "$push_branch" && "$push_branch" != "HEAD" ]]; then
+      push_args+=("$push_branch")
+    fi
+
+    if ! git -C "$project_root" push "${push_args[@]}"; then
+      warn "    Auto-push failed: git push ${push_args[*]} returned non-zero."
+      GC_LAST_AUTO_PUSH_STATUS="failed"
+      return 1
+    fi
+
+    GC_LAST_AUTO_PUSH_STATUS="pushed"
+    return 0
+  }
+
 
   gc_diff_fingerprint() {
     if [[ -z "${PROJECT_ROOT:-}" ]]; then
@@ -8200,6 +8461,7 @@ EOF
       local -a task_written_paths=()
       local -a task_patched_paths=()
       local -a task_commands=()
+      local -a task_auto_push_records=()
       local task_changes_applied=0
       local apply_status="pending"
       local skip_codex_reason="prompt-blocked"
@@ -8513,6 +8775,7 @@ EOF
                 any_changes=1
                 task_changes_applied=1
                 task_written_paths+=("$written_path")
+                task_auto_push_records+=("M\t${written_path}")
                 ;;
               PATCH\ *)
                 local patched_path="${change_line#PATCH }"
@@ -8520,6 +8783,28 @@ EOF
                 any_changes=1
                 task_changes_applied=1
                 task_patched_paths+=("$patched_path")
+                task_auto_push_records+=("M\t${patched_path}")
+                ;;
+              DELETE\ *)
+                local deleted_path="${change_line#DELETE }"
+                info "    Deleted ${deleted_path}"
+                any_changes=1
+                task_changes_applied=1
+                task_auto_push_records+=("D\t${deleted_path}")
+                ;;
+              RENAME\ *)
+                local rename_entry="${change_line#RENAME }"
+                info "    Renamed ${rename_entry}"
+                any_changes=1
+                task_changes_applied=1
+                task_auto_push_records+=("R\t${rename_entry}")
+                ;;
+              MOVE\ *)
+                local move_entry="${change_line#MOVE }"
+                info "    Moved ${move_entry}"
+                any_changes=1
+                task_changes_applied=1
+                task_auto_push_records+=("R\t${move_entry}")
                 ;;
               ARTIFACT\ *)
                 local artifact_entry="${change_line#ARTIFACT }"
@@ -8929,7 +9214,21 @@ REM
       if (( task_needs_review )); then
         manual_followups=1
         if [[ "$task_result_status" != "blocked" ]]; then
-          task_result_status="on-hold"
+          if (( ${GC_WOT_COMPLETE_ON_FOLLOWUP:-0} )); then
+            case "$task_result_status" in
+              complete|completed-no-changes)
+                task_notes+=("Follow-up required; status remains complete due to --complete-on-followup.")
+                ;;
+              apply-failed-migration-context|on-hold|in-progress)
+                task_result_status="on-hold"
+                ;;
+              *)
+                task_result_status="on-hold"
+                ;;
+            esac
+          else
+            task_result_status="on-hold"
+          fi
         fi
       fi
 
@@ -9120,22 +9419,64 @@ REM
         local apply_status_label="${apply_status:-unknown}"
         local commit_label="${banner_task_id}: ${task_title:-Task ${task_number}}"
         local commit_message="chore(tasks): ${banner_task_id} snapshot (apply_status: ${apply_status_label})"
-        gc_auto_commit_task "$commit_message" "${commit_targets[@]}"
-        case "${GC_LAST_AUTO_COMMIT_STATUS:-skipped}" in
-          committed)
-            local note_message="${commit_label//$'\n'/ }"
-            note_message="${note_message//$'\r'/ }"
-            if [[ -n "${GC_LAST_AUTO_COMMIT_HASH:-}" ]]; then
-              task_notes+=("Auto-commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} — ${note_message} (${apply_status_label})")
-            else
-              task_notes+=("Auto-commit recorded — ${note_message} (${apply_status_label})")
-            fi
-            ;;
-          failed)
-            task_notes+=("Auto-commit failed; inspect git status and commit manually.")
-            manual_followups=1
-            ;;
-        esac
+        local auto_push_done=0
+        if [[ "${GC_AUTO_PUSH:-}" == "1" ]]; then
+          if gc_auto_push_helper "$commit_label" "${task_auto_push_records[@]}"; then
+            case "${GC_LAST_AUTO_COMMIT_STATUS:-}" in
+              committed)
+                auto_push_done=1
+                local note_message="${commit_label//$'\n'/ }"
+                note_message="${note_message//$'\r'/ }"
+                if [[ -n "${GC_LAST_AUTO_COMMIT_HASH:-}" ]]; then
+                  if [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "attempted" ]]; then
+                    task_notes+=("Auto-push commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} (push attempted to ${GC_LAST_AUTO_PUSH_REMOTE}/${GC_LAST_AUTO_PUSH_BRANCH:-?}) — ${note_message} (${apply_status_label})")
+                  elif [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "skipped" ]]; then
+                    task_notes+=("Auto-push commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} (push skipped) — ${note_message} (${apply_status_label})")
+                  else
+                    task_notes+=("Auto-push commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} — ${note_message} (${apply_status_label})")
+                  fi
+                else
+                  task_notes+=("Auto-push commit recorded — ${note_message} (${apply_status_label})")
+                fi
+                ;;
+              clean)
+                auto_push_done=1
+                task_notes+=("Auto-push: working tree already clean; no commit created (${commit_label//$'\n'/ }).")
+                ;;
+            esac
+          else
+            warn "    Auto-push helper failed; falling back to built-in auto-commit."
+          fi
+        fi
+        if (( auto_push_done == 0 )); then
+          gc_auto_commit_task "$commit_message" "${commit_targets[@]}"
+          case "${GC_LAST_AUTO_COMMIT_STATUS:-skipped}" in
+            committed)
+              local note_message="${commit_label//$'\n'/ }"
+              note_message="${note_message//$'\r'/ }"
+              if [[ -n "${GC_LAST_AUTO_COMMIT_HASH:-}" ]]; then
+                task_notes+=("Auto-commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} — ${note_message} (${apply_status_label})")
+              else
+                task_notes+=("Auto-commit recorded — ${note_message} (${apply_status_label})")
+              fi
+              if [[ "${GC_AUTO_PUSH:-}" == "1" ]]; then
+                if ! gc_auto_push_only; then
+                  task_notes+=("Auto-push failed; push changes manually.")
+                  manual_followups=1
+                elif [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "pushed" ]]; then
+                  local push_branch_display="${GC_LAST_AUTO_PUSH_BRANCH:-HEAD}"
+                  task_notes+=("Auto-push ${GC_LAST_AUTO_PUSH_REMOTE}/${push_branch_display}.")
+                elif [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "skipped" ]]; then
+                  task_notes+=("Auto-push skipped (remote not configured or GC_AUTO_PUSH_REMOTE=__skip__).")
+                fi
+              fi
+              ;;
+            failed)
+              task_notes+=("Auto-commit failed; inspect git status and commit manually.")
+              manual_followups=1
+              ;;
+          esac
+        fi
       fi
 
       if [[ "$task_result_status" == "complete" ]]; then
@@ -9531,6 +9872,11 @@ REM
       work_failed="$(gc_wot_run_verify_if_needed "batch-limit" "$PROJECT_ROOT" "$any_changes" "$work_failed")"
       work_failed=$((work_failed))
     fi
+  fi
+
+  if (( ${GC_WOT_SOFT_VERIFY_TRIGGERED:-0} )); then
+    warn "Verify step reported failures (soft mode); review verify artifacts before deployment."
+    manual_followups=1
   fi
 
   if (( batch_limit_reached )); then

@@ -5291,21 +5291,7 @@ cmd_verify() {
     log_rel="${log_rel#./}"
     if [[ "$python_available" -eq 1 ]]; then
       local event=""
-      event="$(
-        CHECK_NAME="$name" \
-        CHECK_STATUS="$status" \
-        CHECK_LABEL="$label" \
-        CHECK_MESSAGE="$message" \
-        CHECK_LOG="$log_rel" \
-        CHECK_REPORT="" \
-        CHECK_SCORE="" \
-        CHECK_DURATION="$duration" \
-        CHECK_RUN_KIND="$kind" \
-        CHECK_TIMESTAMP="$timestamp" \
-        CHECK_ORDER="$check_order" \
-        PROJECT_ROOT="$PROJECT_ROOT" \
-        "$python_bin" - "$summary_path" <<'PY'
-import json, os, sys, datetime
+      local py_cmd=$'import json, os, sys, datetime
 path = sys.argv[1]
 root = os.environ.get("PROJECT_ROOT", "")
 name = os.environ.get("CHECK_NAME", "")
@@ -5384,8 +5370,21 @@ data["runs"].append(summary)
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(data, fh, ensure_ascii=False, indent=2)
 
-print(json.dumps(summary, ensure_ascii=False))
-PY
+print(json.dumps(summary, ensure_ascii=False))'
+      event="$(
+        CHECK_NAME="$name" \
+        CHECK_STATUS="$status" \
+        CHECK_LABEL="$label" \
+        CHECK_MESSAGE="$message" \
+        CHECK_LOG="$log_rel" \
+        CHECK_REPORT="" \
+        CHECK_SCORE="" \
+        CHECK_DURATION="$duration" \
+        CHECK_RUN_KIND="$kind" \
+        CHECK_TIMESTAMP="$timestamp" \
+        CHECK_ORDER="$check_order" \
+        PROJECT_ROOT="$PROJECT_ROOT" \
+        "$python_bin" -c "$py_cmd" "$summary_path" 2>/dev/null
       )"
       if [[ -n "$event" ]]; then
         printf '::verify::%s\n' "$event"
@@ -8095,11 +8094,8 @@ EOHELP
     GC_LAST_VERIFY_SUMMARY=""
     GC_LAST_VERIFY_DETAILS=""
     if command -v "$python_bin" >/dev/null 2>&1; then
-      local parsed
-      if parsed="$("$python_bin" - <<'PY' "$verify_output" 2>/dev/null)"; then
-import json
-import sys
-
+      local parsed=""
+      local py_cmd=$'import json, sys
 payload = json.loads(sys.argv[1])
 status = str(payload.get("status", "inconclusive")).strip().lower()
 if status not in {"pass", "fail", "inconclusive"}:
@@ -8109,8 +8105,8 @@ summary = " ".join(summary.split())
 details = json.dumps(payload.get("details", []), ensure_ascii=False)
 print(status)
 print(summary)
-print(details)
-PY
+print(details)'
+      if parsed="$("$python_bin" -c "$py_cmd" "$verify_output" 2>/dev/null)"; then
         IFS=$'\n' read -r GC_LAST_VERIFY_STATUS GC_LAST_VERIFY_SUMMARY GC_LAST_VERIFY_DETAILS <<<"$parsed"
       fi
     fi
@@ -8160,10 +8156,7 @@ PY
 
     local summary_path
     summary_path="$(mktemp)" || return 1
-    if ! "$python_bin" - "$project_root" "$label" "${change_records[@]}" <<'PY' >"$summary_path"; then
-import json
-import sys
-
+    local summary_py=$'import json, sys
 repo = sys.argv[1]
 label = sys.argv[2]
 records = []
@@ -8174,13 +8167,11 @@ for raw in sys.argv[3:]:
         op, path = "?", raw
     op = op or "?"
     records.append({"op": op, "path": path})
-
 summary = {"cwd": repo, "files": records}
 if label:
     summary["label"] = label
-
-print(json.dumps(summary))
-PY
+print(json.dumps(summary))'
+    if ! "$python_bin" -c "$summary_py" "$project_root" "$label" "${change_records[@]}" >"$summary_path"; then
       rm -f "$summary_path"
       warn "    Auto-push skipped: failed to prepare summary payload."
       return 1
@@ -8200,15 +8191,11 @@ PY
     fi
 
     local parse_output=""
-    if ! parse_output="$("$python_bin" - <<'PY' "$autopush_stdout" 2>/dev/null)"; then
-import json
-import sys
-
+    local autopush_parse_py=$'import json, sys
 try:
     payload = json.loads(sys.argv[1])
 except Exception:
     payload = {}
-
 commit_status = payload.get("commitStatus", "skipped")
 commit_sha = payload.get("commitSha") or ""
 push_status = payload.get("pushStatus", "skipped")
@@ -8220,9 +8207,8 @@ print(commit_sha)
 print(push_status)
 print(remote)
 print(branch)
-print(error)
-PY
-    then
+print(error)'
+    if ! parse_output="$("$python_bin" -c "$autopush_parse_py" "$autopush_stdout" 2>/dev/null)"; then
       parse_output=$'failed\n\nfailed\n\n\n'
     fi
 
@@ -9046,11 +9032,8 @@ REM
           fi
           if [[ -n "${GC_LAST_APPLY_META:-}" && -f "$GC_LAST_APPLY_META" ]]; then
             local meta_flags=""
-            if meta_flags="$("$python_bin" - "$GC_LAST_APPLY_META" <<'PY' 2>/dev/null)"; then
-import json
-import sys
+            local meta_parse_py=$'import json, sys
 from pathlib import Path
-
 path = Path(sys.argv[1])
 try:
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -9064,9 +9047,8 @@ def flag(name):
 print(flag("plan_has_items"))
 print(flag("focus_has_items"))
 print(flag("notes_contains_no_changes"))
-print(flag("notes_contains_already_satisfied"))
-PY
-            ); then
+print(flag("notes_contains_already_satisfied"))'
+            if meta_flags="$("$python_bin" -c "$meta_parse_py" "$GC_LAST_APPLY_META" 2>/dev/null)"; then
               IFS=$'\n' read -r task_meta_plan_flag task_meta_focus_flag task_meta_no_changes_flag task_meta_already_flag <<<"$meta_flags"
             fi
           fi

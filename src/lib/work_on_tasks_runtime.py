@@ -239,6 +239,7 @@ def main():
             'duplicate': 'duplicate commands',
             'policy': 'policy guardrails',
             'non-whitelist': 'non-whitelisted commands',
+            'python-heredoc': 'python heredoc (use apply-block/write_block.py)',
         }
 
         def _token_targets_doc(token: str) -> bool:
@@ -336,6 +337,52 @@ def main():
             while len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'`', '"', "'"}:
                 normalized = normalized[1:-1].strip()
             return normalized
+
+        def _hydrate_literal_command(text: str) -> str:
+            """Convert common escaped control sequences to real characters for bash/sh wrappers."""
+            if '\\' not in text or '\n' in text:
+                return text
+            stripped = text.lstrip()
+            if not re.match(r'(bash|sh)\b', stripped):
+                return text
+            needs_hydration = any(seq in text for seq in ('\\n', '\\t', '\\r'))
+            if not needs_hydration:
+                return text
+            result_chars: List[str] = []
+            idx = 0
+            length = len(text)
+            while idx < length:
+                ch = text[idx]
+                if ch == '\\' and idx + 1 < length:
+                    nxt = text[idx + 1]
+                    if nxt == 'n':
+                        result_chars.append('\n')
+                        idx += 2
+                        continue
+                    if nxt == 't':
+                        result_chars.append('\t')
+                        idx += 2
+                        continue
+                    if nxt == 'r':
+                        result_chars.append('\r')
+                        idx += 2
+                        continue
+                result_chars.append(ch)
+                idx += 1
+            return ''.join(result_chars)
+
+        def _script_contains_wide_sed(script: str, threshold: int = SED_MAX_WINDOW) -> Tuple[bool, int, str]:
+            if not script:
+                return (False, 0, '')
+            segments = re.split(r'[;&]\s*', script)
+            for segment in segments:
+                segment = segment.strip()
+                if not segment:
+                    continue
+                exceeds, window = _sed_window_exceeds(segment, threshold=threshold)
+                if exceeds:
+                    return (True, window, segment)
+            return (False, 0, '')
 
         def _sed_window_exceeds(command: str, *, threshold: int = SED_MAX_WINDOW) -> Tuple[bool, int]:
             try:
@@ -1341,6 +1388,25 @@ def main():
 
         command_diff_before = _git_diff_name_status(project_root)
         command_untracked_before = _git_untracked_files(project_root)
+        pending_changes_before: List[str] = []
+        if command_diff_before:
+            for path, status in sorted(command_diff_before.items()):
+                label = status.strip().upper() or "M"
+                pending_changes_before.append(f"{label} {path}")
+        if command_untracked_before:
+            for path in sorted(command_untracked_before):
+                pending_changes_before.append(f"?? {path}")
+        if pending_changes_before:
+            preview_items = pending_changes_before[:6]
+            summary = '; '.join(preview_items)
+            if len(pending_changes_before) > 6:
+                summary += '; …'
+            manual_notes.append(
+                _format_action_result(
+                    "pending-changes",
+                    f"warning — working tree already dirty before commands; recap these files: {summary}"
+                )
+            )
 
         def _record_blocked_command(reason: str, command: str) -> None:
             nonlocal blocked_command_total
@@ -1398,8 +1464,13 @@ def main():
                 command = _normalize_command_wrapper(raw_cmd)
                 if not command:
                     continue
+                command = _hydrate_literal_command(command)
+                try:
+                    command_tokens = shlex.split(command)
+                except ValueError:
+                    command_tokens = command.split()
                 lower_command = command.lower()
-                first_token = command.split()[0] if command.split() else ""
+                first_token = command_tokens[0] if command_tokens else ""
                 if first_token == "cat":
                     if '<<' in command:
                         _record_blocked_command('heredoc', command)
@@ -1425,6 +1496,16 @@ def main():
                     if exceeds_window:
                         _record_blocked_command('sed-window', command)
                         continue
+                elif first_token in {"bash", "sh"}:
+                    if len(command_tokens) >= 3 and command_tokens[1] in {"-lc", "-c"}:
+                        script_text = command_tokens[2]
+                        has_wide_sed, window_span, offending_segment = _script_contains_wide_sed(script_text)
+                        if has_wide_sed:
+                            _record_blocked_command('sed-window', command)
+                            continue
+                        if re.search(r"python3?\s+-\s*<<", script_text):
+                            _record_blocked_command('python-heredoc', command)
+                            continue
                 if first_token == "rg":
                     if _command_targets_docs(command):
                         _record_blocked_command('doc-search', command)
@@ -1446,6 +1527,10 @@ def main():
                 if not COMMAND_WHITELIST_PATTERN.match(command):
                     _record_blocked_command('non-whitelist', command)
                     continue
+                if first_token in {"python3"}:
+                    if re.search(r"<<\s*'?(PY|EOF)", command):
+                        _record_blocked_command('python-heredoc', command)
+                        continue
                 if first_token in {"python3"} and ".write_text(" in command:
                     manual_notes.append(
                         _format_action_result(
@@ -1601,6 +1686,13 @@ def main():
                     _format_action_result(
                         f"blocked-{reason}",
                         summary_text
+                    )
+                )
+            if 'sed-window' in blocked_command_counts or 'doc-search' in blocked_command_counts:
+                manual_notes.append(
+                    _format_action_result(
+                        "command-summary-guidance",
+                        "summarize findings instead of dumping large files; prefer QA catalog links or `gpt-creator show-file --range start:end`"
                     )
                 )
             manual_notes.append(

@@ -160,6 +160,9 @@ def record_task_progress(
     if not timestamp:
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+    status_lower = status_value.lower()
+    apply_status_lower = (apply_status or "").lower() if apply_status else ""
+
     tokens_retrieve_int = parse_int(stage_tokens_retrieve) or 0
     tokens_plan_int = parse_int(stage_tokens_plan) or 0
     tokens_patch_int = parse_int(stage_tokens_patch) or 0

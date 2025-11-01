@@ -114,6 +114,9 @@ def record_task_progress(
     push_remote: str,
     push_branch: str,
     push_error: str,
+    attempt_signature: str,
+    changes_count: str,
+    outcome_reason: str,
 ) -> None:
     position_int = int(position)
     attempts_int = parse_int(attempts) or 0
@@ -184,6 +187,11 @@ def record_task_progress(
     push_remote_value = (push_remote or "").strip()
     push_branch_value = (push_branch or "").strip()
     push_error_value = (push_error or "").strip()
+    attempt_signature_value = (attempt_signature or "").strip()
+    changes_count_int = parse_int(changes_count) or 0
+    outcome_reason_value = (outcome_reason or "").strip()
+    if changes_int and changes_count_int == 0:
+        changes_count_int = 1
     progress_state_value = ""
     if push_status_value == "pushed":
         progress_state_value = "pushed"
@@ -266,6 +274,9 @@ def record_task_progress(
         ("push_remote", "TEXT"),
         ("push_branch", "TEXT"),
         ("push_error", "TEXT"),
+        ("attempt_signature", "TEXT"),
+        ("changes_count", "INTEGER"),
+        ("outcome_reason", "TEXT"),
     ):
         ensure_column(cur, "task_progress", column, definition)
 
@@ -314,6 +325,9 @@ def record_task_progress(
         ("last_push_remote", "TEXT"),
         ("last_push_branch", "TEXT"),
         ("last_push_error", "TEXT"),
+        ("last_attempt_signature", "TEXT"),
+        ("last_changes_count", "INTEGER"),
+        ("last_outcome_reason", "TEXT"),
         ("progress_state", "TEXT"),
         ("progress_state_updated_at", "TEXT"),
     ):
@@ -410,6 +424,9 @@ def record_task_progress(
         push_remote_value,
         push_branch_value,
         push_error_value,
+        attempt_signature_value,
+        changes_count_int,
+        outcome_reason_value,
     )
 
     cur.execute(
@@ -424,10 +441,10 @@ def record_task_progress(
           created_at, updated_at, verify_status, verify_summary, verify_report,
           verify_details, meta_plan_flag, meta_focus_flag, meta_no_changes_flag,
           meta_already_flag, commit_sha, commit_status, push_status, push_remote,
-          push_branch, push_error
+          push_branch, push_error, attempt_signature, changes_count, outcome_reason
         )
         VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         """,
         progress_row,
@@ -478,6 +495,9 @@ def record_task_progress(
     set_field("last_push_remote", push_remote_value)
     set_field("last_push_branch", push_branch_value)
     set_field("last_push_error", push_error_value)
+    set_field("last_attempt_signature", attempt_signature_value)
+    set_field("last_changes_count", changes_count_int)
+    set_field("last_outcome_reason", outcome_reason_value)
     if progress_state_value:
         set_field("progress_state", progress_state_value)
         set_field("progress_state_updated_at", timestamp)
@@ -549,7 +569,7 @@ def record_task_progress(
 
 
 def main() -> int:
-    if len(sys.argv) < 42:
+    if len(sys.argv) < 45:
         return 1
 
     db_path = Path(sys.argv[1])
@@ -593,6 +613,9 @@ def main() -> int:
     push_remote = sys.argv[39]
     push_branch = sys.argv[40]
     push_error = sys.argv[41]
+    attempt_signature = sys.argv[42]
+    changes_count = sys.argv[43]
+    outcome_reason = sys.argv[44]
 
     record_task_progress(
         db_path=db_path,
@@ -636,6 +659,9 @@ def main() -> int:
         push_remote=push_remote,
         push_branch=push_branch,
         push_error=push_error,
+        attempt_signature=attempt_signature,
+        changes_count=changes_count,
+        outcome_reason=outcome_reason,
     )
     return 0
 

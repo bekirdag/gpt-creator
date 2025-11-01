@@ -3290,7 +3290,51 @@ gc_finalize_active_task() {
     local prompt_db="$prompt_entry"
     local output_db="$output_entry"
     local notes_payload="Interrupted by signal ${signal}; rerun work-on-tasks to resume."
-    gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "on-hold" "$report_entry_db" "$prompt_db" "$output_db" "0" "0" "0" "0" "0" "interrupted" "false" "$notes_payload" "" "" "" "" "$timestamp" "0" "0" "0" "0" "" "" "" "0" "0" "0" "0" "" "" "" "" "" ""
+    gc_record_task_progress \
+      "$tasks_db" \
+      "$slug" \
+      "$task_index" \
+      "$run_stamp" \
+      "on-hold" \
+      "$report_entry_db" \
+      "$prompt_db" \
+      "$output_db" \
+      "0" \
+      "0" \
+      "0" \
+      "0" \
+      "0" \
+      "interrupted" \
+      "false" \
+      "$notes_payload" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "$timestamp" \
+      "0" \
+      "0" \
+      "0" \
+      "0" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "0" \
+      "interrupted"
     gc_update_task_state "$tasks_db" "$slug" "$task_index" "on-hold" "$run_stamp"
   fi
 
@@ -3429,6 +3473,23 @@ gc_record_task_progress() {
   local tokens_patch="${25:-0}"
   local tokens_verify="${26:-0}"
   local story_points="${27:-}"
+  local verify_status="${28:-}"
+  local verify_summary="${29:-}"
+  local verify_report="${30:-}"
+  local verify_details="${31:-}"
+  local meta_plan_flag="${32:-0}"
+  local meta_focus_flag="${33:-0}"
+  local meta_no_changes_flag="${34:-0}"
+  local meta_already_flag="${35:-0}"
+  local commit_sha="${36:-}"
+  local commit_status="${37:-}"
+  local push_status="${38:-}"
+  local push_remote="${39:-}"
+  local push_branch="${40:-}"
+  local push_error="${41:-}"
+  local attempt_signature="${42:-}"
+  local changes_count="${43:-0}"
+  local outcome_reason="${44:-}"
   local helper_path
   helper_path="$(gc_clone_python_tool "record_task_progress.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   python3 "$helper_path" \
@@ -3458,7 +3519,24 @@ gc_record_task_progress() {
     "$tokens_plan" \
     "$tokens_patch" \
     "$tokens_verify" \
-    "$story_points"
+    "$story_points" \
+    "$verify_status" \
+    "$verify_summary" \
+    "$verify_report" \
+    "$verify_details" \
+    "$meta_plan_flag" \
+    "$meta_focus_flag" \
+    "$meta_no_changes_flag" \
+    "$meta_already_flag" \
+    "$commit_sha" \
+    "$commit_status" \
+    "$push_status" \
+    "$push_remote" \
+    "$push_branch" \
+    "$push_error" \
+    "$attempt_signature" \
+    "$changes_count" \
+    "$outcome_reason"
 }
 
 gc_make_observation_hash() {
@@ -3841,6 +3919,58 @@ gc_sha256_file() {
   local helper_path
   helper_path="$(gc_clone_python_tool "sha256_file.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   python3 "$helper_path" "$path"
+}
+
+gc_make_attempt_signature() {
+  local task_ref="${1:-}"
+  local payload_path="${2:-}"
+  local prompt_path="${3:-}"
+  local diff_fingerprint="${4:-}"
+  local binder_status="${5:-}"
+  local binder_reason="${6:-}"
+  local meta_path="${7:-}"
+
+  local payload_hash=""
+  local prompt_hash=""
+  local meta_hash=""
+
+  if [[ -n "$payload_path" && -f "$payload_path" ]]; then
+    payload_hash="$(gc_sha256_file "$payload_path" 2>/dev/null || true)"
+  fi
+  if [[ -n "$prompt_path" && -f "$prompt_path" ]]; then
+    prompt_hash="$(gc_sha256_file "$prompt_path" 2>/dev/null || true)"
+  fi
+  if [[ -n "$meta_path" && -f "$meta_path" ]]; then
+    meta_hash="$(gc_sha256_file "$meta_path" 2>/dev/null || true)"
+  fi
+
+  local snapshot="${diff_fingerprint:-}"
+  local binder="${binder_status:-}:${binder_reason:-}"
+  local source="${task_ref}|payload:${payload_hash}|prompt:${prompt_hash}|meta:${meta_hash}|diff:${snapshot}|binder:${binder}"
+
+  local py_bin="${python_bin:-${PYTHON_BIN:-python3}}"
+  if command -v "$py_bin" >/dev/null 2>&1; then
+    local signature
+    signature="$("$py_bin" - "$source" <<'PYCODE' 2>/dev/null
+import hashlib
+import sys
+payload = sys.argv[1].encode("utf-8", "ignore")
+print(hashlib.sha256(payload).hexdigest())
+PYCODE
+)"
+    if [[ -n "$signature" ]]; then
+      printf '%s\n' "$signature"
+      return 0
+    fi
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$source" | shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$source" | sha256sum 2>/dev/null | awk '{print $1}'
+  else
+    printf '%s' "$source" | openssl dgst -sha256 2>/dev/null | awk '{print $2}'
+  fi
 }
 
 gc_host_prepare_pnpm() {
@@ -6081,6 +6211,8 @@ gc_apply_codex_changes() {
     fi
   fi
 
+  GC_LAST_APPLY_PAYLOAD="$payload_json"
+  export GC_LAST_APPLY_PAYLOAD
   local summary_helper
   summary_helper="$(gc_clone_python_tool "wot_summarize_envelope.py" "$helper_root")" || return 1
 
@@ -8725,6 +8857,14 @@ EOF
       local -a task_commands=()
       local -a task_auto_push_records=()
       local task_changes_applied=0
+      local task_change_operations=0
+      local task_last_change_operations=0
+      local task_attempt_signature=""
+      local task_outcome_reason=""
+      local task_last_signature=""
+      local task_last_changes_count="0"
+      local task_last_outcome_reason=""
+      local previous_attempt_signature=""
       local apply_status="pending"
       local skip_codex_reason="prompt-blocked"
       local task_report_path="${report_dir}/task_${task_number}.log"
@@ -8937,6 +9077,43 @@ EOF
         gc_mark_outcome "DEAD_LETTER" "QUOTA"
       fi
 
+      if command -v "$python_bin" >/dev/null 2>&1; then
+        local _task_snapshot=""
+        _task_snapshot="$("$python_bin" - "$tasks_db" "$slug" "$task_index" <<'PYCODE' 2>/dev/null
+import sqlite3
+import sys
+
+if len(sys.argv) < 4:
+    sys.exit(0)
+
+db_path, story_slug, position = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    position_int = int(position)
+except ValueError:
+    sys.exit(0)
+
+conn = sqlite3.connect(db_path)
+cur = conn.cursor()
+cur.execute(
+    "SELECT COALESCE(last_attempt_signature, ''), "
+    "COALESCE(last_changes_count, 0), "
+    "COALESCE(last_outcome_reason, '') "
+    "FROM tasks WHERE story_slug = ? AND position = ?",
+    (story_slug, position_int),
+)
+row = cur.fetchone()
+conn.close()
+if row:
+    print("\\t".join(str(item) for item in row))
+PYCODE
+)"
+        if [[ -n "$_task_snapshot" ]]; then
+          IFS=$'\t' read -r task_last_signature task_last_changes_count task_last_outcome_reason <<<"$_task_snapshot"
+          previous_attempt_signature="$task_last_signature"
+        fi
+      fi
+      [[ -n "$task_last_changes_count" ]] || task_last_changes_count="0"
+
       if (( skip_codex == 1 )); then
         attempt=$max_attempts
         gc_budget_log_stage "patch" 0 0 0 0 "$prompt_pruned_items" "{}" "true" "$skip_codex_reason"
@@ -8948,7 +9125,9 @@ EOF
         local diff_guard_current_step="$diff_guard_global_attempt"
         gc_touch_progress
         GC_LAST_APPLY_META=""
+        GC_LAST_APPLY_PAYLOAD=""
         codex_attempted=1
+        task_change_operations=0
         local diff_before=""
         task_change_sizes=""
         if (( diff_guard_enabled )); then
@@ -9073,6 +9252,7 @@ REM
                 info "    Wrote ${written_path}"
                 any_changes=1
                 task_changes_applied=1
+                ((task_change_operations++))
                 task_written_paths+=("$written_path")
                 task_auto_push_records+=("M\t${written_path}")
                 ;;
@@ -9081,6 +9261,7 @@ REM
                 info "    Patched ${patched_path}"
                 any_changes=1
                 task_changes_applied=1
+                ((task_change_operations++))
                 task_patched_paths+=("$patched_path")
                 task_auto_push_records+=("M\t${patched_path}")
                 ;;
@@ -9089,6 +9270,7 @@ REM
                 info "    Deleted ${deleted_path}"
                 any_changes=1
                 task_changes_applied=1
+                ((task_change_operations++))
                 task_auto_push_records+=("D\t${deleted_path}")
                 ;;
               RENAME\ *)
@@ -9096,6 +9278,7 @@ REM
                 info "    Renamed ${rename_entry}"
                 any_changes=1
                 task_changes_applied=1
+                ((task_change_operations++))
                 task_auto_push_records+=("R\t${rename_entry}")
                 ;;
               MOVE\ *)
@@ -9103,6 +9286,7 @@ REM
                 info "    Moved ${move_entry}"
                 any_changes=1
                 task_changes_applied=1
+                ((task_change_operations++))
                 task_auto_push_records+=("R\t${move_entry}")
                 ;;
               ARTIFACT\ *)
@@ -9144,6 +9328,7 @@ REM
                 ;;
             esac
           done <<<"$apply_output"
+          task_last_change_operations=$task_change_operations
           if [[ -n "$task_apply_meta_path" ]]; then
             if [[ "$task_apply_meta_path" != /* ]]; then
               task_apply_meta_path="${PROJECT_ROOT}/${task_apply_meta_path#./}"
@@ -9210,6 +9395,25 @@ print(flag("notes_contains_already_satisfied"))'
             local validator_effective
             validator_effective="$(gc_validator_effective_status "$validator_status" "$validator_summary")"
 
+            local attempt_signature=""
+            if [[ -n "${GC_LAST_APPLY_PAYLOAD:-}" && -f "$GC_LAST_APPLY_PAYLOAD" ]]; then
+              attempt_signature="$(gc_make_attempt_signature "$task_ref_for_verify" "$GC_LAST_APPLY_PAYLOAD" "$prompt_path" "$diff_before" "$prompt_binder_status" "$prompt_binder_reason" "${GC_LAST_APPLY_META:-}")"
+            elif [[ -f "$output_path" ]]; then
+              attempt_signature="$(gc_make_attempt_signature "$task_ref_for_verify" "$output_path" "$prompt_path" "$diff_before" "$prompt_binder_status" "$prompt_binder_reason" "${GC_LAST_APPLY_META:-}")"
+            fi
+            local identical_noop_attempt=0
+            if [[ -n "$attempt_signature" ]]; then
+              task_attempt_signature="$attempt_signature"
+              if [[ -n "$previous_attempt_signature" && "$attempt_signature" == "$previous_attempt_signature" ]]; then
+                identical_noop_attempt=1
+              elif [[ -n "$task_last_signature" && "$attempt_signature" == "$task_last_signature" ]]; then
+                if [[ "${task_last_changes_count:-0}" == "0" ]]; then
+                  identical_noop_attempt=1
+                fi
+              fi
+              previous_attempt_signature="$attempt_signature"
+            fi
+
             if [[ "$validator_effective" == "pass" ]]; then
               info "    Acceptance validators passed with no repository changes; marking task complete."
               apply_status="noop-accepted"
@@ -9230,10 +9434,23 @@ print(flag("notes_contains_already_satisfied"))'
               if [[ -n "$validator_report_display" ]]; then
                 task_notes+=("Validator report stored at ${validator_report_display}.")
               fi
+              task_outcome_reason="noop-verified"
               break
             fi
 
             if (( attempt < max_attempts )); then
+              if (( identical_noop_attempt )); then
+                warn "  Identical no-change response detected; stopping automatic retries."
+                task_needs_review=1
+                manual_followups=1
+                keep_output=1
+                apply_status="noop-identical"
+                task_result_status="retryable"
+                task_outcome_reason="noop-identical"
+                task_notes+=("Identical edit-free response detected; escalating for manual review.")
+                codex_ok=1
+                break
+              fi
               warn "  Acceptance validators still failing; guiding Codex to produce minimal diffs."
               if (( delta_prompt_injected == 0 )); then
                 local guidance_output=""
@@ -9266,6 +9483,9 @@ REM
               apply_status="locked-no-output"
               task_notes+=("Migration lock active; retained status ${task_result_status} despite empty diff.")
               codex_ok=1
+              if [[ -z "$task_outcome_reason" ]]; then
+                task_outcome_reason="noop-migration-lock"
+              fi
             else
               task_needs_review=1
               manual_followups=1
@@ -9282,6 +9502,9 @@ REM
                 task_notes+=("Validator report stored at ${validator_report_display}.")
               fi
               codex_ok=1
+              if [[ -z "$task_outcome_reason" ]]; then
+                task_outcome_reason="noop-validators-failed"
+              fi
             fi
             break
           fi
@@ -10056,6 +10279,17 @@ REM
         report_entry_display="(missing)"
       fi
 
+      local task_changes_count="$task_last_change_operations"
+      if [[ -z "$task_outcome_reason" ]]; then
+        case "$task_result_status" in
+          completed-no-changes)
+            task_outcome_reason="noop"
+            ;;
+          complete)
+            task_outcome_reason="changes-applied"
+            ;;
+        esac
+      fi
       local changes_flag="false"
       if (( task_changes_applied > 0 )); then
         changes_flag="true"
@@ -10106,7 +10340,7 @@ REM
       (( task_stage_tokens_patch < 0 )) && task_stage_tokens_patch=0
       (( task_stage_tokens_verify < 0 )) && task_stage_tokens_verify=0
 
-      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$observation_hash" "$timestamp_utc" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_story_points" "$task_verify_status" "$task_verify_summary" "$task_verify_report" "$task_verify_details" "$task_meta_plan_flag" "$task_meta_focus_flag" "$task_meta_no_changes_flag" "$task_meta_already_flag" "${GC_LAST_AUTO_COMMIT_HASH:-}" "${GC_LAST_AUTO_COMMIT_STATUS:-}" "${GC_LAST_AUTO_PUSH_STATUS:-}" "${GC_LAST_AUTO_PUSH_REMOTE:-}" "${GC_LAST_AUTO_PUSH_BRANCH:-}" "${GC_LAST_AUTO_PUSH_ERROR:-}"
+      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$observation_hash" "$timestamp_utc" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_story_points" "$task_verify_status" "$task_verify_summary" "$task_verify_report" "$task_verify_details" "$task_meta_plan_flag" "$task_meta_focus_flag" "$task_meta_no_changes_flag" "$task_meta_already_flag" "${GC_LAST_AUTO_COMMIT_HASH:-}" "${GC_LAST_AUTO_COMMIT_STATUS:-}" "${GC_LAST_AUTO_PUSH_STATUS:-}" "${GC_LAST_AUTO_PUSH_REMOTE:-}" "${GC_LAST_AUTO_PUSH_BRANCH:-}" "${GC_LAST_AUTO_PUSH_ERROR:-}" "$task_attempt_signature" "$task_changes_count" "$task_outcome_reason"
 
       gc_log_task_metrics "$run_stamp" "$slug" "$task_number" "$banner_task_id" "$task_result_status" "$task_story_points" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens"
 
@@ -10139,6 +10373,11 @@ REM
         printf 'prompt_tokens_estimate: %s\n' "$task_prompt_estimate"
         printf 'prompt_path: %s\n' "$prompt_entry"
         printf 'output_path: %s\n' "$output_entry"
+        printf 'changes_count: %s\n' "$task_changes_count"
+        printf 'attempt_signature: %s\n' "${task_attempt_signature:-}"
+        if [[ -n "$task_outcome_reason" ]]; then
+          printf 'outcome_reason: %s\n' "$task_outcome_reason"
+        fi
         if ((${#task_written_paths[@]} > 0)); then
           printf 'written:\n'
           for path in "${task_written_paths[@]}"; do

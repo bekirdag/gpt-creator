@@ -50,7 +50,7 @@ def main():
             flags=re.IGNORECASE,
         )
         COMMAND_WHITELIST_PATTERN = re.compile(
-            r'^(git|pnpm|npm|node|bash|sh|python3|python|sqlite3|jq|rg|sed|awk|perl|cat|tee|mv|cp|mkdir|touch|gpt-creator)\b'
+            r'^(git|pnpm|npm|node|bash|sh|python3|python|sqlite3|jq|sed|awk|perl|cat|tee|mv|cp|mkdir|touch|gpt-creator)\b'
         )
 
         output_path = Path(sys.argv[1])
@@ -741,6 +741,12 @@ def main():
                     rel_path = str(dest.relative_to(project_root))
                 except ValueError:
                     rel_path = str(dest)
+                rel_path_lower = rel_path.lstrip("./").lower()
+                if rel_path_lower.startswith("docs/") or rel_path_lower.startswith(".gpt-creator/staging/docs"):
+                    manual_notes.append(
+                        f"Skipped writing {rel_path} because documentation updates are out of scope; focus on code changes."
+                    )
+                    continue
                 if dest.exists():
                     existing = dest.read_text(encoding='utf-8')
                     if existing == content:
@@ -750,6 +756,10 @@ def main():
                 written.append(rel_path)
                 change_bytes[rel_path] = len(content.encode('utf-8'))
                 actual_changes += 1
+                if rel_path_lower.startswith("docs/") or rel_path_lower.startswith(".gpt-creator/staging/docs"):
+                    manual_notes.append(
+                        "Documentation edited after code updates; ensure the related code changes landed before relying on this doc tweak."
+                    )
             elif ctype == 'patch':
                 diff = change.get('diff')
                 diff = rewrite_patch_paths(diff)
@@ -971,6 +981,7 @@ def main():
 
         command_entries = payload.get('commands') or []
         executed_commands: List[str] = []
+        seen_commands: Set[str] = set()
         if isinstance(command_entries, list) and command_entries:
             baseline_status = _git_status_porcelain(project_root)
             for raw_cmd in command_entries:
@@ -979,6 +990,29 @@ def main():
                 command = raw_cmd.strip()
                 if not command:
                     continue
+                lower_command = command.lower()
+                first_token = command.split()[0] if command.split() else ""
+                if first_token == "python":
+                    manual_notes.append(
+                        f"Command '{command}' skipped (use python3 for all scripting)."
+                    )
+                    continue
+                if first_token == "rg":
+                    manual_notes.append(
+                        f"Command '{command}' skipped (disabled: use the documentation catalog helpers instead of ripgrep)."
+                    )
+                    continue
+                if lower_command.startswith("gpt-creator show-file"):
+                    manual_notes.append(
+                        f"Command '{command}' skipped (disabled: rely on the documentation catalog lookup commands)."
+                    )
+                    continue
+                if command in seen_commands:
+                    manual_notes.append(
+                        f"Command '{command}' skipped (already executed earlier in this run)."
+                    )
+                    continue
+                seen_commands.add(command)
                 if COMMAND_BLOCK_PATTERN.search(command):
                     manual_notes.append(f"Command '{command}' skipped (blocked by policy).")
                     continue
@@ -1811,13 +1845,16 @@ def main():
 
         documentation_asset_lines: List[str] = []
         if doc_library_path_str:
-            library_line = f"- Library overview: `{doc_library_path_str}` — review via `gpt-creator show-file {doc_library_path_str} --range START:END` for tags and owners."
+            library_line = (
+                f"- Library overview: `{doc_library_path_str}` — use the documentation catalog search/show helpers "
+                "to inspect specific entries instead of opening the file directly."
+            )
             if doc_library_shim_str and doc_library_shim_str != doc_library_path_str:
                 library_line += f" Shim fallback lives at `{doc_library_shim_str}`."
             documentation_asset_lines.append(library_line)
         elif doc_library_shim_str:
             documentation_asset_lines.append(
-                f"- Library overview (shim): `{doc_library_shim_str}` — review via `gpt-creator show-file {doc_library_shim_str} --range START:END` for tags and owners."
+                f"- Library overview (shim): `{doc_library_shim_str}` — rely on the documentation catalog search/show helpers rather than reading the file directly."
             )
 
         if doc_index_path_str:
@@ -1886,12 +1923,12 @@ def main():
 
 
         DEFAULT_WORK_PROMPT = """## work-on-tasks Prompt
-        - Load the task details and acceptance criteria from the context section.
-        - Consult the documentation catalog or search hits before modifying files.
-        - Outline a concise plan (≤3 bullets focused on actions), execute the required edits, and capture verification steps with clear pass/fail decisions.
-        - Produce only unified diffs in `changes`, referencing the patch artifact path plus hunk/line counts in `notes` instead of pasting full files.
-        - Record follow-up actions when blockers remain.
-        """
+- Load the task details and acceptance criteria from the context section.
+- Consult the documentation catalog or search hits before modifying files.
+- Outline a concise plan (≤3 bullets focused on actions), execute the required edits, and capture verification steps with clear pass/fail decisions.
+- Apply changes by editing files directly via shell commands (no diff/patch output).
+- Record follow-up actions when blockers remain.
+"""
 
         def clamp_text(text: str, limit: int) -> str:
             if limit <= 0 or not text:
@@ -2925,7 +2962,11 @@ def main():
         if doc_catalog_entries:
             lines.append("")
             lines.append("## Documentation Catalog")
-            lines.append("Use the catalog below to pick a section, then run `gpt-creator show-file <path> --range START:END` for a narrow excerpt. Avoid cat/sed on these manuals.")
+            lines.append(
+                "Use the catalog below to pick a section, then run "
+                "`python3 \"$GC_DOC_CATALOG_PY\" show --db \"$GC_DOCUMENTATION_DB_PATH\" --doc-id <ID>` for a narrow excerpt. "
+                "Avoid reading the raw documentation files directly."
+            )
             for entry in doc_catalog_entries[:6]:
                 rel_path = entry['rel_path']
                 lines.append(f"- {entry['doc_id']} — {rel_path}")
@@ -2935,7 +2976,9 @@ def main():
                     for heading in headings_preview[:6]:
                         lines.append(f"    • {heading}")
                 else:
-                    lines.append(f"  (No headings detected; use `gpt-creator show-file {rel_path} --range START:END` to inspect a specific slice.)")
+                    lines.append(
+                        "  (No headings detected; use the documentation catalog search/show helpers to locate the relevant section instead of opening the file directly.)"
+                    )
                 snippet_text = (entry.get("snippet") or "").strip()
                 if snippet_text:
                     snippet_clean = _normalise_space(snippet_text)[:280].rstrip()
@@ -3179,12 +3222,17 @@ def main():
                     info_line += f" (seen {occurrences}x)"
                 lines.append(f"- {info_line}")
                 if rel_path:
-                    lines.append(f"  -> If the compiled output is required, run `gpt-creator show-file \"{rel_path}\" --head 120`; otherwise focus on the source file.")
+                    lines.append(
+                        f"  -> If a compiled artifact is required for `{rel_path}`, rely on the designated build tool or artifact viewer; otherwise focus on the source file."
+                    )
 
         if file_entries:
             lines.append("")
             lines.append("## Cached File Excerpts")
-            lines.append("Reuse the snippets below instead of repeating cat/sed on the same file; refresh only if the file changed. Prefer `gpt-creator show-file <path> --range start:end` or `rg -n '<term>' <path> -C20` to jump to new context.")
+            lines.append(
+                "Reuse the snippets below instead of repeating cat/sed on the same file; refresh only if the file changed. "
+                "When you need another slice, query the documentation catalog or open just the specific code file segment you plan to modify."
+            )
             for entry in file_entries:
                 summary_text = entry.get("summary") or ""
                 excerpt_text = entry.get("excerpt") or ""
@@ -3209,13 +3257,11 @@ def main():
                         except Exception:
                             start_line = end_line = None
                         if start_line is not None and end_line is not None:
-                            command_hint = f"gpt-creator show-file {rel_path} --range {start_line}:{end_line}"
+                            command_hint = f"sed -n '{start_line},{end_line}p' {rel_path}"
                     if not command_hint:
-                        command_hint = f"gpt-creator show-file {rel_path} --head 120"
+                        command_hint = f"sed -n '1,120p' {rel_path}"
                 if command_hint:
                     lines.append(f"  -> Reopen via `{command_hint}`")
-                if rel_path:
-                    lines.append(f"  -> Use `rg -n \"<term>\" {rel_path} -C20` to search within this file without re-reading it in full.")
 
         if guard_entries:
             lines.append("")
@@ -3234,21 +3280,27 @@ def main():
             "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
             "- Keep each section to short bullet items or terse sentences; skip JSON, code fences, and closing summaries.",
             "- Make repository edits by listing the exact shell commands you will run under `Commands` (use `bash` to write files when needed).",
+            "- Do not generate diffs or patches; apply edits directly through those shell commands.",
+            "- Primary objective: ship the code required by the task acceptance criteria; avoid documentation rewrites or reorganizing prompts.",
+            "- If an acceptance criterion demands heavy setup or environments the agent cannot access, acknowledge the gap and continue focusing on the core code changes.",
             "- In `Focus`, call out the files or symbols you are touching so reviewers understand the blast radius.",
             "- Capture blockers, follow-ups, or verification results in `Notes`.",
             "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",
+            "- Use the documentation catalog helpers (`python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" ...`) for SDS/PDR references instead of opening doc files directly.",
+            "- End the `Notes` section with `STATUS: completed`, `STATUS: needs-retry`, or `STATUS: failed` so automation can classify the run.",
         ]
         lines.extend(response_guidance)
 
         if compact_mode:
             lines.append("- Prefer pnpm for scripts; mention commands that cannot run because of network limits.")
-            lines.append("- Avoid repo-wide listings/searches; jump straight to relevant files and use `gpt-creator show-file <path> --range start:end` (or --head/--tail) for slices instead of streaming whole files.")
-            lines.append("- Track file views; if you begin paging with sequential sed/cat ranges, pivot to targeted `gpt-creator show-file <path> --range` or `rg -n <pattern> <path> -C20`.")
-            lines.append("- When a cached excerpt below covers the context you need, cite it instead of re-running cat/sed; refresh only if the file changed.")
+            lines.append("- When you need documentation context, query the catalog (search/show) with precise section names like `\"SDS 7.3\"`; do not read doc files from the repo.")
+            lines.append("- Avoid repo-wide listings/searches; open only the code files you intend to edit and keep `sed`/`cat` ranges tight.")
+            lines.append("- Track file views; if you begin paging sequential ranges, pause and confirm the slice truly supports the active step.")
             lines.append("- Before running `pnpm test` or `pnpm build`, confirm dependencies are installed and prior pnpm commands succeeded; fix failures before retrying.")
         else:
             lines.append("- Prefer pnpm for scripts; note commands that cannot run because of network limits.")
-            lines.append("- Avoid broad repo sweeps; open only the files you need and use targeted `gpt-creator show-file` or `rg` commands.")
+            lines.append("- Route all documentation lookups through the catalog search/show helpers; never crawl SDS/PDR files directly.")
+            lines.append("- Avoid broad repo sweeps; open only the code files tied to your current plan steps and keep the slices minimal.")
 
         lines.append("")
         lines.append("## Guardrails")
@@ -3256,6 +3308,9 @@ def main():
         lines.append("- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.")
         lines.append("- Keep command usage lean and focused on assets needed for the acceptance criteria.")
         lines.append("- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.")
+        lines.append(
+            "- Tackle documentation edits only after the related code changes land, and only when the documentation would be inaccurate without the update."
+        )
         lines.append("- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.")
         if instruction_prompts:
             lines.append("")

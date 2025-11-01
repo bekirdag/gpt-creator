@@ -1472,13 +1472,16 @@ for filename in ("document-catalog-indexing.md", "document-catalog-metadata.md",
 
 documentation_asset_lines: List[str] = []
 if doc_library_path_str:
-    library_line = f"- Library overview: `{doc_library_path_str}` — review via `gpt-creator show-file {doc_library_path_str} --range START:END` for tags and owners."
+    library_line = (
+        f"- Library overview: `{doc_library_path_str}` — use the documentation catalog search/show helpers "
+        "to inspect specific entries instead of opening the file directly."
+    )
     if doc_library_shim_str and doc_library_shim_str != doc_library_path_str:
         library_line += f" Shim fallback lives at `{doc_library_shim_str}`."
     documentation_asset_lines.append(library_line)
 elif doc_library_shim_str:
     documentation_asset_lines.append(
-        f"- Library overview (shim): `{doc_library_shim_str}` — review via `gpt-creator show-file {doc_library_shim_str} --range START:END` for tags and owners."
+        f"- Library overview (shim): `{doc_library_shim_str}` — rely on the documentation catalog search/show helpers rather than reading the file directly."
     )
 
 if doc_index_path_str:
@@ -2802,7 +2805,9 @@ else:
 if doc_catalog_entries:
     lines.append("")
     lines.append("## Documentation Catalog")
-    lines.append("Use the catalog below to pick a section, then run `gpt-creator show-file <path> --range START:END` for a narrow excerpt. Avoid cat/sed on these manuals.")
+    lines.append(
+        "Use the catalog below to pick a section, then run `python3 \"$GC_DOC_CATALOG_PY\" show --db \"$GC_DOCUMENTATION_DB_PATH\" --doc-id <ID>` for a narrow excerpt. Avoid reading the raw documentation files directly."
+    )
     emit_progress(f"Including {len(doc_catalog_entries[:DOC_CATALOG_MAX_ENTRIES])} documentation catalog entries")
     for entry in doc_catalog_entries[:DOC_CATALOG_MAX_ENTRIES]:
         rel_path = entry['rel_path']
@@ -2813,7 +2818,9 @@ if doc_catalog_entries:
             for heading in headings_preview[:6]:
                 lines.append(f"    • {heading}")
         else:
-            lines.append(f"  (No headings detected; use `gpt-creator show-file {rel_path} --range START:END` to inspect a specific slice.)")
+            lines.append(
+                "  (No headings detected; use the documentation catalog search/show helpers to locate the relevant section instead of opening the file directly.)"
+            )
         snippet_text = (entry.get("snippet") or "").strip()
         if snippet_text:
             snippet_clean = _normalise_space(snippet_text)[:SEARCH_SNIPPET_MAX_CHARS].rstrip()
@@ -3057,12 +3064,17 @@ if build_entries:
             info_line += f" (seen {occurrences}x)"
         lines.append(f"- {info_line}")
         if rel_path:
-            lines.append(f"  -> If the compiled output is required, run `gpt-creator show-file \"{rel_path}\" --head 120`; otherwise focus on the source file.")
+            lines.append(
+                f"  -> If a compiled artifact is required for `{rel_path}`, rely on the designated build tool or artifact viewer; otherwise focus on the source file."
+            )
 
 if file_entries:
     lines.append("")
     lines.append("## Cached File Excerpts")
-    lines.append("Reuse the snippets below instead of repeating cat/sed on the same file; refresh only if the file changed. Prefer `gpt-creator show-file <path> --range start:end` or `rg -n '<term>' <path> -C20` to jump to new context.")
+    lines.append(
+        "Reuse the snippets below instead of repeating cat/sed on the same file; refresh only if the file changed. "
+        "When you need another slice, query the documentation catalog or open just the specific code file segment you plan to modify."
+    )
     for entry in file_entries:
         summary_text = entry.get("summary") or ""
         excerpt_text = entry.get("excerpt") or ""
@@ -3087,13 +3099,15 @@ if file_entries:
                 except Exception:
                     start_line = end_line = None
                 if start_line is not None and end_line is not None:
-                    command_hint = f"gpt-creator show-file {rel_path} --range {start_line}:{end_line}"
+                    command_hint = f"sed -n '{start_line},{end_line}p' {rel_path}"
             if not command_hint:
-                command_hint = f"gpt-creator show-file {rel_path} --head 120"
+                command_hint = f"sed -n '1,120p' {rel_path}"
         if command_hint:
             lines.append(f"  -> Reopen via `{command_hint}`")
         if rel_path:
-            lines.append(f"  -> Use `rg -n \"<term>\" {rel_path} -C20` to search within this file without re-reading it in full.")
+            lines.append(
+                "  -> If you need more context, run a tightly scoped `sed`/`awk` snippet on the exact file segment instead of broad searches."
+            )
 
 if guard_entries:
     lines.append("")
@@ -3112,20 +3126,25 @@ response_guidance = [
     "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
     "- Keep each section terse—short bullet items or single sentences—without JSON wrappers or closing summaries.",
     "- Apply changes by listing the exact shell commands under `Commands`; use `bash` to edit files when needed.",
+    "- Do not generate diffs or patches; apply edits directly through those shell commands.",
+    "- Primary objective: ship the code required by the task acceptance criteria; avoid documentation rewrites or reorganizing prompts.",
+    "- If an acceptance criterion demands heavy setup or environments the agent cannot access, acknowledge the gap and continue focusing on the core code changes.",
     "- In `Focus`, identify the files or symbols you will touch so reviewers understand scope.",
     "- Capture blockers, tests, and follow-ups in `Notes`.",
     "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; plan the remediation first.",
+    "- Use the documentation catalog (`python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" ...`) for SDS/PDR lookups instead of opening doc files directly.",
+    "- End the `Notes` section with `STATUS: completed`, `STATUS: needs-retry`, or `STATUS: failed` so automation can classify the run.",
 ]
 lines.extend(response_guidance)
 
 if compact_mode:
     lines.append("- Prefer pnpm for scripts; note any commands that cannot run because of network limits.")
-    lines.append("- Avoid repo-wide listings/searches; rely on targeted `gpt-creator show-file` or `rg` slices.")
-    lines.append("- When a cached excerpt below already covers your context, cite it instead of re-reading via cat/sed.")
+    lines.append("- When you need documentation context, query the catalog search/show helpers with precise section names; do not read doc files from the repository.")
+    lines.append("- Avoid repo-wide listings/searches; open only the code files you intend to edit and keep `sed`/`cat` ranges tight.")
     lines.append("- Before running `pnpm test` or `pnpm build`, confirm dependencies are installed and prior pnpm commands succeeded.")
 else:
     lines.append("- Use pnpm for installs/tests unless the task requires something else; flag unavailable commands.")
-    lines.append("- Skip broad repository listings; open the files you need with focused `gpt-creator show-file` or `rg` calls.")
+    lines.append("- Skip broad repository listings; open only the code files tied to your active plan and keep the slices minimal.")
 
 lines.append("")
 lines.append("## Guardrails")
@@ -3133,6 +3152,7 @@ lines.append("- Stay within this task's scope; avoid unrelated plans or subproje
 lines.append("- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.")
 lines.append("- Keep command usage lean and focused on assets needed for the acceptance criteria.")
 lines.append("- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.")
+lines.append("- Tackle documentation edits only after the related code changes land, and only when the documentation would be inaccurate without the update.")
 lines.append("- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.")
 if instruction_prompts:
     lines.append("")

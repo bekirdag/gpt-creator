@@ -9110,7 +9110,7 @@ EOF
 
       if command -v "$python_bin" >/dev/null 2>&1; then
         local _task_snapshot=""
-        _task_snapshot="$("$python_bin" - "$tasks_db" "$slug" "$task_index" <<'PYCODE' 2>/dev/null
+        if _task_snapshot="$("$python_bin" - "$tasks_db" "$slug" "$task_index" <<'PYCODE' 2>/dev/null
 import sqlite3
 import sys
 
@@ -9123,24 +9123,36 @@ try:
 except ValueError:
     sys.exit(0)
 
-conn = sqlite3.connect(db_path)
-cur = conn.cursor()
-cur.execute(
-    "SELECT COALESCE(last_attempt_signature, ''), "
-    "COALESCE(last_changes_count, 0), "
-    "COALESCE(last_outcome_reason, '') "
-    "FROM tasks WHERE story_slug = ? AND position = ?",
-    (story_slug, position_int),
-)
-row = cur.fetchone()
-conn.close()
+row = None
+conn = None
+try:
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COALESCE(last_attempt_signature, ''), "
+        "COALESCE(last_changes_count, 0), "
+        "COALESCE(last_outcome_reason, '') "
+        "FROM tasks WHERE story_slug = ? AND position = ?",
+        (story_slug, position_int),
+    )
+    row = cur.fetchone()
+except sqlite3.DatabaseError:
+    row = None
+finally:
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 if row:
     print("\\t".join(str(item) for item in row))
 PYCODE
-)"
-        if [[ -n "$_task_snapshot" ]]; then
-          IFS=$'\t' read -r task_last_signature task_last_changes_count task_last_outcome_reason <<<"$_task_snapshot"
-          previous_attempt_signature="$task_last_signature"
+)"; then
+          if [[ -n "$_task_snapshot" ]]; then
+            IFS=$'\t' read -r task_last_signature task_last_changes_count task_last_outcome_reason <<<"$_task_snapshot"
+            previous_attempt_signature="$task_last_signature"
+          fi
         fi
       fi
       [[ -n "$task_last_changes_count" ]] || task_last_changes_count="0"

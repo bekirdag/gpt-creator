@@ -5249,26 +5249,7 @@ cmd_verify() {
 
   local pass=0 fail=0 skip=0
 
-  update_verify_summary() {
-    [[ "$python_available" -eq 1 ]] || return 0
-    local name="$1"
-    local status="$2"
-    local label="$3"
-    local message="$4"
-    local log_path="$5"
-    local report_path="$6"
-    local score="$7"
-    local duration="$8"
-    local run_kind="$9"
-    local timestamp="${10}"
-    local event=""
-    local summary_helper
-    summary_helper="$(gc_clone_python_tool "update_verify_summary.py" "${PROJECT_ROOT:-$PWD}")" || return 0
-    event="$("$python_bin" "$summary_helper" "$summary_path" "$PROJECT_ROOT" "$check_order" "$name" "$status" "$label" "$message" "$log_path" "$report_path" "$score" "$duration" "$run_kind" "$timestamp")" || event=""
-    if [[ -n "$event" ]]; then
-      printf '::verify::%s\n' "$event"
-    fi
-  }
+  # verification summary handled inline
 
   run_check() {
     local name="$1"; shift
@@ -5308,7 +5289,108 @@ cmd_verify() {
     cp -f "$log_file" "${logs_dir}/${name}-latest.log" 2>/dev/null || true
     local log_rel="${log_file#$PROJECT_ROOT/}"
     log_rel="${log_rel#./}"
-    update_verify_summary "$name" "$status" "$label" "$message" "$log_rel" "" "" "$duration" "$kind" "$timestamp"
+    if [[ "$python_available" -eq 1 ]]; then
+      local event=""
+      event="$(
+        CHECK_NAME="$name" \
+        CHECK_STATUS="$status" \
+        CHECK_LABEL="$label" \
+        CHECK_MESSAGE="$message" \
+        CHECK_LOG="$log_rel" \
+        CHECK_REPORT="" \
+        CHECK_SCORE="" \
+        CHECK_DURATION="$duration" \
+        CHECK_RUN_KIND="$kind" \
+        CHECK_TIMESTAMP="$timestamp" \
+        CHECK_ORDER="$check_order" \
+        PROJECT_ROOT="$PROJECT_ROOT" \
+        "$python_bin" - "$summary_path" <<'PY'
+import json, os, sys, datetime
+path = sys.argv[1]
+root = os.environ.get("PROJECT_ROOT", "")
+name = os.environ.get("CHECK_NAME", "")
+if not name:
+    sys.exit(0)
+label = os.environ.get("CHECK_LABEL", name.title())
+status = os.environ.get("CHECK_STATUS", "unknown")
+message = os.environ.get("CHECK_MESSAGE", "")
+log_path = os.environ.get("CHECK_LOG", "")
+report_path = os.environ.get("CHECK_REPORT", "")
+score_raw = os.environ.get("CHECK_SCORE", "")
+duration_raw = os.environ.get("CHECK_DURATION", "")
+run_kind = os.environ.get("CHECK_RUN_KIND", "")
+timestamp = os.environ.get("CHECK_TIMESTAMP", datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z")
+order_raw = os.environ.get("CHECK_ORDER", "")
+
+def relify(path_value):
+    if not path_value:
+        return ""
+    if not os.path.isabs(path_value) and root:
+        abs_path = os.path.normpath(os.path.join(root, path_value))
+    else:
+        abs_path = os.path.normpath(path_value)
+    if root:
+        try:
+            rel = os.path.relpath(abs_path, root)
+        except Exception:
+            rel = abs_path
+    else:
+        rel = abs_path
+    return rel.replace(os.sep, "/")
+
+score = None
+if score_raw:
+    try:
+        score = float(score_raw)
+    except Exception:
+        score = None
+
+duration_value = None
+if duration_raw:
+    try:
+        duration_value = float(duration_raw)
+    except Exception:
+        duration_value = None
+
+log_path = relify(log_path)
+report_path = relify(report_path)
+
+summary = {
+    "name": name,
+    "label": label,
+    "status": status,
+    "message": message,
+    "log": log_path,
+    "report": report_path,
+    "score": score,
+    "duration": duration_value,
+    "run_kind": run_kind,
+    "timestamp": timestamp,
+}
+
+order = [item.strip() for item in order_raw.split(",") if item.strip()]
+
+try:
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    data = {}
+
+if order:
+    data["order"] = order
+data.setdefault("runs", [])
+data["runs"].append(summary)
+
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, ensure_ascii=False, indent=2)
+
+print(json.dumps(summary, ensure_ascii=False))
+PY
+      )"
+      if [[ -n "$event" ]]; then
+        printf '::verify::%s\n' "$event"
+      fi
+    fi
     return 0
   }
 

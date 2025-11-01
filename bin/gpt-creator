@@ -8113,6 +8113,78 @@ print(details)'
     return 0
   }
 
+  gc_validator_effective_status() {
+    local raw_status="${1:-inconclusive}"
+    local raw_summary="${2:-}"
+    local lowered_summary="${raw_summary,,}"
+    case "$raw_status" in
+      pass)
+        printf '%s\n' "pass"
+        ;;
+      fail)
+        printf '%s\n' "fail"
+        ;;
+      *)
+        if [[ -z "$lowered_summary" ]]; then
+          printf '%s\n' "pass"
+        elif [[ "$lowered_summary" == *"no verification adapters configured"* ]]; then
+          printf '%s\n' "pass"
+        elif [[ "$lowered_summary" == *"verification config not found"* ]]; then
+          printf '%s\n' "pass"
+        elif [[ "$lowered_summary" == *"verification config"* && "$lowered_summary" == *"not found"* ]]; then
+          printf '%s\n' "pass"
+        else
+          printf '%s\n' "fail"
+        fi
+        ;;
+    esac
+  }
+
+  gc_compose_validator_guidance() {
+    local status="${1:-}"
+    local summary="${2:-}"
+    local report="${3:-}"
+    local details_json="${4:-[]}"
+    "$python_bin" - "$status" "$summary" "$report" "$details_json" <<'PYCODE' 2>/dev/null
+import json
+import sys
+
+status = sys.argv[1]
+summary = sys.argv[2]
+report = sys.argv[3]
+try:
+    details = json.loads(sys.argv[4])
+except Exception:
+    details = []
+
+failures = []
+for entry in details:
+    if not isinstance(entry, dict):
+        continue
+    check_status = str(entry.get("status", "")).lower()
+    if check_status not in {"fail", "error"}:
+        continue
+    label = entry.get("name") or entry.get("kind") or "check"
+    message = entry.get("message") or ""
+    failures.append(f"{label}: {message}".strip())
+
+if not failures and summary:
+    failures.append(summary.strip())
+
+if not failures:
+    sys.exit(0)
+
+print("Only output JSON. Make minimal edits so these validators pass:")
+for failure in failures:
+    line = failure.replace("\n", " ").strip()
+    if line:
+        print(f"- {line}")
+if report:
+    print(f"- Review validator report: {report}")
+print("Do not plan; produce diffs in the `changes` array.")
+PYCODE
+  }
+
   gc_auto_push_helper() {
     local label="${1:-}"
     shift || true
@@ -8601,6 +8673,12 @@ EOF
       local task_verify_summary=""
       local task_verify_details=""
       local task_verify_report=""
+      local validator_cached=0
+      local validator_status="inconclusive"
+      local validator_summary=""
+      local validator_details="[]"
+      local validator_report=""
+      local delta_prompt_injected=0
       local task_meta_plan_flag=0
       local task_meta_focus_flag=0
       local task_meta_no_changes_flag=0
@@ -8608,6 +8686,10 @@ EOF
       local -a task_notes=()
       local -a task_written_paths=()
       local -a task_patched_paths=()
+      local task_ref_for_verify="${task_id:-${banner_task_id:-${slug:-story}-${task_number}}}"
+      if [[ -z "$task_ref_for_verify" ]]; then
+        task_ref_for_verify="${slug:-story}-${task_number}"
+      fi
       local -a task_commands=()
       local -a task_auto_push_records=()
       local task_changes_applied=0
@@ -9064,43 +9146,102 @@ print(flag("notes_contains_already_satisfied"))'
                 task_notes+=("Agent returned no actionable changes; recorded checkpoint ${checkpoint_rel} for follow-up.")
               fi
             fi
-            if (( task_changes_applied == 0 )); then
-              if (( attempt < max_attempts )); then
-                warn "  Codex response contained no file changes; retrying (attempt $((attempt + 1)) of ${max_attempts})."
-                if (( prompt_change_reminder == 0 )); then
-                  cat >>"$prompt_path" <<'REM'
 
-## Reminder
-- Provide valid unified diffs or file writes in the `changes` array for every edit; planning alone is insufficient.
-- Only conclude once the required modifications are present in the `changes` payload.
-REM
-                  prompt_change_reminder=1
-                fi
-                task_changes_applied=0
-                apply_status="pending"
-                task_commands=()
-                task_written_paths=()
-                task_patched_paths=()
-                continue
-              fi
-              warn "  Codex produced no actionable changes."
-              if (( task_locked_migration )) && [[ "$task_status_lower" =~ $terminal_locked_regex ]]; then
-                task_result_status="${task_status_original:-complete}"
-                apply_status="locked-no-output"
-                task_notes+=("Migration lock active; retained status ${task_result_status} despite empty diff.")
-                codex_ok=1
+            if (( validator_cached == 0 )); then
+              if gc_run_task_verify "$task_ref_for_verify" "$story_run_dir"; then
+                validator_status="${GC_LAST_VERIFY_STATUS:-inconclusive}"
+                validator_summary="${GC_LAST_VERIFY_SUMMARY:-}"
+                validator_details="${GC_LAST_VERIFY_DETAILS:-[]}"
+                validator_report="${GC_LAST_VERIFY_REPORT:-}"
               else
-                task_needs_review=1
-                manual_followups=1
-                keep_output=1
-                task_result_status="apply-failed-migration-context"
-                apply_status="no-changes"
-                task_notes+=("No actionable changes after retries; requires manual follow-up.")
-                codex_ok=1
+                validator_status="inconclusive"
+                validator_summary="${GC_LAST_VERIFY_SUMMARY:-Verification helper failure}"
+                validator_details="${GC_LAST_VERIFY_DETAILS:-[]}"
+                validator_report="${GC_LAST_VERIFY_REPORT:-}"
               fi
-              break_after_update=1
+              validator_cached=1
+            fi
+
+            local validator_report_display="$validator_report"
+            if [[ -n "$validator_report_display" && -n "$PROJECT_ROOT" && "$validator_report_display" == "$PROJECT_ROOT/"* ]]; then
+              validator_report_display="${validator_report_display#$PROJECT_ROOT/}"
+            fi
+
+            local validator_effective
+            validator_effective="$(gc_validator_effective_status "$validator_status" "$validator_summary")"
+
+            if [[ "$validator_effective" == "pass" ]]; then
+              info "    Acceptance validators passed with no repository changes; marking task complete."
+              apply_status="noop-accepted"
+              task_result_status="complete"
+              task_needs_review=0
+              manual_followups=0
+              keep_output=0
+              codex_ok=1
+              task_verify_status="$validator_effective"
+              task_verify_summary="$validator_summary"
+              task_verify_details="$validator_details"
+              task_verify_report="$validator_report"
+              task_notes+=("Acceptance validators passed with no repository changes (COMPLETED_NOOP).")
+              if [[ -n "$validator_summary" ]]; then
+                task_notes+=("Validator summary: ${validator_summary}")
+              fi
+              if [[ -n "$validator_report_display" ]]; then
+                task_notes+=("Validator report stored at ${validator_report_display}.")
+              fi
               break
             fi
+
+            if (( attempt < max_attempts )); then
+              warn "  Acceptance validators still failing; guiding Codex to produce minimal diffs."
+              if (( delta_prompt_injected == 0 )); then
+                local guidance_output=""
+                guidance_output="$(gc_compose_validator_guidance "$validator_status" "$validator_summary" "$validator_report_display" "$validator_details")"
+                if [[ -n "$guidance_output" ]]; then
+                  cat >>"$prompt_path" <<REM
+
+## Validator remediation
+$guidance_output
+REM
+                fi
+                delta_prompt_injected=1
+                task_notes+=("Acceptance validators reported outstanding issues; retrying with delta-only guidance.")
+              fi
+              apply_status="needs-delta"
+              task_commands=()
+              task_written_paths=()
+              task_patched_paths=()
+              validator_cached=0
+              validator_status="inconclusive"
+              validator_summary=""
+              validator_details="[]"
+              validator_report=""
+              continue
+            fi
+
+            warn "  Acceptance validators remained failing without repository changes."
+            if (( task_locked_migration )) && [[ "$task_status_lower" =~ $terminal_locked_regex ]]; then
+              task_result_status="${task_status_original:-complete}"
+              apply_status="locked-no-output"
+              task_notes+=("Migration lock active; retained status ${task_result_status} despite empty diff.")
+              codex_ok=1
+            else
+              task_needs_review=1
+              manual_followups=1
+              keep_output=1
+              task_result_status="blocked"
+              apply_status="validators-failed"
+              if [[ -n "$validator_summary" ]]; then
+                task_notes+=("Validators failing with no repository changes: ${validator_summary}")
+              else
+                task_notes+=("Validators failing with no repository changes; manual follow-up required.")
+              fi
+              if [[ -n "$validator_report_display" ]]; then
+                task_notes+=("Validator report stored at ${validator_report_display}.")
+              fi
+              codex_ok=1
+            fi
+            break
           fi
 
           if [[ "$apply_status" == "parse-error" ]]; then
@@ -9402,10 +9543,6 @@ REM
         break
       done
 
-      local task_ref_for_verify="${task_id:-${banner_task_id:-${slug:-story}-${task_number}}}"
-      if [[ -z "$task_ref_for_verify" ]]; then
-        task_ref_for_verify="${slug:-story}-${task_number}"
-      fi
       local should_run_verify=0
       if [[ "${GC_COMPLETE_ON_VERIFY:-1}" == "1" ]]; then
         should_run_verify=1
@@ -9415,7 +9552,12 @@ REM
         should_run_verify=1
       fi
       if (( should_run_verify )); then
-        if gc_run_task_verify "$task_ref_for_verify" "$story_run_dir"; then
+        if (( validator_cached )); then
+          task_verify_status="$validator_status"
+          task_verify_summary="$validator_summary"
+          task_verify_details="$validator_details"
+          task_verify_report="$validator_report"
+        elif gc_run_task_verify "$task_ref_for_verify" "$story_run_dir"; then
           task_verify_status="${GC_LAST_VERIFY_STATUS:-inconclusive}"
           task_verify_summary="${GC_LAST_VERIFY_SUMMARY:-}"
           task_verify_details="${GC_LAST_VERIFY_DETAILS:-}"

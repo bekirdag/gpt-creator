@@ -17,6 +17,33 @@ shopt -s expand_aliases
 
 mkdir -p "$GC_SCAN_CACHE_DIR" 2>/dev/null || true
 
+# --------------------------- Runtime path helpers -----------------------------
+__gc_prepend_path() {
+  local dir="${1:-}"
+  if [[ -n "$dir" && -d "$dir" ]]; then
+    case ":${PATH:-}:" in
+      *":$dir:"*) ;;  # already present
+      *) PATH="$dir:${PATH:-}"; export PATH ;;
+    esac
+  fi
+}
+
+if [[ -n "${GC_NODE_RUNTIME:-}" ]]; then
+  __gc_prepend_path "${GC_NODE_RUNTIME}/bin"
+fi
+
+if [[ -n "${PNPM_HOME:-}" ]]; then
+  __gc_prepend_path "${PNPM_HOME}"
+elif [[ -n "${GC_NODE_RUNTIME:-}" ]]; then
+  __gc_prepend_path "${GC_NODE_RUNTIME}/pnpm-home"
+fi
+
+if [[ -n "${NPM_CONFIG_PREFIX:-}" ]]; then
+  __gc_prepend_path "${NPM_CONFIG_PREFIX}/bin"
+elif [[ -n "${npm_config_prefix:-}" ]]; then
+  __gc_prepend_path "${npm_config_prefix}/bin"
+fi
+
 # --------------------------- Small utility helpers ----------------------------
 __gc_cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 

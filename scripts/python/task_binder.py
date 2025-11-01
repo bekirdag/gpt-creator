@@ -367,6 +367,9 @@ def update_after_progress(
     tokens_total: Optional[int],
     run_stamp: str,
     reopened_by_migration: bool = False,
+    log_path: Optional[str] = None,
+    prompt_path: Optional[str] = None,
+    output_path: Optional[str] = None,
 ) -> None:
     if not task_id:
         return
@@ -398,6 +401,12 @@ def update_after_progress(
             merged_notes.append(note)
     if merged_notes:
         evidence["notes"] = merged_notes[:16]
+    if log_path:
+        evidence["last_log_path"] = log_path
+    if prompt_path:
+        evidence["last_prompt_path"] = prompt_path
+    if output_path:
+        evidence["last_output_path"] = output_path
 
     binder["last_status"] = status
     binder["last_run_stamp"] = run_stamp
@@ -441,6 +450,9 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     update_cmd.add_argument("--tokens", default="")
     update_cmd.add_argument("--run-stamp", default="")
     update_cmd.add_argument("--reopened", action="store_true")
+    update_cmd.add_argument("--log", default="")
+    update_cmd.add_argument("--prompt", default="")
+    update_cmd.add_argument("--output", default="")
 
     return parser.parse_args(argv)
 
@@ -484,6 +496,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             tokens_total=tokens,
             run_stamp=args.run_stamp or "",
             reopened_by_migration=bool(args.reopened),
+            log_path=args.log or None,
+            prompt_path=args.prompt or None,
+            output_path=args.output or None,
         )
         return 0
 

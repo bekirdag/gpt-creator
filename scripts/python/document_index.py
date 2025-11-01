@@ -2170,12 +2170,28 @@ if binder_hit:
                 binder_summary_lines.append(f"- {doc_label} — {reason}")
             else:
                 binder_summary_lines.append(f"- {doc_label}")
-    evidence_section = (binder_data.get("evidence") or {}).get("notes") or []
+    evidence_data = binder_data.get("evidence") or {}
+    evidence_section = evidence_data.get("notes") or []
     if evidence_section:
         binder_summary_lines.append("")
         binder_summary_lines.append("### Evidence Notes")
         for note in evidence_section[:8]:
             binder_summary_lines.append(f"- {note}")
+    artifact_notes: List[str] = []
+    log_hint = (evidence_data.get("last_log_path") or "").strip()
+    prompt_hint = (evidence_data.get("last_prompt_path") or "").strip()
+    output_hint = (evidence_data.get("last_output_path") or "").strip()
+    if log_hint:
+        artifact_notes.append(f"Task log: {log_hint}")
+    if prompt_hint:
+        artifact_notes.append(f"Prompt snapshot: {prompt_hint}")
+    if output_hint:
+        artifact_notes.append(f"Agent output: {output_hint}")
+    if artifact_notes:
+        binder_summary_lines.append("")
+        binder_summary_lines.append("### Previous Run Artifacts")
+        for entry in artifact_notes[:6]:
+            binder_summary_lines.append(f"- {entry}")
     prior_context_payload = export_prior_task_context(binder_data)
     digest_info = prior_context_payload.get("prior_task_digest")
     if isinstance(digest_info, dict) and digest_info.get("preview"):

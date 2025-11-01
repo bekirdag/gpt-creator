@@ -138,6 +138,19 @@ def record_task_progress(
     commands_text = commands_text or ""
     observation_hash = (observation_hash or "").strip()
 
+    def _append_reference_note(body: str, marker: str) -> str:
+        marker = marker.strip()
+        if not marker:
+            return body
+        lines = [line.strip() for line in body.splitlines() if line.strip()]
+        if marker in lines:
+            return body
+        lines.append(marker)
+        return "\n".join(lines)
+
+    if log_path and log_path.strip():
+        notes_text = _append_reference_note(notes_text, f"Progress log archived at {log_path.strip()}")
+
     notes_json = as_json(notes_text)
     written_json = as_json(written_text)
     patched_json = as_json(patched_text)
@@ -525,6 +538,16 @@ def record_task_progress(
             if status_lower == "blocked-migration-transition":
                 binder_reopened = True
 
+            log_hint = (log_path or "").strip()
+            if log_hint in {"(missing)", "(discarded)", ""}:
+                log_hint = ""
+            prompt_hint = (prompt_path or "").strip()
+            if prompt_hint in {"(missing)", "(discarded)", ""}:
+                prompt_hint = ""
+            output_hint = (output_path or "").strip()
+            if output_hint in {"(missing)", "(discarded)", ""}:
+                output_hint = ""
+
             binder_update_after_progress(
                 Path(project_root),
                 epic_slug=task_row.get("epic_key") or "",
@@ -538,6 +561,9 @@ def record_task_progress(
                 tokens_total=tokens_int,
                 run_stamp=run_stamp,
                 reopened_by_migration=binder_reopened,
+                log_path=log_hint or None,
+                prompt_path=prompt_hint or None,
+                output_path=output_hint or None,
             )
 
     if observation_hash and tokens_int > 0:

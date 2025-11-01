@@ -35,6 +35,7 @@ def main():
         import json
         import os
         import re
+        import shlex
         import subprocess
         from pathlib import Path
         from subprocess import CompletedProcess
@@ -55,6 +56,10 @@ def main():
 
         output_path = Path(sys.argv[1])
         project_root = Path(sys.argv[2])
+        try:
+            project_root_resolved = project_root.resolve()
+        except Exception:
+            project_root_resolved = project_root
 
         _shim_compile_user_pattern = None
         shim_base = project_root / ".gpt-creator" / "shims"
@@ -156,6 +161,157 @@ def main():
                 if path not in before:
                     delta[path] = status
             return delta
+
+        DOC_SUFFIXES = ('.md', '.mdx', '.markdown', '.rst', '.adoc', '.txt')
+        DOC_PATH_PREFIXES = (
+            'docs/',
+            '.gpt-creator/staging/docs/',
+            '.gpt-creator/staging/plan/docs/',
+        )
+        DOC_PATH_EXACT = {
+            'docs',
+            '.gpt-creator/staging/docs',
+            '.gpt-creator/staging/plan/docs',
+        }
+        RG_OPTIONS_EXPECT_VALUE = {
+            '-A',
+            '-B',
+            '-C',
+            '-E',
+            '-M',
+            '-d',
+            '-e',
+            '-f',
+            '-g',
+            '-j',
+            '-m',
+            '-r',
+            '-t',
+            '-T',
+            '--after-context',
+            '--before-context',
+            '--color',
+            '--colors',
+            '--context',
+            '--context-separator',
+            '--dfa-size-limit',
+            '--encoding',
+            '--engine',
+            '--field-context-separator',
+            '--field-match-separator',
+            '--file',
+            '--glob',
+            '--hyperlink-format',
+            '--iglob',
+            '--ignore-file',
+            '--max-columns',
+            '--max-count',
+            '--max-depth',
+            '--max-filesize',
+            '--path-separator',
+            '--pre',
+            '--pre-glob',
+            '--regexp',
+            '--regex',
+            '--replace',
+            '--sort',
+            '--sortr',
+            '--threads',
+            '--type',
+            '--type-add',
+            '--type-clear',
+            '--type-not',
+        }
+
+        def _token_targets_doc(token: str) -> bool:
+            candidate = token.strip().strip('\'"')
+            if not candidate or candidate in {'|', '||', '&&', ';'}:
+                return False
+            if candidate.startswith('-'):
+                return False
+            base_candidate = candidate.rstrip(',;')
+            if base_candidate.startswith('--'):
+                return False
+            path_fragment = base_candidate
+            if ':' in path_fragment:
+                prefix, suffix = path_fragment.rsplit(':', 1)
+                if suffix.isdigit():
+                    path_fragment = prefix
+            normalized = path_fragment.replace('\\', '/').lstrip('./')
+            normalized_lower = normalized.lower()
+            if normalized_lower in DOC_PATH_EXACT:
+                return True
+            if any(normalized_lower.startswith(prefix) for prefix in DOC_PATH_PREFIXES):
+                return True
+            if any(normalized_lower.endswith(suffix) for suffix in DOC_SUFFIXES):
+                return True
+            try:
+                candidate_path = (project_root / path_fragment).resolve()
+                rel = candidate_path.relative_to(project_root_resolved)
+                rel_str = str(rel).replace('\\', '/').lower()
+                if rel_str in DOC_PATH_EXACT:
+                    return True
+                if any(rel_str.startswith(prefix) for prefix in DOC_PATH_PREFIXES):
+                    return True
+                if any(rel_str.endswith(suffix) for suffix in DOC_SUFFIXES):
+                    return True
+            except Exception:
+                pass
+            return False
+
+        def _command_targets_docs(command: str) -> bool:
+            try:
+                tokens = shlex.split(command)
+            except ValueError:
+                tokens = command.split()
+            if not tokens:
+                return False
+            if tokens[0] == 'rg':
+                idx = 1
+                pattern_consumed = False
+                while idx < len(tokens):
+                    token = tokens[idx]
+                    if token == '--':
+                        idx += 1
+                        break
+                    if token.startswith('-'):
+                        if '=' in token:
+                            idx += 1
+                            continue
+                        if token in RG_OPTIONS_EXPECT_VALUE:
+                            idx += 2
+                        else:
+                            idx += 1
+                        continue
+                    if not pattern_consumed:
+                        pattern_consumed = True
+                        idx += 1
+                        break
+                if not pattern_consumed:
+                    return False
+                remainder = tokens[idx:]
+                return any(_token_targets_doc(tok) for tok in remainder)
+            if tokens[0] == 'gpt-creator' and len(tokens) >= 2 and tokens[1] == 'show-file':
+                for token in tokens[2:]:
+                    if token.startswith('-'):
+                        continue
+                    return _token_targets_doc(token)
+                return False
+            for token in tokens[1:]:
+                if _token_targets_doc(token):
+                    return True
+            return False
+
+        def _show_file_lacks_range(command: str) -> bool:
+            try:
+                tokens = shlex.split(command)
+            except ValueError:
+                tokens = command.split()
+            if len(tokens) < 2:
+                return False
+            if tokens[0] != 'gpt-creator' or tokens[1] != 'show-file':
+                return False
+            return not any(tok.startswith('--range') for tok in tokens[2:])
 
 
         def compile_safe(pattern: str, flags: int = 0):
@@ -998,15 +1154,22 @@ def main():
                     )
                     continue
                 if first_token == "rg":
-                    manual_notes.append(
-                        f"Command '{command}' skipped (disabled: use the documentation catalog helpers instead of ripgrep)."
-                    )
-                    continue
+                    if _command_targets_docs(command):
+                        manual_notes.append(
+                            f"Command '{command}' skipped (documentation search must use the catalog helpers)."
+                        )
+                        continue
                 if lower_command.startswith("gpt-creator show-file"):
-                    manual_notes.append(
-                        f"Command '{command}' skipped (disabled: rely on the documentation catalog lookup commands)."
-                    )
-                    continue
+                    if _command_targets_docs(command):
+                        manual_notes.append(
+                            f"Command '{command}' skipped (documentation search must use the catalog helpers)."
+                        )
+                        continue
+                    if _show_file_lacks_range(command):
+                        manual_notes.append(
+                            f"Command '{command}' skipped (specify a --range window when using gpt-creator show-file)."
+                        )
+                        continue
                 if command in seen_commands:
                     manual_notes.append(
                         f"Command '{command}' skipped (already executed earlier in this run)."

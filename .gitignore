@@ -25,7 +25,12 @@ coverage/
 
 # Logs & temps
 .gpt-creator/tmp/
+.gpt-creator/tmp/**/*
 .gpt-creator/logs/
+.gpt-creator/logs/**/*.ndjson
+.gpt-creator/logs/codex-usage.ndjson
+.gpt-creator/tmp/v8-compile-cache-*/
+.gpt-creator/tmp/v8-compile-cache-*/**/*
 .gpt-creator/state/
 .gpt-creator/state/**
 .gpt-creator/staging/plan/.runtime/
@@ -40,7 +45,7 @@ temp/
 
 **/.gpt-creator/logs/
 **/.gpt-creator/tmp/
-**/.gpt-creator/tmp/**
+**/.gpt-creator/tmp/**/*
 **/.gpt-creator/tmp/view-cache/
 .gpt-creator/tmp/*
 !.gpt-creator/tmp/.gitkeep

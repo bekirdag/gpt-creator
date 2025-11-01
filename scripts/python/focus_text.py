@@ -222,10 +222,10 @@ if start == -1 or end == -1 or end <= start:
             'focus': focus_values,
             'changes': changes_from_blocks,
             'commands': [],
-            'notes': ["Auto-recovered legacy apply_patch output; prefer JSON responses."],
+            'notes': ["Auto-recovered apply_patch output from the response."],
         }
     else:
-        raise SystemExit("JSON not found in Codex output")
+        raise SystemExit("Structured instructions not found in Codex output")
 else:
     fragment = raw[start:end+1]
     prefix = raw[:start].strip()
@@ -246,7 +246,7 @@ else:
             'changes': [],
             'commands': [],
             'notes': [
-                f"Codex output contained extra text outside the JSON envelope; review {rel_dump}."
+                f"Codex output contained unexpected prose around the response sections; review {rel_dump}."
             ],
         }
         print('STATUS parse-error')

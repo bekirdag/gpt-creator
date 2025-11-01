@@ -1548,7 +1548,7 @@ DEFAULT_WORK_PROMPT = """## work-on-tasks Prompt
 - Consult the documentation catalog or search hits before modifying files.
 - Outline a concise plan, execute the required edits, and capture verification steps.
 - Record follow-up actions when blockers remain.
-- When done, emit **only** the final minified JSON object exactly once (no prose, no logs, no code fences).
+- Respond using the `Plan`, `Focus`, `Commands`, `Notes` sections; no JSON envelope is required.
 """
 
 def clamp_text(text: str, limit: int) -> str:
@@ -3107,92 +3107,34 @@ if guard_entries:
 
 lines.append("")
 lines.append("## Instructions")
+response_guidance = [
+    "### Response Format",
+    "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
+    "- Keep each section terse—short bullet items or single sentences—without JSON wrappers or closing summaries.",
+    "- Apply changes by listing the exact shell commands under `Commands`; use `bash` to edit files when needed.",
+    "- Include a `diff` fence only when it clarifies a complicated edit; it is optional.",
+    "- In `Focus`, identify the files or symbols you will touch so reviewers understand scope.",
+    "- Capture blockers, tests, and follow-ups in `Notes`.",
+    "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; plan the remediation first.",
+]
+lines.extend(response_guidance)
+
 if compact_mode:
-    lines.append("### Output Contract — STRICT")
-    lines.append('Return **only** this minified JSON with **all keys present** (use [] when empty):')
-    lines.append('{"plan":[],"focus":[],"changes":[],"commands":[],"notes":[]}')
-    lines.append('Rules: no prose before/after, no code fences, no comments, no trailing commas.')
-    lines.append('`focus` **must never be omitted** even if no edits yet (then return an empty array).')
-    lines.append("")
-    lines.append('Return a JSON object: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
-    lines.append("- Populate `plan` with the concrete steps you will take for this task.")
-    lines.append("- List the files or symbols you edit in `focus`; you may include diffs in the same reply.")
-    lines.append("- Provide actual code edits through `changes` using unified diffs only (no full file bodies).")
-    lines.append("- Record shell commands you executed or recommend in `commands`.")
-    lines.append("- Use `notes` for blockers, follow-up actions, or verification reminders.")
-    lines.append("- Keep internal narration tight (≤3 short sentences) and focused on the current task.")
-    lines.append("- Prefer pnpm for scripts; mention commands that cannot run because of network limits.")
-    lines.append("- Avoid repo-wide listings/searches; jump straight to relevant files and use `gpt-creator show-file <path> --range start:end` (or --head/--tail) for slices instead of streaming whole files.")
-    lines.append("- Track file views; if you begin paging with sequential sed/cat ranges, pivot to targeted `gpt-creator show-file <path> --range` or `rg -n <pattern> <path> -C20`.")
-    lines.append("- When a cached excerpt below covers the context you need, cite it instead of re-running cat/sed; refresh only if the file changed.")
-    lines.append("- Before running `pnpm test` or `pnpm build`, confirm dependencies are installed and prior pnpm commands succeeded; fix failures before retrying.")
-    lines.append("- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; capture the remediation steps instead of rerunning immediately.")
-    lines.append("")
-    lines.append("## Change Format")
-    lines.append("- Emit unified diffs inside the `changes` array (no full file bodies).")
-    lines.append("- Large diffs will be stored under `.gpt-creator/artifacts/patches/`; report the artifact path with hunk and line counts in `notes`.")
-    lines.append("- Omit keys with no content; no markdown fences or extra prose.")
-
-    lines.append("")
-    lines.append("## Guardrails")
-    lines.append("- Stay within this task's scope; avoid spinning up unrelated plans or subprojects.")
-    lines.append("- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.")
-    lines.append("- Keep command usage lean and focused on assets needed for the acceptance criteria.")
-    lines.append("- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.")
-    lines.append("- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.")
-
-    lines.append("")
-    lines.append("## Change Format")
-    lines.append("- Emit unified diffs inside the `changes` array (no full file bodies).")
-    lines.append("- Large diffs will be stored under `.gpt-creator/artifacts/patches/`; report the artifact path with hunk and line counts in `notes`.")
-    lines.append("- Omit keys with no content; no markdown fences or extra prose.")
+    lines.append("- Prefer pnpm for scripts; note any commands that cannot run because of network limits.")
+    lines.append("- Avoid repo-wide listings/searches; rely on targeted `gpt-creator show-file` or `rg` slices.")
+    lines.append("- When a cached excerpt below already covers your context, cite it instead of re-reading via cat/sed.")
+    lines.append("- Before running `pnpm test` or `pnpm build`, confirm dependencies are installed and prior pnpm commands succeeded.")
 else:
-    lines.append("### Output Contract — STRICT")
-    lines.append('Return **only** this minified JSON with **all keys present** (use [] when empty):')
-    lines.append('{"plan":[],"focus":[],"changes":[],"commands":[],"notes":[]}')
-    lines.append('Rules: no prose before/after, no code fences, no comments, no trailing commas.')
-    lines.append('`focus` **must never be omitted** even if no edits yet (then return an empty array).')
-    lines.append("")
-    lines.append('Return a JSON object: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
-    lines.append("- Populate `plan` with concise steps that lead to the fix or feature.")
-    lines.append("- List touched files or symbols in `focus`; include diffs in the same response.")
-    lines.append("- Supply code updates through `changes` using unified diffs only; do not omit required edits.")
-    lines.append("- Record executed or recommended shell commands in `commands`.")
-    lines.append("- Use `notes` for blockers, verification needs, or follow-up actions.")
-    lines.append("- Prefer pnpm for install/build scripts; avoid npm/yarn unless explicitly required.")
-    lines.append("- Keep internal narration tight (≤3 short sentences) and focused on the current task.")
-    lines.append("- Avoid repo-wide listings/searches; jump straight to relevant files and use `gpt-creator show-file <path> --range start:end` (or --head/--tail) for context slices instead of streaming whole files.")
-    lines.append("- Track file reads; if you begin paging with sequential sed/cat ranges, switch to targeted `gpt-creator show-file <path> --range` or `rg -n <pattern> <path> -C20`.")
-    lines.append("- Reuse cached excerpts below rather than repeating cat/sed; only re-read files when you know the content changed.")
-    lines.append("- Before running `pnpm test` or `pnpm build`, verify dependencies (`pnpm install`) and resolve any previous pnpm failures first.")
-    lines.append("- Review `Known Command Failures` and `Command Guard Alerts`; plan remediation before retrying any listed command.")
-    lines.append("- Assume limited network access; note any commands that cannot run for that reason instead of failing silently.")
+    lines.append("- Use pnpm for installs/tests unless the task requires something else; flag unavailable commands.")
+    lines.append("- Skip broad repository listings; open the files you need with focused `gpt-creator show-file` or `rg` calls.")
 
-    lines.append("")
-    lines.append("## Guardrails")
-    lines.append("- Stay strictly within this task's scope; do not re-plan or chase unrelated issues.")
-    lines.append("- Read only the documents or files necessary to satisfy the acceptance criteria.")
-    lines.append("- Avoid long exploratory command sequences; focus on edits and checks that prove the task.")
-    lines.append("- Skip directory sweeps outside your declared `focus` unless you first update the plan and focus targets.")
-    lines.append("- Stop when outputs are ready; surface blockers or context gaps inside the JSON `notes`.")
-
-    lines.append("")
-    lines.append("## Output JSON schema")
-    lines.append("Return a single JSON object with keys exactly as follows (omit null/empty collections when not needed):")
-    lines.append("{")
-    lines.append("  \"plan\": [\"short step-by-step plan items...\"],")
-    lines.append("  \"focus\": [\"src/foo.ts:loadWidget\", \"pkg/utils.ts\"],")
-    lines.append("  \"changes\": [")
-    lines.append("    { \"type\": \"patch\", \"path\": \"relative/file/path\", \"diff\": \"UNIFIED_DIFF\" }")
-    lines.append("  ],")
-    lines.append("  \"commands\": [\"optional shell commands to run (e.g., pnpm install)\"],")
-    lines.append("  \"notes\": [\"follow-up items or blockers\"]")
-    lines.append("}")
-    lines.append("- Use UTF-8, escape newlines as \\n inside JSON strings.")
-    lines.append("- Diff entries must be valid unified diffs (git apply compatible) against the current workspace.")
-    lines.append("- Do not emit markdown fences, commentary, or additional text outside the JSON object.")
-    lines.append("- Any text before or after the JSON object will be treated as an error and retried automatically.")
-
+lines.append("")
+lines.append("## Guardrails")
+lines.append("- Stay within this task's scope; avoid unrelated plans or subprojects.")
+lines.append("- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.")
+lines.append("- Keep command usage lean and focused on assets needed for the acceptance criteria.")
+lines.append("- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.")
+lines.append("- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.")
 if instruction_prompts:
     lines.append("")
     lines.append("### Supplemental Instructions (pointers only)")

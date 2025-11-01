@@ -1,11 +1,10 @@
-# Work-on-Tasks JSON Envelope
+# Work-on-Tasks Response Format
 
-Codex responses for `gpt-creator work-on-tasks` must comply with the strict JSON envelope expected by downstream automations:
+Codex responses for `gpt-creator work-on-tasks` now use a lightweight textual contract instead of the legacy JSON envelope. Structure each reply as four short sections:
 
-- Emit **only** a single JSON object at the top level containing the keys `plan`, `changes`, `commands`, and `notes`. Omit unused keys instead of emitting `null`.
-- Produce plain ASCII output without smart quotes, em dashes, or other Unicode characters.
-- Do **not** wrap the JSON in Markdown fences or prepend/append explanatory prose.
-- Every entry in `changes` must be a valid unified diff payload (or a full file body); ensure diffs apply cleanly with `git apply`. Strings that begin with either `diff --git` or the `---` header are accepted.
-- Avoid trailing commentary or diagnostics; tooling treats any non-JSON leading or trailing text as fatal.
+- **Plan** — bullet the concrete steps you will take. Keep each item tight so downstream logs remain scannable.
+- **Focus** — list the files or symbols you are touching. This keeps reviewers aware of the blast radius without relying on machine-parsed JSON.
+- **Commands** — enumerate the shell commands you will execute. Use `bash` when you need to write files; keep commands idempotent so retries are safe.
+- **Notes** — capture blockers, follow-ups, and verification results. Mention any tests or linters you run here.
 
-Following this contract keeps the automation pipeline reliable and prevents Codex runs from being flagged as failed.
+Everything else is optional. You may include a small ```diff``` fence when it helps explain an edit, but the automation no longer requires diffs or strict JSON. The runner parses these sections directly and executes the listed commands, prioritising successful task completion over bookkeeping.

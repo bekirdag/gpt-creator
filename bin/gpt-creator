@@ -6112,116 +6112,28 @@ gc_apply_codex_changes() {
   local _artifact_path="${3:-}" # reserved for future patch artifact support
   : "${_artifact_path:=}"
 
-  local helper_root="${project_root}"
-  local extract_py="${GC_WOT_EXTRACT_HELPER:-}"
-  local validate_py="${GC_WOT_VALIDATE_HELPER:-}"
-  local apply_py="${GC_WOT_APPLY_HELPER:-}"
-  local placeholders_py="${GC_WOT_PLACEHOLDERS_HELPER:-}"
-  local externalize_py="${GC_WOT_EXTERNALIZE_HELPER:-}"
-  local sha_helper="${GC_WOT_SHA_HELPER:-}"
-
-  if [[ -z "$extract_py" ]]; then
-    extract_py="$(gc_clone_python_tool "wot_extract_first_json.py" "$helper_root")" || return 1
-    GC_WOT_EXTRACT_HELPER="$extract_py"
-  fi
-  if [[ -z "$validate_py" ]]; then
-    validate_py="$(gc_clone_python_tool "wot_validate_envelope.py" "$helper_root")" || return 1
-    GC_WOT_VALIDATE_HELPER="$validate_py"
-  fi
-  if [[ -z "$apply_py" ]]; then
-    apply_py="$(gc_clone_python_tool "wot_apply_changes.py" "$helper_root")" || return 1
-    GC_WOT_APPLY_HELPER="$apply_py"
-  fi
-  if [[ -z "$placeholders_py" ]]; then
-    placeholders_py="$(gc_clone_python_tool "wot_ensure_placeholders.py" "$helper_root")" || return 1
-    GC_WOT_PLACEHOLDERS_HELPER="$placeholders_py"
-  fi
-  if [[ -z "$externalize_py" ]]; then
-    externalize_py="$(gc_clone_python_tool "wot_externalize_blobs.py" "$helper_root")" || return 1
-    GC_WOT_EXTERNALIZE_HELPER="$externalize_py"
-  fi
-  if [[ -z "$sha_helper" ]]; then
-    if sha_helper="$(gc_clone_python_tool "sha256_file.py" "$helper_root" 2>/dev/null)"; then
-      GC_WOT_SHA_HELPER="$sha_helper"
-    else
-      sha_helper=""
-    fi
-  fi
-
   local run_dir="${RUN_DIR:-${project_root}/.gpt-creator/staging/plan/work/runs/$(date +%Y%m%d%H%M%S)}"
   mkdir -p "$run_dir"
 
   local payload_raw="${run_dir}/payload.raw"
-  local payload_json="${run_dir}/payload.json"
   cp -f "$output_file" "$payload_raw" || return 1
 
-  if ! python3 "$extract_py" <"$payload_raw" >"$payload_json"; then
-    return 2
-  fi
-  if ! python3 "$externalize_py" "$payload_json" "$run_dir" "$project_root"; then
-    return 2
-  fi
-  local envelope_meta="${run_dir}/payload.meta.json"
-  local validate_status=0
-  if ! GC_WOT_META_OUTPUT="$envelope_meta" python3 "$validate_py" "$payload_json"; then
-    validate_status=$?
-  fi
-  if (( validate_status == 3 )); then
-    return 13
-  elif (( validate_status != 0 )); then
-    return 2
+  local runtime_py="$CLI_ROOT/src/lib/work_on_tasks_runtime.py"
+  if [[ ! -f "$runtime_py" ]]; then
+    warn "work_on_tasks_runtime.py missing under ${CLI_ROOT}/src/lib"
+    return 1
   fi
 
-  while IFS= read -r placeholder_path; do
-    [[ -z "$placeholder_path" ]] && continue
-    (
-      cd "$project_root" || exit 0
-      "$CLI_ROOT/scripts/create-doc-placeholder.sh" \
-        "$placeholder_path" \
-        --owner "Work-on-Tasks" \
-        --summary "Auto-created placeholder"
-    ) || true
-  done < <(python3 "$placeholders_py" "$payload_json")
-
-  local envelope_sha=""
-  if [[ -n "$sha_helper" ]]; then
-    envelope_sha="$(python3 "$sha_helper" "$payload_json" 2>/dev/null || true)"
-  fi
-  if [[ -z "$envelope_sha" ]]; then
-    if command -v shasum >/dev/null 2>&1; then
-      envelope_sha="$(shasum -a 256 "$payload_json" 2>/dev/null | awk '{print $1}')"
-    elif command -v sha256sum >/dev/null 2>&1; then
-      envelope_sha="$(sha256sum "$payload_json" 2>/dev/null | awk '{print $1}')"
-    fi
+  local apply_output
+  if ! apply_output="$(python3 "$runtime_py" apply "$payload_raw" "$project_root")"; then
+    return $?
   fi
 
-  local meta_file="${run_dir}/.applied.json"
-  touch "$meta_file"
-  local identical_envelope=0
-  if [[ -n "$envelope_sha" ]] && grep -q "$envelope_sha" "$meta_file"; then
-    identical_envelope=1
-  fi
-
-  if (( identical_envelope == 0 )); then
-    if ! python3 "$apply_py" "$payload_json" "$project_root"; then
-      return 12
-    fi
-    if [[ -n "$envelope_sha" ]]; then
-      printf '%s %s\n' "$envelope_sha" "$(date -u +%FT%TZ)" >>"$meta_file"
-    fi
-  fi
-
-  GC_LAST_APPLY_PAYLOAD="$payload_json"
+  GC_LAST_APPLY_PAYLOAD="$payload_raw"
   export GC_LAST_APPLY_PAYLOAD
-  local summary_helper
-  summary_helper="$(gc_clone_python_tool "wot_summarize_envelope.py" "$helper_root")" || return 1
+  GC_LAST_APPLY_META=""
 
-  local summary
-  if ! summary="$(WOT_IDENTICAL="$identical_envelope" WOT_META_PATH="$envelope_meta" python3 "$summary_helper" "$payload_json" "$project_root")"; then
-    return 2
-  fi
-
-  printf '%s\n' "$summary"
+  printf '%s\n' "$apply_output"
 }
 
 cmd_create_jira_tasks() {

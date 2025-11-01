@@ -190,125 +190,228 @@ def main():
             print("empty-output", flush=True)
             sys.exit(0)
 
-        # Remove code fences if present
-        if '```' in raw:
-            cleaned = []
-            fenced = False
-            for line in raw.splitlines():
-                marker = line.strip()
-                if marker.startswith('```'):
-                    fenced = not fenced
-                    continue
-                if not fenced:
-                    cleaned.append(line)
-            raw = '\n'.join(cleaned).strip()
+        def _strip_wrapped_json_fence(text: str) -> str:
+            lines = text.splitlines()
+            if len(lines) >= 2:
+                first = lines[0].strip()
+                last = lines[-1].strip()
+                if first.startswith("```") and last == "```":
+                    language = first[3:].strip().lower()
+                    if language in {"json", "jsonc"} or language.startswith("json "):
+                        return "\n".join(lines[1:-1]).strip()
+            return text
 
-        start = raw.find('{')
-        end = raw.rfind('}')
-        if start == -1 or end == -1 or end <= start:
-            blocks = _extract_apply_patch_blocks(raw)
-            if blocks:
-                inferred_focus = []
-                changes_from_blocks = []
-                for block in blocks:
-                    block_text = block.strip("\n")
-                    if not block_text:
-                        continue
-                    if not block_text.endswith('\n'):
-                        block_text += '\n'
-                    changes_from_blocks.append({
-                        'type': 'patch',
-                        'diff': block_text,
-                    })
-                    candidate = None
-                    for line in block_text.splitlines():
-                        stripped = line.strip()
-                        if stripped.startswith('+++ b/'):
-                            candidate = stripped[6:].strip()
-                            if candidate and candidate != '/dev/null':
-                                break
-                        elif stripped.startswith('diff --git '):
-                            parts = stripped.split()
-                            if len(parts) >= 4:
-                                candidate = parts[3][2:].strip()
-                                if candidate and candidate != '/dev/null':
-                                    break
-                    if candidate and candidate not in inferred_focus:
-                        inferred_focus.append(candidate)
-                if not changes_from_blocks:
-                    raise SystemExit("JSON not found in Codex output")
-                focus_values = inferred_focus or ['(auto) apply_patch']
-                payload = {
-                    'plan': [],
-                    'focus': focus_values,
-                    'changes': changes_from_blocks,
-                    'commands': [],
-                    'notes': ["Auto-recovered legacy apply_patch output; prefer JSON responses."],
-                }
-            else:
-                raise SystemExit("JSON not found in Codex output")
-        else:
-            fragment = raw[start:end+1]
-            prefix = raw[:start].strip()
-            suffix = raw[end+1:].strip()
-            has_extra_text = bool(prefix) or bool(suffix)
+        raw = _strip_wrapped_json_fence(raw)
 
+        payload = None
+
+        def _try_parse_json_payload(text: str):
+            start_idx = text.find('{')
+            end_idx = text.rfind('}')
+            if start_idx == -1 or end_idx == -1 or end_idx <= start_idx:
+                return None
+            fragment = text[start_idx:end_idx + 1]
             fragment = re.sub(r'\\"(?=[}\]\n])', r'\\""', fragment)
-
-            while True:
+            attempts = 0
+            while attempts < 5:
                 try:
-                    payload = json.loads(fragment)
-                    break
+                    return json.loads(fragment)
                 except json.JSONDecodeError as exc:
                     if 'Invalid \\escape' in exc.msg:
                         fragment = fragment[:exc.pos] + '\\' + fragment[exc.pos:]
+                        attempts += 1
                         continue
                     decoder = json.JSONDecoder(strict=False)
                     try:
-                        payload = decoder.decode(fragment)
-                        break
+                        return decoder.decode(fragment)
                     except json.JSONDecodeError:
-                        raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
-                        raw_dump.parent.mkdir(parents=True, exist_ok=True)
-                        raw_dump.write_text(raw, encoding='utf-8')
-                        fragment_dump = output_path.with_suffix(output_path.suffix + '.fragment.json')
-                        fragment_dump.parent.mkdir(parents=True, exist_ok=True)
-                        fragment_dump.write_text(fragment, encoding='utf-8')
-                        rel_dump = raw_dump
-                        try:
-                            rel_dump = raw_dump.relative_to(project_root)
-                        except ValueError:
-                            rel_dump = raw_dump
-                        rel_fragment = fragment_dump
-                        try:
-                            rel_fragment = fragment_dump.relative_to(project_root)
-                        except ValueError:
-                            rel_fragment = fragment_dump
-                        if has_extra_text:
-                            payload = {
-                                'plan': [],
-                                'changes': [],
-                                'commands': [],
-                                'notes': [
-                                    "Codex output included non-JSON pre/postface; inner JSON failed to decode.",
-                                    f"Raw stream saved at {rel_dump}. Invalid fragment at {rel_fragment}."
-                                ],
-                                'invalid_json_path': str(rel_fragment),
-                            }
-                        else:
-                            payload = {
-                                'plan': [],
-                                'changes': [],
-                                'commands': [],
-                                'notes': [
-                                    f"Codex output could not be parsed as JSON; review {rel_dump}.",
-                                    f"Invalid JSON fragment saved at {rel_fragment}."
-                                ],
-                                'invalid_json_path': str(rel_fragment),
-                            }
-                        print('STATUS parse-error')
-                        print(f"RAW {rel_dump}")
                         break
+            raw_dump = output_path.with_suffix(output_path.suffix + '.raw.txt')
+            fragment_dump = output_path.with_suffix(output_path.suffix + '.fragment.json')
+            try:
+                raw_dump.parent.mkdir(parents=True, exist_ok=True)
+                raw_dump.write_text(text, encoding='utf-8')
+                fragment_dump.parent.mkdir(parents=True, exist_ok=True)
+                fragment_dump.write_text(fragment, encoding='utf-8')
+            except Exception:
+                pass
+            return None
+
+        def _parse_apply_patch_payload(text: str):
+            blocks = _extract_apply_patch_blocks(text)
+            if not blocks:
+                return None
+            inferred_focus = []
+            changes_from_blocks = []
+            for block in blocks:
+                block_text = block.strip("\n")
+                if not block_text:
+                    continue
+                if not block_text.endswith('\n'):
+                    block_text += '\n'
+                changes_from_blocks.append({
+                    'type': 'patch',
+                    'diff': block_text,
+                })
+                candidate = None
+                for line in block_text.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith('+++ b/'):
+                        candidate = stripped[6:].strip()
+                        if candidate and candidate != '/dev/null':
+                            break
+                    elif stripped.startswith('diff --git '):
+                        parts = stripped.split()
+                        if len(parts) >= 4:
+                            candidate = parts[3][2:].strip()
+                            if candidate and candidate != '/dev/null':
+                                break
+                if candidate and candidate not in inferred_focus:
+                    inferred_focus.append(candidate)
+            if not changes_from_blocks:
+                return None
+            focus_values = inferred_focus or ['(auto) apply_patch']
+            return {
+                'plan': [],
+                'focus': focus_values,
+                'changes': changes_from_blocks,
+                'commands': [],
+                'notes': ["Recovered edits from apply_patch blocks in the response."],
+            }
+
+        def _extract_section_lines(text: str):
+            headings = {"plan", "focus", "commands", "notes", "changes"}
+            sections: Dict[str, List[str]] = {}
+            current = None
+            in_fence = False
+            fence_lang = ""
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("```"):
+                    if in_fence:
+                        in_fence = False
+                        fence_lang = ""
+                    else:
+                        in_fence = True
+                        fence_lang = stripped[3:].strip().lower()
+                    if current:
+                        sections.setdefault(current, []).append(line)
+                    continue
+                if not in_fence:
+                    candidate = stripped.rstrip(':').lower()
+                    if candidate in headings:
+                        current = candidate
+                        sections.setdefault(current, [])
+                        continue
+                if current:
+                    sections.setdefault(current, []).append(line)
+            return sections
+
+        def _parse_list_items(lines: List[str]) -> List[str]:
+            items: List[str] = []
+            in_block = False
+            block_lines: List[str] = []
+            for raw_line in lines:
+                stripped = raw_line.strip()
+                if stripped.startswith("```"):
+                    if in_block:
+                        block_lines.append(raw_line)
+                        block_content = "\n".join(block_lines).strip()
+                        if block_content:
+                            items.append(block_content)
+                        block_lines = []
+                        in_block = False
+                    else:
+                        in_block = True
+                        block_lines = [raw_line]
+                    continue
+                if in_block:
+                    block_lines.append(raw_line)
+                    continue
+                if not stripped:
+                    continue
+                cleaned = re.sub(r'^[\-\*\d\.\)\s]+', '', stripped)
+                items.append(cleaned)
+            if block_lines:
+                block_content = "\n".join(block_lines).strip()
+                if block_content:
+                    items.append(block_content)
+            return items
+
+        def _normalise_command_items(items: List[str]) -> List[str]:
+            normalised: List[str] = []
+            for item in items:
+                if item.startswith("```"):
+                    lines = [line.strip("\n") for line in item.splitlines()]
+                    body = []
+                    in_body = False
+                    for line in lines:
+                        marker = line.strip()
+                        if marker.startswith("```"):
+                            in_body = not in_body
+                            continue
+                        if in_body:
+                            body.append(line)
+                    command = "\n".join(body).strip()
+                    if command:
+                        normalised.append(command)
+                    continue
+                normalised.append(item)
+            return normalised
+
+        def _extract_diff_blocks(text: str) -> List[str]:
+            diffs: List[str] = []
+            seen: Set[str] = set()
+            fence_pattern = re.compile(r"```(?:diff|patch)?\s*\n(.*?)```", re.S)
+            for match in fence_pattern.finditer(text):
+                diff_text = match.group(1).strip()
+                if not diff_text:
+                    continue
+                if not diff_text.endswith('\n'):
+                    diff_text += '\n'
+                if diff_text not in seen:
+                    seen.add(diff_text)
+                    diffs.append(diff_text)
+            plain_pattern = re.compile(r"^diff --git .*?(?=^diff --git |\Z)", re.S | re.M)
+            for match in plain_pattern.finditer(text):
+                diff_text = match.group(0).strip()
+                if not diff_text:
+                    continue
+                if not diff_text.endswith('\n'):
+                    diff_text += '\n'
+                if diff_text not in seen:
+                    seen.add(diff_text)
+                    diffs.append(diff_text)
+            return diffs
+
+        def _parse_freeform_payload(text: str):
+            sections = _extract_section_lines(text)
+            if not sections:
+                return None
+            plan_items = _parse_list_items(sections.get("plan", []))
+            focus_items = _parse_list_items(sections.get("focus", []))
+            command_items = _normalise_command_items(_parse_list_items(sections.get("commands", [])))
+            notes_items = _parse_list_items(sections.get("notes", []))
+            freeform_changes = _parse_list_items(sections.get("changes", []))
+            diff_blobs = _extract_diff_blocks("\n".join(freeform_changes)) if freeform_changes else []
+            if not diff_blobs:
+                diff_blobs = _extract_diff_blocks(text)
+            change_entries = [{'type': 'patch', 'diff': blob} for blob in diff_blobs]
+            return {
+                'plan': plan_items,
+                'focus': focus_items,
+                'changes': change_entries,
+                'commands': command_items,
+                'notes': notes_items,
+            }
+
+        payload = _try_parse_json_payload(raw)
+        if payload is None:
+            payload = _parse_apply_patch_payload(raw)
+        if payload is None:
+            payload = _parse_freeform_payload(raw)
+        if payload is None:
+            raise SystemExit("Agent output could not be parsed into actionable instructions.")
 
         def _normalize_focus(items):
             normalized = []
@@ -359,11 +462,14 @@ def main():
 
         focus_targets = payload.get('focus')
         focus_valid = False
-        if isinstance(focus_targets, list) and focus_targets:
+        if isinstance(focus_targets, list):
             normalized_focus = _normalize_focus(focus_targets)
             if len(normalized_focus) == len(focus_targets):
                 focus_valid = True
                 focus_targets = normalized_focus
+            elif not focus_targets:
+                focus_targets = []
+                focus_valid = True
 
         if not focus_valid:
             inferred_focus = []
@@ -417,46 +523,27 @@ def main():
                     if not isinstance(entry, str):
                         continue
                     note_focus.extend(_extract_focus_from_text(entry))
-                if note_focus:
-                    seen = set()
-                    ordered = []
-                    for item in note_focus:
-                        if item not in seen:
-                            seen.add(item)
-                            ordered.append(item)
-                    if ordered:
-                        focus_targets = ordered
-                        payload['focus'] = focus_targets
-                        focus_valid = True
-                        reminder = "Focus array inferred from notes; include a top-level `focus` list next time."
-                        if isinstance(notes_field, list):
-                            notes_field.append(reminder)
-                        else:
-                            payload['notes'] = [reminder]
+            if note_focus:
+                seen = set()
+                ordered = []
+                for item in note_focus:
+                    if item not in seen:
+                        seen.add(item)
+                        ordered.append(item)
+                if ordered:
+                    focus_targets = ordered
+                    payload['focus'] = focus_targets
+                    focus_valid = True
+                    reminder = "Focus array inferred from notes; include a top-level `focus` list next time."
+                    if isinstance(notes_field, list):
+                        notes_field.append(reminder)
+                    else:
+                        payload['notes'] = [reminder]
 
         if not focus_valid:
-            pending_changes = payload.get('changes')
-            pending_commands = payload.get('commands')
-            has_changes = isinstance(pending_changes, list) and any(pending_changes)
-            has_commands = isinstance(pending_commands, list) and any(pending_commands)
-            if not has_changes and not has_commands:
-                focus_targets = []
-                payload['focus'] = focus_targets
-                focus_valid = True
-                notes_list = payload.get('notes')
-                message = (
-                    "Focus omitted because no changes or commands were provided in this response; "
-                    "declare explicit targets once edits begin."
-                )
-                if isinstance(notes_list, list):
-                    notes_list.append(message)
-                else:
-                    payload['notes'] = [message]
-
-        if not focus_valid:
-            print('STATUS parse-error')
-            print('NOTE Focus targets missing or invalid. Add a `focus` array listing the exact files or symbols you will touch, then rerun work-on-tasks.')
-            sys.exit(1)
+            focus_targets = []
+            payload['focus'] = focus_targets
+            focus_valid = True
 
         # Normalize change payloads so legacy formats (missing `type`, raw diff strings)
         # still apply cleanly without aborting the task workflow.
@@ -3144,88 +3231,35 @@ def main():
 
         lines.append("")
         lines.append("## Instructions")
+        response_guidance = [
+            "### Response Format",
+            "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
+            "- Keep each section to short bullet items or terse sentences; skip JSON, code fences, and closing summaries.",
+            "- Make repository edits by listing the exact shell commands you will run under `Commands` (use `bash` to write files when needed).",
+            "- Include a small `diff` fence only when it makes a tricky change clearer; it is optional.",
+            "- In `Focus`, call out the files or symbols you are touching so reviewers understand the blast radius.",
+            "- Capture blockers, follow-ups, or verification results in `Notes`.",
+            "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",
+        ]
+        lines.extend(response_guidance)
+
         if compact_mode:
-            lines.append("### Output Contract — STRICT")
-            lines.append('Return **only** this minified JSON with **all keys present** (use [] when empty):')
-            lines.append('{"plan":[],"focus":[],"changes":[],"commands":[],"notes":[]}')
-            lines.append('Rules: no prose before/after, no code fences, no comments, no trailing commas.')
-            lines.append('`focus` **must never be omitted** even if no edits yet (then return an empty array).')
-            lines.append("")
-            lines.append('Return a JSON object: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
-            lines.append("- Populate `plan` with the concrete steps you will take for this task.")
-            lines.append("- List the files or symbols you edit in `focus`; you may include diffs in the same reply.")
-            lines.append("- Provide actual code edits through `changes` using unified diffs only (no full file bodies).")
-            lines.append("- Record shell commands you executed or recommend in `commands`.")
-            lines.append("- Use `notes` for blockers, follow-up actions, or verification reminders.")
-            lines.append("- Keep internal narration tight (≤3 short sentences) and focused on the current task.")
             lines.append("- Prefer pnpm for scripts; mention commands that cannot run because of network limits.")
             lines.append("- Avoid repo-wide listings/searches; jump straight to relevant files and use `gpt-creator show-file <path> --range start:end` (or --head/--tail) for slices instead of streaming whole files.")
             lines.append("- Track file views; if you begin paging with sequential sed/cat ranges, pivot to targeted `gpt-creator show-file <path> --range` or `rg -n <pattern> <path> -C20`.")
             lines.append("- When a cached excerpt below covers the context you need, cite it instead of re-running cat/sed; refresh only if the file changed.")
             lines.append("- Before running `pnpm test` or `pnpm build`, confirm dependencies are installed and prior pnpm commands succeeded; fix failures before retrying.")
-            lines.append("- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; capture the remediation steps instead of rerunning immediately.")
-            lines.append("")
-            lines.append("## Guardrails")
-            lines.append("- Stay within this task's scope; avoid spinning up unrelated plans or subprojects.")
-            lines.append("- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.")
-            lines.append("- Keep command usage lean and focused on assets needed for the acceptance criteria.")
-            lines.append("- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.")
-            lines.append("- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.")
-
-            lines.append("")
-            lines.append("## Change Format")
-            lines.append("- Emit unified diffs inside the `changes` array (no full file bodies).")
-            lines.append("- Large diffs are stored under `.gpt-creator/artifacts/patches/`; include the artifact path plus hunk/line counts in `notes`.")
-            lines.append("- Omit keys with no content; no markdown fences or extra prose.")
         else:
-            lines.append("### Output Contract — STRICT")
-            lines.append('Return **only** this minified JSON with **all keys present** (use [] when empty):')
-            lines.append('{"plan":[],"focus":[],"changes":[],"commands":[],"notes":[]}')
-            lines.append('Rules: no prose before/after, no code fences, no comments, no trailing commas.')
-            lines.append('`focus` **must never be omitted** even if no edits yet (then return an empty array).')
-            lines.append("")
-            lines.append('Return a JSON object: {"plan":[], "focus":[], "changes":[], "commands":[], "notes":[]}.')
-            lines.append("- Populate `plan` with concise steps that lead to the fix or feature.")
-            lines.append("- List touched files or symbols in `focus`; include diffs in the same response.")
-            lines.append("- Supply code updates through `changes` using unified diffs only; do not omit required edits.")
-            lines.append("- Record executed or recommended shell commands in `commands`.")
-            lines.append("- Use `notes` for blockers, verification needs, or follow-up actions.")
-            lines.append("- Prefer pnpm for install/build scripts; avoid npm/yarn unless explicitly required.")
-            lines.append("- Keep internal narration tight (≤3 short sentences) and focused on the current task.")
-            lines.append("- Avoid repo-wide listings/searches; jump straight to relevant files and use `gpt-creator show-file <path> --range start:end` (or --head/--tail) for context slices instead of streaming whole files.")
-            lines.append("- Track file reads; if you begin paging with sequential sed/cat ranges, switch to targeted `gpt-creator show-file <path> --range` or `rg -n <pattern> <path> -C20`.")
-            lines.append("- Reuse cached excerpts below rather than repeating cat/sed; only re-read files when you know the content changed.")
-            lines.append("- Before running `pnpm test` or `pnpm build`, verify dependencies (`pnpm install`) and resolve any previous pnpm failures first.")
-            lines.append("- Review `Known Command Failures` and `Command Guard Alerts`; plan remediation before retrying any listed command.")
-            lines.append("- Assume limited network access; note any commands that cannot run for that reason instead of failing silently.")
+            lines.append("- Prefer pnpm for scripts; note commands that cannot run because of network limits.")
+            lines.append("- Avoid broad repo sweeps; open only the files you need and use targeted `gpt-creator show-file` or `rg` commands.")
 
-            lines.append("")
-            lines.append("## Guardrails")
-            lines.append("- Stay strictly within this task's scope; do not re-plan or chase unrelated issues.")
-            lines.append("- Read only the documents or files necessary to satisfy the acceptance criteria.")
-            lines.append("- Avoid long exploratory command sequences; focus on edits and checks that prove the task.")
-            lines.append("- Skip directory sweeps outside your declared `focus` unless you first update the plan and focus targets.")
-            lines.append("- Stop when outputs are ready; surface blockers or context gaps inside the JSON `notes`.")
-
-            lines.append("")
-            lines.append("## Output JSON schema")
-            lines.append("Return a single JSON object with keys exactly as follows (omit null/empty collections when not needed):")
-            lines.append("{")
-            lines.append("  \"plan\": [\"short step-by-step plan items...\"],")
-            lines.append("  \"focus\": [\"src/foo.ts:loadWidget\", \"pkg/utils.ts\"],")
-            lines.append("  \"changes\": [")
-            lines.append("    { \"type\": \"patch\", \"path\": \"relative/file/path\", \"diff\": \"UNIFIED_DIFF\" },")
-            lines.append("    { \"type\": \"file\", \"path\": \"relative/file/path\", \"content\": \"entire file content\" }")
-            lines.append("  ],")
-            lines.append("  \"commands\": [\"optional shell commands to run (e.g., pnpm install)\"],")
-            lines.append("  \"notes\": [\"follow-up items or blockers\"]")
-            lines.append("}")
-            lines.append("- Use UTF-8, escape newlines as \\n inside JSON strings.")
-            lines.append("- Diff entries must be valid unified diffs (git apply compatible) against the current workspace.")
-            lines.append("- File entries provide the complete desired file content (for new or fully rewritten files).")
-            lines.append("- Do not emit markdown fences, commentary, or additional text outside the JSON object.")
-            lines.append("- Any text before or after the JSON object will be treated as an error and retried automatically.")
-
+        lines.append("")
+        lines.append("## Guardrails")
+        lines.append("- Stay within this task's scope; avoid spinning up unrelated plans or subprojects.")
+        lines.append("- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.")
+        lines.append("- Keep command usage lean and focused on assets needed for the acceptance criteria.")
+        lines.append("- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.")
+        lines.append("- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.")
         if instruction_prompts:
             lines.append("")
             lines.append("### Supplemental Instructions (pointers only)")

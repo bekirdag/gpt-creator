@@ -8158,6 +8158,7 @@ except Exception:
     details = []
 
 failures = []
+focus = []
 for entry in details:
     if not isinstance(entry, dict):
         continue
@@ -8167,6 +8168,14 @@ for entry in details:
     label = entry.get("name") or entry.get("kind") or "check"
     message = entry.get("message") or ""
     failures.append(f"{label}: {message}".strip())
+    for key in ("path", "file", "focus", "target"):
+        value = entry.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+            if value and value not in focus:
+                focus.append(value)
+                if len(focus) >= 6:
+                    break
 
 if not failures and summary:
     failures.append(summary.strip())
@@ -8181,8 +8190,29 @@ for failure in failures:
         print(f"- {line}")
 if report:
     print(f"- Review validator report: {report}")
+if focus:
+    print("Focus on these targets:")
+    for item in focus:
+        print(f"  * {item}")
 print("Do not plan; produce diffs in the `changes` array.")
 PYCODE
+  }
+
+  gc_mark_terminal_state() {
+    task_terminal_state="${1:-RUNNING}"
+  }
+
+  gc_mark_failure_class() {
+    task_failure_class="${1:-NONE}"
+  }
+
+  gc_mark_outcome() {
+    local outcome_state="${1:-RUNNING}"
+    local outcome_class="${2:-}"
+    gc_mark_terminal_state "$outcome_state"
+    if [[ -n "$outcome_class" ]]; then
+      gc_mark_failure_class "$outcome_class"
+    fi
   }
 
   gc_auto_push_helper() {
@@ -8644,7 +8674,7 @@ EOF
         task_locked_migration=1
       fi
       local task_status_reason_current="$task_status_reason"
-      local terminal_locked_regex='^(complete|completed|completed-no-changes|blocked-budget|blocked-quota|blocked-merge-conflict|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\([^)]+\)|skipped-already-complete)$'
+      local terminal_locked_regex='^(complete|completed|completed-no-changes|dead-letter|permanent-fail|blocked-budget|blocked-quota|blocked-merge-conflict|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\([^)]+\)|skipped-already-complete)$'
       if [[ "$task_status_lower" == blocked-dependency\(* ]]; then
         local blocked_reason="${task_status_reason_current:-${task_status_original}}"
         warn "  Task ${task_number} (${banner_task_id}) blocked by dependency: ${blocked_reason}"
@@ -8673,6 +8703,8 @@ EOF
       local task_verify_summary=""
       local task_verify_details=""
       local task_verify_report=""
+      local task_terminal_state="RUNNING"
+      local task_failure_class="NONE"
       local validator_cached=0
       local validator_status="inconclusive"
       local validator_summary=""
@@ -8770,6 +8802,7 @@ EOF
         manual_followups=0
         keep_output=0
         task_result_status="blocked-quota"
+        gc_mark_outcome "DEAD_LETTER" "QUOTA"
         apply_status="prompt-blocked"
         skip_codex_reason="stage-limit"
         blocked_stop_run=1
@@ -8829,6 +8862,7 @@ EOF
         manual_followups=1
         keep_output=0
         task_result_status="abandoned-for-budget"
+        gc_mark_outcome "DEAD_LETTER" "QUOTA"
         apply_status="prompt-blocked"
         skip_codex_reason="hard-cap"
         prompt_status="blocked-quota"
@@ -8849,16 +8883,17 @@ EOF
           keep_output=0
           task_result_status="blocked-quota"
           apply_status="prompt-blocked"
-          skip_codex_reason="hard-cap"
-          local budget_note="${prompt_token_estimate}/${prompt_hard_limit_value}"
-          task_notes+=("Prompt estimate ${budget_note} exceeds hard token budget; halting before Codex call.")
-          gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$codex_model_for_step"
-          run_blocked_quota=1
-          if [[ "$prompt_stop_flag" != "false" ]]; then
-            blocked_stop_run=1
-          else
-            manual_followups=1
-          fi
+        skip_codex_reason="hard-cap"
+        local budget_note="${prompt_token_estimate}/${prompt_hard_limit_value}"
+        task_notes+=("Prompt estimate ${budget_note} exceeds hard token budget; halting before Codex call.")
+        gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$codex_model_for_step"
+        run_blocked_quota=1
+        gc_mark_outcome "DEAD_LETTER" "QUOTA"
+        if [[ "$prompt_stop_flag" != "false" ]]; then
+          blocked_stop_run=1
+        else
+          manual_followups=1
+        fi
         fi
       fi
 
@@ -8899,6 +8934,7 @@ EOF
         else
           manual_followups=1
         fi
+        gc_mark_outcome "DEAD_LETTER" "QUOTA"
       fi
 
       if (( skip_codex == 1 )); then
@@ -8952,6 +8988,7 @@ EOF
               manual_followups=1
               keep_output=1
               task_result_status="apply-failed-migration-context"
+              gc_mark_outcome "DEAD_LETTER" "TOOLING"
               apply_status="no-output"
               task_notes+=("No agent output; requires manual follow-up.")
               codex_ok=1
@@ -8985,7 +9022,8 @@ REM
               task_needs_review=1
               manual_followups=1
               keep_output=1
-              task_result_status="blocked"
+              task_result_status="permanent-fail"
+              gc_mark_outcome "PERMANENT_FAIL" "CONTRACT"
               task_notes+=("Repeated contract violations after retries; marking task blocked.")
               codex_ok=1
               break_after_update=1
@@ -8995,7 +9033,8 @@ REM
             task_needs_review=1
             manual_followups=1
             keep_output=1
-            task_result_status="blocked"
+            task_result_status="permanent-fail"
+            gc_mark_outcome "PERMANENT_FAIL" "TOOLING"
             task_notes+=("Codex changes could not be applied automatically; review ${output_path}.")
             codex_ok=1
             break
@@ -9012,6 +9051,7 @@ REM
               manual_followups=1
               keep_output=1
               task_result_status="apply-failed-migration-context"
+              gc_mark_outcome "DEAD_LETTER" "CONTRACT"
               apply_status="empty-apply"
               task_notes+=("No actionable JSON returned; marked apply-failed-migration-context.")
               codex_ok=1
@@ -9173,7 +9213,8 @@ print(flag("notes_contains_already_satisfied"))'
             if [[ "$validator_effective" == "pass" ]]; then
               info "    Acceptance validators passed with no repository changes; marking task complete."
               apply_status="noop-accepted"
-              task_result_status="complete"
+              task_result_status="completed-no-changes"
+              gc_mark_terminal_state "NOOP_VERIFIED"
               task_needs_review=0
               manual_followups=0
               keep_output=0
@@ -9229,7 +9270,8 @@ REM
               task_needs_review=1
               manual_followups=1
               keep_output=1
-              task_result_status="blocked"
+              task_result_status="permanent-fail"
+              gc_mark_outcome "PERMANENT_FAIL" "NOOP"
               apply_status="validators-failed"
               if [[ -n "$validator_summary" ]]; then
                 task_notes+=("Validators failing with no repository changes: ${validator_summary}")
@@ -9263,7 +9305,8 @@ REM
               task_needs_review=1
               manual_followups=1
               keep_output=1
-              task_result_status="on-hold"
+              task_result_status="dead-letter"
+              gc_mark_outcome "DEAD_LETTER" "CONTRACT"
               task_notes+=("Codex output remained invalid JSON after retries; inspect ${output_path}.")
               codex_ok=1
               break_after_update=1
@@ -9365,7 +9408,8 @@ REM
             task_needs_review=1
             manual_followups=1
             keep_output=1
-            task_result_status="on-hold"
+            task_result_status="dead-letter"
+            gc_mark_outcome "DEAD_LETTER" "TRANSIENT"
             apply_status="loop-guard"
             codex_ok=1
             break_after_update=1
@@ -9493,10 +9537,11 @@ REM
               info "    Retrying task ${task_number} after timeout (attempt $((attempt + 1)) of ${max_attempts})."
               continue
             fi
-            task_result_status="on-hold"
+            task_result_status="blocked"
             task_needs_review=1
             manual_followups=1
             keep_output=1
+            gc_mark_outcome "RETRYABLE" "TRANSIENT"
             task_notes+=("Codex produced no output for ${codex_timeout_seconds}s; rerun work-on-tasks to continue from this task.")
             codex_ok=1
             break_after_update=1
@@ -9504,10 +9549,11 @@ REM
             break
           elif (( codex_status == 125 )); then
             warn "  Codex loop guard detected repeated diffs/oscillation; halting task."
-            task_result_status="on-hold"
+            task_result_status="dead-letter"
             task_needs_review=1
             manual_followups=1
             keep_output=1
+            gc_mark_outcome "DEAD_LETTER" "TRANSIENT"
             task_notes+=("Codex loop guard triggered (repeated diffs); inspect Codex log for details.")
             apply_status="loop-guard"
             codex_ok=1
@@ -9518,10 +9564,11 @@ REM
             break
           elif (( codex_status == 126 )); then
             warn "  Codex turn limit reached for ${call_name}; stopping task."
-            task_result_status="on-hold"
+            task_result_status="dead-letter"
             task_needs_review=1
             manual_followups=1
             keep_output=1
+            gc_mark_outcome "DEAD_LETTER" "TRANSIENT"
             task_notes+=("Codex turn limit reached; adjust focus or retry after inspecting Codex log.")
             apply_status="loop-guard"
             codex_ok=1
@@ -9532,10 +9579,11 @@ REM
             break
           fi
           warn "  Codex execution failed for ${call_name}; progress saved."
-          task_result_status="blocked"
+          task_result_status="permanent-fail"
           task_needs_review=1
           manual_followups=1
           keep_output=1
+          gc_mark_outcome "PERMANENT_FAIL" "TOOLING"
           task_notes+=("Codex execution failed; no automated changes were applied.")
           codex_ok=1
           break
@@ -9611,7 +9659,7 @@ REM
         if auto_review_path="$(gc_generate_auto_review "$story_run_dir" "$story_log_dir" "$banner_task_id" "$task_id" "$task_result_status" "$task_number" "$task_tokens_total" "$PROJECT_ROOT")"; then
           task_needs_review=0
           manual_followups=0
-          if [[ "$task_result_status" == "on-hold" || "$task_result_status" == "apply-failed-migration-context" ]]; then
+          if [[ "$task_result_status" == "retryable" || "$task_result_status" == "apply-failed-migration-context" ]]; then
             task_result_status="complete"
           fi
           local auto_review_rel="$auto_review_path"
@@ -9650,27 +9698,34 @@ REM
 
       if (( task_needs_review )); then
         manual_followups=1
-        if [[ "$task_result_status" != "blocked" ]]; then
+        if [[ "$task_result_status" != "blocked" && "$task_result_status" != "permanent-fail" && "$task_result_status" != "dead-letter" ]]; then
           if (( ${GC_WOT_COMPLETE_ON_FOLLOWUP:-0} )); then
             case "$task_result_status" in
               complete|completed-no-changes)
                 task_notes+=("Follow-up required; status remains complete due to --complete-on-followup.")
                 ;;
-              apply-failed-migration-context|on-hold|in-progress)
-                task_result_status="on-hold"
+              apply-failed-migration-context|retryable|in-progress)
+                task_result_status="retryable"
                 ;;
               *)
-                task_result_status="on-hold"
+                task_result_status="retryable"
                 ;;
             esac
           else
-            task_result_status="on-hold"
+            task_result_status="retryable"
           fi
         fi
       fi
 
+      if (( task_needs_review )) && [[ "$task_terminal_state" == "RUNNING" ]]; then
+        gc_mark_outcome "RETRYABLE" "TRANSIENT"
+      fi
+
       if (( codex_ok == 0 )); then
-        task_result_status="blocked"
+        task_result_status="permanent-fail"
+        if [[ "$task_terminal_state" == "RUNNING" ]]; then
+          gc_mark_outcome "PERMANENT_FAIL" "TOOLING"
+        fi
         task_notes+=("Codex execution did not complete; no changes were applied.")
       fi
 
@@ -9825,6 +9880,36 @@ REM
         task_result_status="complete"
       fi
 
+      if [[ "$task_terminal_state" == "RUNNING" ]]; then
+        case "$task_result_status" in
+          complete)
+            if (( task_changes_applied > 0 )); then
+              gc_mark_terminal_state "COMPLETED_WITH_CHANGES"
+            else
+              gc_mark_terminal_state "NOOP_VERIFIED"
+            fi
+            ;;
+          completed-no-changes)
+            gc_mark_terminal_state "NOOP_VERIFIED"
+            ;;
+          permanent-fail)
+            gc_mark_terminal_state "PERMANENT_FAIL"
+            ;;
+          dead-letter)
+            gc_mark_terminal_state "DEAD_LETTER"
+            ;;
+          retryable)
+            gc_mark_terminal_state "RETRYABLE"
+            ;;
+          blocked-quota|abandoned-for-budget|blocked-push)
+            gc_mark_outcome "DEAD_LETTER" "QUOTA"
+            ;;
+          blocked)
+            gc_mark_terminal_state "PERMANENT_FAIL"
+            ;;
+        esac
+      fi
+
       local task_end_epoch
       task_end_epoch="$(date +%s)"
       task_duration_seconds=$((task_end_epoch - task_start_epoch))
@@ -9836,9 +9921,14 @@ REM
       local task_prompt_estimate_display
       task_prompt_estimate_display="$(gc_format_tokens_compact "$task_prompt_estimate")"
 
+      task_notes+=("Terminal state: ${task_terminal_state}")
+      if [[ "$task_failure_class" != "NONE" ]]; then
+        task_notes+=("Failure class: ${task_failure_class}")
+      fi
+
       local story_status_hint="in-progress"
       case "$task_result_status" in
-        blocked|blocked-budget|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|retryable|blocked-push) story_status_hint="blocked" ;;
+        blocked|blocked-budget|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|retryable|blocked-push|dead-letter|permanent-fail) story_status_hint="blocked" ;;
         on-hold) story_status_hint="on-hold" ;;
       esac
 
@@ -10082,13 +10172,13 @@ REM
       gc_clear_active_task
 
       case "$task_result_status" in
-        complete)
+        complete|completed-no-changes)
           info "  ✓ Task ${task_number} (${task_id:-no-id}) completed with status: ${task_result_status}"
           ;;
-        on-hold)
-          warn "  Task ${task_number} (${task_id:-no-id}) marked ${task_result_status}; review ${report_entry_display}."
+        retryable)
+          warn "  Task ${task_number} (${task_id:-no-id}) marked retryable; inspect ${report_entry_display} and rerun when ready."
           ;;
-        blocked|blocked-budget|blocked-quota|blocked-migration-transition|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\))
+        blocked|blocked-budget|blocked-quota|blocked-migration-transition|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|permanent-fail|dead-letter)
           warn "  Task ${task_number} (${task_id:-no-id}) blocked; see ${report_entry_display}."
           ;;
         apply-failed-migration-context)
@@ -10109,20 +10199,26 @@ REM
       fi
 
       printf '\n'
-      gc_render_task_banner --header-bottom "END OF THE TASK WORK" \
-        "END TASK ID" "$banner_task_id" \
-        "REPORT:" \
-        "TOKENS USED: ${task_tokens_display}" \
-        "EST. TOKENS (PROMPT): ${task_prompt_estimate_display}" \
-        "STORY POINTS: ${task_story_points_display}" \
-        "TIME SPENT: ${task_duration_display}" \
+      local -a banner_lines=(
+        "END TASK ID" "$banner_task_id"
+        "REPORT:"
+        "TOKENS USED: ${task_tokens_display}"
+        "EST. TOKENS (PROMPT): ${task_prompt_estimate_display}"
+        "STORY POINTS: ${task_story_points_display}"
+        "TIME SPENT: ${task_duration_display}"
         "STATUS: ${task_status_display}"
+        "TERMINAL STATE: ${task_terminal_state}"
+      )
+      if [[ "$task_failure_class" != "NONE" ]]; then
+        banner_lines+=("FAILURE CLASS: ${task_failure_class}")
+      fi
+      gc_render_task_banner --header-bottom "END OF THE TASK WORK" "${banner_lines[@]}"
 
       (( ++processed_total ))
       (( ++iteration_processed ))
 
       case "$task_result_status" in
-        blocked|blocked-budget|blocked-quota|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\))
+        blocked|blocked-budget|blocked-quota|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|permanent-fail|dead-letter)
           story_failed=1
           break
           ;;

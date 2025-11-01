@@ -100,6 +100,20 @@ def record_task_progress(
     stage_tokens_patch: str,
     stage_tokens_verify: str,
     story_points_raw: str,
+    verify_status: str,
+    verify_summary: str,
+    verify_report: str,
+    verify_details: str,
+    meta_plan_flag: str,
+    meta_focus_flag: str,
+    meta_no_changes_flag: str,
+    meta_already_flag: str,
+    commit_sha: str,
+    commit_status: str,
+    push_status: str,
+    push_remote: str,
+    push_branch: str,
+    push_error: str,
 ) -> None:
     position_int = int(position)
     attempts_int = parse_int(attempts) or 0
@@ -156,6 +170,34 @@ def record_task_progress(
     if tokens_int is None:
         tokens_int = tokens_stage_total
 
+    verify_status_value = (verify_status or "").strip()
+    verify_summary_value = (verify_summary or "").strip()
+    verify_report_value = (verify_report or "").strip()
+    verify_details_value = (verify_details or "").strip()
+    meta_plan_int = parse_bool(meta_plan_flag)
+    meta_focus_int = parse_bool(meta_focus_flag)
+    meta_no_changes_int = parse_bool(meta_no_changes_flag)
+    meta_already_int = parse_bool(meta_already_flag)
+    commit_sha_value = (commit_sha or "").strip()
+    commit_status_value = (commit_status or "").strip()
+    push_status_value = (push_status or "").strip()
+    push_remote_value = (push_remote or "").strip()
+    push_branch_value = (push_branch or "").strip()
+    push_error_value = (push_error or "").strip()
+    progress_state_value = ""
+    if push_status_value == "pushed":
+        progress_state_value = "pushed"
+    elif verify_status_value:
+        progress_state_value = "verified"
+    elif apply_status_lower in {"ok", "completed-no-changes", "contract-violation"}:
+        progress_state_value = "patched"
+    elif status_lower == "in-progress":
+        progress_state_value = "running"
+    elif status_lower == "pending":
+        progress_state_value = "queued"
+    elif status_lower:
+        progress_state_value = status_lower
+
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -210,6 +252,20 @@ def record_task_progress(
         ("tokens_prompt_estimate", "INTEGER"),
         ("llm_prompt_tokens", "INTEGER"),
         ("llm_completion_tokens", "INTEGER"),
+        ("verify_status", "TEXT"),
+        ("verify_summary", "TEXT"),
+        ("verify_report", "TEXT"),
+        ("verify_details", "TEXT"),
+        ("meta_plan_flag", "INTEGER"),
+        ("meta_focus_flag", "INTEGER"),
+        ("meta_no_changes_flag", "INTEGER"),
+        ("meta_already_flag", "INTEGER"),
+        ("commit_sha", "TEXT"),
+        ("commit_status", "TEXT"),
+        ("push_status", "TEXT"),
+        ("push_remote", "TEXT"),
+        ("push_branch", "TEXT"),
+        ("push_error", "TEXT"),
     ):
         ensure_column(cur, "task_progress", column, definition)
 
@@ -244,6 +300,22 @@ def record_task_progress(
         ("last_tokens_per_sp", "REAL"),
         ("last_story_points", "REAL"),
         ("last_hotspot_phase", "TEXT"),
+        ("last_verify_status", "TEXT"),
+        ("last_verify_summary", "TEXT"),
+        ("last_verify_report", "TEXT"),
+        ("last_verify_details", "TEXT"),
+        ("meta_plan_flag", "INTEGER DEFAULT 0"),
+        ("meta_focus_flag", "INTEGER DEFAULT 0"),
+        ("meta_no_changes_flag", "INTEGER DEFAULT 0"),
+        ("meta_already_flag", "INTEGER DEFAULT 0"),
+        ("last_commit_sha", "TEXT"),
+        ("last_commit_status", "TEXT"),
+        ("last_push_status", "TEXT"),
+        ("last_push_remote", "TEXT"),
+        ("last_push_branch", "TEXT"),
+        ("last_push_error", "TEXT"),
+        ("progress_state", "TEXT"),
+        ("progress_state_updated_at", "TEXT"),
     ):
         ensure_column(cur, "tasks", column, definition)
 
@@ -324,6 +396,20 @@ def record_task_progress(
         timestamp,
         timestamp,
         timestamp,
+        verify_status_value,
+        verify_summary_value,
+        verify_report_value,
+        verify_details_value,
+        meta_plan_int,
+        meta_focus_int,
+        meta_no_changes_int,
+        meta_already_int,
+        commit_sha_value,
+        commit_status_value,
+        push_status_value,
+        push_remote_value,
+        push_branch_value,
+        push_error_value,
     )
 
     cur.execute(
@@ -335,10 +421,13 @@ def record_task_progress(
           tokens_patch, tokens_verify, tokens_per_sp, story_points,
           hotspot_phase, duration_seconds, apply_status, changes_applied,
           notes_json, written_json, patched_json, commands_json, occurred_at,
-          created_at, updated_at
+          created_at, updated_at, verify_status, verify_summary, verify_report,
+          verify_details, meta_plan_flag, meta_focus_flag, meta_no_changes_flag,
+          meta_already_flag, commit_sha, commit_status, push_status, push_remote,
+          push_branch, push_error
         )
         VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         """,
         progress_row,
@@ -375,6 +464,23 @@ def record_task_progress(
     set_field("last_tokens_per_sp", tokens_per_sp_value)
     set_field("last_story_points", story_points_value)
     set_field("last_hotspot_phase", hotspot_phase)
+    set_field("last_verify_status", verify_status_value)
+    set_field("last_verify_summary", verify_summary_value)
+    set_field("last_verify_report", verify_report_value)
+    set_field("last_verify_details", verify_details_value)
+    set_field("meta_plan_flag", meta_plan_int)
+    set_field("meta_focus_flag", meta_focus_int)
+    set_field("meta_no_changes_flag", meta_no_changes_int)
+    set_field("meta_already_flag", meta_already_int)
+    set_field("last_commit_sha", commit_sha_value)
+    set_field("last_commit_status", commit_status_value)
+    set_field("last_push_status", push_status_value)
+    set_field("last_push_remote", push_remote_value)
+    set_field("last_push_branch", push_branch_value)
+    set_field("last_push_error", push_error_value)
+    if progress_state_value:
+        set_field("progress_state", progress_state_value)
+        set_field("progress_state_updated_at", timestamp)
     set_field("updated_at", timestamp)
     if status_reason_update:
         set_field("status_reason", status_reason_update)
@@ -443,7 +549,7 @@ def record_task_progress(
 
 
 def main() -> int:
-    if len(sys.argv) < 28:
+    if len(sys.argv) < 42:
         return 1
 
     db_path = Path(sys.argv[1])
@@ -473,6 +579,20 @@ def main() -> int:
     stage_tokens_patch = sys.argv[25]
     stage_tokens_verify = sys.argv[26]
     story_points_raw = sys.argv[27]
+    verify_status = sys.argv[28]
+    verify_summary = sys.argv[29]
+    verify_report = sys.argv[30]
+    verify_details = sys.argv[31]
+    meta_plan_flag = sys.argv[32]
+    meta_focus_flag = sys.argv[33]
+    meta_no_changes_flag = sys.argv[34]
+    meta_already_flag = sys.argv[35]
+    commit_sha = sys.argv[36]
+    commit_status = sys.argv[37]
+    push_status = sys.argv[38]
+    push_remote = sys.argv[39]
+    push_branch = sys.argv[40]
+    push_error = sys.argv[41]
 
     record_task_progress(
         db_path=db_path,
@@ -502,6 +622,20 @@ def main() -> int:
         stage_tokens_patch=stage_tokens_patch,
         stage_tokens_verify=stage_tokens_verify,
         story_points_raw=story_points_raw,
+        verify_status=verify_status,
+        verify_summary=verify_summary,
+        verify_report=verify_report,
+        verify_details=verify_details,
+        meta_plan_flag=meta_plan_flag,
+        meta_focus_flag=meta_focus_flag,
+        meta_no_changes_flag=meta_no_changes_flag,
+        meta_already_flag=meta_already_flag,
+        commit_sha=commit_sha,
+        commit_status=commit_status,
+        push_status=push_status,
+        push_remote=push_remote,
+        push_branch=push_branch,
+        push_error=push_error,
     )
     return 0
 

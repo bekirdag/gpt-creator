@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 import json
+import os
 import sys
 import unicodedata
 from pathlib import Path
 
-ALLOWED = {"plan", "changes", "commands", "notes"}
+ALLOWED = {"plan", "focus", "changes", "commands", "notes"}
 
 
 def main(path: str) -> int:
@@ -20,6 +21,22 @@ def main(path: str) -> int:
         return 2
 
     canonical = {k: v for k, v in data.items() if k in ALLOWED and v is not None}
+
+    meta_path = os.environ.get("GC_WOT_META_OUTPUT") or ""
+    meta_payload = {
+        "plan_has_items": False,
+        "focus_has_items": False,
+        "notes_contains_no_changes": False,
+        "notes_contains_already_satisfied": False,
+    }
+
+    plan_items = canonical.get("plan") or []
+    if isinstance(plan_items, list) and plan_items:
+        meta_payload["plan_has_items"] = True
+
+    focus_items = canonical.get("focus") or []
+    if isinstance(focus_items, list) and focus_items:
+        meta_payload["focus_has_items"] = True
 
     changes = canonical.get("changes", [])
     if changes is None:
@@ -45,6 +62,23 @@ def main(path: str) -> int:
             sys.stderr.write(f"E: invalid change at index {idx}\n")
             return 2
 
+    notes = canonical.get("notes") or []
+    if isinstance(notes, list):
+        lowered_notes = " ".join(note.lower() for note in notes)
+        if "no changes needed" in lowered_notes:
+            meta_payload["notes_contains_no_changes"] = True
+        if "already satisfies" in lowered_notes or "already satisfied" in lowered_notes:
+            meta_payload["notes_contains_already_satisfied"] = True
+
+    if (meta_payload["plan_has_items"] or meta_payload["focus_has_items"]) and not changes and not notes:
+        sys.stderr.write("E: plan/focus supplied but both 'changes' and 'notes' are empty\n")
+        if meta_path:
+            try:
+                Path(meta_path).write_text(json.dumps(meta_payload), encoding="utf-8")
+            except Exception:
+                pass
+        return 3
+
     serialized = json.dumps(canonical, ensure_ascii=True, separators=(",", ":"))
     try:
         serialized.encode("ascii")
@@ -55,6 +89,12 @@ def main(path: str) -> int:
             .decode("ascii")
         )
     p.write_text(serialized, encoding="ascii")
+
+    if meta_path:
+        try:
+            Path(meta_path).write_text(json.dumps(meta_payload), encoding="utf-8")
+        except Exception:
+            pass
     return 0
 
 

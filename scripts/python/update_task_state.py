@@ -12,6 +12,7 @@ LOCKABLE_STATUSES = {
     "blocked-merge-conflict",
     "blocked-schema-drift",
     "blocked-schema-guard-error",
+    "blocked-push",
     "skipped-already-complete",
 }
 

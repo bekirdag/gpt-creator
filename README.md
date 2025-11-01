@@ -347,6 +347,7 @@ gpt-creator work-on-tasks --project /path/to/project
 - Migrations are now two-phased and idempotent: plans land in `.gpt-creator/logs/progress-migration.plan.json`, mappings append to `.gpt-creator/logs/progress-migration.map.ndjson`, and terminal task states are preserved via deterministic `uid` hashes.
 - If the migration epoch changes mid-run, the runner records a `blocked-migration-transition` status and halts so you can resume cleanly once the backlog stabilises.
 - Empty or invalid agent output during migration is surfaced as `apply-failed-migration-context` (instead of a silent skip) so follow-ups are obvious.
+- Verification runs now emit `verify_status`, `commit_sha`, and `push_status` entries inside `task_progress`/`tasks`, enabling dashboards to distinguish between patched, verified, and pushed outcomes.
 - `.gpt-creator/staging` context files collapse tables, SQL spam, JSON blobs, and markup dumps automatically; set `GC_CONTEXT_INCLUDE_UI=1` if you need the raw UI assets restored.
 - Stray Codex progress files from older runs (e.g., `tmp_*`, `final_*`, `diff*`, `qaDoc.json`) are swept into `.gpt-creator/artifacts/**`; inspect `.gpt-creator/logs/progress-migration.log` for the relocation manifest.
 - Use `gpt-creator sweep-artifacts --project /path/to/project` (or pass multiple paths) to run the sweep manually for legacy workspaces or after external scripts deposit artifacts in the repo root.

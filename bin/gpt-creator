@@ -3290,7 +3290,7 @@ gc_finalize_active_task() {
     local prompt_db="$prompt_entry"
     local output_db="$output_entry"
     local notes_payload="Interrupted by signal ${signal}; rerun work-on-tasks to resume."
-    gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "on-hold" "$report_entry_db" "$prompt_db" "$output_db" "0" "0" "0" "0" "0" "interrupted" "false" "$notes_payload" "" "" "" "" "$timestamp" "0" "0" "0" "0" ""
+    gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "on-hold" "$report_entry_db" "$prompt_db" "$output_db" "0" "0" "0" "0" "0" "interrupted" "false" "$notes_payload" "" "" "" "" "$timestamp" "0" "0" "0" "0" "" "" "" "0" "0" "0" "0" "" "" "" "" "" ""
     gc_update_task_state "$tasks_db" "$slug" "$task_index" "on-hold" "$run_stamp"
   fi
 
@@ -5950,7 +5950,14 @@ gc_apply_codex_changes() {
   if ! python3 "$externalize_py" "$payload_json" "$run_dir" "$project_root"; then
     return 2
   fi
-  if ! python3 "$validate_py" "$payload_json"; then
+  local envelope_meta="${run_dir}/payload.meta.json"
+  local validate_status=0
+  if ! GC_WOT_META_OUTPUT="$envelope_meta" python3 "$validate_py" "$payload_json"; then
+    validate_status=$?
+  fi
+  if (( validate_status == 3 )); then
+    return 13
+  elif (( validate_status != 0 )); then
     return 2
   fi
 
@@ -5997,7 +6004,7 @@ gc_apply_codex_changes() {
   summary_helper="$(gc_clone_python_tool "wot_summarize_envelope.py" "$helper_root")" || return 1
 
   local summary
-  if ! summary="$(WOT_IDENTICAL="$identical_envelope" python3 "$summary_helper" "$payload_json" "$project_root")"; then
+  if ! summary="$(WOT_IDENTICAL="$identical_envelope" WOT_META_PATH="$envelope_meta" python3 "$summary_helper" "$payload_json" "$project_root")"; then
     return 2
   fi
 
@@ -7054,6 +7061,24 @@ EOHELP
   GC_WOT_SOFT_VERIFY_TRIGGERED=0
   GC_WOT_COMPLETE_ON_FOLLOWUP="$complete_on_followup"
 
+  GC_COMPLETE_ON_VERIFY="${GC_COMPLETE_ON_VERIFY:-1}"
+  GC_ALLOW_EMPTY_COMMIT="${GC_ALLOW_EMPTY_COMMIT:-1}"
+  GC_AUTO_PUSH_MAIN="${GC_AUTO_PUSH_MAIN:-1}"
+  GC_RETRY_PUSH_MAX="${GC_RETRY_PUSH_MAX:-3}"
+  GC_FORCE_DIFF_ON_VERIFY_FAIL="${GC_FORCE_DIFF_ON_VERIFY_FAIL:-1}"
+  GC_LAST_VERIFY_STATUS="skipped"
+  GC_LAST_VERIFY_SUMMARY=""
+  GC_LAST_VERIFY_REPORT=""
+  GC_LAST_VERIFY_DETAILS=""
+  GC_LAST_AUTO_PUSH_ERROR=""
+  if [[ -z "${GC_VERIFY_CONFIG:-}" ]]; then
+    GC_VERIFY_CONFIG=""
+  fi
+
+  if [[ "${GC_AUTO_PUSH_MAIN:-1}" == "1" && -z "${GC_AUTO_PUSH_BRANCH:-}" ]]; then
+    GC_AUTO_PUSH_BRANCH="main"
+  fi
+
   if (( binder_enabled )); then
     export GC_BINDER_ENABLED=1
   else
@@ -7963,6 +7988,53 @@ EOHELP
     return 0
   }
 
+  gc_run_task_verify() {
+    local task_ref="${1:-task}"
+    local report_dir="${2:-${RUN_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/staging/plan/work}}"
+    local project_root="${PROJECT_ROOT:-$PWD}"
+    local helper_path
+    helper_path="$(gc_clone_python_tool "task_verify.py" "$project_root")" || return 1
+    local report_path="${report_dir}/verify_${task_ref//[^A-Za-z0-9._-]/_}.json"
+    local config_arg=()
+    if [[ -n "${GC_VERIFY_CONFIG:-}" ]]; then
+      config_arg=(--config "${GC_VERIFY_CONFIG}")
+    fi
+    local verify_output=""
+    if ! verify_output="$("$python_bin" "$helper_path" --project "$project_root" "${config_arg[@]}" --task-ref "$task_ref" --output "$report_path")"; then
+      GC_LAST_VERIFY_STATUS="fail"
+      GC_LAST_VERIFY_SUMMARY="Verification helper failed."
+      GC_LAST_VERIFY_REPORT="$report_path"
+      GC_LAST_VERIFY_DETAILS=""
+      return 1
+    fi
+
+    GC_LAST_VERIFY_REPORT="$report_path"
+    GC_LAST_VERIFY_STATUS="inconclusive"
+    GC_LAST_VERIFY_SUMMARY=""
+    GC_LAST_VERIFY_DETAILS=""
+    if command -v "$python_bin" >/dev/null 2>&1; then
+      local parsed
+      if parsed="$("$python_bin" - <<'PY' "$verify_output" 2>/dev/null)"; then
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+status = str(payload.get("status", "inconclusive")).strip().lower()
+if status not in {"pass", "fail", "inconclusive"}:
+    status = "inconclusive"
+summary = str(payload.get("summary", "") or "")
+summary = " ".join(summary.split())
+details = json.dumps(payload.get("details", []), ensure_ascii=False)
+print(status)
+print(summary)
+print(details)
+PY
+        IFS=$'\n' read -r GC_LAST_VERIFY_STATUS GC_LAST_VERIFY_SUMMARY GC_LAST_VERIFY_DETAILS <<<"$parsed"
+      fi
+    fi
+    return 0
+  }
+
   gc_auto_push_helper() {
     local label="${1:-}"
     shift || true
@@ -7973,6 +8045,7 @@ EOHELP
     GC_LAST_AUTO_PUSH_STATUS="skipped"
     GC_LAST_AUTO_PUSH_REMOTE=""
     GC_LAST_AUTO_PUSH_BRANCH=""
+    GC_LAST_AUTO_PUSH_ERROR=""
 
     if [[ "${GC_AUTO_PUSH:-}" != "1" ]]; then
       return 1
@@ -8003,9 +8076,6 @@ EOHELP
       return 1
     fi
 
-    local before_hash
-    before_hash="$(git -C "$project_root" rev-parse HEAD 2>/dev/null || true)"
-
     local summary_path
     summary_path="$(mktemp)" || return 1
     if ! "$python_bin" - "$project_root" "$label" "${change_records[@]}" <<'PY' >"$summary_path"; then
@@ -8034,50 +8104,50 @@ PY
       return 1
     fi
 
-    if ! "$node_bin" "$helper_path" "$summary_path"; then
+    local autopush_stdout=""
+    if ! autopush_stdout="$(GC_AUTOPUSH_EXPECT_JSON=1 "$node_bin" "$helper_path" "$summary_path" 2>&1)"; then
       rm -f "$summary_path"
+      GC_LAST_AUTO_PUSH_STATUS="failed"
+      GC_LAST_AUTO_PUSH_ERROR="$autopush_stdout"
       return 1
     fi
     rm -f "$summary_path"
 
-    local after_hash
-    after_hash="$(git -C "$project_root" rev-parse HEAD 2>/dev/null || true)"
-    if [[ -n "$after_hash" && "$after_hash" != "$before_hash" ]]; then
-      GC_LAST_AUTO_COMMIT_STATUS="committed"
-      GC_LAST_AUTO_COMMIT_HASH="$after_hash"
-    else
-      GC_LAST_AUTO_COMMIT_STATUS="clean"
-      GC_LAST_AUTO_COMMIT_HASH=""
+    if [[ -z "$autopush_stdout" ]]; then
+      autopush_stdout='{}'
     fi
 
-    local current_branch
-    current_branch="$(git -C "$project_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-    local resolved_branch="${GC_AUTO_PUSH_BRANCH:-$current_branch}"
-    local resolved_remote="${GC_AUTO_PUSH_REMOTE:-}"
+    local parse_output=""
+    if ! parse_output="$("$python_bin" - <<'PY' "$autopush_stdout" 2>/dev/null)"; then
+import json
+import sys
 
-    if [[ -z "$resolved_remote" && -n "$resolved_branch" ]]; then
-      resolved_remote="$(git -C "$project_root" config --get "branch.${resolved_branch}.remote" 2>/dev/null || true)"
-    fi
-    if [[ -z "$resolved_remote" && -n "$current_branch" ]]; then
-      resolved_remote="$(git -C "$project_root" config --get "branch.${current_branch}.remote" 2>/dev/null || true)"
-    fi
-    if [[ -z "$resolved_remote" ]]; then
-      resolved_remote="origin"
+try:
+    payload = json.loads(sys.argv[1])
+except Exception:
+    payload = {}
+
+commit_status = payload.get("commitStatus", "skipped")
+commit_sha = payload.get("commitSha") or ""
+push_status = payload.get("pushStatus", "skipped")
+remote = payload.get("remote") or ""
+branch = payload.get("branch") or ""
+error = payload.get("error") or ""
+print(commit_status)
+print(commit_sha)
+print(push_status)
+print(remote)
+print(branch)
+print(error)
+PY
+    then
+      parse_output=$'failed\n\nfailed\n\n\n'
     fi
 
-    if [[ -z "$resolved_branch" || "$resolved_branch" == "HEAD" ]]; then
-      resolved_branch="$current_branch"
-    fi
+    IFS=$'\n' read -r GC_LAST_AUTO_COMMIT_STATUS GC_LAST_AUTO_COMMIT_HASH GC_LAST_AUTO_PUSH_STATUS GC_LAST_AUTO_PUSH_REMOTE GC_LAST_AUTO_PUSH_BRANCH GC_LAST_AUTO_PUSH_ERROR <<<"$parse_output"
 
-    GC_LAST_AUTO_PUSH_REMOTE="$resolved_remote"
-    GC_LAST_AUTO_PUSH_BRANCH="$resolved_branch"
-
-    if [[ "$resolved_remote" == "__skip__" ]]; then
-      GC_LAST_AUTO_PUSH_STATUS="skipped"
-    elif git -C "$project_root" remote get-url "$resolved_remote" >/dev/null 2>&1; then
-      GC_LAST_AUTO_PUSH_STATUS="attempted"
-    else
-      GC_LAST_AUTO_PUSH_STATUS="skipped"
+    if [[ "$GC_LAST_AUTO_COMMIT_STATUS" == "failed" || "$GC_LAST_AUTO_PUSH_STATUS" == "failed" ]]; then
+      return 1
     fi
 
     return 0
@@ -8087,6 +8157,7 @@ PY
     GC_LAST_AUTO_PUSH_STATUS="skipped"
     GC_LAST_AUTO_PUSH_REMOTE=""
     GC_LAST_AUTO_PUSH_BRANCH=""
+    GC_LAST_AUTO_PUSH_ERROR=""
 
     if [[ "${GC_AUTO_PUSH:-}" != "1" ]]; then
       return 0
@@ -8453,10 +8524,19 @@ EOF
       local max_attempts=2
       gc_touch_progress
       local prompt_augmented=0 prompt_change_reminder=0
+      local contract_guard_injected=0
       local keep_output=$keep_artifacts
       local break_after_update=0
       local task_result_status="in-progress"
       local task_needs_review=0
+      local task_verify_status="skipped"
+      local task_verify_summary=""
+      local task_verify_details=""
+      local task_verify_report=""
+      local task_meta_plan_flag=0
+      local task_meta_focus_flag=0
+      local task_meta_no_changes_flag=0
+      local task_meta_already_flag=0
       local -a task_notes=()
       local -a task_written_paths=()
       local -a task_patched_paths=()
@@ -8681,6 +8761,7 @@ EOF
         (( ++diff_guard_global_attempt ))
         local diff_guard_current_step="$diff_guard_global_attempt"
         gc_touch_progress
+        GC_LAST_APPLY_META=""
         codex_attempted=1
         local diff_before=""
         task_change_sizes=""
@@ -8732,12 +8813,39 @@ EOF
           local patch_label="${banner_task_id:-${slug:-story}-${task_number}}"
           patch_label="${patch_label//[^A-Za-z0-9_.-]/_}"
           local patch_artifact_path="${patch_artifact_dir}/${patch_label}.patch"
+          local apply_rc=0
           if ! apply_output="$(gc_apply_codex_changes "$output_path" "$PROJECT_ROOT" "$patch_artifact_path")"; then
+            apply_rc=$?
+            if (( apply_rc == 13 )); then
+              warn "  Agent response violated contract (plan/focus without actionable changes)."
+              task_notes+=("Response contract violated: plan/focus present without corresponding changes or notes.")
+              apply_status="contract-violation"
+              if (( attempt < max_attempts )); then
+                if (( contract_guard_injected == 0 )); then
+                  cat >>"$prompt_path" <<'REM'
+
+## Critical constraint
+- Provide at least one concrete repository change (diff or file write) or explicitly document a blocker with evidence that proves no change is required.
+- Do not repeat the previous plan without actionable modifications.
+REM
+                  contract_guard_injected=1
+                fi
+                continue
+              fi
+              task_needs_review=1
+              manual_followups=1
+              keep_output=1
+              task_result_status="blocked"
+              task_notes+=("Repeated contract violations after retries; marking task blocked.")
+              codex_ok=1
+              break_after_update=1
+              break
+            fi
             warn "  Failed to apply changes for ${call_name}; manual review required (see ${output_path})."
             task_needs_review=1
             manual_followups=1
             keep_output=1
-            task_result_status="on-hold"
+            task_result_status="blocked"
             task_notes+=("Codex changes could not be applied automatically; review ${output_path}.")
             codex_ok=1
             break
@@ -8761,6 +8869,7 @@ EOF
             break
           fi
           apply_status="ok"
+          local task_apply_meta_path=""
           while IFS= read -r change_line; do
             case "$change_line" in
               STATUS\ *)
@@ -8840,8 +8949,45 @@ EOF
                   task_needs_review=1
                 fi
                 ;;
+              META\ *)
+                task_apply_meta_path="${change_line#META }"
+                ;;
             esac
           done <<<"$apply_output"
+          if [[ -n "$task_apply_meta_path" ]]; then
+            if [[ "$task_apply_meta_path" != /* ]]; then
+              task_apply_meta_path="${PROJECT_ROOT}/${task_apply_meta_path#./}"
+            fi
+            GC_LAST_APPLY_META="$task_apply_meta_path"
+          else
+            GC_LAST_APPLY_META=""
+          fi
+          if [[ -n "${GC_LAST_APPLY_META:-}" && -f "$GC_LAST_APPLY_META" ]]; then
+            local meta_flags=""
+            if meta_flags="$("$python_bin" - "$GC_LAST_APPLY_META" <<'PY' 2>/dev/null)"; then
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    payload = {}
+
+def flag(name):
+    value = payload.get(name)
+    return "1" if value else "0"
+
+print(flag("plan_has_items"))
+print(flag("focus_has_items"))
+print(flag("notes_contains_no_changes"))
+print(flag("notes_contains_already_satisfied"))
+PY
+            ); then
+              IFS=$'\n' read -r task_meta_plan_flag task_meta_focus_flag task_meta_no_changes_flag task_meta_already_flag <<<"$meta_flags"
+            fi
+          fi
 
           if (( task_changes_applied == 0 )); then
             if (( empty_checkpoint_created == 0 )); then
@@ -9192,6 +9338,68 @@ REM
         break
       done
 
+      local task_ref_for_verify="${task_id:-${banner_task_id:-${slug:-story}-${task_number}}}"
+      if [[ -z "$task_ref_for_verify" ]]; then
+        task_ref_for_verify="${slug:-story}-${task_number}"
+      fi
+      local should_run_verify=0
+      if [[ "${GC_COMPLETE_ON_VERIFY:-1}" == "1" ]]; then
+        should_run_verify=1
+      elif (( task_changes_applied == 0 )); then
+        should_run_verify=1
+      elif (( task_meta_plan_flag == 1 || task_meta_focus_flag == 1 )); then
+        should_run_verify=1
+      fi
+      if (( should_run_verify )); then
+        if gc_run_task_verify "$task_ref_for_verify" "$story_run_dir"; then
+          task_verify_status="${GC_LAST_VERIFY_STATUS:-inconclusive}"
+          task_verify_summary="${GC_LAST_VERIFY_SUMMARY:-}"
+          task_verify_details="${GC_LAST_VERIFY_DETAILS:-}"
+          task_verify_report="${GC_LAST_VERIFY_REPORT:-}"
+        else
+          task_verify_status="inconclusive"
+          task_verify_summary="${GC_LAST_VERIFY_SUMMARY:-Verification helper failure}"
+          task_verify_details="${GC_LAST_VERIFY_DETAILS:-}"
+          task_verify_report="${GC_LAST_VERIFY_REPORT:-}"
+        fi
+        local verify_report_display="$task_verify_report"
+        if [[ -n "$verify_report_display" && -n "$PROJECT_ROOT" && "$verify_report_display" == "$PROJECT_ROOT/"* ]]; then
+          verify_report_display="${verify_report_display#$PROJECT_ROOT/}"
+        fi
+        if [[ -n "$task_verify_summary" ]]; then
+          task_notes+=("Verify ${task_verify_status}: ${task_verify_summary}")
+        else
+          task_notes+=("Verify ${task_verify_status}.")
+        fi
+        if [[ -n "$verify_report_display" ]]; then
+          task_notes+=("Verification report stored at ${verify_report_display}.")
+        fi
+      fi
+
+      if [[ "$task_verify_status" == "pass" && $task_changes_applied -eq 0 && "${GC_COMPLETE_ON_VERIFY:-1}" == "1" ]]; then
+        if [[ "$task_result_status" == "in-progress" || "$task_result_status" == "complete" ]]; then
+          task_result_status="complete"
+          task_needs_review=0
+          manual_followups=0
+          keep_output=0
+        fi
+      elif [[ "$task_verify_status" == "fail" ]]; then
+        task_needs_review=1
+        manual_followups=1
+        keep_output=1
+        task_result_status="blocked"
+        if [[ -n "$task_verify_report" ]]; then
+          task_notes+=("Verification failed; inspect ${task_verify_report}.")
+        fi
+      elif [[ "$task_verify_status" == "inconclusive" && $task_changes_applied -eq 0 ]]; then
+        if [[ "$task_result_status" == "in-progress" ]]; then
+          task_needs_review=1
+          manual_followups=1
+          task_result_status="blocked"
+          task_notes+=("Verification inconclusive with zero repository changes; follow up required.")
+        fi
+      fi
+
       if (( task_needs_review )) && (( auto_review_enabled )) && (( task_changes_applied > 0 )); then
         local auto_review_path=""
         if auto_review_path="$(gc_generate_auto_review "$story_run_dir" "$story_log_dir" "$banner_task_id" "$task_id" "$task_result_status" "$task_number" "$task_tokens_total" "$PROJECT_ROOT")"; then
@@ -9424,7 +9632,7 @@ REM
 
       local story_status_hint="in-progress"
       case "$task_result_status" in
-        blocked|blocked-budget|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)) story_status_hint="blocked" ;;
+        blocked|blocked-budget|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|retryable|blocked-push) story_status_hint="blocked" ;;
         on-hold) story_status_hint="on-hold" ;;
       esac
 
@@ -9436,75 +9644,71 @@ REM
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "$task_result_status" "$run_stamp"
       gc_update_work_state "$tasks_db" "$slug" "$story_status_hint" "$completed_hint" "$total_tasks_int" "$run_stamp"
 
-      if [[ "$task_result_status" == "complete" && $task_changes_applied -gt 0 ]]; then
-        local -a commit_targets=("${task_written_paths[@]}")
-        commit_targets+=("${task_patched_paths[@]}")
-        local apply_status_label="${apply_status:-unknown}"
+      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
         local commit_label="${banner_task_id}: ${task_title:-Task ${task_number}}"
-        local commit_message="chore(tasks): ${banner_task_id} snapshot (apply_status: ${apply_status_label})"
-        local auto_push_done=0
-        if [[ "${GC_AUTO_PUSH:-}" == "1" ]]; then
-          if gc_auto_push_helper "$commit_label" "${task_auto_push_records[@]}"; then
-            case "${GC_LAST_AUTO_COMMIT_STATUS:-}" in
-              committed)
-                auto_push_done=1
-                local note_message="${commit_label//$'\n'/ }"
-                note_message="${note_message//$'\r'/ }"
-                if [[ -n "${GC_LAST_AUTO_COMMIT_HASH:-}" ]]; then
-                  if [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "attempted" ]]; then
-                    task_notes+=("Auto-push commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} (push attempted to ${GC_LAST_AUTO_PUSH_REMOTE}/${GC_LAST_AUTO_PUSH_BRANCH:-?}) — ${note_message} (${apply_status_label})")
-                  elif [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "skipped" ]]; then
-                    task_notes+=("Auto-push commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} (push skipped) — ${note_message} (${apply_status_label})")
-                  else
-                    task_notes+=("Auto-push commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} — ${note_message} (${apply_status_label})")
-                  fi
-                else
-                  task_notes+=("Auto-push commit recorded — ${note_message} (${apply_status_label})")
-                fi
-                ;;
-              clean)
-                auto_push_done=1
-                task_notes+=("Auto-push: working tree already clean; no commit created (${commit_label//$'\n'/ }).")
-                ;;
-            esac
-          else
-            warn "    Auto-push helper failed; falling back to built-in auto-commit."
-          fi
+        local original_auto_push="${GC_AUTO_PUSH:-0}"
+        local original_remote="${GC_AUTO_PUSH_REMOTE:-}"
+        local original_branch="${GC_AUTO_PUSH_BRANCH:-}"
+        local auto_push_enabled="${GC_AUTO_PUSH:-0}"
+        if [[ "$auto_push_enabled" != "1" ]]; then
+          auto_push_enabled=0
+          GC_AUTO_PUSH=1
+          GC_AUTO_PUSH_REMOTE="__skip__"
+        else
+          auto_push_enabled=1
         fi
-        if (( auto_push_done == 0 )); then
-          gc_auto_commit_task "$commit_message" "${commit_targets[@]}"
-          case "${GC_LAST_AUTO_COMMIT_STATUS:-skipped}" in
-            committed)
-              local note_message="${commit_label//$'\n'/ }"
-              note_message="${note_message//$'\r'/ }"
-              if [[ -n "${GC_LAST_AUTO_COMMIT_HASH:-}" ]]; then
-                task_notes+=("Auto-commit ${GC_LAST_AUTO_COMMIT_HASH:0:7} — ${note_message} (${apply_status_label})")
-              else
-                task_notes+=("Auto-commit recorded — ${note_message} (${apply_status_label})")
-              fi
-              if [[ "${GC_AUTO_PUSH:-}" == "1" ]]; then
-                if ! gc_auto_push_only; then
-                  task_notes+=("Auto-push failed; push changes manually.")
-                  manual_followups=1
-                elif [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "pushed" ]]; then
-                  local push_branch_display="${GC_LAST_AUTO_PUSH_BRANCH:-HEAD}"
-                  task_notes+=("Auto-push ${GC_LAST_AUTO_PUSH_REMOTE}/${push_branch_display}.")
-                elif [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "skipped" ]]; then
-                  task_notes+=("Auto-push skipped (remote not configured or GC_AUTO_PUSH_REMOTE=__skip__).")
-                fi
-              fi
-              ;;
-            failed)
-              task_notes+=("Auto-commit failed; inspect git status and commit manually.")
-              manual_followups=1
-              ;;
-          esac
-        fi
-      fi
+        export GC_AUTOPUSH_TASK_REF="$task_ref_for_verify"
+        export GC_AUTOPUSH_VERIFY_STATUS="$task_verify_status"
+        export GC_ALLOW_EMPTY_COMMIT="${GC_ALLOW_EMPTY_COMMIT:-1}"
 
-      if [[ "$task_result_status" == "complete" ]]; then
+        local finalize_attempt=1
+        local finalize_success=0
+        local finalize_error=""
+        local retry_cap="${GC_RETRY_PUSH_MAX:-3}"
+        if ! [[ "$retry_cap" =~ ^[0-9]+$ ]]; then
+          retry_cap=3
+        fi
+
+        while (( finalize_attempt <= retry_cap )); do
+          if gc_auto_push_helper "$commit_label" "${task_auto_push_records[@]}"; then
+            finalize_success=1
+            break
+          fi
+          finalize_error="${GC_LAST_AUTO_PUSH_ERROR:-auto-push failure}"
+          sleep $((finalize_attempt * 2))
+          ((finalize_attempt++))
+        done
+
+        if (( auto_push_enabled == 0 )); then
+          GC_AUTO_PUSH="$original_auto_push"
+          GC_AUTO_PUSH_REMOTE="$original_remote"
+          GC_AUTO_PUSH_BRANCH="$original_branch"
+        fi
+
+        if (( finalize_success )); then
+          if [[ "${GC_LAST_AUTO_COMMIT_STATUS:-}" == "committed" ]]; then
+            local commit_hash="${GC_LAST_AUTO_COMMIT_HASH:0:7}"
+            local push_desc=""
+            if [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "pushed" ]]; then
+              push_desc="pushed to ${GC_LAST_AUTO_PUSH_REMOTE:-origin}/${GC_LAST_AUTO_PUSH_BRANCH:-HEAD}"
+            elif [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "failed" ]]; then
+              push_desc="push failed"
+            elif [[ "${GC_LAST_AUTO_PUSH_STATUS:-}" == "skipped" ]]; then
+              push_desc="push skipped"
+            else
+              push_desc="commit recorded"
+            fi
+            task_notes+=("Auto-finalized commit ${commit_hash} (${push_desc}).")
+          fi
+        else
+          task_result_status="blocked-push"
+          manual_followups=1
+          task_notes+=("Auto-push failed after ${retry_cap} attempt(s): ${finalize_error}.")
+          keep_output=1
+        fi
+
         local finalize_script="${PROJECT_ROOT}/scripts/auto_finalize_task.sh"
-        if [[ -x "$finalize_script" ]]; then
+        if (( finalize_success )) && [[ -x "$finalize_script" ]]; then
           if ! bash "$finalize_script"; then
             warn "  Auto finalize failed; inspect git status."
           fi
@@ -9606,7 +9810,7 @@ REM
       (( task_stage_tokens_patch < 0 )) && task_stage_tokens_patch=0
       (( task_stage_tokens_verify < 0 )) && task_stage_tokens_verify=0
 
-      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$observation_hash" "$timestamp_utc" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_story_points"
+      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$observation_hash" "$timestamp_utc" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_story_points" "$task_verify_status" "$task_verify_summary" "$task_verify_report" "$task_verify_details" "$task_meta_plan_flag" "$task_meta_focus_flag" "$task_meta_no_changes_flag" "$task_meta_already_flag" "${GC_LAST_AUTO_COMMIT_HASH:-}" "${GC_LAST_AUTO_COMMIT_STATUS:-}" "${GC_LAST_AUTO_PUSH_STATUS:-}" "${GC_LAST_AUTO_PUSH_REMOTE:-}" "${GC_LAST_AUTO_PUSH_BRANCH:-}" "${GC_LAST_AUTO_PUSH_ERROR:-}"
 
       gc_log_task_metrics "$run_stamp" "$slug" "$task_number" "$banner_task_id" "$task_result_status" "$task_story_points" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens"
 

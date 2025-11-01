@@ -157,6 +157,16 @@ def summarize(envelope_path: Path, project_root: Path) -> str:
             safe_note = note_str.replace("\r", " ").replace("\n", " ")
             output_lines.append(f"NOTE {safe_note}")
 
+    meta_path = os.environ.get("WOT_META_PATH")
+    if meta_path:
+        meta_file = Path(meta_path)
+        if meta_file.is_file():
+            try:
+                rel_meta = meta_file.relative_to(project_root)
+            except Exception:
+                rel_meta = meta_file
+            output_lines.append(f"META {rel_meta}")
+
     return "\n".join(output_lines)
 
 

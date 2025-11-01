@@ -7,13 +7,38 @@ db_path, type_arg, item_children, progress_flag, task_details = sys.argv[1:6]
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 
-NON_REMAINING_STATUSES = {
-    "complete",
-    "completed",
-    "done",
-    "completed-no-changes",
-    "skipped-no-changes",
-}
+def normalise_status(value: str) -> str:
+    text = (value or "").strip().lower()
+    return text.replace("_", "-")
+
+
+def status_is_completed(value: str) -> bool:
+    status = normalise_status(value)
+    if not status:
+        return False
+    if status.startswith("complete"):
+        return True
+    if status.startswith("completed"):
+        return True
+    if status.startswith("done"):
+        return True
+    if status.startswith("skipped-already-complete"):
+        return True
+    if status.startswith("skipped-no-changes"):
+        return True
+    return False
+
+
+def status_is_in_progress(value: str) -> bool:
+    status = normalise_status(value)
+    if not status:
+        return False
+    if status == "in-progress" or status == "in progress":
+        return True
+    if status.startswith("in-progress"):
+        return True
+    return False
+
 
 def pluralize(value, singular, plural=None):
     try:
@@ -38,16 +63,12 @@ def empty_counts():
 
 
 def count_remaining_tasks(cur: sqlite3.Connection) -> int:
-    if not NON_REMAINING_STATUSES:
-        row = cur.execute("SELECT COUNT(*) FROM tasks").fetchone()
-        return int(row[0]) if row else 0
-    placeholders = ",".join("?" for _ in NON_REMAINING_STATUSES)
-    query = (
-        "SELECT COUNT(*) FROM tasks "
-        f"WHERE LOWER(COALESCE(status, '')) NOT IN ({placeholders})"
-    )
-    row = cur.execute(query, tuple(NON_REMAINING_STATUSES)).fetchone()
-    return int(row[0]) if row else 0
+    remaining = 0
+    for row in cur.execute("SELECT status FROM tasks"):
+        status = row[0] if not isinstance(row, sqlite3.Row) else row["status"]
+        if not status_is_completed(status):
+            remaining += 1
+    return remaining
 
 def fetch_stories():
     query = """
@@ -67,21 +88,16 @@ def fetch_epics():
     return [dict(row) for row in conn.execute(query)]
 
 def fetch_task_counts():
-    query = """
-        SELECT story_slug,
-               COUNT(*) AS total,
-               SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'complete' THEN 1 ELSE 0 END) AS completed,
-               SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'in-progress' THEN 1 ELSE 0 END) AS in_progress
-        FROM tasks
-        GROUP BY story_slug
-    """
     counts = {}
-    for row in conn.execute(query):
-        counts[row["story_slug"]] = {
-            "total": row["total"] or 0,
-            "completed": row["completed"] or 0,
-            "in_progress": row["in_progress"] or 0,
-        }
+    for row in conn.execute("SELECT story_slug, status FROM tasks"):
+        slug = (row["story_slug"] or "").strip()
+        entry = counts.setdefault(slug, {"total": 0, "completed": 0, "in_progress": 0})
+        entry["total"] += 1
+        status = row["status"]
+        if status_is_completed(status):
+            entry["completed"] += 1
+        elif status_is_in_progress(status):
+            entry["in_progress"] += 1
     return counts
 
 def fetch_tasks_for_story(slug):
@@ -385,7 +401,7 @@ def print_task_children(story):
     print_table(headers, rows)
 
 def compute_story_metrics(total, complete, in_progress, pending, status_field):
-    status_field = (status_field or "pending").strip().lower().replace("_", "-")
+    status_field = normalise_status(status_field or "pending")
     if total > 0:
         if complete >= total and in_progress == 0 and pending == 0:
             status = "complete"
@@ -398,7 +414,7 @@ def compute_story_metrics(total, complete, in_progress, pending, status_field):
             progress = 0.0
     else:
         status = status_field or "pending"
-        progress = 100.0 if status == "complete" else 0.0
+        progress = 100.0 if status_is_completed(status) else 0.0
 
     if total > 0:
         tasks_desc = f"{complete}/{total} complete"
@@ -529,18 +545,16 @@ def print_task_details(task_identifier):
     emit("Updated At", row["updated_at"])
 
 def print_progress():
-    row = conn.execute(
-        """
-        SELECT
-          COUNT(*) AS total,
-          SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'complete' THEN 1 ELSE 0 END) AS complete,
-          SUM(CASE WHEN LOWER(COALESCE(status, '')) = 'in-progress' THEN 1 ELSE 0 END) AS in_progress
-        FROM tasks
-        """
-    ).fetchone()
-    total = row["total"] or 0
-    complete = row["complete"] or 0
-    in_progress = row["in_progress"] or 0
+    total = 0
+    complete = 0
+    in_progress = 0
+    for row in conn.execute("SELECT status FROM tasks"):
+        status = row["status"]
+        total += 1
+        if status_is_completed(status):
+            complete += 1
+        elif status_is_in_progress(status):
+            in_progress += 1
     pending = max(total - complete - in_progress, 0)
     percent = (complete / total * 100) if total else 0.0
     bar_length = 30

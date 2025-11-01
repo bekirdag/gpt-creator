@@ -36,7 +36,6 @@ def main():
         import os
         import re
         import subprocess
-        import sys
         from pathlib import Path
         from subprocess import CompletedProcess
         from typing import Optional, List, Tuple, Set, Dict, Sequence
@@ -1088,7 +1087,6 @@ def main():
         import sqlite3
         import shutil
         import subprocess
-        import sys
         import tempfile
         import time
         from pathlib import Path
@@ -3236,7 +3234,6 @@ def main():
             "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
             "- Keep each section to short bullet items or terse sentences; skip JSON, code fences, and closing summaries.",
             "- Make repository edits by listing the exact shell commands you will run under `Commands` (use `bash` to write files when needed).",
-            "- Include a small `diff` fence only when it makes a tricky change clearer; it is optional.",
             "- In `Focus`, call out the files or symbols you are touching so reviewers understand the blast radius.",
             "- Capture blockers, follow-ups, or verification results in `Notes`.",
             "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",

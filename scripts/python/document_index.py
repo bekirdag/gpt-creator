@@ -3112,7 +3112,6 @@ response_guidance = [
     "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
     "- Keep each section terse—short bullet items or single sentences—without JSON wrappers or closing summaries.",
     "- Apply changes by listing the exact shell commands under `Commands`; use `bash` to edit files when needed.",
-    "- Include a `diff` fence only when it clarifies a complicated edit; it is optional.",
     "- In `Focus`, identify the files or symbols you will touch so reviewers understand scope.",
     "- Capture blockers, tests, and follow-ups in `Notes`.",
     "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; plan the remediation first.",

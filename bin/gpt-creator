@@ -10279,6 +10279,34 @@ REM
         task_result_status="complete"
       fi
 
+      local note_status_override=""
+      if ((${#task_notes[@]} > 0)); then
+        local _note_text=""
+        for _note_text in "${task_notes[@]}"; do
+          if [[ "$_note_text" =~ STATUS:[[:space:]]*([A-Za-z-]+) ]]; then
+            note_status_override="${BASH_REMATCH[1],,}"
+          fi
+        done
+      fi
+      if [[ -n "$note_status_override" ]]; then
+        case "$note_status_override" in
+          completed|complete)
+            if [[ "$task_result_status" == "completed-no-changes" || "$task_result_status" == "in-progress" || "$task_result_status" == "retryable" ]]; then
+              task_result_status="complete"
+            fi
+            ;;
+          needs-retry|needs_retry|retry|retryable)
+            task_result_status="retryable"
+            ;;
+          failed|fail)
+            if [[ "$task_result_status" != "dead-letter" && "$task_result_status" != "permanent-fail" ]]; then
+              task_result_status="permanent-fail"
+              task_outcome_reason="${task_outcome_reason:-note-status-failed}"
+            fi
+            ;;
+        esac
+      fi
+
       if [[ "$task_terminal_state" == "RUNNING" ]]; then
         case "$task_result_status" in
           complete)

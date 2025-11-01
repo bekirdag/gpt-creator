@@ -239,7 +239,6 @@ def main():
             'duplicate': 'duplicate commands',
             'policy': 'policy guardrails',
             'non-whitelist': 'non-whitelisted commands',
-            'python-heredoc': 'python heredoc (use apply-block/write_block.py)',
         }
 
         def _token_targets_doc(token: str) -> bool:
@@ -1503,9 +1502,6 @@ def main():
                         if has_wide_sed:
                             _record_blocked_command('sed-window', command)
                             continue
-                        if re.search(r"python3?\s+-\s*<<", script_text):
-                            _record_blocked_command('python-heredoc', command)
-                            continue
                 if first_token == "rg":
                     if _command_targets_docs(command):
                         _record_blocked_command('doc-search', command)
@@ -1527,10 +1523,6 @@ def main():
                 if not COMMAND_WHITELIST_PATTERN.match(command):
                     _record_blocked_command('non-whitelist', command)
                     continue
-                if first_token in {"python3"}:
-                    if re.search(r"<<\s*'?(PY|EOF)", command):
-                        _record_blocked_command('python-heredoc', command)
-                        continue
                 if first_token in {"python3"} and ".write_text(" in command:
                     manual_notes.append(
                         _format_action_result(

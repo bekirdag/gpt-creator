@@ -334,6 +334,16 @@ def main():
 
         def _normalize_command_wrapper(text: str) -> str:
             normalized = text.strip()
+            if not normalized:
+                return normalized
+            if normalized.startswith('`'):
+                closing = normalized.find('`', 1)
+                if closing != -1:
+                    inner = normalized[1:closing].strip()
+                    if inner:
+                        normalized = inner
+                    else:
+                        normalized = normalized[closing + 1:].strip()
             while len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'`', '"', "'"}:
                 normalized = normalized[1:-1].strip()
             return normalized

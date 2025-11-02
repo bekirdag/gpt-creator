@@ -9568,7 +9568,22 @@ print(flag("notes_contains_already_satisfied"))'
               esac
             fi
 
-            if (( allow_noop_completion )); then
+            local note_reject_completion=0
+            if ((${#task_notes[@]} > 0)); then
+              local _note_text=""
+              for _note_text in "${task_notes[@]}"; do
+                if [[ "$_note_text" =~ STATUS:[[:space:]]*([A-Za-z-]+) ]]; then
+                  case "${BASH_REMATCH[1],,}" in
+                    needs-retry|needs_retry|retry|retryable|failed|fail)
+                      note_reject_completion=1
+                      break
+                      ;;
+                  esac
+                fi
+              done
+            fi
+
+            if (( allow_noop_completion )) && (( note_reject_completion == 0 )); then
               info "    No repository changes required; marking task complete."
               if [[ -z "$apply_status" || "$apply_status" == "pending" || "$apply_status" == "ok" ]]; then
                 apply_status="noop-accepted"

@@ -4054,6 +4054,7 @@ def main():
             "- Primary objective: ship the code required by the task acceptance criteria; avoid documentation rewrites or reorganizing prompts.",
             "- If an acceptance criterion demands heavy setup or environments the agent cannot access, acknowledge the gap and continue focusing on the core code changes.",
             "- In `Focus`, call out the files or symbols you are touching so reviewers understand the blast radius.",
+            "- When you are satisfied with the changes, stage and commit them yourself (e.g., `git add …` then `git commit -m \"<task summary>\"`) and list those commands under `Commands`.",
             "- Capture blockers, follow-ups, or verification results in `Notes`.",
             "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",
             "- Use the documentation catalog helpers (`python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" ...`) for SDS/PDR references instead of opening doc files directly.",

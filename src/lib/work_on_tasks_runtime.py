@@ -1865,12 +1865,20 @@ def main():
                 )
 
         summary_notes = (payload.get('notes') or []) + manual_notes
+        forced_canonical_status = None
+        forced_legacy_status = None
+        if 'placeholder-ellipsis' in blocked_command_counts:
+            forced_canonical_status = 'RETRYABLE'
+            forced_legacy_status = 'retryable'
         if actual_changes > 0:
             legacy_status = 'ok'
             canonical_status = 'COMPLETED'
         else:
             legacy_status = 'noop'
             canonical_status = 'COMPLETED-NO-CHANGES'
+        if forced_canonical_status:
+            canonical_status = forced_canonical_status
+            legacy_status = forced_legacy_status or legacy_status
         status_note = f"STATUS: {canonical_status}"
         if status_note not in summary_notes:
             summary_notes.append(status_note)

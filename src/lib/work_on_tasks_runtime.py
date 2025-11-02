@@ -37,6 +37,7 @@ def main():
         import re
         import shlex
         import subprocess
+        import tempfile
         from pathlib import Path
         from subprocess import CompletedProcess
         from collections import OrderedDict
@@ -417,6 +418,63 @@ def main():
             if max_window > threshold:
                 return (True, max_window)
             return (False, max_window)
+
+        def _extract_python_heredoc(script: str) -> Optional[str]:
+            if not script:
+                return None
+            lines = script.splitlines()
+            if not lines:
+                return None
+            first = lines[0].strip()
+            match = re.fullmatch(
+                r"python3\s+-\s+<<(?P<quote>['\"]?)(?P<label>[A-Za-z0-9_]+)(?P=quote)",
+                first,
+            )
+            if not match:
+                return None
+            label = match.group('label')
+            body: List[str] = []
+            terminator_index: Optional[int] = None
+            for idx, line in enumerate(lines[1:], start=1):
+                if line.strip() == label:
+                    terminator_index = idx
+                    break
+                body.append(line)
+            if terminator_index is None:
+                return None
+            trailing = lines[terminator_index + 1:]
+            if any(chunk.strip() for chunk in trailing):
+                return None
+            code = '\n'.join(body)
+            return code
+
+        def _extract_simple_sed(command: str) -> Optional[Tuple[int, int, str]]:
+            try:
+                tokens = shlex.split(command)
+            except ValueError:
+                tokens = command.split()
+            if not tokens or tokens[0] != 'sed':
+                return None
+            start_line: Optional[int] = None
+            end_line: Optional[int] = None
+            target_path: Optional[str] = None
+            for token in tokens[1:]:
+                cleaned = token.strip().strip('\'"')
+                if not cleaned:
+                    continue
+                if cleaned == '-n':
+                    continue
+                range_match = re.fullmatch(r'(\d+),(\d+)p', cleaned)
+                if range_match:
+                    start_line = int(range_match.group(1))
+                    end_line = int(range_match.group(2))
+                    continue
+                if cleaned.startswith('-'):
+                    continue
+                target_path = cleaned
+            if start_line is None or end_line is None or target_path is None:
+                return None
+            return (start_line, end_line, target_path)
 
         def _summarize_stream(label: str, text: str, *, max_lines: int = 4) -> str:
             if not text:
@@ -1004,6 +1062,63 @@ def main():
                 raise ValueError(f"Path {path} escapes project root")
             return full
 
+        def _run_python_heredoc(code: str) -> CompletedProcess:
+            script_text = code if code.endswith('\n') else code + '\n'
+            tmp_path = None
+            try:
+                tmp_file = tempfile.NamedTemporaryFile('w', suffix='.py', delete=False)
+                tmp_path = Path(tmp_file.name)
+                tmp_file.write(script_text)
+                tmp_file.flush()
+                tmp_file.close()
+                proc = subprocess.run(
+                    ['python3', str(tmp_path)],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(project_root),
+                    timeout=apply_timeout,
+                    check=False,
+                )
+            finally:
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+            return proc
+
+        def _run_simple_sed(start: int, end: int, rel_path: str) -> CompletedProcess:
+            try:
+                target = ensure_within_root(Path(rel_path))
+            except Exception as exc:
+                return CompletedProcess(
+                    args=['sed', '-n', f'{start},{end}p', rel_path],
+                    returncode=1,
+                    stdout='',
+                    stderr=str(exc),
+                )
+            if not target.exists() or not target.is_file():
+                return CompletedProcess(
+                    args=['sed', '-n', f'{start},{end}p', rel_path],
+                    returncode=1,
+                    stdout='',
+                    stderr=f"{rel_path}: not found or not a file",
+                )
+            start_idx = max(start - 1, 0)
+            end_idx = max(end, start_idx)
+            lines = target.read_text(encoding='utf-8', errors='replace').splitlines(keepends=True)
+            if start_idx >= len(lines):
+                snippet = ''
+            else:
+                end_idx = min(end_idx, len(lines))
+                snippet = ''.join(lines[start_idx:end_idx])
+            return CompletedProcess(
+                args=['sed', '-n', f'{start},{end}p', rel_path],
+                returncode=0,
+                stdout=snippet,
+                stderr='',
+            )
+
         for index, change in enumerate(changes):
             if not isinstance(change, dict):
                 manual_notes.append(
@@ -1470,6 +1585,16 @@ def main():
                     command_tokens = command.split()
                 lower_command = command.lower()
                 first_token = command_tokens[0] if command_tokens else ""
+                script_text = ""
+                python_heredoc_code: Optional[str] = None
+                sed_request: Optional[Tuple[int, int, str]] = None
+                if first_token in {"bash", "sh"} and len(command_tokens) >= 3 and command_tokens[1] in {"-lc", "-c"}:
+                    script_text = command_tokens[2]
+                    python_heredoc_code = _extract_python_heredoc(script_text)
+                    if python_heredoc_code is None:
+                        sed_request = _extract_simple_sed(script_text)
+                elif first_token == "sed":
+                    sed_request = _extract_simple_sed(command)
                 if first_token == "cat":
                     if '<<' in command:
                         _record_blocked_command('heredoc', command)
@@ -1490,14 +1615,13 @@ def main():
                             _record_blocked_command('missing-helper', command)
                             continue
                         override_exec = ['python3', str(helper_path)] + token_list[2:]
-                if first_token == "sed":
-                    exceeds_window, window_span = _sed_window_exceeds(command)
-                    if exceeds_window:
-                        _record_blocked_command('sed-window', command)
-                        continue
-                elif first_token in {"bash", "sh"}:
-                    if len(command_tokens) >= 3 and command_tokens[1] in {"-lc", "-c"}:
-                        script_text = command_tokens[2]
+                if sed_request is None:
+                    if first_token == "sed":
+                        exceeds_window, window_span = _sed_window_exceeds(command)
+                        if exceeds_window:
+                            _record_blocked_command('sed-window', command)
+                            continue
+                    elif first_token in {"bash", "sh"} and script_text:
                         has_wide_sed, window_span, offending_segment = _script_contains_wide_sed(script_text)
                         if has_wide_sed:
                             _record_blocked_command('sed-window', command)
@@ -1531,7 +1655,11 @@ def main():
                         )
                     )
                 try:
-                    if override_exec is not None:
+                    if python_heredoc_code is not None:
+                        proc_cmd = _run_python_heredoc(python_heredoc_code)
+                    elif sed_request is not None:
+                        proc_cmd = _run_simple_sed(*sed_request)
+                    elif override_exec is not None:
                         proc_cmd = subprocess.run(
                             list(override_exec),
                             capture_output=True,

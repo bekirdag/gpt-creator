@@ -1853,17 +1853,25 @@ def main():
                     )
                 )
 
+        summary_notes = (payload.get('notes') or []) + manual_notes
+        if actual_changes > 0:
+            legacy_status = 'ok'
+            canonical_status = 'COMPLETED'
+        else:
+            legacy_status = 'noop'
+            canonical_status = 'COMPLETED-NO-CHANGES'
+        status_note = f"STATUS: {canonical_status}"
+        if status_note not in summary_notes:
+            summary_notes.append(status_note)
         summary = {
             'written': written,
             'patched': patched,
             'noop': noop_entries,
             'commands': payload.get('commands') or [],
-            'notes': (payload.get('notes') or []) + manual_notes,
+            'notes': summary_notes,
         }
-        if actual_changes > 0:
-            print('STATUS ok')
-        else:
-            print('STATUS noop')
+        print(f'STATUS {legacy_status}')
+        print(f'STATUS: {canonical_status}')
         print('APPLIED')
         for path in written:
             print(f"WRITE {path}")

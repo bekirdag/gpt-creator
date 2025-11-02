@@ -9383,11 +9383,56 @@ REM
             break
           fi
           apply_status="ok"
+          local runtime_status_canonical=""
           local task_apply_meta_path=""
           while IFS= read -r change_line; do
             case "$change_line" in
-              STATUS\ *)
-                apply_status="${change_line#STATUS }"
+              STATUS*)
+                local raw_status="${change_line#STATUS}"
+                while [[ -n "$raw_status" && "$raw_status" == [[:space:]:]* ]]; do
+                  raw_status="${raw_status:1}"
+                done
+                if [[ -z "$raw_status" ]]; then
+                  continue
+                fi
+                local status_token="$raw_status"
+                if [[ "$status_token" == *[[:space:]]* ]]; then
+                  status_token="${status_token%%[[:space:]]*}"
+                fi
+                local normalized_status="${status_token^^}"
+                normalized_status="${normalized_status// /-}"
+                normalized_status="${normalized_status//_/-}"
+                normalized_status="${normalized_status//[^A-Z0-9-]/}"
+                while [[ "$normalized_status" == *"--"* ]]; do
+                  normalized_status="${normalized_status//--/-}"
+                done
+                normalized_status="${normalized_status##-}"
+                normalized_status="${normalized_status%%-}"
+                if [[ -n "$normalized_status" ]]; then
+                  runtime_status_canonical="$normalized_status"
+                fi
+                case "$normalized_status" in
+                  COMPLETED|COMPLETE)
+                    apply_status="ok"
+                    ;;
+                  COMPLETED-NO-CHANGES|NO-CHANGES|NOOP)
+                    apply_status="no-changes"
+                    ;;
+                  RETRYABLE|RETRY|RETRYABLE-BLOCKED)
+                    apply_status="retryable"
+                    ;;
+                  FAILED|FAIL|ERROR)
+                    apply_status="failed"
+                    ;;
+                  SKIPPED-ALREADY-COMPLETE|SKIPPED|SKIP-ALREADY-COMPLETE)
+                    apply_status="skipped-already-complete"
+                    ;;
+                  *)
+                    if [[ -n "$raw_status" ]]; then
+                      apply_status="${raw_status,,}"
+                    fi
+                    ;;
+                esac
                 ;;
               APPLIED)
                 info "    Changes applied."
@@ -9503,6 +9548,26 @@ print(flag("notes_contains_already_satisfied"))'
             if meta_flags="$("$python_bin" -c "$meta_parse_py" "$GC_LAST_APPLY_META" 2>/dev/null)"; then
               IFS=$'\n' read -r task_meta_plan_flag task_meta_focus_flag task_meta_no_changes_flag task_meta_already_flag <<<"$meta_flags"
             fi
+          fi
+
+          if [[ "$task_result_status" == "in-progress" && -n "$runtime_status_canonical" ]]; then
+            case "$runtime_status_canonical" in
+              COMPLETED|COMPLETE)
+                task_result_status="complete"
+                ;;
+              COMPLETED-NO-CHANGES|NO-CHANGES|NOOP)
+                task_result_status="completed-no-changes"
+                ;;
+              RETRYABLE|RETRY|RETRYABLE-BLOCKED)
+                task_result_status="retryable"
+                ;;
+              FAILED|FAIL|ERROR)
+                task_result_status="permanent-fail"
+                ;;
+              SKIPPED-ALREADY-COMPLETE|SKIPPED|SKIP-ALREADY-COMPLETE)
+                task_result_status="skipped-already-complete"
+                ;;
+            esac
           fi
 
           if (( task_changes_applied == 0 )); then
@@ -10305,6 +10370,11 @@ REM
       fi
       if [[ -n "$note_status_override" ]]; then
         case "$note_status_override" in
+          completed-no-changes|completed_no_changes)
+            if [[ "$task_result_status" == "complete" || "$task_result_status" == "in-progress" || "$task_result_status" == "retryable" ]]; then
+              task_result_status="completed-no-changes"
+            fi
+            ;;
           completed|complete)
             if [[ "$task_result_status" == "completed-no-changes" || "$task_result_status" == "in-progress" || "$task_result_status" == "retryable" ]]; then
               task_result_status="complete"
@@ -10318,6 +10388,9 @@ REM
               task_result_status="permanent-fail"
               task_outcome_reason="${task_outcome_reason:-note-status-failed}"
             fi
+            ;;
+          skipped-already-complete|skipped_already_complete)
+            task_result_status="skipped-already-complete"
             ;;
         esac
       fi

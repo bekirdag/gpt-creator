@@ -1544,22 +1544,24 @@ def main():
 
         skip_command_processing = False
         if isinstance(command_entries, list) and command_entries:
-            precheck_non_whitelisted = []
+            filtered_commands: List[str] = []
+            precheck_non_whitelisted: List[str] = []
             for raw_cmd in command_entries:
                 if not isinstance(raw_cmd, str):
                     continue
                 trimmed = _normalize_command_wrapper(raw_cmd)
                 if not trimmed:
                     continue
-                if not COMMAND_WHITELIST_PATTERN.match(trimmed):
+                if COMMAND_WHITELIST_PATTERN.match(trimmed):
+                    filtered_commands.append(raw_cmd)
+                else:
                     precheck_non_whitelisted.append(trimmed)
             if precheck_non_whitelisted:
-                skip_command_processing = True
                 sample = _truncate_command_text(precheck_non_whitelisted[0])
                 manual_notes.append(
                     _format_action_result(
                         "command-precheck",
-                        f"blocked — {len(precheck_non_whitelisted)} command(s) not in whitelist (first: {sample})"
+                        f"blocked — filtered {len(precheck_non_whitelisted)} non-whitelisted command(s) (first: {sample})"
                     )
                 )
                 manual_notes.append(
@@ -1568,7 +1570,9 @@ def main():
                         "remove or replace non-whitelisted commands; allowed prefixes include bash, python3, pnpm, git, gpt-creator apply-block"
                     )
                 )
-                command_entries = []
+            command_entries = filtered_commands
+            if not command_entries:
+                skip_command_processing = True
 
         if isinstance(command_entries, list) and command_entries and not skip_command_processing:
             baseline_status = _git_status_porcelain(project_root)

@@ -9055,17 +9055,36 @@ EOF
       if gc_budget_stage_tripped "retrieve"; then
         local retrieve_limit_value
         retrieve_limit_value="$(gc_budget_get_stage_limit "retrieve")"
-        task_notes+=("Retrieve stage exceeded budget limit (${retrieve_tokens}/${retrieve_limit_value})")
+        local max_retrieve_cap="${GC_AUTOBUDGET_RETRIEVE_MAX:-250000}"
+        local new_retrieve_cap="$retrieve_limit_value"
+        if (( retrieve_tokens > retrieve_limit_value )); then
+          new_retrieve_cap=$((retrieve_tokens + retrieve_tokens / 10 + 2048))
+        else
+          new_retrieve_cap=$((retrieve_limit_value + retrieve_limit_value / 2 + 2048))
+        fi
+        if (( new_retrieve_cap > max_retrieve_cap )); then
+          new_retrieve_cap="$max_retrieve_cap"
+        fi
+        if (( new_retrieve_cap > retrieve_limit_value )); then
+          gc_budget_set_stage_limit "retrieve" "$new_retrieve_cap"
+          task_notes+=("Retrieve stage exceeded budget limit (${retrieve_tokens}/${retrieve_limit_value}); raised cap to ${new_retrieve_cap} tokens and retrying prompt build.")
+          gc_budget_reset_stage_tracking
+          rm -f "$prompt_path" "$output_path"
+          if (( attempt > 0 )); then
+            (( attempt-- ))
+          fi
+          continue
+        fi
+        task_notes+=("Retrieve stage exceeded maximum automatic budget (${retrieve_tokens}/${retrieve_limit_value}); deferring task for follow-up.")
         skip_codex=1
         codex_ok=1
-        manual_followups=0
+        manual_followups=1
         keep_output=0
-        task_result_status="blocked-quota"
-        gc_mark_outcome "DEAD_LETTER" "QUOTA"
+        task_result_status="retryable"
         apply_status="prompt-blocked"
         skip_codex_reason="stage-limit"
-        blocked_stop_run=1
-        run_blocked_quota=1
+        break_after_update=1
+        continue
       else
         gc_budget_log_stage "plan" "$prompt_token_estimate" 0 "$prompt_token_estimate" 0 "$prompt_pruned_items" "{}" "false"
         local guard_safe_limit="${GC_SAFE_PROMPT_TOKENS:-8000}"
@@ -9113,46 +9132,81 @@ EOF
         prompt_token_hard_cap=$((prompt_token_hard_cap))
       fi
       local prompt_estimate_tokens=$((prompt_est_tokens_raw))
+      local current_prompt_cap_int=0
+      if [[ "$prompt_hard_limit_value" =~ ^[0-9]+$ ]]; then
+        current_prompt_cap_int=$((prompt_hard_limit_value))
+      elif [[ "$prompt_soft_limit_value" =~ ^[0-9]+$ ]]; then
+        current_prompt_cap_int=$((prompt_soft_limit_value))
+      else
+        current_prompt_cap_int=$prompt_token_hard_cap
+      fi
+
       if (( prompt_token_hard_cap > 0 )) && (( prompt_estimate_tokens > prompt_token_hard_cap )) && (( skip_codex == 0 )); then
-        warn "    Prompt ~${prompt_estimate_tokens} tokens exceeds hard cap ${prompt_token_hard_cap}; skipping task (abandoned-for-budget)."
-        gc_mark_task_abandoned_for_budget "$tasks_db" "$slug" "$task_index" "$run_stamp" || true
+        local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-300000}"
+        local new_prompt_cap=$((prompt_estimate_tokens + prompt_estimate_tokens / 10 + 2048))
+        if (( new_prompt_cap > max_prompt_cap )); then
+          new_prompt_cap="$max_prompt_cap"
+        fi
+        if (( new_prompt_cap > current_prompt_cap_int )); then
+          warn "    Prompt ~${prompt_estimate_tokens} tokens exceeds hard cap ${current_prompt_cap_int}; raising cap to ${new_prompt_cap} and retrying."
+          GC_TASK_TOKEN_HARD_LIMIT="$new_prompt_cap"
+          gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_HARD_CAP "$new_prompt_cap"
+          gc_budget_reset_stage_tracking
+          rm -f "$prompt_path" "$output_path"
+          if (( attempt > 0 )); then
+            (( attempt-- ))
+          fi
+          continue
+        fi
+        warn "    Prompt ~${prompt_estimate_tokens} tokens exceeds maximum automatic cap ${current_prompt_cap_int}; deferring task."
         skip_codex=1
         codex_ok=1
         manual_followups=1
         keep_output=0
-        task_result_status="abandoned-for-budget"
-        gc_mark_outcome "DEAD_LETTER" "QUOTA"
+        task_result_status="retryable"
         apply_status="prompt-blocked"
         skip_codex_reason="hard-cap"
         prompt_status="blocked-quota"
-        prompt_hard_limit_value="$prompt_token_hard_cap"
+        prompt_hard_limit_value="$current_prompt_cap_int"
         prompt_token_estimate="$prompt_estimate_tokens"
         prompt_stop_on_overbudget="true"
-        run_blocked_quota=1
         task_prompt_estimate=$((prompt_estimate_tokens))
-        task_notes+=("Prompt estimated at ~${prompt_estimate_tokens} tokens exceeds hard cap ${prompt_token_hard_cap}; not sent to LLM.")
+        task_notes+=("Prompt estimated at ~${prompt_estimate_tokens} tokens exceeds maximum automatic cap ${current_prompt_cap_int}; retry will run with trimmed context once budgets refresh.")
+        break_after_update=1
+        continue
       fi
 
       if [[ "${prompt_status,,}" != "blocked-quota" ]]; then
-        if [[ "$prompt_hard_limit_value" =~ ^[0-9]+$ ]] && (( prompt_hard_limit_value > 0 )) && [[ "$prompt_token_estimate" =~ ^[0-9]+$ ]] && (( prompt_token_estimate > prompt_hard_limit_value )); then
+        if (( current_prompt_cap_int > 0 )) && [[ "$prompt_token_estimate" =~ ^[0-9]+$ ]] && (( prompt_token_estimate > current_prompt_cap_int )); then
+          local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-300000}"
+          local new_prompt_cap=$((prompt_token_estimate + prompt_token_estimate / 10 + 2048))
+          if (( new_prompt_cap > max_prompt_cap )); then
+            new_prompt_cap="$max_prompt_cap"
+          fi
+          if (( new_prompt_cap > current_prompt_cap_int )); then
+            warn "    Prompt estimate ${prompt_token_estimate}/${current_prompt_cap_int} exceeds hard cap; raising cap to ${new_prompt_cap} and retrying."
+            GC_TASK_TOKEN_HARD_LIMIT="$new_prompt_cap"
+            gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_HARD_CAP "$new_prompt_cap"
+            gc_budget_reset_stage_tracking
+            rm -f "$prompt_path" "$output_path"
+            if (( attempt > 0 )); then
+              (( attempt-- ))
+            fi
+            continue
+          fi
           skip_codex=1
           codex_ok=1
-          task_needs_review=0
-          manual_followups=0
-          keep_output=0
-          task_result_status="blocked-quota"
-          apply_status="prompt-blocked"
-        skip_codex_reason="hard-cap"
-        local budget_note="${prompt_token_estimate}/${prompt_hard_limit_value}"
-        task_notes+=("Prompt estimate ${budget_note} exceeds hard token budget; halting before Codex call.")
-        gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$codex_model_for_step"
-        run_blocked_quota=1
-        gc_mark_outcome "DEAD_LETTER" "QUOTA"
-        if [[ "$prompt_stop_flag" != "false" ]]; then
-          blocked_stop_run=1
-        else
+          task_needs_review=1
           manual_followups=1
-        fi
+          keep_output=0
+          task_result_status="retryable"
+          apply_status="prompt-blocked"
+          skip_codex_reason="hard-cap"
+          local budget_note="${prompt_token_estimate}/${current_prompt_cap_int}"
+          task_notes+=("Prompt estimate ${budget_note} exceeds maximum automatic hard token budget; defer and retry after context trim.")
+          gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$codex_model_for_step"
+          break_after_update=1
+          continue
         fi
       fi
 
@@ -9172,28 +9226,39 @@ EOF
       fi
 
       if [[ "${prompt_status,,}" == "blocked-quota" ]]; then
+        local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-300000}"
+        local new_prompt_cap=$((prompt_token_estimate + prompt_token_estimate / 10 + 2048))
+        if (( new_prompt_cap > max_prompt_cap )); then
+          new_prompt_cap="$max_prompt_cap"
+        fi
+        if (( skip_codex == 0 )) && (( new_prompt_cap > current_prompt_cap_int )); then
+          warn "    Prompt exceeded token budgets (${prompt_token_estimate}/${current_prompt_cap_int}); raising cap to ${new_prompt_cap} and retrying."
+          GC_TASK_TOKEN_HARD_LIMIT="$new_prompt_cap"
+          gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_HARD_CAP "$new_prompt_cap"
+          gc_budget_reset_stage_tracking
+          rm -f "$prompt_path" "$output_path"
+          if (( attempt > 0 )); then
+            (( attempt-- ))
+          fi
+          continue
+        fi
         skip_codex=1
         codex_ok=1
-        task_needs_review=0
-        manual_followups=0
+        task_needs_review=1
+        manual_followups=1
         keep_output=0
-        task_result_status="blocked-quota"
+        task_result_status="retryable"
         apply_status="prompt-blocked"
         local budget_note="${prompt_token_estimate}"
-        if [[ "$prompt_hard_limit_value" =~ ^[0-9]+$ ]] && (( prompt_hard_limit_value > 0 )); then
-          budget_note="${prompt_token_estimate}/${prompt_hard_limit_value}"
+        if (( current_prompt_cap_int > 0 )); then
+          budget_note="${prompt_token_estimate}/${current_prompt_cap_int}"
         elif [[ "$prompt_soft_limit_value" =~ ^[0-9]+$ ]] && (( prompt_soft_limit_value > 0 )); then
           budget_note="${prompt_token_estimate}/${prompt_soft_limit_value}"
         fi
-        task_notes+=("Prompt exceeded token budgets after deterministic pruning; estimated ${budget_note} tokens.")
+        task_notes+=("Prompt exceeded token budgets after deterministic pruning; estimated ${budget_note} tokens. Will retry with trimmed context.")
         gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$codex_model_for_step"
-        if [[ "$prompt_stop_flag" != "false" ]]; then
-          blocked_stop_run=1
-          run_blocked_quota=1
-        else
-          manual_followups=1
-        fi
-        gc_mark_outcome "DEAD_LETTER" "QUOTA"
+        break_after_update=1
+        continue
       fi
 
       if command -v "$python_bin" >/dev/null 2>&1; then

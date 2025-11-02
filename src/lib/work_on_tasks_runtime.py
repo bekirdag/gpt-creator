@@ -240,6 +240,7 @@ def main():
             'duplicate': 'duplicate commands',
             'policy': 'policy guardrails',
             'non-whitelist': 'non-whitelisted commands',
+            'placeholder-ellipsis': 'incomplete command placeholder',
         }
 
         def _token_targets_doc(token: str) -> bool:
@@ -1602,6 +1603,9 @@ def main():
                 script_text = ""
                 python_heredoc_code: Optional[str] = None
                 sed_request: Optional[Tuple[int, int, str]] = None
+                if '...' in command or '…' in command:
+                    _record_blocked_command('placeholder-ellipsis', command)
+                    continue
                 if first_token in {"bash", "sh"} and len(command_tokens) >= 3 and command_tokens[1] in {"-lc", "-c"}:
                     script_text = command_tokens[2]
                     python_heredoc_code = _extract_python_heredoc(script_text)
@@ -1827,6 +1831,13 @@ def main():
                     _format_action_result(
                         "command-summary-guidance",
                         "summarize findings instead of dumping large files; prefer QA catalog links or `gpt-creator show-file --range start:end`"
+                    )
+                )
+            if 'placeholder-ellipsis' in blocked_command_counts:
+                manual_notes.append(
+                    _format_action_result(
+                        "commands-fill-placeholders",
+                        "replace `...` placeholders with the exact commands you intend to run before retrying"
                     )
                 )
             manual_notes.append(
@@ -4063,6 +4074,7 @@ def main():
             "- If an acceptance criterion demands heavy setup or environments the agent cannot access, acknowledge the gap and continue focusing on the core code changes.",
             "- In `Focus`, call out the files or symbols you are touching so reviewers understand the blast radius.",
             "- When you are satisfied with the changes, stage and commit them yourself (e.g., `git add …` then `git commit -m \"<task summary>\"`) and list those commands under `Commands`.",
+            "- Push your work once committed (e.g., `git push origin <branch>`), and include that command under `Commands` as well.",
             "- Capture blockers, follow-ups, or verification results in `Notes`.",
             "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",
             "- Use the documentation catalog helpers (`python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" ...`) for SDS/PDR references instead of opening doc files directly.",

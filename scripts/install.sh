@@ -355,6 +355,7 @@ install_files() {
     --include '/templates/***'
     --include '/src/***'
     --include '/scripts/***'
+    --include '/.gpt-creator/***'
     --include '/tui/***'
     --include '/docs/***'
     --include '/verify/***'
@@ -365,6 +366,11 @@ install_files() {
   if ! as_root "$PREFIX" rsync "${rsync_args[@]}" "$REPO_DIR"/ "$APP_DIR"/; then
     echo "rsync minimal copy failed; copying full repo…"
     as_root "$PREFIX" cp -R "$REPO_DIR"/. "$APP_DIR"/
+  fi
+
+  # Ensure shim binaries remain executable (fallback tools like rg live here)
+  if [[ -d "$APP_DIR/.gpt-creator/shims/bin" ]]; then
+    as_root "$PREFIX" find "$APP_DIR/.gpt-creator/shims/bin" -type f -exec chmod +x {} \;
   fi
 
   # Ensure CLI entrypoint is up to date

@@ -373,14 +373,9 @@ install_files() {
     as_root "$PREFIX" find "$APP_DIR/.gpt-creator/shims/bin" -type f -exec chmod +x {} \;
   fi
 
-  # Ensure CLI entrypoint is up to date
-  if [[ -f "$APP_BIN" ]] && ! grep -q "placeholder" "$APP_BIN"; then
-    as_root "$PREFIX" chmod +x "$APP_BIN"
-  else
-    echo "› Installing CLI entrypoint to $APP_BIN"
-    as_root "$PREFIX" mkdir -p "$(dirname "$APP_BIN")"
-    as_root "$PREFIX" install -m 0755 "$REPO_DIR/bin/gpt-creator" "$APP_BIN"
-  fi
+  echo "› Installing CLI entrypoint to $APP_BIN"
+  as_root "$PREFIX" mkdir -p "$(dirname "$APP_BIN")"
+  as_root "$PREFIX" install -m 0755 "$REPO_DIR/bin/gpt-creator" "$APP_BIN"
 }
 
 install_link() {

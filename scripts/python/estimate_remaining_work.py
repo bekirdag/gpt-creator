@@ -39,8 +39,17 @@ def normalize_status(value: str) -> str:
     return cleaned
 
 
-def is_done_status(value: str) -> bool:
+def coerce_status(value: str, fallback: str = "") -> str:
     status = normalize_status(value)
+    if not status:
+        return normalize_status(fallback)
+    if status in {"verified", "noop-verified"}:
+        return "completed-no-changes"
+    return status
+
+
+def is_done_status(value: str) -> bool:
+    status = coerce_status(value)
     if not status:
         return False
     for prefix in DONE_STATUS_PREFIXES:
@@ -50,11 +59,9 @@ def is_done_status(value: str) -> bool:
 
 
 def status_is_in_progress(value: str) -> bool:
-    status = normalize_status(value)
+    status = coerce_status(value)
     if not status:
         return False
-    if status == "in-progress":
-        return True
     for prefix in IN_PROGRESS_PREFIXES:
         prefix_norm = normalize_status(prefix)
         if prefix_norm and status.startswith(prefix_norm):
@@ -248,7 +255,7 @@ def fetch_progress_status_map(cur: sqlite3.Cursor) -> Dict[str, str]:
             status_candidate = row["progress_state"]
         if not status_candidate:
             status_candidate = row["status"]
-        status_norm = normalize_status(status_candidate or "")
+        status_norm = coerce_status(status_candidate)
         if not status_norm:
             continue
         task_id_value = row["task_id"]
@@ -287,11 +294,11 @@ def determine_effective_status(
             return override
 
     if has_task_progress_state and "progress_state" in task_row.keys():
-        progress_state = normalize_status(task_row["progress_state"] or "")
+        progress_state = coerce_status(task_row["progress_state"], base_status)
         if progress_state:
             return progress_state
 
-    normalized_base = normalize_status(base_status)
+    normalized_base = coerce_status(base_status, "pending")
     return normalized_base or "pending"
 
 

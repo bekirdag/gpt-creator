@@ -386,6 +386,9 @@ install_link() {
       echo "✖ $LINK_PATH exists. Re-run with --force to replace." >&2; exit 1; fi
   fi
   as_root "$PREFIX" ln -s "$APP_BIN" "$LINK_PATH"
+  if [[ -f "$APP_DIR/.gpt-creator/shims/bin/rg" ]]; then
+    as_root "$PREFIX" ln -sf "$APP_DIR/.gpt-creator/shims/bin/rg" "$BIN_DIR/rg"
+  fi
   if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then
     echo "⚠ $BIN_DIR is not on PATH. Add: export PATH=\"$BIN_DIR:\$PATH\"" >&2
   fi

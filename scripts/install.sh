@@ -379,6 +379,26 @@ install_files() {
   as_root "$PREFIX" install -m 0755 "$REPO_DIR/bin/gpt-creator" "$APP_BIN"
 }
 
+ensure_runtime_permissions() {
+  local target_user="${SUDO_USER:-$USER}"
+  local target_home
+  if ! target_home="$(eval "echo ~${target_user}")"; then
+    return
+  fi
+
+  local prisma_cache="${target_home}/.cache/prisma"
+  as_root "/" mkdir -p "$prisma_cache"
+  as_root "/" chown -R "${target_user}:${target_user}" "$prisma_cache" 2>/dev/null || true
+
+  if command -v pnpm >/dev/null 2>&1; then
+    local pnpm_store_path
+    pnpm_store_path="$(sudo -u "$target_user" pnpm store path 2>/dev/null || true)"
+    if [[ -n "$pnpm_store_path" && -d "$pnpm_store_path" ]]; then
+      as_root "/" chown -R "${target_user}:${target_user}" "$pnpm_store_path" 2>/dev/null || true
+    fi
+  fi
+}
+
 install_link() {
   echo "› Linking $LINK_PATH → $APP_BIN"
   as_root "$PREFIX" mkdir -p "$BIN_DIR"
@@ -449,9 +469,10 @@ FISHC
 
 main() {
   [[ $SKIP_PREFLIGHT -eq 1 ]] || preflight
-  install_files
-  install_link
-  install_completions
+install_files
+ensure_runtime_permissions
+install_link
+install_completions
   echo "✔ Installed. Try:"
   echo "    gpt-creator create-project /path/to/project"
 }

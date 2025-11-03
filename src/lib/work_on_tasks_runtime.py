@@ -1843,11 +1843,12 @@ def main():
                     )
                 )
             manual_notes.append(
-                _format_action_result(
-                    "commands-remediation",
-                    "replace blocked commands with approved workflows (gpt-creator apply-block, python3 scripts/python/write_block.py, pnpm --filter …) before retrying"
+                    _format_action_result(
+                        "commands-remediation",
+                        "replace blocked commands with approved workflows (gpt-creator apply-block, python3 scripts/python/write_block.py, pnpm --filter …) before retrying"
+                    )
                 )
-            )
+            command_failure_detected = True
 
         if invalid_regex_patterns:
             logged_patterns = []

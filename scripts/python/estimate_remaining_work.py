@@ -24,6 +24,13 @@ NON_REMAINING_STATUSES = {
     "completed-no-changes",
     "skipped-no-changes",
 }
+DONE_STATUS_PREFIXES = (
+    "complete",
+    "completed",
+    "done",
+    "skipped",
+    "skip",
+)
 DEFAULT_CONTAMINATION_THRESHOLD = 0.2
 
 
@@ -33,6 +40,18 @@ def normalize_status(value: str) -> str:
     while "--" in cleaned:
         cleaned = cleaned.replace("--", "-")
     return cleaned
+
+
+def is_done_status(value: str) -> bool:
+    status = normalize_status(value)
+    if not status:
+        return False
+    if status in NON_REMAINING_STATUSES:
+        return True
+    for prefix in DONE_STATUS_PREFIXES:
+        if status.startswith(prefix):
+            return True
+    return False
 
 
 def meta_float(cursor: sqlite3.Cursor, key: str, default: float = 0.0) -> float:
@@ -181,16 +200,16 @@ def table_exists(cursor: sqlite3.Cursor, name: str) -> bool:
 
 
 def count_remaining_tasks(cursor: sqlite3.Cursor) -> int:
-    if not NON_REMAINING_STATUSES:
-        row = cursor.execute("SELECT COUNT(*) FROM tasks").fetchone()
-        return int(row[0]) if row else 0
-    placeholders = ",".join("?" for _ in NON_REMAINING_STATUSES)
-    query = (
-        "SELECT COUNT(*) FROM tasks "
-        f"WHERE LOWER(COALESCE(status, '')) NOT IN ({placeholders})"
-    )
-    row = cursor.execute(query, tuple(NON_REMAINING_STATUSES)).fetchone()
-    return int(row[0]) if row else 0
+    try:
+        rows = cursor.execute("SELECT status FROM tasks").fetchall()
+    except sqlite3.DatabaseError:
+        return 0
+    remaining = 0
+    for row in rows:
+        status = row["status"] if isinstance(row, sqlite3.Row) else row[0]
+        if not is_done_status(status or ""):
+            remaining += 1
+    return remaining
 
 
 def fmt_float(value: float) -> str:
@@ -253,13 +272,12 @@ def estimate(db_path: Path) -> int:
         raise SystemExit(f"Failed to read tasks: {exc}")
 
     remaining_tasks = count_remaining_tasks(cur)
-    done_statuses = NON_REMAINING_STATUSES
     total_points = 0.0
     completed_points = 0.0
     task_info: Dict[str, Dict[str, float | str]] = {}
 
     for row in rows:
-        status = (row["status"] or "").strip().lower().replace("_", "-")
+        status = normalize_status(row["status"] or "")
         points = parse_points(row["story_points"])
         task_key_primary = str(row["id"])
         task_info[task_key_primary] = {"points": points, "status": status}
@@ -267,7 +285,7 @@ def estimate(db_path: Path) -> int:
         position = row["position"]
         if story_slug and position is not None:
             task_info[f"{story_slug}:{position}"] = {"points": points, "status": status}
-        if status in done_statuses:
+        if is_done_status(status):
             completed_points += points
             continue
         total_points += points
@@ -306,7 +324,7 @@ def estimate(db_path: Path) -> int:
     for task_key, tokens in token_by_task.items():
         tokens_total += tokens
         info = task_info.get(task_key)
-        if info:
+        if info and is_done_status(str(info.get("status", ""))):
             covered_points += float(info.get("points", 0.0))
 
     conn.close()

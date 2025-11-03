@@ -184,7 +184,7 @@ Sweep legacy Codex work artifacts (for example \fItmp_*.json\fR, \fIfinal_*.json
 Drive Codex over tasks sourced from the SQLite backlog, apply returned JSON diff/file instructions automatically, and persist task/story status back into the database for precise resume support.
 Artifacts (prompt/output pairs) are removed after each successful task to limit memory use unless \fB--keep-artifacts\fR is supplied.
 Use \fB--batch-size\fR to pause after a fixed number of tasks and \fB--sleep-between\fR to insert delays between Codex runs when conserving resources.
-Codex invocations are also capped by the \fBGC_CODEX_EXEC_MAX_DURATION\fR watchdog (default 900 seconds) to prevent runaway loops; set it to 0 when you explicitly need longer manual sessions.
+Codex invocations are also capped by the \fBGC_CODEX_EXEC_MAX_DURATION\fR watchdog (default 3600 seconds) to prevent runaway loops; set it to 0 when you explicitly need longer manual sessions.
 \fB--context-lines\fR controls how many lines from the shared context appendix are appended to each prompt (default 400) and \fB--context-none\fR omits that appendix entirely for minimal prompts.
 \fB--context-file-lines\fR clips each staged document before inclusion, while \fB--context-skip\fR accepts repeatable glob patterns to drop noisy files (for example, \fB--context-skip '*.css'\fR).
 \fB--prompt-compact\fR keeps the default compact instruction/schema block, while \fB--prompt-expanded\fR restores the legacy verbose guidance if you need the older behaviour.
@@ -245,7 +245,7 @@ Override reporter name stored in new issue reports (defaults to git \fIuser.name
 Override the JSON allowlist of trusted CLI SHA-256 digests checked by \fBgpt-creator reports audit\fR (defaults to \fIconfig/release-digests.json\fR).
 .TP
 .B GC_CODEX_EXEC_MAX_DURATION
-Hard runtime watchdog (in seconds) for each Codex invocation (default 900; set to 0 to disable).
+Hard runtime watchdog (in seconds) for each Codex invocation (default 3600; set to 0 to disable).
 .TP
 .B GC_CODEX_DIFF_REPEAT_LIMIT
 Maximum number of identical `turn diff` emissions tolerated before Codex is aborted (default 6; set to 0 to disable).

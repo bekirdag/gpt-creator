@@ -13,10 +13,10 @@ from pathlib import Path
 from typing import Any, Dict
 
 DEFAULT_STAGE_LIMITS = {
-    "retrieve": 8000,
-    "plan": 10000,
-    "patch": 20000,
-    "verify": 8000,
+    "retrieve": 1_000_000,
+    "plan": 1_000_000,
+    "patch": 1_000_000,
+    "verify": 1_000_000,
 }
 
 DEFAULT_OFFENDER_CFG = {

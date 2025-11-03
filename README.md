@@ -360,7 +360,7 @@ Prompt budgeting defaults live alongside your workspace at `.gpt-creator/config.
 
 ```yaml
 perTask:
-  hardLimit: 100000        # model context (tokens) minus reserved output
+  hardLimit: 1000000       # model context (tokens) minus reserved output
   softLimitRatio: 0.85     # percentage of the hard limit to trigger pruning
   minOutputTokens: 1024    # reserved completion tokens
 runner:
@@ -386,10 +386,10 @@ Stage budgets and offender handling are also declarative:
 ```yaml
 budget:
   per_stage_limits:
-    retrieve: 8000
-    plan: 10000
-    patch: 20000
-    verify: 8000
+    retrieve: 1000000
+    plan: 1000000
+    patch: 1000000
+    verify: 1000000
   offenders:
     window_runs: 10
     top_k: 3

@@ -6,7 +6,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-MAX_TOKENS = 60000
+MAX_TOKENS = 1_000_000
 RESERVED_FOR_REPLY = 4000
 DIGEST_KEEP_CHARS = 2000
 APPROX_CHARS_PER_TOKEN = 4
@@ -87,4 +87,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

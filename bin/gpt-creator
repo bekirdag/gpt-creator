@@ -90,7 +90,7 @@ export COMPOSE_HTTP_TIMEOUT DOCKER_CLIENT_TIMEOUT
 # shellcheck disable=SC2034
 GC_CODEX_EXEC_TIMEOUT_INITIAL="${GC_CODEX_EXEC_TIMEOUT-}"
 : "${GC_CODEX_EXEC_TIMEOUT:=0}"
-: "${GC_CODEX_EXEC_MAX_DURATION:=900}"
+: "${GC_CODEX_EXEC_MAX_DURATION:=3600}"
 : "${GC_CODEX_MAX_TURNS:=180}"
 : "${GC_CODEX_MAX_TOKENS_PER_TASK:=0}"
 export GC_CODEX_EXEC_MAX_DURATION
@@ -8046,7 +8046,7 @@ EOHELP
     echo "W: consider running inside tmux/screen" >&2
   fi
 
-  export GC_HARD_TOKENS_PER_TASK="${GC_HARD_TOKENS_PER_TASK:-60000}"
+  export GC_HARD_TOKENS_PER_TASK="${GC_HARD_TOKENS_PER_TASK:-1000000}"
   WOT_EXCLUDE_STATUSES="${WOT_EXCLUDE_STATUSES:-skip-already-complete,blocked-*,test-env-failed}"
 
   local backlog_guard_snapshot_output=""
@@ -8128,9 +8128,9 @@ EOHELP
   fi
   local context_shrink_iterations=0
   local context_last_shrink_tokens=0
-  local context_auto_shrink_threshold="${GC_CONTEXT_AUTO_SHRINK_THRESHOLD:-60000}"
+  local context_auto_shrink_threshold="${GC_CONTEXT_AUTO_SHRINK_THRESHOLD:-1000000}"
   if ! [[ "$context_auto_shrink_threshold" =~ ^[0-9]+$ ]]; then
-    context_auto_shrink_threshold=60000
+    context_auto_shrink_threshold=1000000
   fi
   info "Work run directory → ${run_dir}"
 
@@ -9060,7 +9060,7 @@ EOF
       if gc_budget_stage_tripped "retrieve"; then
         local retrieve_limit_value
         retrieve_limit_value="$(gc_budget_get_stage_limit "retrieve")"
-        local max_retrieve_cap="${GC_AUTOBUDGET_RETRIEVE_MAX:-250000}"
+        local max_retrieve_cap="${GC_AUTOBUDGET_RETRIEVE_MAX:-1000000}"
         local new_retrieve_cap="$retrieve_limit_value"
         if (( retrieve_tokens > retrieve_limit_value )); then
           new_retrieve_cap=$((retrieve_tokens + retrieve_tokens / 10 + 2048))
@@ -9128,11 +9128,11 @@ EOF
         fi
       fi
 
-      : "${GC_TASK_TOKEN_HARD_LIMIT:=60000}"
+      : "${GC_TASK_TOKEN_HARD_LIMIT:=1000000}"
       local prompt_token_hard_cap
-      prompt_token_hard_cap="$(gc_parse_int "${GC_TASK_TOKEN_HARD_LIMIT}" 60000)"
+      prompt_token_hard_cap="$(gc_parse_int "${GC_TASK_TOKEN_HARD_LIMIT}" 1000000)"
       if ! [[ "$prompt_token_hard_cap" =~ ^[0-9]+$ ]]; then
-        prompt_token_hard_cap=60000
+        prompt_token_hard_cap=1000000
       else
         prompt_token_hard_cap=$((prompt_token_hard_cap))
       fi
@@ -9147,7 +9147,7 @@ EOF
       fi
 
       if (( prompt_token_hard_cap > 0 )) && (( prompt_estimate_tokens > prompt_token_hard_cap )) && (( skip_codex == 0 )); then
-        local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-300000}"
+        local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-1000000}"
         local new_prompt_cap=$((prompt_estimate_tokens + prompt_estimate_tokens / 10 + 2048))
         if (( new_prompt_cap > max_prompt_cap )); then
           new_prompt_cap="$max_prompt_cap"
@@ -9183,7 +9183,7 @@ EOF
 
       if [[ "${prompt_status,,}" != "blocked-quota" ]]; then
         if (( current_prompt_cap_int > 0 )) && [[ "$prompt_token_estimate" =~ ^[0-9]+$ ]] && (( prompt_token_estimate > current_prompt_cap_int )); then
-          local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-300000}"
+          local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-1000000}"
           local new_prompt_cap=$((prompt_token_estimate + prompt_token_estimate / 10 + 2048))
           if (( new_prompt_cap > max_prompt_cap )); then
             new_prompt_cap="$max_prompt_cap"
@@ -9231,7 +9231,7 @@ EOF
       fi
 
       if [[ "${prompt_status,,}" == "blocked-quota" ]]; then
-        local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-300000}"
+        local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-1000000}"
         local new_prompt_cap=$((prompt_token_estimate + prompt_token_estimate / 10 + 2048))
         if (( new_prompt_cap > max_prompt_cap )); then
           new_prompt_cap="$max_prompt_cap"

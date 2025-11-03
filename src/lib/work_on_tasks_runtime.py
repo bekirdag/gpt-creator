@@ -351,6 +351,30 @@ def main():
                         normalized = normalized[closing + 1:].strip()
             while len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'`', '"', "'"}:
                 normalized = normalized[1:-1].strip()
+
+            def _escape_unescaped_quotes(body: str, quote: str) -> str:
+                result_chars: List[str] = []
+                prev = ''
+                for ch in body:
+                    if ch == quote and prev != '\\':
+                        result_chars.append('\\')
+                        result_chars.append(ch)
+                    else:
+                        result_chars.append(ch)
+                    prev = ch
+                return ''.join(result_chars)
+
+            # Many plans wrap commands as: bash -lc "cmd with \"nested\" quotes".
+            # When quotes inside the script are not escaped the inner bash fails with
+            # "unexpected EOF while looking for matching \"". Auto-escape them so that
+            # nested quoting cannot break command execution.
+            match = re.match(r'^(bash|sh)\s+-[lc]\s+(.+)$', normalized)
+            if match:
+                script = match.group(2).strip()
+                if script.startswith('"') and script.endswith('"') and len(script) >= 2:
+                    inner = script[1:-1]
+                    escaped_inner = _escape_unescaped_quotes(inner, '"')
+                    normalized = f"{match.group(1)} -lc \"{escaped_inner}\""
             return normalized
 
         def _hydrate_literal_command(text: str) -> str:

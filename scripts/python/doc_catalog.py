@@ -76,7 +76,9 @@ def load_from_fs(limit: Optional[int] = None) -> list[Document]:
     return docs
 
 
-def load_from_sqlite(db_path: Path, limit: Optional[int] = None) -> list[Document]:
+def load_from_sqlite(
+    db_path: Path, limit: Optional[int] = None
+) -> list[Document]:
     docs: list[Document] = []
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -100,6 +102,17 @@ def load_from_sqlite(db_path: Path, limit: Optional[int] = None) -> list[Documen
     return docs
 
 
+def safe_load_from_sqlite(
+    db_path: Optional[Path], limit: Optional[int] = None
+) -> Optional[list[Document]]:
+    if not have_sqlite_catalog(db_path):
+        return None
+    try:
+        return load_from_sqlite(db_path, limit)
+    except sqlite3.Error:
+        return None
+
+
 def have_sqlite_catalog(db_path: Optional[Path]) -> bool:
     return bool(db_path and db_path.exists())
 
@@ -116,9 +129,8 @@ def resolve_db_path(args: argparse.Namespace) -> Optional[Path]:
 def cmd_list(args: argparse.Namespace) -> int:
     db_path = resolve_db_path(args)
     limit = args.limit
-    if have_sqlite_catalog(db_path):
-        docs = load_from_sqlite(db_path, limit)
-    else:
+    docs = safe_load_from_sqlite(db_path, limit)
+    if docs is None:
         docs = load_from_fs(limit)
     for doc in docs:
         title_part = f" — {doc.title}" if doc.title else ""
@@ -159,9 +171,8 @@ def cmd_search(args: argparse.Namespace) -> int:
     db_path = resolve_db_path(args)
     limit = args.limit
     query = args.query
-    if have_sqlite_catalog(db_path):
-        base_docs = load_from_sqlite(db_path)
-    else:
+    base_docs = safe_load_from_sqlite(db_path)
+    if base_docs is None:
         base_docs = load_from_fs()
     matches = list(search_documents(base_docs, query, limit))
     for doc in matches:
@@ -175,9 +186,8 @@ def cmd_show(args: argparse.Namespace) -> int:
     doc_id = args.doc_id
     start = args.start or 1
     end = args.end
-    if have_sqlite_catalog(db_path):
-        docs = load_from_sqlite(db_path)
-    else:
+    docs = safe_load_from_sqlite(db_path)
+    if docs is None:
         docs = load_from_fs()
     target = None
     for doc in docs:
@@ -216,15 +226,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.add_argument("--limit", type=int, default=10)
     p_list.set_defaults(func=cmd_list)
 
-    p_search = sub.add_parser("search", help="Search documentation content.")
-    p_search.add_argument("--limit", type=int, default=10)
-    p_search.add_argument("--query", required=True)
-    p_search.set_defaults(func=cmd_search)
+def add_db_option(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--db",
+        metavar="PATH",
+        help="Optional path to the SQLite catalog (falls back to docs/ scan).",
+    )
 
-    p_show = sub.add_parser("show", help="Show a document by ID or path.")
-    p_show.add_argument("--doc-id", required=True)
-    p_show.add_argument("--start", type=int)
-    p_show.add_argument("--end", type=int)
+
+p_search = sub.add_parser("search", help="Search documentation content.")
+add_db_option(p_search)
+p_search.add_argument("--limit", type=int, default=10)
+p_search.add_argument("--query", required=True)
+p_search.set_defaults(func=cmd_search)
+
+p_show = sub.add_parser("show", help="Show a document by ID or path.")
+add_db_option(p_show)
+p_show.add_argument("--doc-id", required=True)
+p_show.add_argument("--start", type=int)
+p_show.add_argument("--end", type=int)
     p_show.set_defaults(func=cmd_show)
 
     return parser

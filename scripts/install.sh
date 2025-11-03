@@ -355,6 +355,7 @@ install_files() {
     --include '/templates/***'
     --include '/src/***'
     --include '/scripts/***'
+    --include '/.gpt-creator/'
     --include '/.gpt-creator/***'
     --include '/tui/***'
     --include '/docs/***'

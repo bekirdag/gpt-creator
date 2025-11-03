@@ -5,6 +5,9 @@
 
 set -Eeuo pipefail
 
+mkdir -p "${PWD}/.gpt-creator/shims" 2>/dev/null || true
+export BASH_ENV="${BASH_ENV:-$PWD/.gpt-creator/shims/bash_env.sh}"
+
 if (( BASH_VERSINFO[0] < 4 )); then
   if [[ -z "${GC_BASH_BOOTSTRAP:-}" ]]; then
     bash_candidates=()

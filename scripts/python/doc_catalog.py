@@ -211,40 +211,39 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--db",
+        metavar="PATH",
+        help="Optional path to the SQLite catalog (falls back to docs/ scan).",
+    )
+
     parser = argparse.ArgumentParser(
         prog="doc_catalog.py",
         description="Minimal documentation catalog helper.",
-    )
-    parser.add_argument(
-        "--db",
-        metavar="PATH",
-        help="Optional path to the SQLite catalog (falls back to docs/ scan).",
+        parents=[common],
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_list = sub.add_parser("list", help="List available documentation entries.")
+    p_list = sub.add_parser(
+        "list", parents=[common], help="List available documentation entries."
+    )
     p_list.add_argument("--limit", type=int, default=10)
     p_list.set_defaults(func=cmd_list)
 
-def add_db_option(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--db",
-        metavar="PATH",
-        help="Optional path to the SQLite catalog (falls back to docs/ scan).",
+    p_search = sub.add_parser(
+        "search", parents=[common], help="Search documentation content."
     )
+    p_search.add_argument("--limit", type=int, default=10)
+    p_search.add_argument("--query", required=True)
+    p_search.set_defaults(func=cmd_search)
 
-
-p_search = sub.add_parser("search", help="Search documentation content.")
-add_db_option(p_search)
-p_search.add_argument("--limit", type=int, default=10)
-p_search.add_argument("--query", required=True)
-p_search.set_defaults(func=cmd_search)
-
-p_show = sub.add_parser("show", help="Show a document by ID or path.")
-add_db_option(p_show)
-p_show.add_argument("--doc-id", required=True)
-p_show.add_argument("--start", type=int)
-p_show.add_argument("--end", type=int)
+    p_show = sub.add_parser(
+        "show", parents=[common], help="Show a document by ID or path."
+    )
+    p_show.add_argument("--doc-id", required=True)
+    p_show.add_argument("--start", type=int)
+    p_show.add_argument("--end", type=int)
     p_show.set_defaults(func=cmd_show)
 
     return parser

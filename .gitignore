@@ -24,17 +24,27 @@ coverage/
 !.env.example
 
 # Logs & temps
+.gpt-creator/artifacts/
+.gpt-creator/dag/
 .gpt-creator/tmp/
 .gpt-creator/tmp/**/*
+.gpt-creator/manifests/
 .gpt-creator/logs/
 .gpt-creator/logs/**/*.ndjson
 .gpt-creator/logs/codex-usage.ndjson
+.gpt-creator/scan.tsv
+.gpt-creator/scan.tsv.*
 .gpt-creator/tmp/v8-compile-cache-*/
 .gpt-creator/tmp/v8-compile-cache-*/**/*
 .gpt-creator/state/
 .gpt-creator/state/**
 .gpt-creator/staging/plan/.runtime/
+.gpt-creator/tasks.db
+.gpt-creator/tasks.db-*
 logs/
+.gpt-creator/staging/
+.gpt-creator/staging/**
+logs_output.txt
 *.log
 *.log.*
 .tmp/

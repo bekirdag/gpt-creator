@@ -166,7 +166,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
 `gpt-creator backlog` emits structured summaries straight to the console, backed by `.gpt-creator/staging/plan/tasks/tasks.db`.
 
 ```bash
-$ gpt-creator backlog --project ~/apps/yoga
+$ gpt-creator backlog --project ~/projects/sample-app
 Epic ID  Slug        Title                 Stories                                Tasks                                  Progress
 -------  ----------  --------------------  -------------------------------------  -------------------------------------  --------
 GC-01    gc-api      API Platform          12 stories (6 complete, 3 in-progress)  98 tasks (54 complete, 12 in-progress)  55.1%
@@ -177,7 +177,7 @@ GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)
 - `--type stories` lists every story with its epic, status, and task progress:
 
   ```bash
-  $ gpt-creator backlog --project ~/apps/yoga --type stories
+  $ gpt-creator backlog --project ~/projects/sample-app --type stories
   Story Slug     Story ID  Title                     Epic               Status       Tasks                                 Progress
   -------------  --------  ------------------------  ------------------ ------------ ------------------------------------ --------
   user-onboard   GC-201    User onboarding flow      API Platform       in-progress  3/8 complete, 2 in-progress, 3 pending 37.5%
@@ -187,7 +187,7 @@ GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)
 - `--item-children <id>` accepts an epic slug/key/ID (or a story slug/ID) and prints its immediate children:
 
   ```bash
-  $ gpt-creator backlog --project ~/apps/yoga --item-children gc-api
+  $ gpt-creator backlog --project ~/projects/sample-app --item-children gc-api
   Stories for epic: API Platform [GC-01] (gc-api)
   Story Slug     Title                           Status       Epic            Tasks                                 Progress
   -------------  ------------------------------  -----------  --------------  ------------------------------------  --------
@@ -196,7 +196,7 @@ GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)
   ```
 
   ```bash
-  $ gpt-creator backlog --project ~/apps/yoga --item-children user-onboard
+  $ gpt-creator backlog --project ~/projects/sample-app --item-children user-onboard
   Tasks for story: User onboarding flow (user-onboard)
   #  Task ID    Title                                                Status      Estimate
   1  GC-101     Implement signup API                                 in-progress 3d
@@ -206,7 +206,7 @@ GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)
 - `--task-details <id>` prints a single task in detail:
 
   ```bash
-  $ gpt-creator backlog --project ~/apps/yoga --task-details GC-101
+  $ gpt-creator backlog --project ~/projects/sample-app --task-details GC-101
   Task details
   ------------
   Task ID: GC-101
@@ -221,7 +221,7 @@ GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)
 - `--progress` summarises global task progress with a percentage bar:
 
   ```bash
-  $ gpt-creator backlog --project ~/apps/yoga --progress
+  $ gpt-creator backlog --project ~/projects/sample-app --progress
   Overall backlog progress
   Tasks complete: 210/300 (70.0%)
   In-progress: 45, Pending: 45

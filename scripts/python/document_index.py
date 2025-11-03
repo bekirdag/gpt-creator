@@ -71,18 +71,18 @@ from task_binder import (
 
 APPROX_CHARS_PER_TOKEN = 4
 ESTIMATE_MARGIN = 1.06
-DEFAULT_SOFT_LIMIT_RATIO = 0.85
+DEFAULT_SOFT_LIMIT_RATIO = 1.0
 DEFAULT_MIN_OUTPUT_TOKENS = 1024
 MODEL_CONTEXTS: Dict[str, int] = {
-    "gpt-5-codex": 128000,
-    "gpt-5": 128000,
-    "gpt-4.1": 128000,
-    "gpt-4.1-coder": 128000,
-    "gpt-4.1-mini": 128000,
-    "gpt-4o": 128000,
-    "gpt-4o-mini": 128000,
-    "o4": 128000,
-    "o4-mini": 128000,
+    "gpt-5-codex": 1001024,
+    "gpt-5": 1001024,
+    "gpt-4.1": 1001024,
+    "gpt-4.1-coder": 1001024,
+    "gpt-4.1-mini": 1001024,
+    "gpt-4o": 1001024,
+    "gpt-4o-mini": 1001024,
+    "o4": 1001024,
+    "o4-mini": 1001024,
 }
 
 DESCRIPTION_MAX_LINES = int(os.getenv("GC_PROMPT_DESCRIPTION_MAX_LINES", "400"))
@@ -168,14 +168,14 @@ def _approximate_tokens(text: str) -> int:
 def _resolve_model_context(model_name: str) -> int:
     name = (model_name or "").strip().lower()
     if not name:
-        return 128000
+        return 1001024
     if name in MODEL_CONTEXTS:
         return MODEL_CONTEXTS[name]
     # try to match prefix
     for key, value in MODEL_CONTEXTS.items():
         if name.startswith(key):
             return value
-    return 128000
+    return 1001024
 
 
 def _parse_bool(value: Any, *, default: bool = False) -> bool:

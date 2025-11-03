@@ -52,7 +52,7 @@ STATUS_NORMALISE_MAP = {
     "needs review": "needs-review",
 }
 
-DEFAULT_EPIC_WATCH = ("adm-01",)
+DEFAULT_EPIC_WATCH: Tuple[str, ...] = ()
 DEFAULT_WINDOW_DAYS = 7.0
 DEFAULT_WIP_LIMIT = 12
 

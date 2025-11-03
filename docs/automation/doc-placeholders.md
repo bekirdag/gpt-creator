@@ -13,7 +13,7 @@ The helper keeps everything project-agnostic: it accepts any path, creates paren
 ## Script Usage
 
 ```bash
-scripts/create-doc-placeholder.sh docs/delivery/example/checklist.md \
+scripts/create-doc-placeholder.sh docs/placeholders/example/checklist.md \
   --owner "Release PM" \
   --summary "Guardrail release checklist"
 ```

@@ -1409,7 +1409,6 @@ gc_parse_size_bytes() {
 }
 
 GC_PROGRESS_DIR_MIGRATIONS=(
-  "docs/delivery::staging/docs"
   "Design::staging/docs"
   "legal_editor_tmp::artifacts"
 )
@@ -1422,13 +1421,10 @@ GC_PROGRESS_FILE_MIGRATIONS=(
   "change_*::artifacts/change"
   "changes_*::artifacts/change"
   "codex_*::artifacts/codex"
-  "delivery_plan*::artifacts/delivery"
-  "qaDoc.json::artifacts/delivery"
   "backlog.md::artifacts/planning"
   "plan.md::artifacts/planning"
   "tasks.json::staging/plan/legacy"
   "encoded*::artifacts/encoded"
-  "session_lifecycle*::artifacts/session"
   "breadcrumbs*.json::artifacts/ui"
   "cli_content.json::artifacts/context"
   "focusTrap.json::artifacts/ui"
@@ -3561,7 +3557,19 @@ gc_backlog_guard_snapshot() {
   local wip_limit="${4:-}"
   local helper_path
   helper_path="$(gc_clone_python_tool "backlog_guard.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  local -a args=("snapshot" "--db" "$db_path" "--epic" "ADM-01")
+  local -a args=("snapshot" "--db" "$db_path")
+  local epics_raw="${GC_BACKLOG_GUARD_EPICS:-}"
+  local -a epics=()
+  if [[ -n "$epics_raw" ]]; then
+    epics_raw="${epics_raw//,/ }"
+    read -r -a epics <<<"$epics_raw"
+  fi
+  local epic_value
+  for epic_value in "${epics[@]}"; do
+    epic_value="${epic_value//[[:space:]]/}"
+    [[ -n "$epic_value" ]] || continue
+    args+=("--epic" "$epic_value")
+  done
   if [[ -n "$window_days" ]]; then
     args+=("--window-days" "$window_days")
   fi
@@ -3581,7 +3589,19 @@ gc_backlog_guard_compare() {
   local wip_limit="${3:-}"
   local helper_path
   helper_path="$(gc_clone_python_tool "backlog_guard.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  local -a args=("compare" "--before" "$before_path" "--after" "$after_path" "--epic" "ADM-01")
+  local -a args=("compare" "--before" "$before_path" "--after" "$after_path")
+  local epics_raw="${GC_BACKLOG_GUARD_EPICS:-}"
+  local -a epics=()
+  if [[ -n "$epics_raw" ]]; then
+    epics_raw="${epics_raw//,/ }"
+    read -r -a epics <<<"$epics_raw"
+  fi
+  local epic_value
+  for epic_value in "${epics[@]}"; do
+    epic_value="${epic_value//[[:space:]]/}"
+    [[ -n "$epic_value" ]] || continue
+    args+=("--epic" "$epic_value")
+  done
   if [[ -n "$wip_limit" ]]; then
     args+=("--wip-limit" "$wip_limit")
   fi

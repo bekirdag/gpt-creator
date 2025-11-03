@@ -1585,6 +1585,7 @@ def main():
             if not command_entries:
                 skip_command_processing = True
 
+        command_failure_detected = False
         if isinstance(command_entries, list) and command_entries and not skip_command_processing:
             baseline_status = _git_status_porcelain(project_root)
             for raw_cmd in command_entries:
@@ -1708,6 +1709,7 @@ def main():
                 if proc_cmd.stderr:
                     sys.stderr.write(proc_cmd.stderr)
                 if proc_cmd.returncode != 0:
+                    command_failure_detected = True
                     note = _format_action_result(
                         _truncate_command_text(command),
                         f"failed — exit {proc_cmd.returncode}; revise before retrying"
@@ -1868,6 +1870,9 @@ def main():
         forced_canonical_status = None
         forced_legacy_status = None
         if 'placeholder-ellipsis' in blocked_command_counts:
+            forced_canonical_status = 'RETRYABLE'
+            forced_legacy_status = 'retryable'
+        elif command_failure_detected:
             forced_canonical_status = 'RETRYABLE'
             forced_legacy_status = 'retryable'
         if actual_changes > 0:

@@ -106,7 +106,7 @@ Deliverables (write to ADMIN_DIR):
 - Tables with inline filters, pagination; accessible modals; destructive confirmations.
 - API client bindings to /api/v1/admin/* per SDS.
 - Dockerfile + compose fragment for 'admin'.
-- README with environment, run/build, and smoke test steps.
+- README with environment details and run/build steps.
 
 Write files only—no commentary.
 PROMPT

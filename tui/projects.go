@@ -69,7 +69,6 @@ var pipelineSteps = []pipelineStep{
 		filepath.Join(".gpt-creator", "staging", "plan", "create-db-dump", "sql"),
 	}},
 	{Label: "Run", Paths: []string{"docker"}},
-	{Label: "Verify", Paths: []string{filepath.Join(".gpt-creator", "staging", "verify")}},
 }
 
 func discoverProjects(root string) ([]discoveredProject, error) {

@@ -603,7 +603,7 @@ def normalise_candidate_path(raw: str, cwd: str) -> Optional[pathlib.Path]:
                         if task_token == "run" and idx < len(parts):
                             task_token = parts[idx]
                         pnpm_task = task_token
-                        if pnpm_task in {"test", "build"}:
+                        if pnpm_task in {"build"}:
                             modules_paths = [
                                 workdir_path / "node_modules",
                                 workdir_path / "node_modules" / ".pnpm",
@@ -615,7 +615,7 @@ def normalise_candidate_path(raw: str, cwd: str) -> Optional[pathlib.Path]:
                                 ])
                             modules_present = any(path.exists() for path in modules_paths)
                             if not modules_present:
-                                pnpm_issues.append("node_modules missing; run `pnpm install` before invoking pnpm test/build.")
+                                pnpm_issues.append("node_modules missing; run `pnpm install` before invoking pnpm build.")
                             failure_entry = cached_failure_details.get(command_text)
                             if failure_entry:
                                 try:

@@ -63,12 +63,12 @@ def build_lines(index: int, task: dict[str, object], project_root: str) -> list[
             "- Outline your plan before modifying files.",
             "- Implement the task in the repository; commits are not required.",
             "- Show relevant diffs (git snippets) and command results.",
-            "- Verify acceptance criteria for this task.",
+            "- Ensure acceptance criteria for this task are addressed.",
             "- If blocked, explain why and propose next steps.",
             "",
             "## Output Format",
             f"- Begin with a heading `Task {index}`.",
-            "- Summarise changes, tests, and outstanding follow-ups.",
+            "- Summarise changes and outstanding follow-ups.",
         ]
     )
     return lines

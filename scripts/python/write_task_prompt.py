@@ -200,7 +200,7 @@ def write_task_prompt(
 
     with prompt_path.open("w", encoding="utf-8") as fh:
         fh.write("You are a delivery engineer decomposing a single user story into actionable Jira tasks.\n\n")
-        fh.write("Consider frontend, backend, admin UI, data, security, accessibility, analytics, and QA needs.\n\n")
+        fh.write("Consider frontend, backend, admin UI, data, security, accessibility, and analytics needs.\n\n")
         fh.write("## User story\n")
         json.dump(story, fh, indent=2)
         fh.write("\n\n")
@@ -216,10 +216,10 @@ def write_task_prompt(
             fh.write("(No high-confidence documentation sections matched; consult the consolidated context if needed.)\n\n")
         fh.write("## Requirements\n")
         fh.write("- Cover happy paths, error handling, analytics, and release readiness considerations.\n")
-        fh.write("- Assign owners, note dependencies, and tag each task for the impacted surfaces (Web-FE, API, DB, QA, etc.).\n")
+        fh.write("- Assign owners, note dependencies, and tag each task for the impacted surfaces (Web-FE, API, DB, etc.).\n")
         fh.write("- Provide numeric story points and hour estimates consistent with the workload.\n")
         fh.write("- Reference documentation by identifier (e.g., SDS §10.1.1, SQL:users, API:/v1/auth) instead of pasting content.\n")
-        fh.write("- Describe APIs, data contracts, validations, and required testing (unit, integration, E2E).\n\n")
+        fh.write("- Describe APIs, data contracts, and validations.\n\n")
         if sds_refs:
             fh.write("## SDS references\n")
             for ref, summary in sds_refs:
@@ -249,7 +249,7 @@ def write_task_prompt(
             '      "document_references": ["SDS §10.1.1"],\n'
             '      "endpoints": ["GET /api/v1/..."],\n'
             '      "data_contracts": ["Request payloads, DB tables, indexes, policies, RBAC"],\n'
-            '      "qa_notes": ["Unit tests, integration tests"],\n'
+            '      "qa_notes": [],\n'
             '      "user_roles": ["Visitor"]\n'
             "    }\n"
             "  ]\n"

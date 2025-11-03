@@ -827,8 +827,6 @@ if isinstance(command_entries, list) and command_entries:
                 command = command.replace("rg ", "rg -m 200 --max-count 200 ", 1)
             if "--max-filesize" not in command:
                 command = command.replace("rg ", "rg --max-filesize 256K ", 1)
-        if os.environ.get("GC_TESTS_SUMMARY", "") == "1" and ("pnpm test" in command or "npm test" in command) and "--reporter" not in command:
-            command += " --reporter summary"
         try:
             proc_cmd = subprocess.run(
                 ['bash', '-lc', command],

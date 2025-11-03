@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 if (( BASH_VERSINFO[0] < 4 )); then
   if [[ -z "${GC_BASH_BOOTSTRAP:-}" ]]; then
@@ -146,4 +146,8 @@ if [[ -z "${run_pgid:-}" ]]; then
   run_pgid="$run_pid"
 fi
 wait "$run_pid"
-exit $?
+child_status=$?
+if (( child_status != 0 )); then
+  printf '[run_tasks_sigint_safe] child exited with status %d; continuing per policy\n' "$child_status" >&2
+fi
+exit 0

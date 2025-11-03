@@ -4,11 +4,15 @@ Absolutely—here’s a **complete TUI spec + Bubble Tea implementation plan** t
 
 ---
 
+> **Testing note:** References to `verify` commands and QA screens in this spec are preserved for historical context. gpt-creator no longer orchestrates automated testing; any QA flows are maintained outside the core workflow.
+
+---
+
 ## 0) Feature inventory (from repo)
 
 **Bootstrap & generation**
 
-* `create-project <path>` orchestrates **scan → normalize → plan → generate → db → run**, then acceptance verification. ([GitHub][1])
+* `create-project <path>` orchestrates **scan → normalize → plan → generate → db → run**. Automated verification was removed; testing now lives outside the CLI. ([GitHub][1])
 * `generate all` renders **api/web/admin/db/docker** templates; injects env; maps first free DB port. ([GitHub][1])
 
 **Documentation synthesis**
@@ -28,9 +32,9 @@ Absolutely—here’s a **complete TUI spec + Bubble Tea implementation plan** t
 
 * `create-jira-tasks`, `migrate-tasks`, `refine-tasks`, `create-tasks`, `work-on-tasks`, and **`backlog`** browser (SQLite). State files + JSON under staging. ([GitHub][1])
 
-**Verification**
+**Verification (legacy)**
 
-* `verify acceptance` after bootstrap; `verify all` adds OpenAPI, Lighthouse, a11y, consent, program‑filter. ([GitHub][1])
+* Legacy scripts remain under `verify/` for teams that want manual QA (`verify acceptance`, `verify all`, etc.), but they are no longer wired into the workflow. ([GitHub][1])
 
 **Ops & housekeeping**
 
@@ -85,11 +89,11 @@ Absolutely—here’s a **complete TUI spec + Bubble Tea implementation plan** t
 
 ### A) **Workspace / Projects**
 
-* **Projects List** (auto‑discover folders with `.gpt-creator/` or `.gptcreatorrc`): columns **Name • Stage (scan/normalize/plan/generate/db/run/verify) • Tasks Done% • Verify Pass**. Progress heuristics from staging presence/mtimes; verify & task counts from last runs. ([GitHub][1])
+* **Projects List** (auto‑discover folders with `.gpt-creator/` or `.gptcreatorrc`): columns **Name • Stage (scan/normalize/plan/generate/db/run) • Tasks Done%**. Progress heuristics from staging presence/mtimes; task counts from last runs. ([GitHub][1])
 * **Overview tab (per project)**
 
-  * **Pipeline strip** with 7 steps (✓/●/…); last durations and artifacts. ([GitHub][1])
-  * **Quick actions**: *Run create‑project*, *Run verify all*, *Open artifacts*, *Open stack*.
+  * **Pipeline strip** with the six active steps (✓/●/…); last durations and artifacts. ([GitHub][1])
+  * **Quick actions**: *Run create‑project*, *Open artifacts*, *Open stack*.
   * **Artifacts glance**: links into `.gpt-creator/staging/**`. ([GitHub][1])
 
 ### B) **New Project (wizard)** — fully interactive
@@ -99,7 +103,7 @@ Steps:
 1. **Path + Template** (template `auto` default).
 2. **Inputs** (attach PDR/SDS/RFP/OpenAPI/SQL/mermaid/UI samples).
 3. **Models & Limits** (Codex/LLM, token budget).
-4. **Generate plan** → **Generate code** → **DB** → **Run** + **Verify acceptance** with live PTY logs. ([GitHub][1])
+4. **Generate plan** → **Generate code** → **DB** → **Run** with live PTY logs. ([GitHub][1])
    Output lands in `/apps/**`, `/db`, `/docker` and `.env` is created. ([GitHub][1])
 
 ### C) **Docs (PDR/SDS)**
@@ -131,9 +135,9 @@ Steps:
 * Hierarchical view **Epics → Stories → Tasks**, statuses: todo/doing/done/blocked.
 * Actions: `create-jira-tasks` (JSON), `migrate-tasks` (SQLite), `refine-tasks`, `create-tasks`, `work-on-tasks`, `backlog` browser. All stream to logs. ([GitHub][1])
 
-### I) **Verify**
+### I) **Verify (legacy)**
 
-* **Verify acceptance** and **Verify all** grid (OpenAPI, Lighthouse, a11y, consent, program‑filter); pass/fail, score, links to reports. ([GitHub][1])
+* Legacy grid showing historical QA results (OpenAPI, Lighthouse, a11y, consent, program-filter); actions remain disabled in the default workflow. ([GitHub][1])
 
 ### J) **Tokens**
 
@@ -157,9 +161,9 @@ Steps:
 
 * **Pipeline step state** = files exist under:
 
-  * `staging/inputs/` (scan/normalize done), `staging/plan/**` (plan), `apps/**` (generate), `db/` + Compose built (db), `docker/**` + services up (run), `verify/*` artifacts (verify). ([GitHub][1])
+  * `staging/inputs/` (scan/normalize done), `staging/plan/**` (plan), `apps/**` (generate), `db/` + Compose built (db), `docker/**` + services up (run). Testing/QA happens outside gpt-creator; legacy flows may still drop artifacts under `verify/*`. ([GitHub][1])
 * **Tasks %** = (`done` / `total`) from SQLite backlog after `migrate-tasks`. ([GitHub][1])
-* **Verify pass** = passed checks / total checks from last `verify` reports. ([GitHub][1])
+* **Verify pass** = (deprecated) legacy metric from historical verification reports; no longer part of the default workflow. ([GitHub][1])
 
 ---
 
@@ -604,7 +608,7 @@ From the repo README:
 * **Generate** – generation targets (api/web/admin/db/docker).
 * **Database** – provision/import/seed; **create-db-dump**.
 * **Run/Services** – bring stack up/down, open URLs, show health.
-* **Verify** – acceptance / all checks + reports.
+* **Verify** – legacy QA scripts surfaced for reference only.
 * **Tokens** – usage summary.
 * **Reports** – browse saved reports.
 * **Env Editor** – project & app `.env` files.
@@ -619,7 +623,7 @@ From the repo README:
 * **Generate**: `generate all` (if present) or run full pipeline step; show changed files; open **Diff**.
 * **Database**: `create-db-dump`, plus convenience actions for provision/import/seed (repo mentions DB synthesis; we surface the CLI entrypoint we have). ([GitHub][1])
 * **Run/Services**: table of compose services: **Service • Container • State • Health • Ports • Restarts** (from `compose ps` + `inspect`). ([Docker Documentation][2])
-* **Verify**: grid of checks; **Run verify acceptance** / **verify all**; open report files. ([GitHub][1])
+* **Verify**: legacy view showing historical QA runs; no automated actions.
 * **Tokens**: day/command rollups from NDJSON. ([GitHub][1])
 * **Reports**: list and open YAML/MD.
 * **Env Editor**: table **KEY | VALUE | Secret?**; preserves comments/order.
@@ -1704,5 +1708,3 @@ func max(a, b int) int {
 * Replace `sampleLog()` with a PTY stream of your real commands (`create-project`, `verify all`, etc.).
 * Fill main tab content from `.gpt-creator/` artifacts and SQLite backlog.
 * Wire command palette `enter` → spawn CLI and stream output to `rightVP`.
-
-

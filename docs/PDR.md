@@ -34,9 +34,9 @@
 
 - **Founder/Tech Lead:** Bootstrap demo from RFP + OpenAPI + sample pages.  
 - **Full‑stack Dev:** Align API to spec + DB dump; scaffold FE pages.  
-- **QA:** Run verify suite on PRs; ensure NFR thresholds.
+- **QA:** Coordinate validation outside gpt-creator; ensure NFR thresholds with team-owned tooling.
 
-Core flow: _Folder → create-project → stack up → verify → create-tasks → work-on-tasks → pass_.
+Core flow: _Folder → create-project → stack up → create-tasks → work-on-tasks → pass_.
 
 ---
 
@@ -67,10 +67,10 @@ Discovery emits `/staging/scan.json` with type, path, confidence.
 ## 6. Architecture (High Level)
 
 ```
-scan → normalize → plan → generate → db → run → verify → create-tasks → work-on-tasks
+scan → normalize → plan → generate → db → run → create-tasks → work-on-tasks
 ```
 
-Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
+Components: `src/cli/*`, `src/lib/*`, `templates/*`, `examples/*` (legacy QA scripts reside under `verify/` but are outside the default workflow).
 
 ---
 
@@ -78,7 +78,7 @@ Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
 
 **FR‑1 CLI**  
 - `create-project <path>` orchestrates all phases; fails fast with actionable errors.  
-- Subcommands: `scan`, `normalize`, `plan`, `generate [api|web|admin|db|docker]`, `db [provision|import|seed]`, `run [compose-up|logs|open]`, `verify`, `create-tasks`, `work-on-tasks`, `iterate` (deprecated), `help`, `version`.
+- Subcommands: `scan`, `normalize`, `plan`, `generate [api|web|admin|db|docker]`, `db [provision|import|seed]`, `run [compose-up|logs|open]`, `create-tasks`, `work-on-tasks`, `iterate` (deprecated), `help`, `version`. (Testing/QA is managed outside the CLI; `verify` remains only as a no-op compatibility shim.)
 
 **FR‑2 Normalize**  
 - Copies inputs to `/staging/inputs` with canonical names; keeps provenance in `/staging/plan/provenance.json`.
@@ -96,14 +96,14 @@ Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
 **FR‑5 Run**  
 - `docker compose up` orchestrated; health‑wait for MySQL and API; proxy on :8080.
 
-**FR‑6 Verify**  
-- Runs acceptance (`/health`, web root, admin `/admin/`), OpenAPI validation, pa11y, Lighthouse, consent check, and program‑filters check.  
+**FR‑6 Verify (legacy)**  
+- Legacy scripts can still run acceptance (`/health`, web root, admin `/admin/`), OpenAPI validation, pa11y, Lighthouse, consent, and program-filter checks outside the CLI.  
 - Gating thresholds (see §8 and §9).
 
 **FR‑7 Jira backlog execution**  
 - `create-tasks` parses Jira markdown into a SQLite backlog (epics/stories/tasks) stored under `/staging/plan/tasks/tasks.db`, preserving prior slugs and statuses unless forced.
 - Task rows include enriched columns (tags, story points, dependencies, assignee, document references, idempotency, rate limits, RBAC, messaging/workflows, performance targets, observability, endpoints, sample payloads, story/epic refs) for downstream automation.
-- `work-on-tasks` drives Codex over that backlog, applies returned patches, persists progress directly in the database, and optionally re-verifies.
+- `work-on-tasks` drives Codex over that backlog, applies returned patches, and persists progress directly in the database; any QA follow-up happens outside the CLI.
 - `work-on-tasks` accepts batching/pacing flags (`--batch-size`, `--sleep-between`) to manage long-running Codex sessions.
 - Shared-context size is tunable via `--context-lines`, `--context-file-lines`, `--context-skip`, or `--context-none` to keep Codex prompts concise.
 - Prompts ship with the compact instruction/schema block by default; pass `--prompt-expanded` to restore the legacy verbose guidance when needed.
@@ -135,7 +135,7 @@ Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
   Given a folder with sample artifacts → When `create-project` runs → Then API `/health` returns 200, web `/` and admin `/admin/` return 200.
 
 - **AC‑2 OpenAPI Valid:**  
-  Given `openapi.yaml` → When `verify` runs → Then swagger‑cli validates spec (exit 0).
+  Given `openapi.yaml` → When the team's QA tooling validates the spec → Then swagger‑cli passes without errors (exit 0).
 
 - **AC‑3 a11y:**  
   Given running web/admin → When pa11y runs on `/` and `/admin/` → Then no errors of severity “error”; warnings allowed.
@@ -161,7 +161,7 @@ Components: `src/cli/*`, `src/lib/*`, `templates/*`, `verify/*`, `examples/*`.
 
 ## 11. Telemetry & Logging
 
-- Structured logs with phase timings (scan, normalize, plan, generate, db, run, verify).  
+- Structured logs with phase timings (scan, normalize, plan, generate, db, run).  
 - `--verbose` and `--quiet`; exit codes standardized.
 
 ---
@@ -192,7 +192,7 @@ Generated apps live under `/apps/{api,web,admin}` in the target project.
 ## 14. Risks & Mitigations
 
 - **R1 Discovery misses files** → fuzzy match + manual override + logs.  
-- **R2 Spec drift OpenAPI/SQL** → plan deltas + verify gate fails.  
+- **R2 Spec drift OpenAPI/SQL** → plan deltas flagged for team QA review.  
 - **R3 Ambiguous HTML → Vue** → require `PAGE-CODE` & docs; human review loop.  
 - **R4 Tooling variance** → preflight checks; actionable error messages.
 
@@ -200,18 +200,18 @@ Generated apps live under `/apps/{api,web,admin}` in the target project.
 
 ## 15. Milestones
 
-- **M0** Scaffold repo + examples + verify.  
+- **M0** Scaffold repo + examples.  
 - **M1** End‑to‑end success on sample project.  
 - **M2** OpenAPI‑first resource generation.  
 - **M3** Pages → Vue mapping heuristics.  
-- **M4** Jira create-tasks + work-on-tasks loop with auto‑patch & re‑verify.
+- **M4** Jira create-tasks + work-on-tasks loop with auto‑patch.
 
 ---
 
 ## 16. Glossary
 
 - **Staging**: normalized copy of inputs used for deterministic generation.  
-- **Verify**: suite of acceptance & NFR checks used as gates.  
+- **Verify**: legacy acceptance & NFR checks maintained outside the core workflow.  
 - **Iterate**: Deprecated legacy command kept for compatibility; prints a warning directing to `create-tasks` + `work-on-tasks`.
 
 ---
@@ -222,7 +222,7 @@ See `docs/USAGE.md`, `man/gpt-creator.1`.
 
 ## Appendix B — Folder Structure
 
-See repo root README and `/templates`, `/src/cli`, `/src/lib`, `/verify`, `/examples`.
+See repo root README and `/templates`, `/src/cli`, `/src/lib`, `/examples`, plus `/verify` for legacy QA scripts.
 
 ## Appendix C — Verify Thresholds
 

@@ -297,7 +297,7 @@ def determine_effective_status(
         raw_progress = task_row["progress_state"] or ""
         if raw_progress and str(raw_progress).strip():
             progress_norm = normalize_status(raw_progress)
-            if progress_norm not in {"verified", "noop-verified"}:
+            if progress_norm not in {"verified", "noop-accepted"}:
                 return coerce_status(raw_progress, base_status)
 
     return coerce_status(base_status, "pending") or "pending"

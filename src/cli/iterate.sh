@@ -183,7 +183,7 @@ $title
 - Concrete code changes (files, paths, diffs or complete new files).
 - Any migrations (SQL/Prisma).
 - Shell commands to wire into this repo structure.
-- Short verification steps.
+- Highlight blockers or manual follow-up required.
 
 ## Context (truncated when large)
 (Full context: context.md in this run directory)

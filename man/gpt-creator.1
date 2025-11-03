@@ -59,7 +59,7 @@ gpt-creator \- scaffold and iteratively build full‑stack projects from docs us
 [\-\-project DIR] [\-\-root DIR] [\-\-type epics|stories] [\-\-item-children ID] [\-\-progress] [\-\-task-details ID]
 .br
 .B gpt-creator work-on-tasks
-[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-force] [\-\-no-verify] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC] [\-\-context-lines NUM] [\-\-context-none] [\-\-context-file-lines NUM] [\-\-context-skip GLOB] [\-\-prompt-compact] [\-\-prompt-expanded] [\-\-context-doc-snippets] [\-\-sample-lines NUM] [\-\-max-tokens NUM] [\-\-soft-limit RATIO] [\-\-reserve-output NUM] [\-\-stop-on-overbudget[=true|false]]
+[\-\-project DIR] [\-\-story ID|SLUG] [\-\-fresh] [\-\-force] [\-\-keep-artifacts] [\-\-memory-cycle] [\-\-batch-size NUM] [\-\-sleep-between SEC] [\-\-context-lines NUM] [\-\-context-none] [\-\-context-file-lines NUM] [\-\-context-skip GLOB] [\-\-prompt-compact] [\-\-prompt-expanded] [\-\-context-doc-snippets] [\-\-sample-lines NUM] [\-\-max-tokens NUM] [\-\-soft-limit RATIO] [\-\-reserve-output NUM] [\-\-stop-on-overbudget[=true|false]]
 .br
 .B gpt-creator reports
 [\-\-project DIR] [list|backlog|auto|show|work] [\-\-open] [\-\-branch NAME] [\-\-no-push] [\-\-prompt-only] [\-\-reporter NAME] [slug]
@@ -73,7 +73,7 @@ into a staging layout, builds a plan, and drives the Codex client to generate a
 NestJS + Vue 3 + MySQL system with Docker orchestration.
 .PP
 The \fBcreate-project\fR command is a one‑shot orchestrator that runs the full
-pipeline: \fBscan\fR → \fBnormalize\fR → \fBplan\fR → \fBgenerate\fR → \fBdb\fR → \fBrun\fR → \fBverify\fR.
+pipeline: \fBscan\fR → \fBnormalize\fR → \fBplan\fR → \fBgenerate\fR → \fBdb\fR → \fBrun\fR.
 .SH GLOBAL OPTIONS
 .TP
 .B \-h, \-\-help
@@ -99,7 +99,7 @@ Override the idle/stall detection threshold (default 1800 seconds). Also configu
 Run the full pipeline on a target directory. When `--template auto` (default),
 the command inspects the staged RFP/PDR and, when possible, clones a matching
 project scaffold from \fIproject_templates/\fR before executing the standard
-scan → normalize → plan → generate → db → run → verify flow. Use
+scan → normalize → plan → generate → db → run flow. Use
 `--template <name>` to force a specific template or `--skip-template` to start
 from an empty folder.
 .TP
@@ -107,7 +107,7 @@ from an empty folder.
 Automate the entire RFP → code loop. The command optionally applies a project
 template (same semantics as \fBcreate-project\fR), then runs `create-pdr`,
 `create-sds`, `create-jira-tasks`, and the full build pipeline (scan → normalize
-→ plan → generate → db → run → verify) sequentially. The result is a generated
+→ plan → generate → db → run) sequentially. The result is a generated
 stack, staged PDR/SDS, and a populated Jira backlog with a single invocation.
 Progress is checkpointed; re-running the command resumes from the last
 successful step unless \fB--fresh\fR is supplied to start over. Use
@@ -134,7 +134,7 @@ Provision MySQL, import schema/dumps, and seed baseline data.
 Docker Compose wrappers: \fBup\fR, \fBdown\fR, \fBlogs\fR, \fBopen\fR.
 .TP
 .B verify
-Acceptance & NFR checks: routes render, filters work, Lighthouse, AA basics.
+Deprecated placeholder retained for compatibility; automated verification has been removed and the command only emits a notice.
 .TP
 .B create-sds
 Derive a System Design Specification from the staged PDR. The command calls Codex
@@ -199,8 +199,8 @@ The runner now performs a git/prisma preflight, halting with statuses such as `b
 \fB--soft-limit\fR adjusts the pruning target ratio (0 < ratio \(le 1; default 0.85) so prompts are aggressively trimmed before hitting the hard cap.
 \fB--reserve-output\fR reserves the specified number of tokens for Codex responses (default 1024) to avoid exhausting the reply window with context alone.
 \fB--stop-on-overbudget\fR (optional =true/false) controls whether `work-on-tasks` halts the run when a prompt still exceeds the hard budget after deterministic pruning (default true).
-\fB--plan-max-out\fR, \fB--status-max-out\fR, \fB--verify-max-out\fR, \fB--patch-max-out\fR, and \fB--out-hard-cap\fR cap Codex responses per phase; defaults originate from the \fIllm.output_limits\fR stanza in \fI.gpt-creator/config.yml\fR.
-\fB--max-tokens-per-stage\fR stage=NUM sets hard ceilings for retrieve/plan/patch/verify stages, while \fB--auto-abandon-top-offenders\fR (or \fB--no-auto-abandon-top-offenders\fR) decides whether stages that exceeded those limits last run should be skipped automatically.
+\fB--plan-max-out\fR, \fB--status-max-out\fR, \fB--patch-max-out\fR, and \fB--out-hard-cap\fR cap Codex responses per phase; defaults originate from the \fIllm.output_limits\fR stanza in \fI.gpt-creator/config.yml\fR.
+\fB--max-tokens-per-stage\fR stage=NUM sets hard ceilings for retrieve/plan/patch stages, while \fB--auto-abandon-top-offenders\fR (or \fB--no-auto-abandon-top-offenders\fR) decides whether stages that exceeded those limits last run should be skipped automatically.
 Large unified diffs are written to \fI.gpt-creator/artifacts/patches/<task>.patch\fR and summarised inline; every Codex turn appends telemetry to \fI.gpt-creator/logs/codex-usage.ndjson\fR and the runner produces a human-readable \fI.gpt-creator/logs/budget-report.md\fR at the end of each run.
 \fB--memory-cycle\fR processes one task per invocation, performs a best-effort memory trim (including Docker cache pruning), and automatically restarts the command so long backlogs stay within bounded RAM.
 .TP

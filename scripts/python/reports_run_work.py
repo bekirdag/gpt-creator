@@ -95,17 +95,18 @@ def build_prompt(
     instructions.append(f"1. Checkout the branch `{branch}` (create it if missing).")
     instructions.append("2. Investigate and resolve the described issue with deterministic steps.")
     instructions.append(
-        "3. Run any relevant checks or tests (e.g. `gpt-creator verify acceptance`) to confirm the fix."
-    )
-    instructions.append(
-        f"4. Stage and commit the changes with a concise message "
+        f"3. Stage and commit the changes with a concise message "
         f"(suggested: `fix: {slug} {summary_for_commit}`)."
     )
     if push:
-        instructions.append(f"5. Push the branch to origin via `git push origin {branch}`.")
-    instructions.append(
-        "6. Provide a short summary of the fix in the commit message body if additional context is required."
-    )
+        instructions.append(f"4. Push the branch to origin via `git push origin {branch}`.")
+        instructions.append(
+            "5. Provide a short summary of the fix in the commit message body if additional context is required."
+        )
+    else:
+        instructions.append(
+            "4. Provide a short summary of the fix in the commit message body if additional context is required."
+        )
     instructions.append("")
     instructions.append("## Notes for Codex")
     instructions.append("- Operate deterministically and avoid modifying unrelated files.")
@@ -147,4 +148,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

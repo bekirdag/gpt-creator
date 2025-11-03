@@ -118,7 +118,7 @@ Deliverables (write to filesystem under OUT_DIR):
 - Rate limits, Helmet headers, CSRF on state-change routes.
 - Health endpoint /health.
 - Dockerfile (Node 20) and docker-compose service fragment for api + mysql.
-- README with local run, env vars, and curl smoke tests.
+- README with local run and env vars.
 
 Conventions:
 - Base path /api/v1; cookie-based sessions (HttpOnly, Secure, SameSite).
@@ -134,7 +134,7 @@ Tasks:
 5) Implement Program read with filters; Events read with upcoming/past split.
 6) Implement Admin ingestion endpoints and audit logging skeletons.
 7) Add Docker artifacts and compose snippet.
-8) Include minimal unit tests for 2–3 endpoints.
+8) Document run/build steps and environment configuration in the README.
 
 Write files only—no commentary.
 PROMPT

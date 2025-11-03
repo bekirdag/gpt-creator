@@ -36,15 +36,6 @@ function resolveTaskRef(summary) {
   return 'task';
 }
 
-function resolveVerifySuffix() {
-  const status = (process.env.GC_AUTOPUSH_VERIFY_STATUS || '').trim().toLowerCase();
-  if (!status) return '';
-  if (status === 'pass' || status === 'verified') {
-    return ' [verified]';
-  }
-  return ` [verify:${status}]`;
-}
-
 async function resolveCurrentBranch(cwd) {
   const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd)).stdout.trim();
   return branch || 'HEAD';
@@ -60,12 +51,11 @@ async function performAutoPush(summary) {
   const preferMain = process.env.GC_AUTO_PUSH_MAIN === '1';
 
   const taskRef = resolveTaskRef(summary) || 'task';
-  const verifySuffix = resolveVerifySuffix();
   const explicitCommitMessage = (process.env.GC_AUTOPUSH_COMMIT_MESSAGE || '').trim();
   const commitMessage =
     explicitCommitMessage.length > 0
       ? explicitCommitMessage
-      : `chore(gpt-creator): complete ${taskRef}${verifySuffix}`;
+      : `chore(gpt-creator): complete ${taskRef}`;
 
   await git(['add', '-A'], cwd);
   const commitArgs = ['commit', '-m', commitMessage];

@@ -11,7 +11,7 @@ gpt-creator run {up|down|logs|open} --root DIR
 gpt-creator verify --root DIR
 gpt-creator create-tasks --root DIR [--jira tasks.md] [--force]
 gpt-creator backlog --project DIR [--type epics|stories] [--item-children ITEM] [--progress] [--task-details ID]
-gpt-creator work-on-tasks --root DIR [--story ID|SLUG] [--from-task REF] [--fresh] [--no-verify]
+gpt-creator work-on-tasks --root DIR [--story ID|SLUG] [--from-task REF] [--fresh] [--verify|--soft-verify] [--no-verify]
 gpt-creator iterate --root DIR [--jira tasks.md]  # deprecated
 gpt-creator tui  # preview TUI with placeholder data
 gpt-creator keys [list|set <service>]  # manage API credentials

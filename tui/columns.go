@@ -3602,7 +3602,7 @@ var featureDefinitions = []featureDefinition{
 	{Key: "artifacts", Title: "Artifacts", Desc: "Browse staging outputs & apps"},
 	{Key: "database", Title: "Database", Desc: "Provision/seed/dump"},
 	{Key: "services", Title: "Run/Services", Desc: "Docker services"},
-	{Key: "verify", Title: "Verify", Desc: "Acceptance & NFR checks"},
+	{Key: "verify", Title: "Verify", Desc: "Testing handled outside gpt-creator"},
 	{Key: "tokens", Title: "Tokens", Desc: "Usage summaries"},
 	{Key: "reports", Title: "Reports", Desc: "Automation reports"},
 	{Key: "env", Title: "Env Editor", Desc: "Environment variables"},
@@ -3611,7 +3611,7 @@ var featureDefinitions = []featureDefinition{
 
 var featureItemsByKey = map[string][]featureItemDefinition{
 	"overview": {
-		{Key: "pipeline", Title: "Pipeline Status", Desc: "scan → verify"},
+		{Key: "pipeline", Title: "Pipeline Status", Desc: "scan → run"},
 		{Key: "activity", Title: "Recent Activity", Desc: "Latest runs & timestamps"},
 	},
 	"tasks": {
@@ -3648,8 +3648,28 @@ var featureItemsByKey = map[string][]featureItemDefinition{
 		{Key: "run-down", Title: "run down", Desc: "Tear down stack", Command: []string{"run", "down"}, ProjectRequired: true, Meta: map[string]string{"requiresDocker": "1"}},
 	},
 	"verify": {
-		{Key: "verify-acceptance", Title: "verify acceptance", Desc: "Run functional acceptance suite", Command: []string{"verify", "acceptance"}, ProjectRequired: true, PreviewKey: "path:.gpt-creator/staging/verify", Meta: map[string]string{"requiresDocker": "1"}},
-		{Key: "verify-all", Title: "verify all", Desc: "Run full verification suite", Command: []string{"verify", "all"}, ProjectRequired: true, PreviewKey: "path:.gpt-creator/staging/verify", Meta: map[string]string{"requiresDocker": "1"}},
+		{
+			Key:             "verify-acceptance",
+			Title:           "verify acceptance",
+			Desc:            "Testing automation removed",
+			Command:         []string{"verify", "acceptance"},
+			ProjectRequired: true,
+			PreviewKey:      "path:.gpt-creator/staging/verify",
+			Meta:            map[string]string{"requiresDocker": "1"},
+			Disabled:        true,
+			DisabledReason:  "Testing is out of scope for gpt-creator.",
+		},
+		{
+			Key:             "verify-all",
+			Title:           "verify all",
+			Desc:            "Testing automation removed",
+			Command:         []string{"verify", "all"},
+			ProjectRequired: true,
+			PreviewKey:      "path:.gpt-creator/staging/verify",
+			Meta:            map[string]string{"requiresDocker": "1"},
+			Disabled:        true,
+			DisabledReason:  "Testing is out of scope for gpt-creator.",
+		},
 	},
 	"tokens": {
 		{Key: "tokens-details", Title: "tokens --details", Desc: "Summarise token usage with details", Command: []string{"tokens", "--details"}, ProjectRequired: true, PreviewKey: "path:.gpt-creator/logs/codex-usage.ndjson"},
@@ -3777,119 +3797,12 @@ func featureItemEntries(project *discoveredProject, featureKey string, dockerAva
 		}
 	case "verify":
 		appendDefaults = false
-		if project == nil {
-			items = append(items, featureItemsForKey("verify")...)
-			break
-		}
-		summary := verifySummaryForProject(project)
-		overall := overallVerifyStatus(summary)
-		descParts := []string{fmt.Sprintf("%d/%d passing", summary.Stats.Passed, summary.Stats.Total)}
-		if summary.Stats.Failed > 0 {
-			descParts = append(descParts, fmt.Sprintf("%d failing", summary.Stats.Failed))
-		}
-		if summary.Stats.Skipped > 0 {
-			descParts = append(descParts, fmt.Sprintf("%d skipped", summary.Stats.Skipped))
-		}
-		if summary.LastUpdated.IsZero() {
-			descParts = append(descParts, "No runs yet")
-		} else {
-			descParts = append(descParts, "Updated "+formatRelativeTime(summary.LastUpdated))
-		}
 		items = append(items, featureItemDefinition{
-			Key:   "verify-summary",
-			Title: fmt.Sprintf("%s Overall", verifyStatusIcon(overall)),
-			Desc:  strings.Join(descParts, " • "),
-			Meta: map[string]string{
-				"verifyOverallStatus": overall,
-				"verifyPassed":        strconv.Itoa(summary.Stats.Passed),
-				"verifyFailed":        strconv.Itoa(summary.Stats.Failed),
-				"verifySkipped":       strconv.Itoa(summary.Stats.Skipped),
-				"verifyTotal":         strconv.Itoa(summary.Stats.Total),
-			},
+			Key:   "verify-disabled",
+			Title: "Testing outside scope",
+			Desc:  "gpt-creator focuses on code creation; manage QA with your own tooling.",
 		})
-		for _, check := range sortedVerifyChecks(summary) {
-			def, _ := verifyDefinitionByName(check.Name)
-			title := fmt.Sprintf("%s %s", verifyStatusIcon(check.Status), check.Label)
-			descParts := []string{}
-			if check.Score != nil {
-				descParts = append(descParts, "Score "+strconv.FormatFloat(*check.Score, 'f', 1, 64))
-			}
-			if statusLabel := verifyStatusLabel(check.Status); statusLabel != "" {
-				descParts = append(descParts, statusLabel)
-			}
-			if check.Message != "" {
-				descParts = append(descParts, check.Message)
-			}
-			if !check.Updated.IsZero() {
-				descParts = append(descParts, "Updated "+formatRelativeTime(check.Updated))
-			}
-			if len(descParts) == 0 {
-				descParts = append(descParts, "Select to view details")
-			}
-			meta := map[string]string{
-				"verifyName":   check.Name,
-				"verifyLabel":  check.Label,
-				"verifyStatus": normalizeVerifyStatus(check.Status),
-			}
-			if check.Message != "" {
-				meta["verifyMessage"] = check.Message
-			}
-			if check.Log != "" {
-				meta["verifyLog"] = check.Log
-			}
-			if check.Report != "" {
-				meta["verifyReport"] = check.Report
-			}
-			if !check.Updated.IsZero() {
-				meta["verifyUpdated"] = check.Updated.Format(time.RFC3339)
-			}
-			if check.RunKind != "" {
-				meta["verifyRunKind"] = check.RunKind
-			}
-			if check.DurationSeconds > 0 {
-				meta["verifyDuration"] = strconv.FormatFloat(check.DurationSeconds, 'f', 1, 64)
-			}
-			if check.Score != nil {
-				meta["verifyScore"] = strconv.FormatFloat(*check.Score, 'f', 1, 64)
-			}
-			if def.RequiresDocker {
-				meta["requiresDocker"] = "1"
-			}
-			key := strings.ReplaceAll(check.Name, "/", "-")
-			items = append(items, featureItemDefinition{
-				Key:             "verify-check-" + key,
-				Title:           title,
-				Desc:            strings.Join(descParts, " • "),
-				Command:         append([]string{}, def.Command...),
-				ProjectRequired: true,
-				PreviewKey:      "verify:check:" + check.Name,
-				Meta:            meta,
-			})
-		}
-		defaults := featureItemsForKey("verify")
-		for _, def := range defaults {
-			item := def
-			switch item.Key {
-			case "verify-acceptance":
-				if check, ok := summary.Checks["acceptance"]; ok {
-					actionParts := []string{}
-					actionParts = append(actionParts, verifyStatusLabel(check.Status))
-					if !check.Updated.IsZero() {
-						actionParts = append(actionParts, "Updated "+formatRelativeTime(check.Updated))
-					}
-					if len(actionParts) > 0 {
-						item.Desc = strings.Join(actionParts, " • ")
-					}
-				}
-			case "verify-all":
-				if summary.LastUpdated.IsZero() {
-					item.Desc = "Run full verification suite"
-				} else {
-					item.Desc = fmt.Sprintf("%d/%d passing • Updated %s", summary.Stats.Passed, summary.Stats.Total, formatRelativeTime(summary.LastUpdated))
-				}
-			}
-			items = append(items, item)
-		}
+		items = append(items, featureItemsForKey("verify")...)
 	case "tokens":
 		if summary := tokensSummary(project); summary != "" {
 			items = append(items, featureItemDefinition{
@@ -4038,35 +3951,14 @@ func buildOverviewItems(project *discoveredProject) []featureItemDefinition {
 			Meta:  map[string]string{"overview": "tasks"},
 		})
 	}
-	if stats.VerifyTotal > 0 {
-		percent := percentOf(stats.VerifyPass, stats.VerifyTotal)
-		items = append(items, featureItemDefinition{
-			Key:   "overview-verify",
-			Title: fmt.Sprintf("Verify %d%%", percent),
-			Desc:  fmt.Sprintf("%d/%d passing", stats.VerifyPass, stats.VerifyTotal),
-			Meta:  map[string]string{"overview": "verify"},
-		})
-	}
-
 	items = append(items, featureItemDefinition{
 		Key:     "overview-run-create-project",
 		Title:   "Run create-project",
-		Desc:    "Idempotent pipeline bootstrap (scan → verify).",
+		Desc:    "Idempotent pipeline bootstrap (scan → run).",
 		Command: []string{"create-project", project.Path},
 		Meta: map[string]string{
 			"overview": "action",
 			"action":   "create-project",
-		},
-	})
-	items = append(items, featureItemDefinition{
-		Key:             "overview-run-verify-all",
-		Title:           "Run verify all",
-		Desc:            "Re-run verification only; skips generation.",
-		Command:         []string{"verify", "all"},
-		ProjectRequired: true,
-		Meta: map[string]string{
-			"overview": "action",
-			"action":   "verify-all",
 		},
 	})
 
@@ -4180,21 +4072,13 @@ func renderOverviewPreview(project *discoveredProject, item featureItemDefinitio
 		}
 		b.WriteString("Use backlog commands to drill into epics/stories.\n")
 	case "verify":
-		stats := project.Stats
-		percent := percentOf(stats.VerifyPass, stats.VerifyTotal)
-		b.WriteString(fmt.Sprintf("Verify: %d/%d passing (%d%%).\n", stats.VerifyPass, stats.VerifyTotal, percent))
-		if stats.VerifyTotal > 0 {
-			bar := renderProgressBar(float64(stats.VerifyPass)/float64(max(stats.VerifyTotal, 1)), 42)
-			b.WriteString(bar)
-			b.WriteRune('\n')
-		}
-		b.WriteString("Re-run `verify all` to refresh acceptance and NFR checks.\n")
+		b.WriteString("Testing is outside gpt-creator's remit; coordinate QA with your own processes.\n")
 	case "action":
 		switch item.Meta["action"] {
 		case "create-project":
-			b.WriteString("Re-run the entire pipeline. Safe to run again; generates missing artifacts and refreshes verification.\n")
+			b.WriteString("Re-run the entire pipeline. Safe to run again; regenerates missing artifacts and code scaffolds.\n")
 		case "verify-all":
-			b.WriteString("Execute only verification commands. Generation and database steps are skipped.\n")
+			b.WriteString("Testing automation commands remain only for legacy compatibility.\n")
 		}
 	default:
 		if strings.TrimSpace(item.Desc) != "" {
@@ -4535,9 +4419,6 @@ func itemPreview(project *discoveredProject, featureKey string, item featureItem
 		if stats.TasksTotal > 0 {
 			fmt.Fprintf(&b, "Tasks: %d/%d complete\n", stats.TasksDone, stats.TasksTotal)
 		}
-		if stats.VerifyTotal > 0 {
-			fmt.Fprintf(&b, "Verify: %d/%d passing\n", stats.VerifyPass, stats.VerifyTotal)
-		}
 		if !project.Stats.LastRun.IsZero() {
 			fmt.Fprintf(&b, "Last activity: %s\n", project.Stats.LastRun.Format(time.RFC822))
 		}
@@ -4559,17 +4440,17 @@ func itemPreview(project *discoveredProject, featureKey string, item featureItem
 	case "services":
 		b.WriteString("Monitor docker-compose services, container health, and HTTP endpoints.\n")
 		b.WriteString("Shortcuts: u=up • l=logs • d=down • o=open endpoint • 1-9 open specific endpoint.\n")
-	case "verify":
-		b.WriteString("Run acceptance or full verification suites and inspect their reports.\n")
 	case "tokens":
 		b.WriteString("Track Codex/OpenAI token usage and costs over time.\n")
 	case "reports":
-		b.WriteString("Browse automation and verify reports, preview details, then open or export entries.\n")
+		b.WriteString("Browse automation reports and captured run logs.\n")
 		b.WriteString("Shortcuts: enter/o open • e export • y copy path.\n")
 	case "settings":
 		b.WriteString(renderSettingsPreview(item))
 	case "env":
 		b.WriteString("Review and edit .env values across project applications (editing coming soon).\n")
+	case "verify":
+		b.WriteString("Testing is managed outside of gpt-creator; rely on your team's QA pipeline.\n")
 	default:
 		if item.Desc == "" {
 			b.WriteString("Use this command from the preview panel.\n")

@@ -1549,7 +1549,7 @@ def format_duration(seconds_value):
 DEFAULT_WORK_PROMPT = """## work-on-tasks Prompt
 - Load the task details and acceptance criteria from the context section.
 - Consult the documentation catalog or search hits before modifying files.
-- Outline a concise plan, execute the required edits, and capture verification steps.
+- Outline a concise plan and execute the required edits.
 - Record follow-up actions when blockers remain.
 - Respond using the `Plan`, `Focus`, `Commands`, `Notes` sections; no JSON envelope is required.
 """
@@ -3146,7 +3146,7 @@ response_guidance = [
     "- Primary objective: ship the code required by the task acceptance criteria; avoid documentation rewrites or reorganizing prompts.",
     "- If an acceptance criterion demands heavy setup or environments the agent cannot access, acknowledge the gap and continue focusing on the core code changes.",
     "- In `Focus`, identify the files or symbols you will touch so reviewers understand scope.",
-    "- Capture blockers, tests, and follow-ups in `Notes`.",
+    "- Capture blockers and follow-ups in `Notes`.",
     "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; plan the remediation first.",
     "- Use the documentation catalog (`python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" ...`) for SDS/PDR lookups instead of opening doc files directly.",
     "- End the `Notes` section with `STATUS: completed`, `STATUS: needs-retry`, or `STATUS: failed` so automation can classify the run.",
@@ -3157,9 +3157,8 @@ if compact_mode:
     lines.append("- Prefer pnpm for scripts; note any commands that cannot run because of network limits.")
     lines.append("- When you need documentation context, query the catalog search/show helpers with precise section names; do not read doc files from the repository.")
     lines.append("- Avoid repo-wide listings/searches; open only the code files you intend to edit and keep `sed`/`cat` ranges tight.")
-    lines.append("- Before running `pnpm test` or `pnpm build`, confirm dependencies are installed and prior pnpm commands succeeded.")
 else:
-    lines.append("- Use pnpm for installs/tests unless the task requires something else; flag unavailable commands.")
+    lines.append("- Use pnpm for installs unless the task requires something else; flag unavailable commands.")
     lines.append("- Skip broad repository listings; open only the code files tied to your active plan and keep the slices minimal.")
 
 lines.append("")

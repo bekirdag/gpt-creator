@@ -98,13 +98,11 @@ export GC_CODEX_MAX_TURNS
 
 GC_LLM_OUTPUT_LIMIT_PLAN_DEFAULT=450
 GC_LLM_OUTPUT_LIMIT_STATUS_DEFAULT=350
-GC_LLM_OUTPUT_LIMIT_VERIFY_DEFAULT=500
 GC_LLM_OUTPUT_LIMIT_PATCH_DEFAULT=7000
 GC_LLM_OUTPUT_LIMIT_HARD_CAP_DEFAULT=12000
 
 GC_LLM_OUTPUT_LIMIT_PLAN="${GC_LLM_OUTPUT_LIMIT_PLAN_DEFAULT}"
 GC_LLM_OUTPUT_LIMIT_STATUS="${GC_LLM_OUTPUT_LIMIT_STATUS_DEFAULT}"
-GC_LLM_OUTPUT_LIMIT_VERIFY="${GC_LLM_OUTPUT_LIMIT_VERIFY_DEFAULT}"
 GC_LLM_OUTPUT_LIMIT_PATCH="${GC_LLM_OUTPUT_LIMIT_PATCH_DEFAULT}"
 GC_LLM_OUTPUT_LIMIT_HARD_CAP="${GC_LLM_OUTPUT_LIMIT_HARD_CAP_DEFAULT}"
 
@@ -197,7 +195,7 @@ gc_budget_stage_skip_reason() {
 }
 
 gc_budget_reset_stage_tracking() {
-  local stages=("retrieve" "plan" "patch" "verify")
+  local stages=("retrieve" "plan" "patch")
   local stage
   for stage in "${stages[@]}"; do
     local total_var
@@ -2739,7 +2737,6 @@ gc_load_llm_output_limits() {
     case "$key" in
       plan) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_PLAN "$value" ;;
       status) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_STATUS "$value" ;;
-      verify) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_VERIFY "$value" ;;
       patch) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_PATCH "$value" ;;
       hard_cap) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_HARD_CAP "$value" ;;
     esac
@@ -2752,7 +2749,6 @@ gc_output_limit_default_for_step() {
   case "${step,,}" in
     plan) printf '%s\n' "$GC_LLM_OUTPUT_LIMIT_PLAN_DEFAULT" ;;
     status) printf '%s\n' "$GC_LLM_OUTPUT_LIMIT_STATUS_DEFAULT" ;;
-    verify) printf '%s\n' "$GC_LLM_OUTPUT_LIMIT_VERIFY_DEFAULT" ;;
     patch|*) printf '%s\n' "$GC_LLM_OUTPUT_LIMIT_PATCH_DEFAULT" ;;
   esac
 }
@@ -2764,7 +2760,6 @@ gc_output_limit_for_step() {
   case "$step_lower" in
     plan) limit="$GC_LLM_OUTPUT_LIMIT_PLAN" ;;
     status) limit="$GC_LLM_OUTPUT_LIMIT_STATUS" ;;
-    verify) limit="$GC_LLM_OUTPUT_LIMIT_VERIFY" ;;
     patch) limit="$GC_LLM_OUTPUT_LIMIT_PATCH" ;;
     *) step_lower="patch"; limit="$GC_LLM_OUTPUT_LIMIT_PATCH" ;;
   esac
@@ -5276,6 +5271,9 @@ EOHELP
 
 
 cmd_verify() {
+  info "'gpt-creator verify' is deprecated; no automated checks are available."
+  return 0
+
   local kind="${1:-all}"; shift || true
   local root=""
   local api_base="${GC_API_BASE_URL:-http://localhost:3000/api/v1}"
@@ -6068,58 +6066,6 @@ gc_wot_normalize_sleep_between() {
   printf '%s\n' "$normalized"
 }
 
-gc_wot_run_verify_if_needed() {
-  local reason="${1:-completion}"
-  local project_root="${2:?project root required}"
-  local any_changes="${3:-0}"
-  local work_failed="${4:-0}"
-
-  local reason_label=""
-  local skip_message=""
-  case "$reason" in
-    completion)
-      reason_label="work run"
-      skip_message="No repository changes detected; skipping verify."
-      ;;
-    batch-limit)
-      reason_label="batch pause"
-      skip_message="Batch limit reached with no repository changes; skipping verify."
-      ;;
-    *)
-      reason_label="$reason"
-      skip_message="No repository changes detected; skipping verify."
-      ;;
-  esac
-
-  if (( any_changes == 0 )); then
-    info "$skip_message"
-    printf '%s\n' "$work_failed"
-    return 0
-  fi
-
-  local verify_start_ts verify_duration_ms verify_failed=0
-  info "Re-running verify after ${reason_label}"
-  verify_start_ts="$(date +%s)"
-  if ! cmd_verify all --project "$project_root"; then
-    verify_failed=1
-    warn "Verify command reported failures."
-  fi
-  verify_duration_ms=$(( ( $(date +%s) - verify_start_ts ) * 1000 ))
-  gc_budget_log_stage "verify" 0 0 0 "$verify_duration_ms" "[]" "{}" "false"
-
-  if (( verify_failed )); then
-    if (( ${GC_WOT_SOFT_VERIFY:-0} )); then
-      GC_WOT_SOFT_VERIFY_TRIGGERED=1
-      info "Verify failure tolerated via soft mode."
-      printf '%s\n' "$work_failed"
-    else
-      printf '%s\n' "1"
-    fi
-  else
-    printf '%s\n' "$work_failed"
-  fi
-}
-
 gc_apply_codex_changes() {
   local output_file="${1:?output file required}"
   local project_root="${2:?project root required}"
@@ -6842,7 +6788,7 @@ EOF
 }
 
 cmd_work_on_tasks() {
-  local root="" resume=1 story_filter="" start_task_ref="" no_verify=0 keep_artifacts=0 memory_cycle=0 force_reset=0
+  local root="" resume=1 story_filter="" start_task_ref="" keep_artifacts=0 memory_cycle=0 force_reset=0
   local batch_size=0 sleep_between=0 sleep_between_positive=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=1
   local -a context_skip_patterns=()
   local override_max_tokens=""
@@ -6857,10 +6803,8 @@ cmd_work_on_tasks() {
   local diff_repeat_limit_override=""
   local override_plan_max_out=""
   local override_status_max_out=""
-  local override_verify_max_out=""
   local override_patch_max_out=""
   local override_hard_cap=""
-  local verify_mode="hard"
   local complete_on_followup=0
   local backlog_guard_window_days="${GC_BACKLOG_GUARD_WINDOW_DAYS:-7}"
   local backlog_guard_wip_limit="${GC_BACKLOG_GUARD_WIP_LIMIT:-12}"
@@ -6945,17 +6889,19 @@ cmd_work_on_tasks() {
         force_reset=1
         shift
         ;;
-      --no-verify) no_verify=1; shift;;
+      --no-verify)
+        shift
+        ;;
+      --verify)
+        shift
+        ;;
       --soft-verify|--verify-soft|--verify-soft-fail)
-        verify_mode="soft"
         shift
         ;;
       --verify-mode)
-        verify_mode="${2:-}"
         shift 2
         ;;
       --verify-mode=*)
-        verify_mode="${1#--verify-mode=}"
         shift
         ;;
       --complete-on-followup|--keep-complete-on-followup)
@@ -7033,7 +6979,6 @@ cmd_work_on_tasks() {
         shift 2
         ;;
       --verify-max-out)
-        override_verify_max_out="${2:-}"
         shift 2
         ;;
       --patch-max-out)
@@ -7130,9 +7075,6 @@ Options:
   --story ID|SLUG      Start from the matching story id or slug (inclusive)
   --from-task REF      Resume from task REF (task id or story-slug:position) and continue forward
   --fresh              Ignore saved progress and start from the first story
-  --no-verify          Skip running gpt-creator verify after tasks complete
-  --soft-verify        Allow verify failures but continue the run (soft gate)
-  --verify-mode MODE   Set verify policy: hard (default), soft, or skip
   --complete-on-followup
                         Keep task status as complete even when follow-up notes are recorded
   --auto-push[=REMOTE/BRANCH]
@@ -7155,7 +7097,6 @@ Options:
   --on-empty-apply MODE  Handle clean empty apply results: complete (default), retry, or fail
   --plan-max-out NUM    Max output tokens for planning/status updates (default: 450; respects config/overrides)
   --status-max-out NUM  Max output tokens for per-task status notes (default: 350)
-  --verify-max-out NUM  Max output tokens for verification summaries (default: 500)
   --patch-max-out NUM   Max output tokens for code/diff responses (default: 7000)
   --out-hard-cap NUM    Absolute ceiling for any Codex response (default: 12000)
   --sample-lines NUM   Include at most NUM chunks of minified sample payloads (default: 0; increase to view raw content)
@@ -7188,33 +7129,11 @@ EOHELP
     esac
   done
 
-  case "${verify_mode,,}" in
-    ""|hard)
-      verify_mode="hard"
-      ;;
-    soft)
-      ;;
-    skip)
-      no_verify=1
-      verify_mode="skip"
-      ;;
-    *)
-      die "Invalid --verify-mode value: ${verify_mode}"
-      ;;
-  esac
-
-  GC_WOT_SOFT_VERIFY=0
-  if [[ "$verify_mode" == "soft" ]]; then
-    GC_WOT_SOFT_VERIFY=1
-  fi
-  GC_WOT_SOFT_VERIFY_TRIGGERED=0
   GC_WOT_COMPLETE_ON_FOLLOWUP="$complete_on_followup"
 
-  GC_COMPLETE_ON_VERIFY="${GC_COMPLETE_ON_VERIFY:-1}"
   GC_ALLOW_EMPTY_COMMIT="${GC_ALLOW_EMPTY_COMMIT:-1}"
   GC_AUTO_PUSH_MAIN="${GC_AUTO_PUSH_MAIN:-1}"
   GC_RETRY_PUSH_MAX="${GC_RETRY_PUSH_MAX:-3}"
-  GC_FORCE_DIFF_ON_VERIFY_FAIL="${GC_FORCE_DIFF_ON_VERIFY_FAIL:-1}"
   GC_LAST_VERIFY_STATUS="skipped"
   GC_LAST_VERIFY_SUMMARY=""
   GC_LAST_VERIFY_REPORT=""
@@ -7324,9 +7243,6 @@ EOHELP
   fi
   if [[ -n "$override_status_max_out" && ! "$override_status_max_out" =~ ^[0-9]+$ ]]; then
     die "Invalid --status-max-out value: ${override_status_max_out}"
-  fi
-  if [[ -n "$override_verify_max_out" && ! "$override_verify_max_out" =~ ^[0-9]+$ ]]; then
-    die "Invalid --verify-max-out value: ${override_verify_max_out}"
   fi
   if [[ -n "$override_patch_max_out" && ! "$override_patch_max_out" =~ ^[0-9]+$ ]]; then
     die "Invalid --patch-max-out value: ${override_patch_max_out}"
@@ -7905,14 +7821,11 @@ EOHELP
   if [[ -n "$override_status_max_out" ]]; then
     gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_STATUS "$override_status_max_out"
   fi
-  if [[ -n "$override_verify_max_out" ]]; then
-    gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_VERIFY "$override_verify_max_out"
-  fi
   if [[ -n "$override_patch_max_out" ]]; then
     gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_PATCH "$override_patch_max_out"
   fi
 
-  info "LLM output limits → plan=${GC_LLM_OUTPUT_LIMIT_PLAN}, status=${GC_LLM_OUTPUT_LIMIT_STATUS}, verify=${GC_LLM_OUTPUT_LIMIT_VERIFY}, patch=${GC_LLM_OUTPUT_LIMIT_PATCH}, hard_cap=${GC_LLM_OUTPUT_LIMIT_HARD_CAP}"
+  info "LLM output limits → plan=${GC_LLM_OUTPUT_LIMIT_PLAN}, status=${GC_LLM_OUTPUT_LIMIT_STATUS}, patch=${GC_LLM_OUTPUT_LIMIT_PATCH}, hard_cap=${GC_LLM_OUTPUT_LIMIT_HARD_CAP}"
 
   local tasks_dir="${PLAN_DIR}/tasks"
   mkdir -p "$tasks_dir"
@@ -8208,135 +8121,6 @@ EOHELP
     return 0
   }
 
-  gc_run_task_verify() {
-    local task_ref="${1:-task}"
-    local report_dir="${2:-${RUN_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/staging/plan/work}}"
-    local project_root="${PROJECT_ROOT:-$PWD}"
-    local helper_path
-    helper_path="$(gc_clone_python_tool "task_verify.py" "$project_root")" || return 1
-    local report_path="${report_dir}/verify_${task_ref//[^A-Za-z0-9._-]/_}.json"
-    local config_arg=()
-    if [[ -n "${GC_VERIFY_CONFIG:-}" ]]; then
-      config_arg=(--config "${GC_VERIFY_CONFIG}")
-    fi
-    local verify_output=""
-    if ! verify_output="$("$python_bin" "$helper_path" --project "$project_root" "${config_arg[@]}" --task-ref "$task_ref" --output "$report_path")"; then
-      GC_LAST_VERIFY_STATUS="fail"
-      GC_LAST_VERIFY_SUMMARY="Verification helper failed."
-      GC_LAST_VERIFY_REPORT="$report_path"
-      GC_LAST_VERIFY_DETAILS=""
-      return 1
-    fi
-
-    GC_LAST_VERIFY_REPORT="$report_path"
-    GC_LAST_VERIFY_STATUS="inconclusive"
-    GC_LAST_VERIFY_SUMMARY=""
-    GC_LAST_VERIFY_DETAILS=""
-    if command -v "$python_bin" >/dev/null 2>&1; then
-      local parsed=""
-      local py_cmd=$'import json, sys
-payload = json.loads(sys.argv[1])
-status = str(payload.get("status", "inconclusive")).strip().lower()
-if status not in {"pass", "fail", "inconclusive"}:
-    status = "inconclusive"
-summary = str(payload.get("summary", "") or "")
-summary = " ".join(summary.split())
-details = json.dumps(payload.get("details", []), ensure_ascii=False)
-print(status)
-print(summary)
-print(details)'
-      if parsed="$("$python_bin" -c "$py_cmd" "$verify_output" 2>/dev/null)"; then
-        IFS=$'\n' read -r GC_LAST_VERIFY_STATUS GC_LAST_VERIFY_SUMMARY GC_LAST_VERIFY_DETAILS <<<"$parsed"
-      fi
-    fi
-    return 0
-  }
-
-  gc_validator_effective_status() {
-    local raw_status="${1:-inconclusive}"
-    local raw_summary="${2:-}"
-    local lowered_summary="${raw_summary,,}"
-    case "$raw_status" in
-      pass)
-        printf '%s\n' "pass"
-        ;;
-      fail)
-        printf '%s\n' "fail"
-        ;;
-      *)
-        if [[ -z "$lowered_summary" ]]; then
-          printf '%s\n' "pass"
-        elif [[ "$lowered_summary" == *"no verification adapters configured"* ]]; then
-          printf '%s\n' "pass"
-        elif [[ "$lowered_summary" == *"verification config not found"* ]]; then
-          printf '%s\n' "pass"
-        elif [[ "$lowered_summary" == *"verification config"* && "$lowered_summary" == *"not found"* ]]; then
-          printf '%s\n' "pass"
-        else
-          printf '%s\n' "fail"
-        fi
-        ;;
-    esac
-  }
-
-  gc_compose_validator_guidance() {
-    local status="${1:-}"
-    local summary="${2:-}"
-    local report="${3:-}"
-    local details_json="${4:-[]}"
-    "$python_bin" - "$status" "$summary" "$report" "$details_json" <<'PYCODE' 2>/dev/null
-import json
-import sys
-
-status = sys.argv[1]
-summary = sys.argv[2]
-report = sys.argv[3]
-try:
-    details = json.loads(sys.argv[4])
-except Exception:
-    details = []
-
-failures = []
-focus = []
-for entry in details:
-    if not isinstance(entry, dict):
-        continue
-    check_status = str(entry.get("status", "")).lower()
-    if check_status not in {"fail", "error"}:
-        continue
-    label = entry.get("name") or entry.get("kind") or "check"
-    message = entry.get("message") or ""
-    failures.append(f"{label}: {message}".strip())
-    for key in ("path", "file", "focus", "target"):
-        value = entry.get(key)
-        if isinstance(value, str):
-            value = value.strip()
-            if value and value not in focus:
-                focus.append(value)
-                if len(focus) >= 6:
-                    break
-
-if not failures and summary:
-    failures.append(summary.strip())
-
-if not failures:
-    sys.exit(0)
-
-print("Only output JSON. Make minimal edits so these validators pass:")
-for failure in failures:
-    line = failure.replace("\n", " ").strip()
-    if line:
-        print(f"- {line}")
-if report:
-    print(f"- Review validator report: {report}")
-if focus:
-    print("Focus on these targets:")
-    for item in focus:
-        print(f"  * {item}")
-print("Do not plan; produce diffs in the `changes` array.")
-PYCODE
-  }
-
   gc_mark_terminal_state() {
     task_terminal_state="${1:-RUNNING}"
   }
@@ -8490,7 +8274,6 @@ print(error)'
     local original_task_ref="${GC_AUTOPUSH_TASK_REF:-}"
     local original_attempt_ref="${GC_AUTOPUSH_ATTEMPT_REF:-}"
     local original_commit_message="${GC_AUTOPUSH_COMMIT_MESSAGE:-}"
-    local original_verify_status="${GC_AUTOPUSH_VERIFY_STATUS:-}"
     local original_allow_empty="${GC_ALLOW_EMPTY_COMMIT:-}"
 
     GC_AUTO_PUSH=1
@@ -8504,7 +8287,6 @@ print(error)'
     else
       unset GC_AUTOPUSH_COMMIT_MESSAGE
     fi
-    export GC_AUTOPUSH_VERIFY_STATUS="${GC_AUTOPUSH_VERIFY_STATUS:-${status_label}}"
     export GC_ALLOW_EMPTY_COMMIT=0
 
     local finalize_attempt=1
@@ -8554,11 +8336,6 @@ print(error)'
       export GC_AUTOPUSH_COMMIT_MESSAGE="$original_commit_message"
     else
       unset GC_AUTOPUSH_COMMIT_MESSAGE
-    fi
-    if [[ -n "$original_verify_status" ]]; then
-      export GC_AUTOPUSH_VERIFY_STATUS="$original_verify_status"
-    else
-      unset GC_AUTOPUSH_VERIFY_STATUS
     fi
     if [[ -n "$original_allow_empty" ]]; then
       export GC_ALLOW_EMPTY_COMMIT="$original_allow_empty"
@@ -8943,11 +8720,6 @@ EOF
       local codex_ok=0
       local attempt=0
       local max_attempts=2
-      local test_retry_count=0
-      local max_test_attempts="${GC_TEST_AUTO_FIX_ATTEMPTS:-10}"
-      if ! [[ "$max_test_attempts" =~ ^[0-9]+$ ]] || (( max_test_attempts <= 0 )); then
-        max_test_attempts=10
-      fi
       gc_touch_progress
       local prompt_augmented=0 prompt_change_reminder=0
       local contract_guard_injected=0
@@ -8961,11 +8733,6 @@ EOF
       local task_verify_report=""
       local task_terminal_state="RUNNING"
       local task_failure_class="NONE"
-      local validator_cached=0
-      local validator_status="inconclusive"
-      local validator_summary=""
-      local validator_details="[]"
-      local validator_report=""
       local delta_prompt_injected=0
       local task_meta_plan_flag=0
       local task_meta_focus_flag=0
@@ -9652,29 +9419,6 @@ print(flag("notes_contains_already_satisfied"))'
               fi
             fi
 
-            if (( validator_cached == 0 )); then
-              if gc_run_task_verify "$task_ref_for_verify" "$story_run_dir"; then
-                validator_status="${GC_LAST_VERIFY_STATUS:-inconclusive}"
-                validator_summary="${GC_LAST_VERIFY_SUMMARY:-}"
-                validator_details="${GC_LAST_VERIFY_DETAILS:-[]}"
-                validator_report="${GC_LAST_VERIFY_REPORT:-}"
-              else
-                validator_status="inconclusive"
-                validator_summary="${GC_LAST_VERIFY_SUMMARY:-Verification helper failure}"
-                validator_details="${GC_LAST_VERIFY_DETAILS:-[]}"
-                validator_report="${GC_LAST_VERIFY_REPORT:-}"
-              fi
-              validator_cached=1
-            fi
-
-            local validator_report_display="$validator_report"
-            if [[ -n "$validator_report_display" && -n "$PROJECT_ROOT" && "$validator_report_display" == "$PROJECT_ROOT/"* ]]; then
-              validator_report_display="${validator_report_display#$PROJECT_ROOT/}"
-            fi
-
-            local validator_effective
-            validator_effective="$(gc_validator_effective_status "$validator_status" "$validator_summary")"
-
             local attempt_signature=""
             if [[ -n "${GC_LAST_APPLY_PAYLOAD:-}" && -f "$GC_LAST_APPLY_PAYLOAD" ]]; then
               attempt_signature="$(gc_make_attempt_signature "$task_ref_for_verify" "$GC_LAST_APPLY_PAYLOAD" "$prompt_path" "$diff_before" "$prompt_binder_status" "$prompt_binder_reason" "${GC_LAST_APPLY_META:-}")"
@@ -9695,12 +9439,8 @@ print(flag("notes_contains_already_satisfied"))'
             fi
 
             local allow_noop_completion=0
-            if [[ "$validator_effective" != "fail" ]]; then
-              case "$empty_apply_mode" in
-                complete)
-                  allow_noop_completion=1
-                  ;;
-              esac
+            if [[ "$empty_apply_mode" == "complete" ]]; then
+              allow_noop_completion=1
             fi
 
             local note_reject_completion=0
@@ -9724,29 +9464,15 @@ print(flag("notes_contains_already_satisfied"))'
                 apply_status="noop-accepted"
               fi
               task_result_status="completed-no-changes"
-              gc_mark_terminal_state "NOOP_VERIFIED"
+              gc_mark_terminal_state "NOOP_ACCEPTED"
               task_needs_review=0
               manual_followups=0
               keep_output=0
               codex_ok=1
-              task_verify_status="$validator_effective"
-              task_verify_summary="$validator_summary"
-              task_verify_details="$validator_details"
-              task_verify_report="$validator_report"
               local noop_note="No repository changes required; task marked complete."
-              if [[ -n "$validator_summary" ]]; then
-                noop_note+=" Validator summary: ${validator_summary}."
-              fi
               task_notes+=("${noop_note}")
-              if [[ -n "$validator_report_display" ]]; then
-                task_notes+=("Validator report stored at ${validator_report_display}.")
-              fi
               if [[ -z "$task_outcome_reason" ]]; then
-                if [[ "$validator_effective" == "pass" ]]; then
-                  task_outcome_reason="noop-verified"
-                else
-                  task_outcome_reason="noop-auto"
-                fi
+                task_outcome_reason="noop-accepted"
               fi
               break
             fi
@@ -9779,31 +9505,23 @@ print(flag("notes_contains_already_satisfied"))'
               fi
               warn "  Acceptance validators still failing; guiding Codex to produce minimal diffs."
               if (( delta_prompt_injected == 0 )); then
-                local guidance_output=""
-                guidance_output="$(gc_compose_validator_guidance "$validator_status" "$validator_summary" "$validator_report_display" "$validator_details")"
-                if [[ -n "$guidance_output" ]]; then
-                  cat >>"$prompt_path" <<REM
+                cat >>"$prompt_path" <<'REM'
 
-## Validator remediation
-$guidance_output
+## Diff reminder
+- Provide explicit unified diffs for the required edits.
+- If no changes are necessary, clearly explain why the existing implementation already satisfies the task.
 REM
-                fi
                 delta_prompt_injected=1
-                task_notes+=("Acceptance validators reported outstanding issues; retrying with delta-only guidance.")
+                task_notes+=("Codex returned no diffs; prompted for explicit changes before retry.")
               fi
               apply_status="needs-delta"
               task_commands=()
               task_written_paths=()
               task_patched_paths=()
-              validator_cached=0
-              validator_status="inconclusive"
-              validator_summary=""
-              validator_details="[]"
-              validator_report=""
               continue
             fi
 
-            warn "  Acceptance validators remained failing without repository changes."
+            warn "  Codex could not produce repository changes; escalating for manual follow-up."
             if (( task_locked_migration )) && [[ "$task_status_lower" =~ $terminal_locked_regex ]]; then
               task_result_status="${task_status_original:-complete}"
               apply_status="locked-no-output"
@@ -9818,18 +9536,11 @@ REM
               keep_output=1
               task_result_status="permanent-fail"
               gc_mark_outcome "PERMANENT_FAIL" "NOOP"
-              apply_status="validators-failed"
-              if [[ -n "$validator_summary" ]]; then
-                task_notes+=("Validators failing with no repository changes: ${validator_summary}")
-              else
-                task_notes+=("Validators failing with no repository changes; manual follow-up required.")
-              fi
-              if [[ -n "$validator_report_display" ]]; then
-                task_notes+=("Validator report stored at ${validator_report_display}.")
-              fi
+              apply_status="noop-unresolved"
+              task_notes+=("Agent could not produce repository changes; manual follow-up required.")
               codex_ok=1
               if [[ -z "$task_outcome_reason" ]]; then
-                task_outcome_reason="noop-validators-failed"
+                task_outcome_reason="noop-unresolved"
               fi
             fi
             break
@@ -10139,108 +9850,6 @@ REM
         break
       done
 
-      local should_run_verify=0
-      if [[ "${GC_COMPLETE_ON_VERIFY:-1}" == "1" ]]; then
-        should_run_verify=1
-      elif (( task_changes_applied == 0 )); then
-        should_run_verify=1
-      elif (( task_meta_plan_flag == 1 || task_meta_focus_flag == 1 )); then
-        should_run_verify=1
-      fi
-      if (( should_run_verify )); then
-        if (( validator_cached )); then
-          task_verify_status="$validator_status"
-          task_verify_summary="$validator_summary"
-          task_verify_details="$validator_details"
-          task_verify_report="$validator_report"
-        elif gc_run_task_verify "$task_ref_for_verify" "$story_run_dir"; then
-          task_verify_status="${GC_LAST_VERIFY_STATUS:-inconclusive}"
-          task_verify_summary="${GC_LAST_VERIFY_SUMMARY:-}"
-          task_verify_details="${GC_LAST_VERIFY_DETAILS:-}"
-          task_verify_report="${GC_LAST_VERIFY_REPORT:-}"
-        else
-          task_verify_status="inconclusive"
-          task_verify_summary="${GC_LAST_VERIFY_SUMMARY:-Verification helper failure}"
-          task_verify_details="${GC_LAST_VERIFY_DETAILS:-}"
-          task_verify_report="${GC_LAST_VERIFY_REPORT:-}"
-        fi
-        local verify_report_display="$task_verify_report"
-        if [[ -n "$verify_report_display" && -n "$PROJECT_ROOT" && "$verify_report_display" == "$PROJECT_ROOT/"* ]]; then
-          verify_report_display="${verify_report_display#$PROJECT_ROOT/}"
-        fi
-        if [[ -n "$task_verify_summary" ]]; then
-          task_notes+=("Verify ${task_verify_status}: ${task_verify_summary}")
-        else
-          task_notes+=("Verify ${task_verify_status}.")
-        fi
-        if [[ -n "$verify_report_display" ]]; then
-          task_notes+=("Verification report stored at ${verify_report_display}.")
-        fi
-      fi
-
-      if [[ "$task_verify_status" == "pass" && $task_changes_applied -eq 0 && "${GC_COMPLETE_ON_VERIFY:-1}" == "1" ]]; then
-        if [[ "$task_result_status" == "in-progress" || "$task_result_status" == "complete" ]]; then
-          task_result_status="complete"
-          task_needs_review=0
-          manual_followups=0
-          keep_output=0
-        fi
-      elif [[ "$task_verify_status" == "fail" ]]; then
-        ((test_retry_count++))
-        local verify_report_display_path="${task_verify_report:-}"
-        local verify_summary_trim="${task_verify_summary}"
-        if (( test_retry_count <= max_test_attempts )); then
-          if (( max_attempts < max_test_attempts )); then
-            max_attempts="$max_test_attempts"
-          fi
-          validator_cached=0
-          task_verify_status="skipped"
-          task_needs_review=0
-          manual_followups=0
-          keep_output=0
-          task_result_status="in-progress"
-          apply_status="tests-retry"
-          task_notes+=("Verification failed (attempt ${test_retry_count}/${max_test_attempts}); appended guidance to address failing tests.")
-          "$python_bin" - "$prompt_path" "$verify_summary_trim" "$verify_report_display" "$test_retry_count" "$max_test_attempts" <<'PY'
-import sys
-from pathlib import Path
-
-prompt_path = Path(sys.argv[1])
-summary = (sys.argv[2] or "").strip()
-report = (sys.argv[3] or "").strip()
-attempt = sys.argv[4]
-limit = sys.argv[5]
-
-guidance = ["", "## Verification failure guidance"]
-guidance.append(f"- Verification attempt {attempt} of {limit} failed; focus on fixing the failing tests.")
-if summary:
-    guidance.append(f"- Summary: {summary}")
-if report and report not in {"", "(missing)"}:
-    guidance.append(f"- Inspect `{report}` for detailed failure output.")
-guidance.append("- Update the code so the failing tests pass, then re-run verification within this task.")
-guidance.append("- Do not skip tests; ensure `pnpm test` (or the reported command) succeeds before finishing.")
-prompt_path.write_text(prompt_path.read_text(encoding="utf-8") + "\n".join(guidance) + "\n", encoding="utf-8")
-PY
-          continue
-        fi
-        task_needs_review=1
-        manual_followups=1
-        keep_output=0
-        task_result_status="retryable"
-        apply_status="tests-failed"
-        task_notes+=("Verification failed after ${max_test_attempts} attempts; moving on to the next task for follow-up.")
-        if [[ -n "$task_verify_report" ]]; then
-          task_notes+=("Last verification report: ${task_verify_report}.")
-        fi
-      elif [[ "$task_verify_status" == "inconclusive" && $task_changes_applied -eq 0 ]]; then
-        if [[ "$task_result_status" == "in-progress" ]]; then
-          task_needs_review=1
-          manual_followups=1
-          task_result_status="blocked"
-          task_notes+=("Verification inconclusive with zero repository changes; follow up required.")
-        fi
-      fi
-
       if (( task_needs_review )) && (( auto_review_enabled )) && (( task_changes_applied > 0 )); then
         local auto_review_path=""
         if auto_review_path="$(gc_generate_auto_review "$story_run_dir" "$story_log_dir" "$banner_task_id" "$task_id" "$task_result_status" "$task_number" "$task_tokens_total" "$PROJECT_ROOT")"; then
@@ -10509,11 +10118,11 @@ PY
             if (( task_changes_applied > 0 )); then
               gc_mark_terminal_state "COMPLETED_WITH_CHANGES"
             else
-              gc_mark_terminal_state "NOOP_VERIFIED"
+              gc_mark_terminal_state "NOOP_ACCEPTED"
             fi
             ;;
           completed-no-changes)
-            gc_mark_terminal_state "NOOP_VERIFIED"
+            gc_mark_terminal_state "NOOP_ACCEPTED"
             ;;
           permanent-fail)
             gc_mark_terminal_state "PERMANENT_FAIL"
@@ -10605,7 +10214,6 @@ PY
 
       if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
         local commit_label="${banner_task_id}: ${task_title:-Task ${task_number}}"
-        export GC_AUTOPUSH_VERIFY_STATUS="$task_verify_status"
         if gc_finalize_task_snapshot "$commit_label" "$task_ref_for_verify" "$attempt_label" "$task_result_status" "complete" "${task_auto_push_records[@]}"; then
           if [[ "${GC_LAST_AUTO_COMMIT_STATUS:-}" == "committed" ]]; then
             local commit_hash="${GC_LAST_AUTO_COMMIT_HASH:0:7}"
@@ -11060,21 +10668,6 @@ PY
     fi
   fi
 
-  if (( work_failed == 0 && no_verify == 0 )); then
-    if (( remaining_tasks == 0 )); then
-      work_failed="$(gc_wot_run_verify_if_needed "completion" "$PROJECT_ROOT" "$any_changes" "$work_failed")"
-      work_failed=$((work_failed))
-    elif (( batch_limit_reached )); then
-      work_failed="$(gc_wot_run_verify_if_needed "batch-limit" "$PROJECT_ROOT" "$any_changes" "$work_failed")"
-      work_failed=$((work_failed))
-    fi
-  fi
-
-  if (( ${GC_WOT_SOFT_VERIFY_TRIGGERED:-0} )); then
-    warn "Verify step reported failures (soft mode); review verify artifacts before deployment."
-    manual_followups=1
-  fi
-
   if (( batch_limit_reached )); then
     info "Batch size limit hit after ${processed_total} task(s); rerun to continue from the next pending task."
   fi
@@ -11128,12 +10721,13 @@ PY
 cmd_iterate() {
   warn "'iterate' is deprecated; prefer 'gpt-creator create-tasks' followed by 'gpt-creator work-on-tasks'."
 
-  local root="" jira="" reverify=1
+  local root="" jira=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project) root="$(abs_path "$2")"; shift 2;;
       --jira) jira="$(abs_path "$2")"; shift 2;;
-      --no-verify) reverify=0; shift;;
+      --no-verify) shift;;
+      --verify) shift;;
       *) break;;
     esac
   done
@@ -11213,14 +10807,6 @@ PROMPT
 
   codex_call "iterate-summary" --prompt "$summary_prompt" --output "$summary_output" || warn "Codex summary step returned non-zero"
 
-  if [[ "$reverify" -eq 1 ]]; then
-    info "Re-running verify after iteration"
-    local iter_verify_start
-    iter_verify_start="$(date +%s)"
-    cmd_verify all --project "$PROJECT_ROOT"
-    local iter_verify_duration=$(( ( $(date +%s) - iter_verify_start ) * 1000 ))
-    gc_budget_log_stage "verify" 0 0 0 "$iter_verify_duration" "[]" "{}" "false"
-  fi
 }
 
 cmd_binder() {
@@ -11708,7 +11294,7 @@ cmd_create_project() {
 Usage: gpt-creator create-project [--template NAME|auto|skip] [--skip-template] <path>
 
 Create a new project root, optionally scaffold it from a project template, then
-run the full build pipeline (scan → normalize → plan → generate → db → run → verify).
+run the full build pipeline (scan → normalize → plan → generate → db → run).
 USAGE
         return 0
         ;;
@@ -11742,7 +11328,6 @@ USAGE
   cmd_generate all --project "$PROJECT_ROOT"
   cmd_db provision --project "$PROJECT_ROOT" || warn "Database provision step reported an error"
   cmd_run up --project "$PROJECT_ROOT" || warn "Stack start reported an error"
-  cmd_verify acceptance --project "$PROJECT_ROOT" || warn "Acceptance checks failing — review stack health."
   ok "Project bootstrap complete"
 }
 
@@ -11774,7 +11359,7 @@ cmd_bootstrap() {
 Usage: gpt-creator bootstrap [--template NAME|auto|skip] [--skip-template] [--rfp FILE] [--fresh] <path>
 
 Generate a full project from an RFP in one step by running:
-  • create-pdr → create-sds → create-db-dump → create-jira-tasks → scan/normalize/plan/generate/db/run/verify
+  • create-pdr → create-sds → create-db-dump → create-jira-tasks → scan/normalize/plan/generate/db/run
 Templates from project_templates/ are applied first (auto-selected by default).
 USAGE
         return 0
@@ -11951,17 +11536,12 @@ USAGE
   fi
 
   if ! gc_bootstrap_step_is_done verify; then
-    if cmd_verify acceptance --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step verify "done"
-    else
-      gc_bootstrap_mark_step verify "failed"
-      die "Acceptance verification failed"
-    fi
+    gc_bootstrap_mark_step verify "done"
   else
     info "Step 'verify' already completed; skipping."
   fi
 
-  info "[11/11] Verifying acceptance"
+  info "[11/11] Finalizing bootstrap"
   gc_bootstrap_mark_complete
   ok "Bootstrap complete — code, docs, and backlog generated"
 }
@@ -12142,8 +11722,8 @@ Usage:
   ${APP_NAME} tidy-progress [--project <path>] [path...] (deprecated alias of sweep-artifacts)
   ${APP_NAME} next [--project <path>] [--story SLUG]
   ${APP_NAME} why --task TASK_ID [--project <path>] [--story SLUG]
-  ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--no-verify] [--keep-artifacts]
-  ${APP_NAME} iterate [--project <path>] [--jira <file>] [--no-verify] (deprecated)
+  ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--keep-artifacts]
+  ${APP_NAME} iterate [--project <path>] [--jira <file>] (deprecated)
   ${APP_NAME} keys [list|set <service>]
   ${APP_NAME} tui
   ${APP_NAME} update [--force]

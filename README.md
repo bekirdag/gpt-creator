@@ -8,13 +8,13 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 
 ## Features at a Glance
 
-- **Single-command bootstrap**: `gpt-creator create-project <path>` orchestrates scan → normalize → plan → generate → db → run, then runs acceptance verification. Additional NFR checks remain available via `verify all`.
+- **Single-command bootstrap**: `gpt-creator create-project <path>` orchestrates scan → normalize → plan → generate → db → run; automated verification has been removed and the legacy `verify` commands remain only as inert compatibility shims for manual scripts.
 - **Fuzzy discovery**: Locates artifacts across diverse naming conventions (e.g., `*PDR*.md`, `openapi.*`, `sql_dump*.sql`, `*.mmd`, HTML/CSS samples).
 - **Deterministic staging**: Copies inputs into `.gpt-creator/staging/inputs/` with canonical names and provenance tracking.
 - **Progress cleanup**: Sweeps legacy Codex progress artifacts (e.g., `tmp_*`, `final_*`, `diff*`, `*_patch.jsonstr`) into `.gpt-creator/**` so the project root stays clean while runs remain resumable.
 - **Planning outputs**: Produces route/entity summaries and task hints under `.gpt-creator/staging/plan/` as scaffolding for further design work.
 - **Template-driven generation**: Renders baseline NestJS, Vue 3, Prisma, and Docker scaffolds into `/apps/**` and `/docker`, ready for manual extension or Codex-driven augmentation.
-- **Verification toolkit**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks that you can run on demand.
+- **Verification toolkit**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks for teams that still want to run them manually outside the core workflow.
 - **Doc synthesis**: `create-pdr` converts the staged RFP into a multi-level Product Requirements Document (PDR) by iteratively asking Codex to draft the table of contents, sections, and detailed subsections. `create-sds` continues the loop, transforming the staged PDR into a System Design Specification that drills from architecture overview down to low-level operational detail.
 - **Database synthesis**: `create-db-dump` reads the SDS (and PDR context) to draft a full MySQL schema plus production-grade seed data, then reviews both dumps for consistency before storing them under `.gpt-creator/staging/plan/create-db-dump/sql/`.
 - **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, and `work-on-tasks` executes/resumes backlog items. The legacy `iterate` command is deprecated.
@@ -29,13 +29,13 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 | Requirement | Notes |
 |-------------|-------|
 | macOS (primary target) or Linux | Windows is untested. |
-| [Docker](https://docs.docker.com/), `docker compose` | Needed for the `run` and verification phases. |
+| [Docker](https://docs.docker.com/), `docker compose` | Needed for the `run` phase; legacy verification scripts are manual-only. |
 | Node.js ≥ 20 | Required for generated NestJS / Vite projects. |
 | `pnpm` | Used by generated clients; install via `corepack enable`. |
 | MySQL client (`mysql`) | Used for import/health checks. |
 | Codex CLI (`codex` or compatible) | AI generation/iteration driver. |
 | `OPENAI_API_KEY` environment variable | Passed to Codex for model access. |
-| Optional: `npx`, `jq`, `curl`, `pa11y`, `lighthouse` | Automatically invoked by verification scripts when available. |
+| Optional: `npx`, `jq`, `curl`, `pa11y`, `lighthouse` | Used only when running the legacy verification scripts manually. |
 
 > **Tip:** Run `./scripts/install.sh --skip-preflight` if you simply want to copy binaries without the strict prerequisite checks. The default preflight ensures everything above is present.
 
@@ -96,7 +96,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
    - A `.gpt-creator` workspace is created under the project root.
    - Generated code lands in `/apps/api`, `/apps/web`, `/apps/admin`, `/db`, `/docker`.
    - A `.env` file with random database credentials is created automatically; reuse it for local scripts and CI secrets.
-   - The command finishes after acceptance checks (`verify acceptance`); run `verify all` to execute the extended NFR suite.
+  - The automated testing stage has been removed; gpt-creator now focuses exclusively on code creation.
    - Templates live under `project_templates/`. Add subdirectories (optionally with `tags.txt` or `template.json`) to seed new projects; `--template auto` attempts to match the staged RFP/PDR, or pass `--template <name>` / `--skip-template` to override.
 
    To drive the entire flow (PDR → SDS → Jira tasks → stack generation) in one shot:
@@ -287,19 +287,8 @@ gpt-creator run up --project /path/to/project
 - The generated `docker/docker-compose.yml` applies conservative `mem_limit`/`mem_reservation` values for each service so runaway containers cannot starve the host. Tweak those limits if your stack needs more RAM.
 - Use `gpt-creator refresh-stack --project /path/to/project` when you want to tear everything down, rebuild containers, re-import the SQL dump, and apply seeds in one shot (handy after large migrations or corrupted volumes).
 
-### 7. Verify
-```
-gpt-creator verify all --project /path/to/project
-```
-Runs:
-- `verify/acceptance.sh` (HTTP health)
-- `verify/check-openapi.sh` (swagger-cli or docker fallback)
-- `verify/check-a11y.sh` (pa11y)
-- `verify/check-lighthouse.sh`
-- `verify/check-consent.sh`
-- `verify/check-program-filters.sh`
-
-Scripts exit with `0` on success, `3` when a dependency is missing, or non-zero on failure.
+### 7. Testing
+`gpt-creator` does not orchestrate automated testing. Running `gpt-creator verify …` prints a notice and exits without executing checks so you can manage QA with your own tooling. The legacy scripts under `verify/` remain available for teams that choose to maintain separate validation flows.
 
 ### Codex Token Usage
 ```
@@ -333,7 +322,7 @@ gpt-creator work-on-tasks --project /path/to/project
 - Reads pending work directly from the SQLite tasks database and generates Codex prompts per story/task, storing run artifacts in `.gpt-creator/staging/plan/work/runs/<timestamp>/`.
 - Expects Codex responses in JSON (plan + `changes` array); diffs and file payloads are applied automatically via `git apply`/direct writes before moving to the next task.
 - Saves progress back into the SQLite database (task status + story-level counters); on restart it resumes at the first incomplete story unless `--fresh` is provided, or `--from-task` is used to jump to a specific task.
-- Use `--story ST-123` (or slug) to jump to a specific story and `--no-verify` to skip the automatic `verify all` invocation after a successful run.
+- Use `--story ST-123` (or slug) to jump to a specific story. The deprecated `--verify` / `--soft-verify` flags are accepted as no-ops for compatibility.
 - Cleans prompt/output artifacts after each successful task to keep memory usage low; pass `--keep-artifacts` if you need to retain the raw Codex exchange for auditing.
 - Control resource usage with batching/pacing flags: `--batch-size 10` pauses after 10 tasks (resume with the same command) and `--sleep-between 2` inserts a short delay between tasks.
 - Tame prompt size with `--context-lines N` (defaults to 400) to include only the tail of the shared context, `--context-file-lines 120` to clip each staged document, or `--context-skip "*.css"` / `--context-none` to drop noisy artifacts altogether; the CLI automatically falls back to a literal tail when the digest cannot be generated.
@@ -341,20 +330,20 @@ gpt-creator work-on-tasks --project /path/to/project
 - Sample payloads now default to a short digest; raise `--sample-lines N` to stream the first N minified chunks when you truly need the raw body.
 - Surface targeted excerpts from referenced docs/endpoints with `--context-doc-snippets`; the CLI now condenses matches into short summaries with hashes so prompts stay lean.
 - Guard prompt budgets up front with `--max-tokens <int>` (hard cap), `--soft-limit <ratio>` (soft budget), `--reserve-output <int>` (completion reservation), and `--stop-on-overbudget[=true|false]` (whether to abort the run when pruning cannot meet the hard cap).
-- Tune Codex response sizes by step with `--plan-max-out`, `--status-max-out`, `--verify-max-out`, `--patch-max-out`, and the global `--out-hard-cap`; defaults come from `llm.output_limits` in `.gpt-creator/config.yml`.
+- Tune Codex response sizes by step with `--plan-max-out`, `--status-max-out`, `--patch-max-out`, and the global `--out-hard-cap`; defaults come from `llm.output_limits` in `.gpt-creator/config.yml` (the legacy `--verify-max-out` flag is ignored).
 - Large apply diffs are written to `.gpt-creator/artifacts/patches/<task>.patch` and summarised with an `ARTIFACT` line (hunks + lines) so the terminal never truncates critical context.
 - Use `--max-tokens-per-stage stage=NUM` together with `--auto-abandon-top-offenders` / `--no-auto-abandon-top-offenders` to carry stage budgets forward from previous runs or opt-out when experimenting.
 - Migrations are now two-phased and idempotent: plans land in `.gpt-creator/logs/progress-migration.plan.json`, mappings append to `.gpt-creator/logs/progress-migration.map.ndjson`, and terminal task states are preserved via deterministic `uid` hashes.
 - If the migration epoch changes mid-run, the runner records a `blocked-migration-transition` status and halts so you can resume cleanly once the backlog stabilises.
 - Empty or invalid agent output during migration is surfaced as `apply-failed-migration-context` (instead of a silent skip) so follow-ups are obvious.
-- Verification runs now emit `verify_status`, `commit_sha`, and `push_status` entries inside `task_progress`/`tasks`, enabling dashboards to distinguish between patched, verified, and pushed outcomes.
+- Historical `verify_status` telemetry is no longer emitted; dashboards should treat verification fields as deprecated.
 - `.gpt-creator/staging` context files collapse tables, SQL spam, JSON blobs, and markup dumps automatically; set `GC_CONTEXT_INCLUDE_UI=1` if you need the raw UI assets restored.
 - Stray Codex progress files from older runs (e.g., `tmp_*`, `final_*`, `diff*`, `qaDoc.json`) are swept into `.gpt-creator/artifacts/**`; inspect `.gpt-creator/logs/progress-migration.log` for the relocation manifest.
 - Use `gpt-creator sweep-artifacts --project /path/to/project` (or pass multiple paths) to run the sweep manually for legacy workspaces or after external scripts deposit artifacts in the repo root.
 - Ensure `.gpt-creator/staging/plan/tasks/tasks.db` exists before running `work-on-tasks`; automatic imports from legacy JSON are removed, so run `create-tasks` (or `create-jira-tasks` followed by `migrate-tasks`) to populate the database.
 - When memory pressure is a concern, `--memory-cycle` processes one task per run, prunes caches (Codex artifacts + Docker leftovers), and automatically restarts to continue from the next pending task while keeping peak RSS low.
 - Automatically installs Node.js dependencies before the first task when a pnpm workspace or package manifest is present; inspect `/tmp/gc_deps_install.log` if installation fails.
-- Review the generated commits/diffs afterwards and run project tests as needed.
+- Review the generated commits/diffs afterwards and run any project-specific checks as needed.
 
 Prompt budgeting defaults live alongside your workspace at `.gpt-creator/config.yml`; set the per-task budgets and runner behaviour once and share them with collaborators:
 
@@ -374,12 +363,11 @@ llm:
   output_limits:
     plan: 450     # planning / status turns
     status: 350   # per-task summary line
-    verify: 500   # post-apply verification summary
     patch: 7000   # unified diff/code generation
     hard_cap: 12000
 ```
 
-Pass any of the `--*-max-out` overrides (or `--out-hard-cap`) when you need temporary headroom; the CLI clamps every call to the lower of the step limit and the hard cap.
+Pass any of the `--*-max-out` overrides (or `--out-hard-cap`) when you need temporary headroom; the CLI clamps every call to the lower of the step limit and the hard cap. Legacy `verify`-related keys are ignored.
 
 Stage budgets and offender handling are also declarative:
 
@@ -389,7 +377,6 @@ budget:
     retrieve: 1000000
     plan: 1000000
     patch: 1000000
-    verify: 1000000
   offenders:
     window_runs: 10
     top_k: 3
@@ -398,7 +385,6 @@ budget:
     actions:
       show-file: range-only
       rg: narrow
-      tests: summary
 ```
 
 Every Codex phase logs telemetry to `.gpt-creator/logs/codex-usage.ndjson`; the runner aggregates the latest run into `.gpt-creator/logs/budget-report.md`, highlights over-budget stages, and records which remedial actions (`range-only`, `narrow`, `summary`, etc.) were enforced next time.
@@ -439,9 +425,9 @@ gpt-creator iterate --project /path/to/project --jira docs/jira.md
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `GC_API_BASE_URL` | API base URL used by `run`/`verify`. | `http://localhost:3000/api/v1` |
+| `GC_API_BASE_URL` | API base URL used by `run` and manual verification scripts. | `http://localhost:3000/api/v1` |
 | `GC_API_HEALTH_URL` | Explicit health endpoint; else derived from base. | `unset` |
-| `GC_WEB_URL`, `GC_ADMIN_URL` | Web/Admin URLs used during verification. | `http://localhost:8080/`, `http://localhost:8080/admin/` |
+| `GC_WEB_URL`, `GC_ADMIN_URL` | Web/Admin URLs surfaced to manual verification scripts. | `http://localhost:8080/`, `http://localhost:8080/admin/` |
 | `GC_DB_NAME`, `GC_DB_USER`, `GC_DB_PASSWORD` | Injected into rendered DB templates. | `app`, `app`, `app_pass` |
 | `GC_SKIP_PROGRESS_MIGRATION` | Set to `1` to opt out of the automatic sweep that relocates legacy Codex artifacts into `.gpt-creator/`. | `0` |
 | `GC_AUTO_REVIEW` | Leave unset (default) or set to `1`/`true`/`on` to let `work-on-tasks` synthesize review artifacts automatically and clear review-required flags; set to `0`/`false` to disable. | `1` |
@@ -471,7 +457,7 @@ By default `GC_AUTO_REVIEW` is active; the CLI drops automated review stubs unde
 ├── scripts/                  # install/uninstall helpers
 ├── src/                      # bash libraries used by the CLI
 ├── templates/                # generator templates (api/web/admin/db/docker)
-├── verify/                   # verification scripts
+├── verify/                   # legacy verification scripts (outside the core workflow)
 ├── docs/                     # PDR, usage guides, roadmap
 └── examples/sample-project/  # Sample artifacts for testing
 ```
@@ -496,7 +482,7 @@ By default `GC_AUTO_REVIEW` is active; the CLI drops automated review stubs unde
 |---------|------------------|
 | `codex` binary not found | Install Codex CLI or set `CODEX_BIN` to a compatible wrapper. |
 | `create-jira-tasks` stops with “Failed to parse Codex JSON output” | Check `.gpt-creator/staging/plan/create-jira-tasks/output/*.raw.txt` for the offending response. The CLI auto-cleans common issues (code fences, smart quotes, comments, trailing commas, Python-style literals); if it still fails, rerun with `--force` after pruning the bad snippet or adjust the prompts/docs. |
-| Verification scripts skip with exit 3 | Install the missing dependency (`npx`, `pa11y`, `lighthouse`, `docker`). |
+| Legacy verification script exits with status 3 | Install the missing dependency (`npx`, `pa11y`, `lighthouse`, `docker`) if you maintain those legacy checks. |
 | Docker stack fails health check | Run `gpt-creator run logs`, inspect `docker/docker-compose.yml`, confirm environment variables. |
 | Normalization misses a file | Place the artifact under a clearer name or rerun `gpt-creator scan` with the file already present. |
 
@@ -506,8 +492,8 @@ By default `GC_AUTO_REVIEW` is active; the CLI drops automated review stubs unde
 
 1. Fork and clone the repository.
 2. Create a topic branch: `git checkout -b feature/my-change`.
-3. Make changes and add tests if applicable.
-4. Run the verification suite against the sample project.
+3. Make changes focusing on the requested code updates.
+4. Coordinate QA using your team's processes; gpt-creator does not run tests.
 5. Submit a pull request referencing relevant PDR goals/requirements.
 
 See `docs/ROADMAP.md` for upcoming milestones.

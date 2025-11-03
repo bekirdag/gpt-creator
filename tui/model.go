@@ -11328,11 +11328,7 @@ func formatProjectDescription(stats projectStats) string {
 	if stats.TasksTotal > 0 {
 		tasks = fmt.Sprintf("Tasks %d/%d", stats.TasksDone, stats.TasksTotal)
 	}
-	verify := "Verify —"
-	if stats.VerifyTotal > 0 {
-		verify = fmt.Sprintf("Verify %d/%d", stats.VerifyPass, stats.VerifyTotal)
-	}
-	return fmt.Sprintf("%s · %s · %s", stage, tasks, verify)
+	return fmt.Sprintf("%s · %s", stage, tasks)
 }
 
 func featureListEntries() []list.Item {

@@ -559,6 +559,11 @@ def main():
 
         raw = _strip_wrapped_json_fence(raw)
 
+        CODE_SAMPLE_PATTERN = re.compile(
+            r"```|(?m)^\s*(?:const|let|var|function|class|def|describe|it|expect|public\s+static)\b"
+        )
+        code_sample_detected = bool(CODE_SAMPLE_PATTERN.search(raw))
+
         payload = None
 
         def _try_parse_json_payload(text: str):
@@ -963,6 +968,13 @@ def main():
         patched = []
         noop_entries = []
         manual_notes = []
+        if code_sample_detected:
+            manual_notes.append(
+                _format_action_result(
+                    "code-sample-detected",
+                    "warning — response contained source/test snippets; restate steps without including code"
+                )
+            )
         if parse_failure_detected:
             manual_notes.append(
                 _format_action_result(
@@ -2750,7 +2762,7 @@ def main():
         DEFAULT_WORK_PROMPT = """## work-on-tasks Prompt
 - Load the task details and acceptance criteria from the context section.
 - Consult the documentation catalog or search hits before modifying files.
-- Outline a concise plan (≤3 bullets focused on actions), execute the required edits, and capture verification steps with clear pass/fail decisions.
+- Outline a concise plan (≤3 bullets focused on actions), execute the required edits, and capture final status notes with clear pass/fail decisions.
 - Apply changes by editing files directly via shell commands (no diff/patch output).
 - Record follow-up actions when blockers remain.
 """
@@ -4105,6 +4117,7 @@ def main():
             "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
             "- Write each heading exactly as shown (e.g., `Plan` on its own line) with no surrounding Markdown styling or punctuation.",
             "- Keep each section to short bullet items or terse sentences; skip JSON, code fences, and closing summaries.",
+            "- Do not include source code, config snippets, or test case bodies; describe changes and evidence at a high level only.",
             "- Make repository edits by listing the exact shell commands you will run under `Commands` (use `bash` to write files when needed).",
             "- Ensure the `Commands` section lists actionable shell commands; if none are required, include a single bullet `- (none)` beneath the heading.",
             "- Do not generate diffs or patches; apply edits directly through those shell commands.",
@@ -4113,7 +4126,7 @@ def main():
             "- In `Focus`, call out the files or symbols you are touching so reviewers understand the blast radius.",
             "- When you are satisfied with the changes, stage and commit them yourself (e.g., `git add …` then `git commit -m \"<task summary>\"`) and list those commands under `Commands`.",
             "- Push your work once committed (e.g., `git push origin <branch>`), and include that command under `Commands` as well.",
-            "- Capture blockers, follow-ups, or verification results in `Notes`.",
+            "- Capture blockers or follow-ups in `Notes`.",
             "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",
             "- Use the documentation catalog helpers (`python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" ...`) for SDS/PDR references instead of opening doc files directly.",
             "- End the `Notes` section with `STATUS: completed`, `STATUS: needs-retry`, or `STATUS: failed` so automation can classify the run.",
@@ -4125,7 +4138,6 @@ def main():
             lines.append("- When you need documentation context, query the catalog (search/show) with precise section names like `\"SDS 7.3\"`; do not read doc files from the repo.")
             lines.append("- Avoid repo-wide listings/searches; open only the code files you intend to edit and keep `sed`/`cat` ranges tight.")
             lines.append("- Track file views; if you begin paging sequential ranges, pause and confirm the slice truly supports the active step.")
-            lines.append("- Before running `pnpm test` or `pnpm build`, confirm dependencies are installed and prior pnpm commands succeeded; fix failures before retrying.")
         else:
             lines.append("- Prefer pnpm for scripts; note commands that cannot run because of network limits.")
             lines.append("- Route all documentation lookups through the catalog search/show helpers; never crawl SDS/PDR files directly.")

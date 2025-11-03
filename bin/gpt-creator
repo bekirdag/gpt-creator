@@ -8886,9 +8886,10 @@ EOF
 
       local prompt_meta
       if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$task_index" "$prompt_path" "$context_tail" "$CODEX_MODEL_CODE" "$PROJECT_ROOT" "$STAGING_DIR")"; then
-        warn "  Failed to build prompt for task index ${task_index}"
+        warn "  Failed to build prompt for task index ${task_index}; skipping task."
+        manual_followups=1
         work_failed=1
-        break
+        continue
       fi
       if [[ -z "$prompt_slim_helper" ]]; then
         prompt_slim_helper="$(gc_clone_python_tool "wot_slim_prompt.py" "${PROJECT_ROOT:-$PWD}")" || return 1
@@ -8928,10 +8929,9 @@ EOF
       local terminal_locked_regex='^(complete|completed|completed-no-changes|dead-letter|permanent-fail|blocked-budget|blocked-quota|blocked-merge-conflict|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\([^)]+\)|skipped-already-complete)$'
       if [[ "$task_status_lower" == blocked-dependency\(* ]]; then
         local blocked_reason="${task_status_reason_current:-${task_status_original}}"
-        warn "  Task ${task_number} (${banner_task_id}) blocked by dependency: ${blocked_reason}"
+        warn "  Task ${task_number} (${banner_task_id}) blocked by dependency: ${blocked_reason}; skipping for now."
         manual_followups=1
-        story_failed=1
-        break
+        continue
       fi
 
       printf '\n'
@@ -8943,6 +8943,11 @@ EOF
       local codex_ok=0
       local attempt=0
       local max_attempts=2
+      local test_retry_count=0
+      local max_test_attempts="${GC_TEST_AUTO_FIX_ATTEMPTS:-10}"
+      if ! [[ "$max_test_attempts" =~ ^[0-9]+$ ]] || (( max_test_attempts <= 0 )); then
+        max_test_attempts=10
+      fi
       gc_touch_progress
       local prompt_augmented=0 prompt_change_reminder=0
       local contract_guard_injected=0
@@ -10081,15 +10086,14 @@ REM
               info "    Retrying task ${task_number} after timeout (attempt $((attempt + 1)) of ${max_attempts})."
               continue
             fi
-            task_result_status="blocked"
+            task_result_status="retryable"
             task_needs_review=1
             manual_followups=1
-            keep_output=1
+            keep_output=0
             gc_mark_outcome "RETRYABLE" "TRANSIENT"
-            task_notes+=("Codex produced no output for ${codex_timeout_seconds}s; rerun work-on-tasks to continue from this task.")
+            task_notes+=("Codex timed out after ${codex_timeout_seconds}s; deferring and moving to the next task.")
             codex_ok=1
             break_after_update=1
-            work_failed=1
             break
           elif (( codex_status == 125 )); then
             warn "  Codex loop guard detected repeated diffs/oscillation; halting task."
@@ -10182,12 +10186,51 @@ REM
           keep_output=0
         fi
       elif [[ "$task_verify_status" == "fail" ]]; then
+        ((test_retry_count++))
+        local verify_report_display_path="${task_verify_report:-}"
+        local verify_summary_trim="${task_verify_summary}"
+        if (( test_retry_count <= max_test_attempts )); then
+          if (( max_attempts < max_test_attempts )); then
+            max_attempts="$max_test_attempts"
+          fi
+          validator_cached=0
+          task_verify_status="skipped"
+          task_needs_review=0
+          manual_followups=0
+          keep_output=0
+          task_result_status="in-progress"
+          apply_status="tests-retry"
+          task_notes+=("Verification failed (attempt ${test_retry_count}/${max_test_attempts}); appended guidance to address failing tests.")
+          "$python_bin" - "$prompt_path" "$verify_summary_trim" "$verify_report_display" "$test_retry_count" "$max_test_attempts" <<'PY'
+import sys
+from pathlib import Path
+
+prompt_path = Path(sys.argv[1])
+summary = (sys.argv[2] or "").strip()
+report = (sys.argv[3] or "").strip()
+attempt = sys.argv[4]
+limit = sys.argv[5]
+
+guidance = ["", "## Verification failure guidance"]
+guidance.append(f"- Verification attempt {attempt} of {limit} failed; focus on fixing the failing tests.")
+if summary:
+    guidance.append(f"- Summary: {summary}")
+if report and report not in {"", "(missing)"}:
+    guidance.append(f"- Inspect `{report}` for detailed failure output.")
+guidance.append("- Update the code so the failing tests pass, then re-run verification within this task.")
+guidance.append("- Do not skip tests; ensure `pnpm test` (or the reported command) succeeds before finishing.")
+prompt_path.write_text(prompt_path.read_text(encoding="utf-8") + "\n".join(guidance) + "\n", encoding="utf-8")
+PY
+          continue
+        fi
         task_needs_review=1
         manual_followups=1
-        keep_output=1
-        task_result_status="blocked"
+        keep_output=0
+        task_result_status="retryable"
+        apply_status="tests-failed"
+        task_notes+=("Verification failed after ${max_test_attempts} attempts; moving on to the next task for follow-up.")
         if [[ -n "$task_verify_report" ]]; then
-          task_notes+=("Verification failed; inspect ${task_verify_report}.")
+          task_notes+=("Last verification report: ${task_verify_report}.")
         fi
       elif [[ "$task_verify_status" == "inconclusive" && $task_changes_applied -eq 0 ]]; then
         if [[ "$task_result_status" == "in-progress" ]]; then
@@ -10506,6 +10549,44 @@ REM
         task_notes+=("Failure class: ${task_failure_class}")
       fi
 
+      local status_token=""
+      case "$task_result_status" in
+        complete|completed)
+          status_token="COMPLETED"
+          ;;
+        completed-no-changes)
+          status_token="COMPLETED NO CHANGES"
+          ;;
+        retryable)
+          status_token="RETRYABLE"
+          ;;
+        skipped-already-complete)
+          status_token="SKIPPED ALREADY COMPLETE"
+          ;;
+        blocked|blocked-*|abandoned-for-budget)
+          status_token="BLOCKED"
+          ;;
+        dead-letter|permanent-fail|apply-failed-*|dirty-tree-snapshot-failed)
+          status_token="FAILED"
+          ;;
+        *)
+          status_token="${task_result_status//[_-]/ }"
+          status_token="${status_token^^}"
+          ;;
+      esac
+      if [[ -n "$status_token" ]]; then
+        local -a task_notes_without_status=()
+        local task_note_entry=""
+        for task_note_entry in "${task_notes[@]}"; do
+          if [[ "$task_note_entry" =~ ^STATUS[[:space:]:=] ]]; then
+            continue
+          fi
+          task_notes_without_status+=("$task_note_entry")
+        done
+        task_notes_without_status+=("STATUS: ${status_token}")
+        task_notes=("${task_notes_without_status[@]}")
+      fi
+
       local story_status_hint="in-progress"
       case "$task_result_status" in
         blocked|blocked-budget|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|retryable|blocked-push|dead-letter|permanent-fail) story_status_hint="blocked" ;;
@@ -10580,8 +10661,8 @@ REM
       fi
 
       if (( blocked_stop_run )); then
-        story_failed=1
-        work_failed=1
+        task_notes+=("Auto-push issues recorded; continuing to the next task.")
+        blocked_stop_run=0
       fi
 
       local timestamp_utc
@@ -10804,7 +10885,8 @@ REM
       case "$task_result_status" in
         blocked|blocked-budget|blocked-quota|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|permanent-fail|dead-letter)
           story_failed=1
-          break
+          break_after_update=1
+          continue
           ;;
       esac
 
@@ -10823,8 +10905,9 @@ REM
     fi
 
     if (( story_failed )); then
-      warn "Stopping at story ${slug} due to previous error."
-      break
+      warn "Continuing after issues in story ${slug}; moving to the next story."
+      story_failed=0
+      continue
     fi
 
     if (( idle_timeout_triggered )); then

@@ -43,8 +43,6 @@ def coerce_status(value: str, fallback: str = "") -> str:
     status = normalize_status(value)
     if not status:
         return normalize_status(fallback)
-    if status in {"verified", "noop-verified"}:
-        return "completed-no-changes"
     return status
 
 
@@ -62,6 +60,8 @@ def status_is_in_progress(value: str) -> bool:
     status = coerce_status(value)
     if not status:
         return False
+    if status == "in-progress":
+        return True
     for prefix in IN_PROGRESS_PREFIXES:
         prefix_norm = normalize_status(prefix)
         if prefix_norm and status.startswith(prefix_norm):
@@ -291,15 +291,16 @@ def determine_effective_status(
     for key in candidate_keys:
         override = progress_overrides.get(key)
         if override:
-            return override
+            return coerce_status(override, base_status)
 
     if has_task_progress_state and "progress_state" in task_row.keys():
-        progress_state = coerce_status(task_row["progress_state"], base_status)
-        if progress_state:
-            return progress_state
+        raw_progress = task_row["progress_state"] or ""
+        if raw_progress and str(raw_progress).strip():
+            progress_norm = normalize_status(raw_progress)
+            if progress_norm not in {"verified", "noop-verified"}:
+                return coerce_status(raw_progress, base_status)
 
-    normalized_base = coerce_status(base_status, "pending")
-    return normalized_base or "pending"
+    return coerce_status(base_status, "pending") or "pending"
 
 
 def fmt_float(value: float) -> str:

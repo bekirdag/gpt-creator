@@ -32,6 +32,8 @@ if [[ -n "${GC_NODE_RUNTIME:-}" ]]; then
   __gc_prepend_path "${GC_NODE_RUNTIME}/bin"
 fi
 
+__gc_prepend_path "${PWD}/.gpt-creator/shims/bin"
+
 if [[ -n "${PNPM_HOME:-}" ]]; then
   __gc_prepend_path "${PNPM_HOME}"
 elif [[ -n "${GC_NODE_RUNTIME:-}" ]]; then

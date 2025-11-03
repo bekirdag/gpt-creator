@@ -33,6 +33,7 @@ def main():
             sys.exit(1)
         sys.argv = [sys.argv[0]] + args
         import json
+        import logging
         import os
         import re
         import shlex
@@ -760,13 +761,27 @@ def main():
                 'notes': notes_items,
             }
 
+        logger = logging.getLogger("gc-runner.apply")
+
+        parse_failure_detected = False
+
         payload = _try_parse_json_payload(raw)
         if payload is None:
             payload = _parse_apply_patch_payload(raw)
         if payload is None:
             payload = _parse_freeform_payload(raw)
         if payload is None:
-            raise SystemExit("Agent output could not be parsed into actionable instructions.")
+            parse_failure_detected = True
+            logger.warning(
+                "Agent output could not be parsed into actionable instructions; proceeding with empty payload."
+            )
+            payload = {
+                'plan': [],
+                'focus': [],
+                'changes': [],
+                'commands': [],
+                'notes': [],
+            }
 
         def _normalize_focus(items):
             normalized = []
@@ -948,6 +963,13 @@ def main():
         patched = []
         noop_entries = []
         manual_notes = []
+        if parse_failure_detected:
+            manual_notes.append(
+                _format_action_result(
+                    "agent-output-parse",
+                    "warning — response unparsable; skipped task instructions and continued to next item"
+                )
+            )
 
         existing_notes = payload.get('notes')
         if isinstance(existing_notes, list):
@@ -4081,8 +4103,10 @@ def main():
         response_guidance = [
             "### Response Format",
             "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
+            "- Write each heading exactly as shown (e.g., `Plan` on its own line) with no surrounding Markdown styling or punctuation.",
             "- Keep each section to short bullet items or terse sentences; skip JSON, code fences, and closing summaries.",
             "- Make repository edits by listing the exact shell commands you will run under `Commands` (use `bash` to write files when needed).",
+            "- Ensure the `Commands` section lists actionable shell commands; if none are required, include a single bullet `- (none)` beneath the heading.",
             "- Do not generate diffs or patches; apply edits directly through those shell commands.",
             "- Primary objective: ship the code required by the task acceptance criteria; avoid documentation rewrites or reorganizing prompts.",
             "- If an acceptance criterion demands heavy setup or environments the agent cannot access, acknowledge the gap and continue focusing on the core code changes.",

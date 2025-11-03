@@ -440,15 +440,33 @@ gc_doc_catalog_ready() {
 }
 
 gc_setup_doc_catalog_helpers() {
+  local root="${PROJECT_ROOT:-$PWD}"
+  local compat_base="${root}/.gpt-creator/src/lib"
+  ensure_helper_compat() {
+    local helper_path="${1:?helper path required}"
+    local helper_name="${2:?helper name required}"
+    if [[ -z "$helper_path" || -z "$helper_name" ]]; then
+      return 0
+    fi
+    mkdir -p "$compat_base"
+    local compat_target="${compat_base}/${helper_name}"
+    if [[ ! -f "$compat_target" || "$helper_path" -nt "$compat_target" ]]; then
+      cp "$helper_path" "$compat_target" 2>/dev/null || true
+    fi
+  }
+
   local helper_path=""
   helper_path="$(gc_clone_python_tool "doc_catalog.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   export GC_DOC_CATALOG_PY="$helper_path"
+  ensure_helper_compat "$helper_path" "doc_catalog.py"
 
   helper_path="$(gc_clone_python_tool "doc_registry.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   export GC_DOC_REGISTRY_PY="$helper_path"
+  ensure_helper_compat "$helper_path" "doc_registry.py"
 
   helper_path="$(gc_clone_python_tool "doc_indexer.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   export GC_DOC_INDEXER_PY="$helper_path"
+  ensure_helper_compat "$helper_path" "doc_indexer.py"
 }
 
 gc_populate_doc_catalog_shims() {

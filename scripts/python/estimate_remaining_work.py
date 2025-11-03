@@ -367,11 +367,14 @@ def estimate(db_path: Path) -> int:
 
     progress_overrides = fetch_progress_status_map(cur)
     remaining_tasks = 0
+    total_tasks_count = 0
+    completed_tasks_count = 0
     total_points = 0.0
     completed_points = 0.0
     task_info: Dict[str, Dict[str, float | str]] = {}
 
     for row in rows:
+        total_tasks_count += 1
         base_status = row["status"] or ""
         points = parse_points(row["story_points"])
         effective_status = determine_effective_status(
@@ -390,6 +393,7 @@ def estimate(db_path: Path) -> int:
         if task_id_value:
             task_info[task_id_value] = {"points": points, "status": effective_status}
         if is_done_status(effective_status):
+            completed_tasks_count += 1
             completed_points += points
             continue
         remaining_tasks += 1
@@ -479,7 +483,9 @@ def estimate(db_path: Path) -> int:
     estimate_str = " ".join(parts)
 
     summary_rows = [
+        ("Completed tasks (detected)", f"{completed_tasks_count:,}"),
         ("Remaining tasks", f"{remaining_tasks:,}"),
+        ("Total tasks", f"{total_tasks_count:,}"),
         ("Remaining story points", fmt_number(total_points)),
     ]
     if eta_stalled_reason is not None:

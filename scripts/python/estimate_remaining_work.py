@@ -17,19 +17,16 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 DEFAULT_RATE = 15.0
-NON_REMAINING_STATUSES = {
-    "complete",
-    "completed",
-    "done",
-    "completed-no-changes",
-    "skipped-no-changes",
-}
 DONE_STATUS_PREFIXES = (
     "complete",
     "completed",
     "done",
     "skipped",
     "skip",
+)
+IN_PROGRESS_PREFIXES = (
+    "in-progress",
+    "in progress",
 )
 DEFAULT_CONTAMINATION_THRESHOLD = 0.2
 
@@ -46,10 +43,21 @@ def is_done_status(value: str) -> bool:
     status = normalize_status(value)
     if not status:
         return False
-    if status in NON_REMAINING_STATUSES:
-        return True
     for prefix in DONE_STATUS_PREFIXES:
         if status.startswith(prefix):
+            return True
+    return False
+
+
+def status_is_in_progress(value: str) -> bool:
+    status = normalize_status(value)
+    if not status:
+        return False
+    if status == "in-progress":
+        return True
+    for prefix in IN_PROGRESS_PREFIXES:
+        prefix_norm = normalize_status(prefix)
+        if prefix_norm and status.startswith(prefix_norm):
             return True
     return False
 
@@ -199,17 +207,92 @@ def table_exists(cursor: sqlite3.Cursor, name: str) -> bool:
         return False
 
 
-def count_remaining_tasks(cursor: sqlite3.Cursor) -> int:
+def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
     try:
-        rows = cursor.execute("SELECT status FROM tasks").fetchall()
+        info = cursor.execute(f"PRAGMA table_info({table})").fetchall()
     except sqlite3.DatabaseError:
-        return 0
-    remaining = 0
+        return False
+    needle = (column or "").strip().lower()
+    for entry in info:
+        name = str(entry[1] or "").strip().lower()
+        if name == needle:
+            return True
+    return False
+
+
+def fetch_progress_status_map(cur: sqlite3.Cursor) -> Dict[str, str]:
+    if not table_exists(cur, "task_progress"):
+        return {}
+    columns = {
+        str(entry[1] or "").strip().lower()
+        for entry in cur.execute("PRAGMA table_info(task_progress)")
+    }
+    fields = ["task_id", "status"]
+    if "progress_state" in columns:
+        fields.append("progress_state")
+    if "story_slug" in columns:
+        fields.append("story_slug")
+    if "task_position" in columns:
+        fields.append("task_position")
+
+    sql = f"SELECT {', '.join(fields)} FROM task_progress ORDER BY id"
+    overrides: Dict[str, str] = {}
+    try:
+        rows = cur.execute(sql).fetchall()
+    except sqlite3.DatabaseError:
+        return overrides
+
     for row in rows:
-        status = row["status"] if isinstance(row, sqlite3.Row) else row[0]
-        if not is_done_status(status or ""):
-            remaining += 1
-    return remaining
+        status_candidate = None
+        if "progress_state" in row.keys():
+            status_candidate = row["progress_state"]
+        if not status_candidate:
+            status_candidate = row["status"]
+        status_norm = normalize_status(status_candidate or "")
+        if not status_norm:
+            continue
+        task_id_value = row["task_id"]
+        if task_id_value is not None:
+            overrides[str(task_id_value)] = status_norm
+        if "story_slug" in row.keys() and "task_position" in row.keys():
+            slug = row["story_slug"]
+            position = row["task_position"]
+            if slug and position is not None:
+                overrides[f"{slug}:{int(position)}"] = status_norm
+    return overrides
+
+
+def determine_effective_status(
+    base_status: str,
+    task_row: sqlite3.Row,
+    progress_overrides: Dict[str, str],
+    has_task_progress_state: bool,
+) -> str:
+    candidate_keys = []
+    if "id" in task_row.keys():
+        candidate_keys.append(str(task_row["id"]))
+    if "task_id" in task_row.keys():
+        text_id = str(task_row["task_id"] or "").strip()
+        if text_id:
+            candidate_keys.append(text_id)
+    if {"story_slug", "position"}.issubset(task_row.keys()):
+        slug = str(task_row["story_slug"] or "").strip()
+        position = task_row["position"]
+        if slug and position is not None:
+            candidate_keys.append(f"{slug}:{int(position)}")
+
+    for key in candidate_keys:
+        override = progress_overrides.get(key)
+        if override:
+            return override
+
+    if has_task_progress_state and "progress_state" in task_row.keys():
+        progress_state = normalize_status(task_row["progress_state"] or "")
+        if progress_state:
+            return progress_state
+
+    normalized_base = normalize_status(base_status)
+    return normalized_base or "pending"
 
 
 def fmt_float(value: float) -> str:
@@ -263,31 +346,45 @@ def estimate(db_path: Path) -> int:
     blocked_dominant = rate_meta.get("blocked_dominant", "")
     blocked_threshold = eta_cfg.get("blocked_threshold", 0.6)
     eta_floor = eta_cfg.get("min_throughput_floor", 2.0)
+    task_columns = {str(info[1] or "").strip().lower() for info in cur.execute("PRAGMA table_info(tasks)")}
+    select_fields = ["id", "story_slug", "position", "story_points", "status", "task_id"]
+    include_progress_state = "progress_state" in task_columns
+    if include_progress_state:
+        select_fields.append("progress_state")
     try:
-        rows = cur.execute(
-            "SELECT id, story_slug, position, story_points, status FROM tasks"
-        ).fetchall()
+        rows = cur.execute(f"SELECT {', '.join(select_fields)} FROM tasks").fetchall()
     except sqlite3.DatabaseError as exc:
         conn.close()
         raise SystemExit(f"Failed to read tasks: {exc}")
 
-    remaining_tasks = count_remaining_tasks(cur)
+    progress_overrides = fetch_progress_status_map(cur)
+    remaining_tasks = 0
     total_points = 0.0
     completed_points = 0.0
     task_info: Dict[str, Dict[str, float | str]] = {}
 
     for row in rows:
-        status = normalize_status(row["status"] or "")
+        base_status = row["status"] or ""
         points = parse_points(row["story_points"])
+        effective_status = determine_effective_status(
+            base_status,
+            row,
+            progress_overrides,
+            include_progress_state,
+        )
         task_key_primary = str(row["id"])
-        task_info[task_key_primary] = {"points": points, "status": status}
+        task_info[task_key_primary] = {"points": points, "status": effective_status}
         story_slug = (row["story_slug"] or "").strip()
         position = row["position"]
         if story_slug and position is not None:
-            task_info[f"{story_slug}:{position}"] = {"points": points, "status": status}
-        if is_done_status(status):
+            task_info[f"{story_slug}:{position}"] = {"points": points, "status": effective_status}
+        task_id_value = (row["task_id"] or "").strip()
+        if task_id_value:
+            task_info[task_id_value] = {"points": points, "status": effective_status}
+        if is_done_status(effective_status):
             completed_points += points
             continue
+        remaining_tasks += 1
         total_points += points
 
     tokens_total = 0.0

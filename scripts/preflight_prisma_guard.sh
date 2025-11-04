@@ -42,6 +42,7 @@ if [[ ! -d "$project_root" ]]; then
 fi
 
 cd "$project_root"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -162,6 +163,35 @@ for schema_path in "${schema_paths[@]}"; do
     printf 'preflight-prisma-guard: prisma CLI unavailable for %s; skipping.\n' "$(normalize_path "$schema_path")" >&2
   fi
 done
+
+index_guard_failures=()
+if command_exists python3; then
+  index_guard="${SCRIPT_DIR}/python/prisma_index_guard.py"
+  if [[ -f "$index_guard" ]]; then
+    for schema_path in "${schema_paths[@]}"; do
+      migrations_dir="$(dirname "$schema_path")/migrations"
+      if [[ ! -d "$migrations_dir" ]]; then
+        continue
+      fi
+      set +e
+      guard_output="$(python3 "$index_guard" --schema "$schema_path" --migrations "$migrations_dir" 2>&1)"
+      status=$?
+      set -e
+      if (( status != 0 )); then
+        if [[ -n "$guard_output" ]]; then
+          printf '%s\n' "$guard_output" >&2
+        fi
+        index_guard_failures+=("$(normalize_path "$schema_path")")
+      fi
+    done
+  fi
+fi
+
+if ((${#index_guard_failures[@]} > 0)); then
+  printf 'preflight-prisma-guard: missing required indexes detected for: %s\n' "${index_guard_failures[*]}" >&2
+  printf 'blocked-missing-indexes\n'
+  exit 6
+fi
 
 if ((${#drift_paths[@]} > 0)); then
   printf 'Prisma schema drift detected for: %s\n' "${drift_paths[*]}" >&2

@@ -1423,31 +1423,13 @@ def main():
                     )
                 )
                 return False, notes
-            diff_proc = _run_git_command(['diff', '--cached', '--quiet'])
-            if diff_proc.returncode == 0:
-                notes.append(
-                    _format_action_result(
-                        "auto-commit",
-                        "note — no staged changes after git add; skipping commit"
-                    )
-                )
-                return True, notes
-            if diff_proc.returncode not in (0, 1):
-                stderr_text = (diff_proc.stderr or "").strip()
-                notes.append(
-                    _format_action_result(
-                        "git diff --cached --quiet",
-                        f"failed — exit {diff_proc.returncode}; {stderr_text or 'see stderr'}"
-                    )
-                )
-                return False, notes
             commit_message = os.environ.get("WORK_ON_TASKS_COMMIT_MESSAGE")
             if not commit_message:
                 task_ref = _resolve_task_commit_ref()
                 commit_suffix = os.environ.get("WORK_ON_TASKS_COMMIT_SUFFIX", "automated changes")
                 timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
                 commit_message = f"{task_ref}: {commit_suffix} ({timestamp} UTC)"
-            commit_proc = _run_git_command(['commit', '-m', commit_message])
+            commit_proc = _run_git_command(['commit', '--allow-empty', '-m', commit_message])
             if commit_proc.returncode != 0:
                 stderr_text = (commit_proc.stderr or "").strip()
                 notes.append(

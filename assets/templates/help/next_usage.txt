@@ -1,0 +1,4 @@
+Usage: gpt-creator next [--project PATH] [--story SLUG]
+
+List the next ready task(s) per story with dependency gate reasons.
+

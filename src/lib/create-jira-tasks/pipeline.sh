@@ -58,15 +58,7 @@ cjt::state_init() {
     rm -f "$CJT_STATE_FILE"
   fi
   if [[ ! -f "$CJT_STATE_FILE" ]]; then
-    cat >"$CJT_STATE_FILE" <<'JSON'
-{
-  "version": 1,
-  "epics": {"status": "pending"},
-  "stories": {"status": "pending", "completed": []},
-  "tasks": {"status": "pending", "completed": []},
-  "refine": {"status": "pending", "stories": {}}
-}
-JSON
+    cat "$CJT_TEMPLATE_ROOT/state_init.json" >"$CJT_STATE_FILE"
   fi
 }
 
@@ -162,6 +154,7 @@ cjt::init() {
   source "$CJT_ROOT_DIR/src/constants.sh"
   source "$CJT_ROOT_DIR/src/gpt-creator.sh"
   [[ -f "$CJT_ROOT_DIR/src/lib/path.sh" ]] && source "$CJT_ROOT_DIR/src/lib/path.sh"
+  CJT_TEMPLATE_ROOT="$CJT_ROOT_DIR/assets/templates/prompts/create_jira_tasks"
 
   CJT_WORK_DIR="$(gc::ensure_workspace "$CJT_PROJECT_ROOT")"
   CJT_STAGING_DIR="$CJT_WORK_DIR/staging"
@@ -1097,13 +1090,7 @@ cjt::refine_tasks() {
           break
         fi
         if (( parse_retry == 0 )); then
-          cat >>"$prompt_file" <<'REM'
-
-## Reminder
-- Output a single JSON object conforming to the schema above.
-- Do not include explanations, markdown code fences, or commentary outside the JSON.
-- If a field is not applicable use an empty array or omit it; do not return prose.
-REM
+          cat "$CJT_TEMPLATE_ROOT/refine_reminder.md" >>"$prompt_file"
           parse_retry=1
           cjt::warn "Codex produced non-JSON output for ${slug} task ${task_num}; retrying once with stricter reminder."
           continue

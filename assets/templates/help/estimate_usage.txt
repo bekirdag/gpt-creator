@@ -1,0 +1,4 @@
+Usage: gpt-creator estimate [--project PATH]
+
+Estimate how long it will take to finish the remaining tasks based on story points (default 15 SP/hour; refined by work-on-tasks throughput).
+

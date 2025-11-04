@@ -141,6 +141,8 @@ cddb::init() {
   source "$CDDB_ROOT_DIR/src/gpt-creator.sh"
   [[ -f "$CDDB_ROOT_DIR/src/lib/path.sh" ]] && source "$CDDB_ROOT_DIR/src/lib/path.sh"
 
+  CDDB_TEMPLATE_ROOT="$CDDB_ROOT_DIR/assets/templates/prompts/create_db_dump"
+
   CDDB_WORK_DIR="$(gc::ensure_workspace "$CDDB_PROJECT_ROOT")"
   CDDB_STAGING_DIR="$CDDB_WORK_DIR/staging"
   CDDB_PLAN_DIR="$CDDB_STAGING_DIR/plan"
@@ -209,33 +211,13 @@ cddb::write_schema_prompt() {
   local prompt_file="${1:?prompt file required}"
   mkdir -p "$(dirname "$prompt_file")"
   {
-    cat <<'PROMPT'
-You are a principal database architect. Design a MySQL schema that fully supports the system described in the SDS.
-
-Instructions:
-- Produce a complete SQL dump suitable for `mysql < schema.sql`.
-- Define databases, tables, columns with data types, defaults, nullability, character sets, indexes, primary keys, foreign keys, unique constraints, and check constraints where appropriate.
-- Model relationships explicitly with foreign keys, cascading rules, and junction tables.
-- Include derived tables needed for analytics, audit, compliance, or background processing called out in the SDS.
-- Add necessary views or stored routines only if they are critical to system operation.
-- Use consistent naming conventions and comment statements (`-- ...`) to explain non-obvious design decisions.
-- Ensure the schema is normalized but pragmatic—denormalize when the SDS calls for performance considerations.
-- Output only SQL (no code fences, no prose outside of SQL comments).
-
-## SDS Excerpt
-PROMPT
+    cat "$CDDB_TEMPLATE_ROOT/schema_prompt_header.md"
     cat "$CDDB_SDS_SNIPPET"
     if [[ -n "$CDDB_PDR_SNIPPET" ]]; then
-      cat <<'PROMPT'
-
-## PDR Excerpt
-PROMPT
+      cat "$CDDB_TEMPLATE_ROOT/schema_prompt_pdr_header.md"
       cat "$CDDB_PDR_SNIPPET"
     fi
-    cat <<'PROMPT'
-
-## End Context
-PROMPT
+    cat "$CDDB_TEMPLATE_ROOT/schema_prompt_footer.md"
   } >"$prompt_file"
 }
 
@@ -244,29 +226,11 @@ cddb::write_seed_prompt() {
   local schema_file="${2:?schema path required}"
   mkdir -p "$(dirname "$prompt_file")"
   {
-    cat <<'PROMPT'
-You are preparing production-quality seed data for a freshly provisioned MySQL database.
-
-Instructions:
-- Use the provided schema to craft INSERT statements that populate reference data, configuration defaults, sample content, feature flags, roles/permissions, enumerations, and critical bootstrap records required for the system to operate end-to-end.
-- Provide realistic values, respecting all constraints, foreign keys, and unique indexes.
-- Cover every table that must start non-empty (including lookup tables and essential user accounts).
-- Avoid dummy lorem ipsum; align the seed data with the domain terminology found in the SDS.
-- Wrap the output as executable SQL: include `START TRANSACTION;` and `COMMIT;` around the inserts, and set `SET NAMES utf8mb4;` at the start.
-- Output SQL only—no prose or code fences.
-
-## Database Schema
-PROMPT
+    cat "$CDDB_TEMPLATE_ROOT/seed_prompt_header.md"
     cat "$schema_file"
-    cat <<'PROMPT'
-
-## SDS Excerpt
-PROMPT
+    cat "$CDDB_TEMPLATE_ROOT/seed_prompt_sds_header.md"
     cat "$CDDB_SDS_SNIPPET"
-    cat <<'PROMPT'
-
-## End Context
-PROMPT
+    cat "$CDDB_TEMPLATE_ROOT/seed_prompt_footer.md"
   } >"$prompt_file"
 }
 
@@ -276,33 +240,13 @@ cddb::write_review_prompt() {
   local prompt_file="${3:?prompt required}"
   mkdir -p "$(dirname "$prompt_file")"
   {
-    cat <<'PROMPT'
-You are auditing a MySQL schema dump and seed dataset before launch.
-
-Tasks:
-1. Validate that table definitions, keys, indexes, constraints, data types, and relationships satisfy the SDS requirements and are internally consistent.
-2. Confirm the seed data loads without violating constraints and provides the minimum viable records for the system to run end-to-end.
-3. Resolve inconsistencies by editing the schema and/or seed scripts directly.
-4. Optimise naming, ensure referential integrity, and align default values with business logic described in the SDS.
-5. Return the corrected schema followed by a blank line and then the corrected seed script. Do not include explanatory prose or fences.
-
-## SDS Excerpt
-PROMPT
+    cat "$CDDB_TEMPLATE_ROOT/review_prompt_header.md"
     cat "$CDDB_SDS_SNIPPET"
-    cat <<'PROMPT'
-
-## Schema Dump
-PROMPT
+    cat "$CDDB_TEMPLATE_ROOT/review_prompt_schema_header.md"
     cat "$schema_file"
-    cat <<'PROMPT'
-
-## Seed Dump
-PROMPT
+    cat "$CDDB_TEMPLATE_ROOT/review_prompt_seed_header.md"
     cat "$seed_file"
-    cat <<'PROMPT'
-
-## End Inputs
-PROMPT
+    cat "$CDDB_TEMPLATE_ROOT/review_prompt_footer.md"
   } >"$prompt_file"
 }
 

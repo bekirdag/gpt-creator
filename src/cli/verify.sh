@@ -4,6 +4,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # Load shared constants if present
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
@@ -26,27 +30,21 @@ err(){  printf "\033[31m[%s][ERROR]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 
 usage() {
-  cat <<EOF
-Usage: $GC_NAME verify [options]
-
-Service URLs:
-  --api-url URL     API health URL (default: ${GC_API_HEALTH_URL:-http://localhost:3000/health})
-  --web-url URL     Web URL (default: ${GC_WEB_URL:-http://localhost:5173})
-  --admin-url URL   Admin URL (default: ${GC_ADMIN_URL:-http://localhost:5174})
-
-Database (optional, uses mysql client):
-  --db-host HOST    MySQL host (default: ${MYSQL_HOST:-localhost})
-  --db-port PORT    MySQL port (default: ${MYSQL_PORT:-3306})
-  --db-user USER    MySQL user (default: ${MYSQL_USER:-root})
-  --db-pass PASS    MySQL password (default: \$MYSQL_PASSWORD)
-  --db-name NAME    Database name (default: ${MYSQL_DATABASE:-app})
-
-Other:
-  --compose-file PATH  docker-compose.yml path (default: $GC_COMPOSE_FILE)
-  -h, --help           Show help
-
-Exits non-zero on any failure.
-EOF
+  (
+    set -a
+    VERIFY_CMD_NAME="$GC_NAME"
+    VERIFY_API_DEFAULT="${GC_API_HEALTH_URL:-http://localhost:3000/health}"
+    VERIFY_WEB_DEFAULT="${GC_WEB_URL:-http://localhost:5173}"
+    VERIFY_ADMIN_DEFAULT="${GC_ADMIN_URL:-http://localhost:5174}"
+    VERIFY_DB_HOST_DEFAULT="${MYSQL_HOST:-localhost}"
+    VERIFY_DB_PORT_DEFAULT="${MYSQL_PORT:-3306}"
+    VERIFY_DB_USER_DEFAULT="${MYSQL_USER:-root}"
+    VERIFY_DB_PASS_DEFAULT="${MYSQL_PASSWORD:-}"
+    VERIFY_DB_NAME_DEFAULT="${MYSQL_DATABASE:-app}"
+    VERIFY_COMPOSE_FILE_DEFAULT="$GC_COMPOSE_FILE"
+    set +a
+    gc_cli_render_template "help/verify_usage.txt"
+  )
 }
 
 : "${GC_API_HEALTH_URL:=http://localhost:3000/health}"

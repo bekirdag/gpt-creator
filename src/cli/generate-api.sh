@@ -5,6 +5,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # shellcheck disable=SC1091
 if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
   source "${ROOT_DIR}/src/constants.sh"
@@ -46,19 +50,12 @@ OUT_DIR="${API_DIR}"
 INSTALL_DEPS=1
 
 show_help() {
-  cat <<EOF
-generate-api — scaffold NestJS API
-
-Usage:
-  gpt-creator generate api [options]
-
-Options:
-  --openapi <file>     Path to OpenAPI spec (auto-discover if omitted)
-  --out <dir>          Output directory for API (default: ${OUT_DIR})
-  --no-install         Skip pnpm install/build
-  -n, --dry-run        Create prompt only; do not call Codex
-  -h, --help           Show help
-EOF
+  (
+    set -a
+    GEN_API_OUT_DEFAULT="${OUT_DIR}"
+    set +a
+    gc_cli_render_template "help/generate_api_usage.txt"
+  )
 }
 
 # Arg parse
@@ -98,56 +95,17 @@ SQL="$(resolve_doc "${STAGING_DIR}/schema.sql" '*schema.sql' '*sql_dump*.sql' '*
 
 PROMPT_FILE="${WORK_DIR}/prompts/generate-api.prompt.md"
 
-cat > "$PROMPT_FILE" <<'PROMPT'
-System:
-You are Codex (gpt-5-high) generating a production-grade NestJS 10 API (TypeScript 5) with MySQL 8 using Prisma, aligned to the project's PDR/SDS. Honor OWASP, consent logging, reCAPTCHA verify at signup, and Problem+JSON errors. Emit a complete, runnable codebase.
-
-Context (files to read and obey):
-- OPENAPI: {{OPENAPI_PATH}}
-- PDR: {{PDR}}
-- SDS: {{SDS}}
-- IA/UI Pages: {{IA}}
-- RFP: {{RFP}}
-- SQL baseline (for naming/seed guidance): {{SQL}}
-
-Deliverables (write to filesystem under OUT_DIR):
-- NestJS project (pnpm) with modules: auth, members, program (schedule), events, pages, newsletter, admin (ingestion CRUD, audit).
-- DTOs & validators per OpenAPI; controllers/services; guards; filters.
-- Prisma schema (MySQL) + migrations and seed aligned to SDS tables (users, consents, instructors, class_types, classes, reservations, events, newsletter_subscriptions, ingestion_runs/errors, audit_logs, policy_versions).
-- reCAPTCHA verification in POST /auth/signup; consent versions persisted.
-- Rate limits, Helmet headers, CSRF on state-change routes.
-- Health endpoint /health.
-- Dockerfile (Node 20) and docker-compose service fragment for api + mysql.
-- README with local run and env vars.
-
-Conventions:
-- Base path /api/v1; cookie-based sessions (HttpOnly, Secure, SameSite).
-- Problem+JSON error format.
-- Time in UTC; display Europe/Istanbul handled by frontend.
-- Env via @nestjs/config; include .env.sample.
-
-Tasks:
-1) Scaffold project structure with pnpm + Nest CLI layout.
-2) Implement endpoints/types from OpenAPI, filling any missing details from SDS/PDR.
-3) Implement Prisma schema & migrations; seeds for class_types and instructors.
-4) Implement auth (Argon2id hash), signup with reCAPTCHA + consent logging, login/logout, profile update, password reset.
-5) Implement Program read with filters; Events read with upcoming/past split.
-6) Implement Admin ingestion endpoints and audit logging skeletons.
-7) Add Docker artifacts and compose snippet.
-8) Document run/build steps and environment configuration in the README.
-
-Write files only—no commentary.
-PROMPT
-
-# Interpolate paths into the prompt (lightweight)
-sed -i \
-  -e "s#{{OPENAPI_PATH}}#${OPENAPI_PATH}#g" \
-  -e "s#{{PDR}}#${PDR}#g" \
-  -e "s#{{SDS}}#${SDS}#g" \
-  -e "s#{{IA}}#${IA}#g" \
-  -e "s#{{RFP}}#${RFP}#g" \
-  -e "s#{{SQL}}#${SQL}#g" \
-  "$PROMPT_FILE"
+(
+  set -a
+  GEN_API_OPENAPI="${OPENAPI_PATH}"
+  GEN_API_PDR="${PDR}"
+  GEN_API_SDS="${SDS}"
+  GEN_API_IA="${IA}"
+  GEN_API_RFP="${RFP}"
+  GEN_API_SQL="${SQL}"
+  set +a
+  gc_cli_render_template "prompts/generate_api.prompt.md.tmpl"
+) > "$PROMPT_FILE"
 
 log_info "Prepared Codex prompt → $PROMPT_FILE"
 log_info "Output directory         → $OUT_DIR"

@@ -1,0 +1,4 @@
+Usage: gpt-creator dag validate [--project PATH] [--story SLUG]
+
+Validate story-level DAG definitions under .gpt-creator/dag.
+

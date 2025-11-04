@@ -4,6 +4,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # Load shared constants if present
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
@@ -25,28 +29,4 @@ warn(){ printf "\033[33m[%s][WARN]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 err(){  printf "\033[31m[%s][ERROR]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 
-cat <<'EOF'
-gpt-creator — scaffolding & orchestration CLI
-
-Usage:
-  gpt-creator create-project /path/to/project
-  gpt-creator scan|normalize|plan [options]
-  gpt-creator generate (api|web|admin|db|docker) [options]
-  gpt-creator db (provision|import|seed) [options]
-  gpt-creator run (compose up|logs|open) [options]
-  gpt-creator verify [options]
-  gpt-creator create-tasks [options]
-  gpt-creator backlog [options]
-  gpt-creator work-on-tasks [options]
-  gpt-creator iterate [options]  # deprecated
-  gpt-creator help
-  gpt-creator version
-
-Tips:
-  • Use 'gpt-creator create-project …' for one-shot discovery → normalize → plan → generate → run.
-  • 'verify' pings API/Web/Admin, checks MySQL, and ensures docs are present in staging.
-  • 'create-tasks' snapshots Jira markdown; 'work-on-tasks' executes those stories with Codex.
-  • 'work-on-tasks' supports batching (`--batch-size`) and pacing (`--sleep-between`) to control resource usage.
-  • 'backlog' prints summaries (`--type epics|stories`), drills into hierarchy (`--item-children`), shows overall progress (`--progress`), or dumps a single task (`--task-details`).
-  • 'iterate' is deprecated; it runs the legacy loop but prints a warning that suggests the commands above.
-EOF
+gc_cli_render_template "help/global_cli_help.txt"

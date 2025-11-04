@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+HELP_DIR="${ROOT_DIR}/assets/templates/help"
+
 usage() {
-  cat <<'USAGE' >&2
-Usage: work-on-tasks-retry.sh <task-ref> [additional gpt-creator args]
-
-Runs `gpt-creator work-on-tasks` scoped to a single task (batch size 1) and
-automatically retries once when the CLI reports a timeout (exit 124).
-
-Examples:
-  scripts/work-on-tasks-retry.sh story-slug:003 --project /path/to/project
-USAGE
+  local usage_file="${HELP_DIR}/work_on_tasks_retry_usage.txt"
+  if [[ -f "$usage_file" ]]; then
+    cat "$usage_file" >&2
+  else
+    printf '%s\n' \
+      "Usage: work-on-tasks-retry.sh <task-ref> [additional gpt-creator args]" \
+      "" \
+      "Runs \`gpt-creator work-on-tasks\` scoped to a single task (batch size 1) and" \
+      "automatically retries once when the CLI reports a timeout (exit 124)." \
+      "" \
+      "Examples:" \
+      "  scripts/work-on-tasks-retry.sh story-slug:003 --project /path/to/project" >&2
+  fi
   exit 2
 }
 

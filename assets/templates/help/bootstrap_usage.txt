@@ -1,0 +1,6 @@
+Usage: gpt-creator bootstrap [--template NAME|auto|skip] [--skip-template] [--rfp FILE] [--fresh] <path>
+
+Generate a full project from an RFP in one step by running:
+  • create-pdr → create-sds → create-db-dump → create-jira-tasks → scan/normalize/plan/generate/db/run
+Templates from project_templates/ are applied first (auto-selected by default).
+

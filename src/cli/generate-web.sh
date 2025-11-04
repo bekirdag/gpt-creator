@@ -5,6 +5,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # shellcheck disable=SC1091
 if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
   source "${ROOT_DIR}/src/constants.sh"
@@ -48,21 +52,12 @@ UI_DOC="${UI_DOC:-}"
 INSTALL_DEPS=1
 
 show_help() {
-  cat <<EOF
-generate-web — scaffold Vue 3 public website (Vite)
-
-Usage:
-  gpt-creator generate web [options]
-
-Options:
-  --style <file>       Path to site CSS (e.g., style.css or style_sheet.md tokens)
-  --samples <dir>      Path to page_samples directory (with *.html)
-  --ui-doc <file>      Path to UI pages specification markdown
-  --out <dir>          Output directory (default: ${WEB_DIR})
-  --no-install         Skip pnpm install/build
-  -n, --dry-run        Create prompt only; do not call Codex
-  -h, --help           Show help
-EOF
+  (
+    set -a
+    GEN_WEB_OUT_DEFAULT="${WEB_DIR}"
+    set +a
+    gc_cli_render_template "help/generate_web_usage.txt"
+  )
 }
 
 # Arg parse
@@ -98,35 +93,14 @@ fi
 [[ -f "$STYLE_CSS" ]] || log_warn "Style CSS/tokens not found; proceeding without."
 
 PROMPT_FILE="${WORK_DIR}/prompts/generate-web.prompt.md"
-
-cat > "$PROMPT_FILE" <<'PROMPT'
-System:
-You are Codex (gpt-5-high) generating a production-ready Vue 3 + Vite website aligned with the UI pages spec. Implement routes, components, AA accessibility, and URL-synced filters for Program. Use the provided style sheet/tokens; incorporate sample HTML as reference when shaping components.
-
-Context:
-- UI Pages spec: {{UI_DOC}}
-- Style / tokens: {{STYLE_CSS}}
-- Sample pages (if present): {{SAMPLES_DIR}}
-
-Deliverables (write to WEB_DIR):
-- Vite + Vue 3 project with router and Pinia.
-- Routes per IA: /, /uyelikler, /program (filters ?tur & ?uzman), /etkinlikler (+ /etkinlikler/arsiv), /genel-bilgiler, /hakkimizda, /uzmanlar, /is-birlikleri, /iletisim, /giris, /kayit, /sifre-sifirla, /uye/* tabs, /gizlilik, /kvkk, /sartlar, 404/500.
-- Components: Header, MobileDrawer, Footer (legal links + newsletter), ProgramTable (desktop) + ProgramCards (mobile), FilterChips, EventCards, Forms (Auth/Contact/Newsletter), Dashboard tabs.
-- Accessibility: WCAG 2.2 AA focus rings, labels, keyboard traversal; ARIA landmarks.
-- SEO: per-route title/meta; sitemap.xml & robots.txt generation; OG defaults.
-- API integration: fetch from /api/v1 endpoints with typed client; env-configured base URL.
-- Styling: map tokens to CSS variables; include provided CSS; keep it lightweight (Tailwind optional but not required).
-- Dockerfile (nginx for static hosting) + compose fragment for 'web'.
-- README with run/build instructions.
-
-Write files only—no commentary.
-PROMPT
-
-sed -i \
-  -e "s#{{UI_DOC}}#${UI_DOC}#g" \
-  -e "s#{{STYLE_CSS}}#${STYLE_CSS:-<none>}#g" \
-  -e "s#{{SAMPLES_DIR}}#${SAMPLES_DIR:-<none>}#g" \
-  "$PROMPT_FILE"
+(
+  set -a
+  GEN_WEB_UI_DOC="${UI_DOC}"
+  GEN_WEB_STYLE="${STYLE_CSS:-<none>}"
+  GEN_WEB_SAMPLES="${SAMPLES_DIR:-<none>}"
+  set +a
+  gc_cli_render_template "prompts/generate_web.prompt.md.tmpl"
+) > "$PROMPT_FILE"
 
 log_info "Prepared Codex prompt → $PROMPT_FILE"
 log_info "Output directory       → $WEB_DIR"

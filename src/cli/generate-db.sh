@@ -7,6 +7,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
   source "${ROOT_DIR}/src/constants.sh"
@@ -50,17 +54,12 @@ humanize_name() {
 }
 
 usage() {
-  cat <<'USAGE'
-Usage:
-  gpt-creator generate db [--orm prisma|typeorm] [--db-url mysql://...] [--sql path.sql] [--out apps/api]
-Options:
-  --orm           ORM target. Default: prisma
-  --db-url        MySQL connection URL for introspection (e.g., mysql://user:pass@127.0.0.1:3306/app)
-  --sql           Optional SQL dump to import before introspection
-  --out           API project directory where schema/ORM files will be written. Default: apps/api
-  --model         Codex model for fallback generation. Default from $CODEX_MODEL or gpt-5-high
-  -h, --help      Show help
-USAGE
+  (
+    set -a
+    GEN_DB_CODEX_MODEL_DEFAULT="${CODEX_MODEL:-gpt-5-high}"
+    set +a
+    gc_cli_render_template "help/generate_db_usage.txt"
+  )
 }
 
 ORM="prisma"
@@ -138,15 +137,7 @@ case "${ORM}" in
     need_cmd node
     if [[ ! -f "${PRISMA_DIR}/schema.prisma" ]]; then
       log "Bootstrapping Prisma schema (placeholder)"
-      cat > "${PRISMA_DIR}/schema.prisma" <<'PRISMA'
-generator client {
-  provider = "prisma-client-js"
-}
-datasource db {
-  provider = "mysql"
-  url      = env("DATABASE_URL")
-}
-PRISMA
+      gc_cli_render_template "generate/prisma_placeholder.schema.prisma" > "${PRISMA_DIR}/schema.prisma"
     fi
     if try_mysql_ping; then
       log "Introspecting database → Prisma schema"
@@ -173,27 +164,14 @@ command -v "${CODEX_BIN}" >/dev/null 2>&1 || die "Codex client not found (set CO
 PROMPT_DIR="${ROOT_DIR}/.gpt-creator/prompts"
 mkdir -p "${PROMPT_DIR}"
 
-cat > "${PROMPT_DIR}/db.system.md" <<'SYS'
-You are an expert backend engineer. Produce a high-quality, production-ready ORM schema for a NestJS API using MySQL 8.
-- Prefer Prisma if unspecified. Align tables, FKs, and indexes to support queries in the spec.
-- Map Turkish labels to normalized English identifiers where necessary, but preserve Turkish enums in seed data.
-- Enforce unique constraints and reasonable lengths. Use snake_case table names.
-SYS
+gc_cli_render_template "prompts/generate_db.system.md" > "${PROMPT_DIR}/db.system.md"
 
-cat > "${PROMPT_DIR}/db.task.md" <<TASK
-Goal: Generate a complete ORM schema and initial migration for ${PROJECT_LABEL_PROMPT}.
-Inputs: PDR, SDS, OpenAPI (if present), SQL dump (if present), Mermaid ERD (if present).
-Outputs:
-1) prisma/schema.prisma (or TypeORM entities if requested)
-2) Migration SQL (create tables, FKs, indexes) aligned with acceptance criteria.
-Cover: Auth & consents, Instructors, Class Types, Classes (Program), Reservations (dup-safe), Events (auto-archive by end time), Newsletter, Contact messages, Ingestion (runs + errors), Audit logs.
-Constraints:
-- MySQL 8
-- Time stored in UTC; Program displays Europe/Istanbul
-- Password hashing at app (Argon2id), not in DB
-- Audit logs for admin CRUD
-Return only the schema/migration content when asked for files.
-TASK
+(
+  set -a
+  GEN_DB_PROJECT_LABEL="${PROJECT_LABEL_PROMPT}"
+  set +a
+  gc_cli_render_template "prompts/generate_db.task.md.tmpl"
+) > "${PROMPT_DIR}/db.task.md"
 
 # Collect likely inputs
 ATTACH=()

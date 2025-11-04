@@ -1,0 +1,5 @@
+Usage:
+  gpt-creator generate docker [--out docker]
+Options:
+  --out   Output directory for docker assets. Default: ${GEN_DOCKER_OUT_DEFAULT}
+

@@ -1,0 +1,5 @@
+Usage: gpt-creator create-project [--template NAME|auto|skip] [--skip-template] <path>
+
+Create a new project root, optionally scaffold it from a project template, then
+run the full build pipeline (scan → normalize → plan → generate → db → run).
+

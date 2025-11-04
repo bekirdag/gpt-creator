@@ -1,0 +1,12 @@
+generate-admin — scaffold Vue 3 Admin backoffice
+
+Usage:
+  gpt-creator generate admin [options]
+
+Options:
+  --mmd <file>         Mermaid workflow for backoffice (auto-discover if omitted)
+  --out <dir>          Output directory (default: ${GEN_ADMIN_OUT_DEFAULT})
+  --no-install         Skip pnpm install/build
+  -n, --dry-run        Create prompt only; do not call Codex
+  -h, --help           Show help
+

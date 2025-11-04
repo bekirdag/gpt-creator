@@ -1,0 +1,5 @@
+Usage: gpt-creator binder clear --story SLUG [--project PATH] [--epic EPIC] [--task TASK]
+
+Manage task binder cache entries. The 'clear' subcommand removes cached binders for a story
+or a specific task.
+

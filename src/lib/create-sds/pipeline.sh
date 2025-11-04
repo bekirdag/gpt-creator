@@ -160,6 +160,7 @@ csds::init() {
   source "$CSDS_ROOT_DIR/src/constants.sh"
   source "$CSDS_ROOT_DIR/src/gpt-creator.sh"
   [[ -f "$CSDS_ROOT_DIR/src/lib/path.sh" ]] && source "$CSDS_ROOT_DIR/src/lib/path.sh"
+  CSDS_TEMPLATE_ROOT="$CSDS_ROOT_DIR/assets/templates/prompts/create_sds"
 
   CSDS_WORK_DIR="$(gc::ensure_workspace "$CSDS_PROJECT_ROOT")"
   CSDS_STAGING_DIR="$CSDS_WORK_DIR/staging"
@@ -227,51 +228,9 @@ csds::write_toc_prompt() {
 
   mkdir -p "$(dirname "$prompt_file")"
   {
-    cat <<'CSDS_TOC'
-You are Codex, acting as the lead systems architect. Draft a System Design Specification (SDS) that realises the Product Requirements Document (PDR) provided below.
-
-Process:
-1. Read the PDR excerpt to understand product goals and constraints.
-2. Identify architecture domains first: platform overview, runtime topology, service/module boundaries, data flows, integration points, and operational concerns.
-3. Decompose each domain into progressively detailed sections and subsections covering diagrams, contracts, databases, APIs, deployment, observability, security, scalability, and runbooks.
-4. Before writing narrative content, output a complete SDS table of contents ordered from strategic architecture down to granular implementation details.
-
-Respond with strict JSON using this schema:
-{
-  "document_title": "System Design Specification",
-  "sections": [
-    {
-      "title": "Top-level heading",
-      "summary": "1-3 sentence synopsis of scope",
-      "subsections": [
-        {
-          "title": "Sub heading",
-          "summary": "Short summary",
-          "subsections": [
-            {
-              "title": "Nested heading",
-              "summary": "Short summary"
-            }
-          ]
-        }
-      ]
-    }
-  ]
-}
-
-Rules:
-- Order sections top-down: architecture overview → component design → data & storage → integration & interface contracts → infrastructure & operations → testing, observability, and risk management.
-- Provide at least five top-level sections spanning architecture, data, interfaces, infrastructure, and quality/operability.
-- Populate subsection arrays whenever deeper guidance is needed; leave empty only when no additional breakdown is required.
-- Output JSON only.
-
-## PDR Excerpt
-CSDS_TOC
+    cat "$CSDS_TEMPLATE_ROOT/toc_prompt_header.md"
     cat "$snippet"
-    cat <<'CSDS_TOC'
-
-## End PDR Excerpt
-CSDS_TOC
+    cat "$CSDS_TEMPLATE_ROOT/toc_prompt_footer.md"
   } >"$prompt_file"
 }
 
@@ -448,33 +407,11 @@ csds::write_review_prompt() {
 
   mkdir -p "$(dirname "$prompt_file")"
   {
-    cat <<'PROMPT'
-You are a lead systems architect performing a final quality review of a System Design Specification (SDS).
-
-Goals:
-- Confirm the SDS is complete and prescriptive enough for engineering teams to build the entire platform described in the PDR.
-- Ensure every section (architecture, data, integrations, infra, reliability, security, compliance, observability, rollout) is internally consistent and aligned with the others.
-- Detect gaps, contradictions, or missing implementation detail and resolve them by updating the SDS content.
-- Keep terminology, component interfaces, data contracts, and operational considerations synchronized throughout the document.
-
-Method:
-1. Study the PDR excerpt to anchor product requirements.
-2. Audit the SDS end-to-end, validating that architecture decisions satisfy the PDR while staying coherent.
-3. Rewrite or expand the SDS so it is self-consistent, implementation-ready, and efficient—no redundant or conflicting guidance.
-4. Output the improved SDS in Markdown only. Do not include commentary, checklists, or code fences.
-
-## PDR Excerpt
-PROMPT
+    cat "$CSDS_TEMPLATE_ROOT/review_prompt_header.md"
     cat "$pdr_excerpt"
-    cat <<'PROMPT'
-
-## Current SDS
-PROMPT
+    cat "$CSDS_TEMPLATE_ROOT/review_prompt_current_sds_header.md"
     cat "$sds_file"
-    cat <<'PROMPT'
-
-## End SDS
-PROMPT
+    cat "$CSDS_TEMPLATE_ROOT/review_prompt_footer.md"
   } >"$prompt_file"
 }
 

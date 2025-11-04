@@ -2,24 +2,32 @@
 # Unix installer for gpt-creator (macOS / Linux)
 set -Eeuo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+HELP_DIR="${REPO_DIR}/assets/templates/help"
+
 PREFIX="/usr/local"
 SKIP_PREFLIGHT=0
 FORCE=0
 
 usage() {
-  cat <<EOF
-gpt-creator installer (macOS / Linux)
-
-Usage:
-  ./install.sh [--prefix /usr/local] [--skip-preflight] [--force]
-
-Installs:
-  • CLI symlink → \$PREFIX/bin/gpt-creator
-  • App files   → \$PREFIX/lib/gpt-creator
-  • Shell completions (zsh/bash/fish)
-
-Preflight checks: Docker, Node 20+, pnpm, mysql client, Codex client, OPENAI_API_KEY
-EOF
+  local usage_file="${HELP_DIR}/install_usage.txt"
+  if [[ -f "$usage_file" ]]; then
+    cat "$usage_file"
+  else
+    printf '%s\n' \
+      "gpt-creator installer (macOS / Linux)" \
+      "" \
+      "Usage:" \
+      "  ./install.sh [--prefix /usr/local] [--skip-preflight] [--force]" \
+      "" \
+      "Installs:" \
+      "  • CLI symlink → \$PREFIX/bin/gpt-creator" \
+      "  • App files   → \$PREFIX/lib/gpt-creator" \
+      "  • Shell completions (zsh/bash/fish)" \
+      "" \
+      "Preflight checks: Docker, Node 20+, pnpm, mysql client, Codex client, OPENAI_API_KEY"
+  fi
 }
 
 while [[ $# -gt 0 ]]; do
@@ -46,8 +54,6 @@ case "$OS_NAME" in
     ;;
 esac
 
-SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-REPO_DIR="$(cd "$SCRIPTS_DIR/.." && pwd -P)"
 APP_DIR="$PREFIX/lib/gpt-creator"
 BIN_DIR="$PREFIX/bin"
 APP_BIN="$APP_DIR/bin/gpt-creator"
@@ -425,12 +431,12 @@ install_completions() {
     zcomp="$PREFIX/share/zsh/site-functions"
   fi
   as_root "$PREFIX" mkdir -p "$zcomp"
-  as_root "$PREFIX" tee "$zcomp/_gpt-creator" >/dev/null <<'ZSHC'
-#compdef gpt-creator
-_arguments -s \
-  '1:subcommand:(create-project help)' \
-  '2:path:_files -/'
-ZSHC
+  local zsh_src="${REPO_DIR}/completions/gpt-creator.zsh"
+  if [[ -f "$zsh_src" ]]; then
+    as_root "$PREFIX" install -m 0644 "$zsh_src" "$zcomp/_gpt-creator"
+  else
+    echo "⚠ Missing zsh completion template at ${zsh_src}" >&2
+  fi
 
   # bash
   local bdir
@@ -443,28 +449,22 @@ ZSHC
       ;;
   esac
   as_root "$PREFIX" mkdir -p "$bdir"
-  as_root "$PREFIX" tee "$bdir/gpt-creator" >/dev/null <<'BASHC'
-_gpt_creator_complete() {
-  local cur prev
-  COMPREPLY=()
-  cur="${COMP_WORDS[COMP_CWORD]}"
-  prev="${COMP_WORDS[COMP_CWORD-1]}"
-  if [[ $COMP_CWORD -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "create-project help" -- "$cur") )
-  elif [[ "${COMP_WORDS[1]}" == "create-project" ]]; then
-    COMPREPLY=( $(compgen -o plusdirs -f -- "$cur") )
+  local bash_src="${REPO_DIR}/completions/gpt-creator.bash"
+  if [[ -f "$bash_src" ]]; then
+    as_root "$PREFIX" install -m 0644 "$bash_src" "$bdir/gpt-creator"
+  else
+    echo "⚠ Missing bash completion template at ${bash_src}" >&2
   fi
-}
-complete -F _gpt_creator_complete gpt-creator
-BASHC
 
   # fish
   local fdir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
   mkdir -p "$fdir"
-  tee "$fdir/gpt-creator.fish" >/dev/null <<'FISHC'
-complete -c gpt-creator -n "not __fish_seen_subcommand_from create-project help" -a "create-project help"
-complete -c gpt-creator -n "__fish_seen_subcommand_from create-project" -a "(__fish_complete_directories)"
-FISHC
+  local fish_src="${REPO_DIR}/completions/gpt-creator.fish"
+  if [[ -f "$fish_src" ]]; then
+    install -m 0644 "$fish_src" "$fdir/gpt-creator.fish"
+  else
+    echo "⚠ Missing fish completion template at ${fish_src}" >&2
+  fi
 }
 
 main() {

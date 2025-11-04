@@ -4,22 +4,15 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # shellcheck source=src/lib/create-db-dump/pipeline.sh
 source "$ROOT_DIR/src/lib/create-db-dump/pipeline.sh"
 
 usage() {
-  cat <<'USAGE'
-Usage: gpt-creator create-db-dump [options]
-
-Generate MySQL schema and seed dumps directly from the SDS.
-
-Options:
-  --project PATH   Project root (defaults to current directory)
-  --model NAME     Codex model to use (default: gpt-5-codex)
-  --dry-run        Prepare prompts but do not invoke Codex
-  --force          Regenerate outputs even if they already exist
-  -h, --help       Show this help message
-USAGE
+  gc_cli_render_template "help/create_db_dump_usage.txt"
 }
 
 PROJECT_PATH="$PWD"

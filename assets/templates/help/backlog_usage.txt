@@ -1,0 +1,15 @@
+Usage: gpt-creator backlog [--project PATH|--root PATH]
+                           [--type epics|stories]
+                           [--item-children ID]
+                           [--progress]
+                           [--task-details ID]
+
+Inspect the backlog stored in .gpt-creator/staging/plan/tasks/tasks.db without an interactive prompt.
+
+  --type epics|stories     List backlog summaries (defaults to 'epics' when no other flag is provided).
+  --item-children ID       Show the direct children of the epic/story identified by ID (slug, key, or ID).
+  --progress               Print an overall progress bar summarising task completion.
+  --task-details ID        Show a detailed view for the matching task ID (case-insensitive).
+
+Pass any combination of the flags above; each requested view is printed sequentially.
+

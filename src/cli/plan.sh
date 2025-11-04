@@ -4,6 +4,9 @@
 set -Eeuo pipefail
 
 __DIR__="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GC_TEMPLATE_ROOT="$(cd "${__DIR__}/../.." && pwd)/assets/templates"
+# shellcheck disable=SC1091
+source "${__DIR__}/../lib/templates.sh"
 if [[ -f "${__DIR__}/../constants.sh" ]]; then
   # shellcheck source=../constants.sh
   source "${__DIR__}/../constants.sh"
@@ -38,33 +41,7 @@ UI_BOF_DIR="${NORM}/ui/backoffice"
 CSS_DIR="${NORM}/ui/styles"
 
 # Compose a compact prompt for Codex (file paths + instructions)
-cat > "${PROMPT_FILE}" <<'PROMPT'
-You are **Codex Build Orchestrator**. Produce a **step‑by‑step, dependency‑ordered build plan** for a full-stack product using:
-- Backend: NestJS (Node 20, TypeScript), MySQL 8, Prisma (or TypeORM), SMTP, reCAPTCHA.
-- Frontend: Vue 3 + Vite (website + admin), Tailwind optional, AA accessibility.
-- Infra: Docker (dev), Nginx/Traefik reverse proxy, Hetzner Ubuntu (single box).
-
-**Inputs available on disk** (paths will follow below):
-- PDR / SDS / RFP markdown
-- OpenAPI spec (yaml/json)
-- Mermaid diagrams (website/admin flows)
-- SQL dump(s) / schema
-- UI page samples (HTML/CSS)
-- Jira tasks (markdown)
-
-**Deliver a plan** that includes:
-1) Repo layout (monorepo), package.json workspaces.
-2) DB: schemas, migrations, seeds; import of SQL dump if present.
-3) API: NestJS modules, DTOs, validation, Problem+JSON errors, rate limits, auth, reCAPTCHA verification, newsletter, contact.
-4) Frontend: Vue routes/components for all pages; Program (filters Tür/Uzman) table/cards; Events + Past; Auth; Member dashboard; Admin modules.
-5) Dev containers: docker-compose.yml (MySQL, API, Website, Admin, Proxy), .env structure.
-6) Scripts: `gpt-creator generate api|web|admin|db|docker` tasks list with acceptance criteria checks.
-7) Verification: Lighthouse, axe, /health checks; UAT scenarios mapped to acceptance IDs.
-8) Explicit TODOs when inputs are missing (e.g., no OpenAPI).
-
-Output format:
-- Markdown with sections, numbered steps, checklists (acceptance). Keep concise but complete.
-PROMPT
+gc_cli_render_template "prompts/plan_prompt.txt" > "${PROMPT_FILE}"
 
 # Append the actual resolved paths so Codex can reference them (kept compact)
 {

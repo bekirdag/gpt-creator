@@ -6,6 +6,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 slugify() {
   local s="${1:-}"
   s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
@@ -129,12 +133,12 @@ if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
 fi
 
 usage() {
-  cat <<'USAGE'
-Usage:
-  gpt-creator generate docker [--out docker]
-Options:
-  --out   Output directory for docker assets. Default: docker
-USAGE
+  (
+    set -a
+    GEN_DOCKER_OUT_DEFAULT="${OUT_DIR:-docker}"
+    set +a
+    gc_cli_render_template "help/generate_docker_usage.txt"
+  )
 }
 
 OUT_DIR="docker"
@@ -156,167 +160,41 @@ admin_df="${OUT_PATH}/admin.Dockerfile"
 nginx_conf="${OUT_PATH}/nginx.conf"
 env_example="${ROOT_DIR}/.env.example"
 
-cat > "${compose}" <<YML
-services:
-  db:
-    image: mysql:8.0
-    container_name: ${PROJECT_SLUG}-db
-    environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS}
-      MYSQL_ROOT_HOST: '%'
-      MYSQL_DATABASE: ${DB_NAME}
-      MYSQL_USER: ${DB_USER}
-      MYSQL_PASSWORD: ${DB_PASS}
-    ports:
-      - "${DB_HOST_PORT}:3306"
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${DB_ROOT_PASS}"]
-      interval: 5s
-      timeout: 3s
-      retries: 30
-    volumes:
-      - db_data:/var/lib/mysql
+(
+  set -a
+  GEN_DOCKER_PROJECT_SLUG="${PROJECT_SLUG}"
+  GEN_DOCKER_DB_ROOT_PASS="${DB_ROOT_PASS}"
+  GEN_DOCKER_DB_NAME="${DB_NAME}"
+  GEN_DOCKER_DB_USER="${DB_USER}"
+  GEN_DOCKER_DB_PASS="${DB_PASS}"
+  GEN_DOCKER_DB_HOST_PORT="${DB_HOST_PORT}"
+  GEN_DOCKER_API_HOST_PORT="${API_HOST_PORT}"
+  GEN_DOCKER_WEB_HOST_PORT="${WEB_HOST_PORT}"
+  GEN_DOCKER_ADMIN_HOST_PORT="${ADMIN_HOST_PORT}"
+  GEN_DOCKER_PROXY_HOST_PORT="${PROXY_HOST_PORT}"
+  GEN_DOCKER_API_BASE_URL="${API_BASE_URL}"
+  GEN_DOCKER_DATABASE_URL_CONTAINER="mysql://${DB_USER}:${DB_PASS}@db:3306/${DB_NAME}"
+  set +a
+  gc_cli_render_template "docker/docker-compose.yml.tmpl"
+) > "${compose}"
 
-  api:
-    build:
-      context: ..
-      dockerfile: docker/api.Dockerfile
-    container_name: ${PROJECT_SLUG}-api
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      NODE_ENV: development
-      DATABASE_URL: mysql://${DB_USER}:${DB_PASS}@db:3306/${DB_NAME}
-      PORT: 3000
-      GC_SERVICE: api
-    command: sh -c "corepack enable pnpm && cd /workspace && CI=1 pnpm install --frozen-lockfile=false && cd apps/api && pnpm run start:dev"
-    ports:
-      - "${API_HOST_PORT}:3000"
-    volumes:
-      - ..:/workspace
+gc_cli_render_template "docker/api.Dockerfile" > "${api_df}"
+gc_cli_render_template "docker/web.Dockerfile" > "${web_df}"
+gc_cli_render_template "docker/admin.Dockerfile" > "${admin_df}"
 
-  web:
-    build:
-      context: ..
-      dockerfile: docker/web.Dockerfile
-    container_name: ${PROJECT_SLUG}-web
-    environment:
-      NODE_ENV: development
-      VITE_API_BASE: ${API_BASE_URL}
-      GC_SERVICE: web
-    command: sh -c "corepack enable pnpm && cd /workspace && CI=1 pnpm install --frozen-lockfile=false && cd apps/web && pnpm run dev -- --host 0.0.0.0"
-    ports:
-      - "${WEB_HOST_PORT}:5173"
-    volumes:
-      - ..:/workspace
+gc_cli_render_template "docker/nginx.conf.tmpl" > "${nginx_conf}"
 
-  admin:
-    build:
-      context: ..
-      dockerfile: docker/admin.Dockerfile
-    container_name: ${PROJECT_SLUG}-admin
-    environment:
-      NODE_ENV: development
-      VITE_API_BASE: ${API_BASE_URL}
-      GC_SERVICE: admin
-    command: sh -c "corepack enable pnpm && cd /workspace && CI=1 pnpm install --frozen-lockfile=false && cd apps/admin && pnpm run dev -- --host 0.0.0.0"
-    ports:
-      - "${ADMIN_HOST_PORT}:5173"
-    volumes:
-      - ..:/workspace
-
-  proxy:
-    image: nginx:alpine
-    container_name: ${PROJECT_SLUG}-proxy
-    depends_on:
-      - web
-      - admin
-      - api
-    ports:
-      - "${PROXY_HOST_PORT}:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-
-volumes:
-  db_data: {}
-YML
-
-cat > "${api_df}" <<'DOCKER'
-# API (NestJS) development Dockerfile
-FROM node:20-alpine
-RUN corepack enable pnpm && mkdir -p /workspace/apps/api
-WORKDIR /workspace/apps/api
-EXPOSE 3000
-CMD ["sh", "-c", "while true; do sleep 3600; done"]
-DOCKER
-
-cat > "${web_df}" <<'DOCKER'
-# Website (Vue 3) development Dockerfile
-FROM node:20-alpine
-RUN corepack enable pnpm && mkdir -p /workspace/apps/web
-WORKDIR /workspace/apps/web
-EXPOSE 5173
-CMD ["sh", "-c", "while true; do sleep 3600; done"]
-DOCKER
-
-cat > "${admin_df}" <<'DOCKER'
-# Admin (Vue 3) development Dockerfile
-FROM node:20-alpine
-RUN corepack enable pnpm && mkdir -p /workspace/apps/admin
-WORKDIR /workspace/apps/admin
-EXPOSE 5173
-CMD ["sh", "-c", "while true; do sleep 3600; done"]
-DOCKER
-
-cat > "${nginx_conf}" <<'NGINX'
-events {}
-http {
-  server {
-    listen 80;
-    server_name _;
-
-    location / {
-      proxy_pass http://web:5173;
-      proxy_http_version 1.1;
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
-      proxy_set_header Host $host;
-      proxy_redirect off;
-    }
-
-    location /admin/ {
-      proxy_pass http://admin:5173;
-      proxy_http_version 1.1;
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
-      proxy_set_header Host $host;
-      proxy_redirect off;
-    }
-
-    location /api/ {
-      proxy_pass http://api:3000/api/;
-      proxy_set_header Host $host;
-    }
-  }
-}
-NGINX
-
-cat > "${env_example}" <<ENV
-# Copy to .env.local and edit as needed
-DATABASE_URL=mysql://${DB_USER}:${DB_PASS}@127.0.0.1:${DB_HOST_PORT}/${DB_NAME}
-DB_HOST_PORT=${DB_HOST_PORT}
-API_HOST_PORT=${API_HOST_PORT}
-WEB_HOST_PORT=${WEB_HOST_PORT}
-ADMIN_HOST_PORT=${ADMIN_HOST_PORT}
-PROXY_HOST_PORT=${PROXY_HOST_PORT}
-VITE_API_BASE=${API_BASE_URL}
-RECAPTCHA_SITE_KEY=
-RECAPTCHA_SECRET=
-SMTP_HOST=
-SMTP_PORT=587
-SMTP_USER=
-SMTP_PASS=
-ENV
+(
+  set -a
+  GEN_DOCKER_ENV_DB_URL="mysql://${DB_USER}:${DB_PASS}@127.0.0.1:${DB_HOST_PORT}/${DB_NAME}"
+  GEN_DOCKER_DB_HOST_PORT="${DB_HOST_PORT}"
+  GEN_DOCKER_API_HOST_PORT="${API_HOST_PORT}"
+  GEN_DOCKER_WEB_HOST_PORT="${WEB_HOST_PORT}"
+  GEN_DOCKER_ADMIN_HOST_PORT="${ADMIN_HOST_PORT}"
+  GEN_DOCKER_PROXY_HOST_PORT="${PROXY_HOST_PORT}"
+  GEN_DOCKER_API_BASE_URL="${API_BASE_URL}"
+  set +a
+  gc_cli_render_template "env/docker.env.example.tmpl"
+) > "${env_example}"
 
 log "Wrote docker assets to: ${OUT_PATH}"

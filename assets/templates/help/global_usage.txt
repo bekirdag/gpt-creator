@@ -1,0 +1,48 @@
+${APP_NAME} v${VERSION}
+
+Usage:
+  ${APP_NAME} [--reports-on|--reports-off] [--reports-idle-timeout SECONDS] <command> [args]
+  ${APP_NAME} create-project [--template NAME|auto|skip] [--skip-template] <path>
+  ${APP_NAME} bootstrap [--template NAME|auto|skip] [--skip-template] [--rfp FILE] [--fresh] <path>
+  ${APP_NAME} scan [--project <path>]
+  ${APP_NAME} normalize [--project <path>]
+  ${APP_NAME} plan [--project <path>]
+  ${APP_NAME} generate <api|web|admin|db|docker|all> [--project <path>]
+  ${APP_NAME} db <provision|import|seed> [--project <path>]
+  ${APP_NAME} run <up|down|logs|open> [--project <path>]
+  ${APP_NAME} refresh-stack [options]
+  ${APP_NAME} verify <acceptance|nfr|all> [--project <path>] [--api-url API_BASE] [--api-health URL] [--web-url URL] [--admin-url URL]
+  ${APP_NAME} create-sds [--project <path>] [--model NAME] [--dry-run] [--force]
+  ${APP_NAME} create-pdr [--project <path>] [--model NAME] [--dry-run] [--force]
+  ${APP_NAME} create-jira-tasks [--project <path>] [--model NAME] [--force] [--dry-run]
+  ${APP_NAME} create-db-dump [--project <path>] [--model NAME] [--dry-run] [--force]
+  ${APP_NAME} migrate-tasks [--project <path>] [--force]
+  ${APP_NAME} refine-tasks [--project <path>] [--story SLUG] [--model NAME] [--dry-run]
+  ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
+  ${APP_NAME} backlog [--project <path>] [--type epics|stories] [--item-children ID] [--progress] [--task-details ID]
+  ${APP_NAME} dag validate [--project <path>] [--story SLUG]
+  ${APP_NAME} estimate [--project <path>]
+  ${APP_NAME} tokens [--project <path>] [--details] [--json]
+  ${APP_NAME} reports [--project <path>] [list|backlog|show|work] [--branch NAME] [--no-push] [--prompt-only] [--open] [slug]
+  ${APP_NAME} show-file [--range A:B|--head N|--tail N|--diff|--refresh] <path>
+  ${APP_NAME} task-convert [options] (deprecated; runs create-tasks)
+  ${APP_NAME} sweep-artifacts [--project <path>] [path...]
+  ${APP_NAME} tidy-progress [--project <path>] [path...] (deprecated alias of sweep-artifacts)
+  ${APP_NAME} next [--project <path>] [--story SLUG]
+  ${APP_NAME} why --task TASK_ID [--project <path>] [--story SLUG]
+  ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--keep-artifacts]
+  ${APP_NAME} iterate [--project <path>] [--jira <file>] (deprecated)
+  ${APP_NAME} keys [list|set <service>]
+  ${APP_NAME} tui
+  ${APP_NAME} update [--force]
+  ${APP_NAME} version
+  ${APP_NAME} help
+
+Global flags:
+  --reports-on               Enable automatic crash/stall reports for the current invocation
+  --reports-off              Disable automatic crash/stall reports (overrides GC_REPORTS_ON=1)
+  --reports-idle-timeout <s> Override idle detection threshold in seconds (default: ${GC_REPORTS_IDLE_TIMEOUT})
+
+Environment overrides:
+  CODEX_BIN, CODEX_MODEL, DOCKER_BIN, MYSQL_BIN, EDITOR_CMD, GC_API_HEALTH_URL, GC_WEB_URL, GC_ADMIN_URL
+

@@ -1,0 +1,13 @@
+Goal: Generate a complete ORM schema and initial migration for ${GEN_DB_PROJECT_LABEL}.
+Inputs: PDR, SDS, OpenAPI (if present), SQL dump (if present), Mermaid ERD (if present).
+Outputs:
+1) prisma/schema.prisma (or TypeORM entities if requested)
+2) Migration SQL (create tables, FKs, indexes) aligned with acceptance criteria.
+Cover: Auth & consents, Instructors, Class Types, Classes (Program), Reservations (dup-safe), Events (auto-archive by end time), Newsletter, Contact messages, Ingestion (runs + errors), Audit logs.
+Constraints:
+- MySQL 8
+- Time stored in UTC; Program displays Europe/Istanbul
+- Password hashing at app (Argon2id), not in DB
+- Audit logs for admin CRUD
+Return only the schema/migration content when asked for files.
+

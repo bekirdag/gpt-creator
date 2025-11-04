@@ -4,6 +4,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # Load shared constants if present
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
@@ -35,8 +39,12 @@ if [[ -z "${VER}" || "${VER}" == "0.0.0" ]]; then
   fi
 fi
 
-cat <<EOF
-$GC_NAME $VER
-model: ${GC_DEFAULT_MODEL}
-root:  $ROOT_DIR
-EOF
+(
+  set -a
+  VERSION_OUTPUT_NAME="$GC_NAME"
+  VERSION_OUTPUT_VERSION="$VER"
+  VERSION_OUTPUT_MODEL="$GC_DEFAULT_MODEL"
+  VERSION_OUTPUT_ROOT="$ROOT_DIR"
+  set +a
+  gc_cli_render_template "meta/version_output.txt"
+)

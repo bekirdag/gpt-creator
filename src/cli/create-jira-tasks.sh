@@ -4,21 +4,14 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 source "$ROOT_DIR/src/lib/create-jira-tasks/pipeline.sh"
 
 usage() {
-  cat <<'USAGE'
-Usage: gpt-creator create-jira-tasks [options]
-
-Generate Jira epics, user stories, and tasks directly from project documentation.
-
-Options:
-  --project PATH     Project root (defaults to current directory)
-  --model NAME       Codex model to use (default: gpt-5-codex)
-  --force            Rebuild tasks.db from scratch (ignore saved progress)
-  --dry-run          Prepare prompts but do not call Codex
-  -h, --help         Show this help message
-USAGE
+  gc_cli_render_template "help/create_jira_tasks_usage.txt"
 }
 
 PROJECT_PATH="$PWD"

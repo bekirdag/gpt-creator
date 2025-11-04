@@ -4,6 +4,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # Optional shared helpers
 if [[ -f "$ROOT_DIR/src/gpt-creator.sh" ]]; then source "$ROOT_DIR/src/gpt-creator.sh"; fi
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then source "$ROOT_DIR/src/constants.sh"; fi
@@ -25,22 +29,7 @@ slugify() {
 PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_SLUG}"
 usage() {
-  cat <<EOF
-Usage: gpt-creator run <command> [options]
-
-Commands:
-  compose-up        Bring up Docker stack (build + up -d). See: run-compose-up.sh
-  logs [svc]        Tail logs (default: api). Uses docker compose.
-  ps                Show service status.
-  open [site]       Open local URLs (web|admin|api), default: web.
-  stop              Stop services (docker compose stop).
-  down              Stop & remove services (docker compose down).
-
-Examples:
-  gpt-creator run compose-up --open
-  gpt-creator run logs api
-  gpt-creator run open admin
-EOF
+  gc_cli_render_template "help/run_usage.txt"
 }
 
 [[ $# -lt 1 ]] && { usage; exit 1; }

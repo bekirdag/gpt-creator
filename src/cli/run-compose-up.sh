@@ -4,6 +4,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # Optional shared helpers
 if [[ -f "$ROOT_DIR/src/gpt-creator.sh" ]]; then source "$ROOT_DIR/src/gpt-creator.sh"; fi
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then source "$ROOT_DIR/src/constants.sh"; fi
@@ -25,11 +29,12 @@ slugify() {
 PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_SLUG}"
 usage() {
-  cat <<EOF
-Usage: $(basename "$0") [--compose <file>] [--open]
-   --compose   Path to docker compose file (default: ./docker/compose.yaml or ./docker-compose.yml)
-   --open      Open web UI after start (uses APP_WEB_URL or http://localhost:5173)
-EOF
+  (
+    set -a
+    RUN_COMPOSE_UP_CMD_NAME="$(basename "$0")"
+    set +a
+    gc_cli_render_template "help/run_compose_up_usage.txt"
+  )
 }
 
 COMPOSE_FILE=""

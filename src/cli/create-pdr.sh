@@ -4,21 +4,14 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 source "$ROOT_DIR/src/lib/create-pdr/pipeline.sh"
 
 usage() {
-  cat <<'USAGE'
-Usage: gpt-creator create-pdr [options]
-
-Generate a Product Requirements Document (PDR) from the staged Request for Proposal (RFP) using Codex.
-
-Options:
-  --project PATH   Project root (defaults to current directory)
-  --model NAME     Codex model to use (default: gpt-5-codex)
-  --dry-run        Skip Codex calls but emit the derived prompts
-  --force          Regenerate all stages even if outputs already exist
-  -h, --help       Show this help message
-USAGE
+  gc_cli_render_template "help/create_pdr_usage.txt"
 }
 
 PROJECT_PATH="$PWD"

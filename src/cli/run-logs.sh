@@ -4,6 +4,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # Load shared constants if present
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
@@ -26,21 +30,13 @@ err(){  printf "\033[31m[%s][ERROR]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 
 usage() {
-  cat <<EOF
-Usage: $GC_NAME run-logs [options]
-
-Options:
-  -p, --project-dir PATH   Project root (default: current directory)
-  -s, --service NAME       Specific service to tail (e.g., api, web, admin, db)
-      --since DURATION     Only show logs since e.g. "10m", "1h"
-  -n, --tail N             Number of lines to show (default: 300)
-  -f, --follow             Follow logs (stream)
-  -h, --help               Show this help
-
-Examples:
-  $GC_NAME run-logs -f
-  $GC_NAME run-logs --service api --since 30m -f
-EOF
+  (
+    set -a
+    RUN_LOGS_CMD_NAME="$GC_NAME"
+    RUN_LOGS_DEFAULT_TAIL="$TAIL"
+    set +a
+    gc_cli_render_template "help/run_logs_usage.txt"
+  )
 }
 
 SERVICE=""

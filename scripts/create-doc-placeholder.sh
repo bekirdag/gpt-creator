@@ -1,12 +1,41 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-usage() {
-  cat <<'USAGE' >&2
-Usage: create-doc-placeholder.sh <path> --owner "Owner" [--summary "Summary"] [--date YYYY-MM-DD]
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+HELP_DIR="${ROOT_DIR}/assets/templates/help"
+PLACEHOLDER_TEMPLATE_DIR="${ROOT_DIR}/assets/templates/doc_placeholders"
+GC_WORK_DIR_NAME="${GC_WORK_DIR_NAME:-.gpt-creator}"
 
-Creates a minimal placeholder file for the referenced documentation path.
-USAGE
+gc_clone_python_tool() {
+  local script_name="${1:?python script name required}"
+  local root="${2:-${ROOT_DIR}}"
+  local source_path="${ROOT_DIR}/scripts/python/${script_name}"
+  if [[ ! -f "$source_path" ]]; then
+    echo "Python helper missing at ${source_path}" >&2
+    return 1
+  fi
+  local target_dir="${root%/}/${GC_WORK_DIR_NAME:-.gpt-creator}/shims/python"
+  local target_path="${target_dir}/${script_name}"
+  if [[ ! -d "$target_dir" ]]; then
+    mkdir -p "$target_dir" || { echo "Failed to create ${target_dir}" >&2; return 1; }
+  fi
+  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
+    cp "$source_path" "$target_path" || { echo "Failed to copy ${script_name}" >&2; return 1; }
+  fi
+  printf '%s\n' "$target_path"
+}
+
+usage() {
+  local usage_file="${HELP_DIR}/create_doc_placeholder_usage.txt"
+  if [[ -f "$usage_file" ]]; then
+    cat "$usage_file" >&2
+  else
+    printf '%s\n' \
+      "Usage: create-doc-placeholder.sh <path> --owner \"Owner\" [--summary \"Summary\"] [--date YYYY-MM-DD]" \
+      "" \
+      "Creates a minimal placeholder file for the referenced documentation path." >&2
+  fi
   exit 2
 }
 
@@ -17,22 +46,7 @@ fi
 owner=""
 summary=""
 override_date=""
-
 path=""
-
-escape_json() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  value="${value//$'\n'/\\n}"
-  printf '%s' "$value"
-}
-
-escape_csv() {
-  local value="$1"
-  value="${value//\"/\"\"}"
-  printf '%s' "$value"
-}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -83,12 +97,6 @@ else
   timestamp="$override_date"
 fi
 
-summary_text="$summary"
-if [[ -z "$summary_text" ]]; then
-  base_name=$(basename "$path")
-  summary_text="Populate ${base_name} with project-specific details."
-fi
-
 abs_path="$path"
 mkdir -p "$(dirname "$abs_path")"
 
@@ -97,77 +105,68 @@ if [[ -f "$abs_path" ]]; then
   exit 0
 fi
 
-extension="${abs_path##*.}"
 base_name=$(basename "$abs_path")
+summary_text="$summary"
+if [[ -z "$summary_text" ]]; then
+  summary_text="Populate ${base_name} with project-specific details."
+fi
 
+extension="${abs_path##*.}"
+if [[ "$abs_path" == "$extension" ]]; then
+  extension=""
+fi
+extension="${extension,,}"
+
+template_file=""
+template_format="text"
 case "$extension" in
   md|mdx)
-    cat <<EOF >"$abs_path"
-# Placeholder: ${summary_text}
-
-- Owner: ${owner}
-- Last Updated: ${timestamp}
-- TODO: ${summary_text}
-EOF
+    template_file="${PLACEHOLDER_TEMPLATE_DIR}/markdown.md.tmpl"
+    template_format="markdown"
     ;;
-  txt|log|mdown|markdown)
-    cat <<EOF >"$abs_path"
-Owner: ${owner}
-Date: ${timestamp}
-TODO: ${summary_text}
-EOF
+  txt|log|mdown|markdown|"")
+    template_file="${PLACEHOLDER_TEMPLATE_DIR}/text.txt.tmpl"
     ;;
   csv)
-    owner_csv=$(escape_csv "$owner")
-    summary_csv=$(escape_csv "$summary_text")
-    cat <<EOF >"$abs_path"
-owner,date,summary,todo
-"${owner_csv}","${timestamp}","${summary_csv}","Replace this placeholder with final content"
-EOF
+    template_file="${PLACEHOLDER_TEMPLATE_DIR}/data.csv.tmpl"
+    template_format="csv"
     ;;
   json|ndjson|jsonl)
-    owner_json=$(escape_json "$owner")
-    summary_json=$(escape_json "$summary_text")
-    path_json=$(escape_json "$path")
-    cat <<EOF >"$abs_path"
-{
-  "owner": "${owner_json}",
-  "last_updated": "${timestamp}",
-  "summary": "${summary_json}",
-  "todo": "Replace this placeholder with final content",
-  "path": "${path_json}"
-}
-EOF
+    template_file="${PLACEHOLDER_TEMPLATE_DIR}/data.json.tmpl"
+    template_format="json"
     ;;
   sql)
-    cat <<EOF >"$abs_path"
--- Owner: ${owner}
--- Last Updated: ${timestamp}
--- TODO: ${summary_text}
-EOF
+    template_file="${PLACEHOLDER_TEMPLATE_DIR}/data.sql.tmpl"
+    template_format="sql"
     ;;
   ics)
-    summary_line=${summary_text//$'\n'/ }
-    cat <<EOF >"$abs_path"
-BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//gpt-creator//Doc Placeholder//EN
-BEGIN:VEVENT
-UID:${base_name}-placeholder
-DTSTAMP:${timestamp//-/}T000000Z
-SUMMARY:${summary_line}
-DESCRIPTION:Owner ${owner}; replace placeholder with real event details.
-END:VEVENT
-END:VCALENDAR
-EOF
+    template_file="${PLACEHOLDER_TEMPLATE_DIR}/event.ics.tmpl"
+    template_format="ics"
     ;;
   *)
-    cat <<EOF >"$abs_path"
-Owner: ${owner}
-Date: ${timestamp}
-TODO: ${summary_text}
-EOF
+    template_file="${PLACEHOLDER_TEMPLATE_DIR}/default.txt.tmpl"
     ;;
 esac
+
+if [[ ! -f "$template_file" ]]; then
+  echo "Template missing for extension '${extension}' (expected at ${template_file})" >&2
+  exit 1
+fi
+
+helper_path="$(gc_clone_python_tool "render_doc_placeholder.py" "$ROOT_DIR")"
+if [[ -z "$helper_path" ]]; then
+  echo "Failed to prepare render_doc_placeholder helper." >&2
+  exit 1
+fi
+
+python3 "$helper_path" \
+  --template "$template_file" \
+  --format "$template_format" \
+  --owner "$owner" \
+  --timestamp "$timestamp" \
+  --summary "$summary_text" \
+  --path "$abs_path" \
+  --base-name "$base_name" \
+  --output "$abs_path"
 
 printf '[ok] Created placeholder %s\n' "$abs_path" >&2

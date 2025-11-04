@@ -1,0 +1,6 @@
+Usage: ${APP_NAME} keys [list|status]
+       ${APP_NAME} keys set <service>
+       ${APP_NAME} keys <service>
+
+Lists required third-party API keys and stores credentials under your user config directory.
+

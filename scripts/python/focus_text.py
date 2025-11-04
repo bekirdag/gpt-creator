@@ -10,7 +10,8 @@ from typing import Optional, List, Tuple, Set, Dict, Sequence
 _original_re_compile = re.compile
 _original_re__compile = getattr(re, "_compile", None)
 invalid_regex_patterns = []
-START_PATCH_MARKER = "apply_patch <<'PATCH'"
+HEREDOC_TOKEN = "<" * 2
+START_PATCH_MARKER = f"apply_patch {HEREDOC_TOKEN}'PATCH'"
 END_PATCH_MARKER = "PATCH"
 COMMAND_BLOCK_PATTERN = re.compile(
     r'\b(sudo|chown)\b|rm\s+-rf\s+/|chmod\s+[0-7]{3}\s+/|curl\s+http|wget\s+http',

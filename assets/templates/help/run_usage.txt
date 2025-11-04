@@ -1,0 +1,15 @@
+Usage: gpt-creator run <command> [options]
+
+Commands:
+  compose-up        Bring up Docker stack (build + up -d). See: run-compose-up.sh
+  logs [svc]        Tail logs (default: api). Uses docker compose.
+  ps                Show service status.
+  open [site]       Open local URLs (web|admin|api), default: web.
+  stop              Stop services (docker compose stop).
+  down              Stop & remove services (docker compose down).
+
+Examples:
+  gpt-creator run compose-up --open
+  gpt-creator run logs api
+  gpt-creator run open admin
+

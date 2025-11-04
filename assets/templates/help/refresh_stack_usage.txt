@@ -1,0 +1,15 @@
+Usage: gpt-creator refresh-stack [options]
+
+Tear down, rebuild, and prime the local Docker stack (schema + seeds).
+
+Options:
+  --project PATH   Project root (defaults to current directory)
+  --compose FILE   Override docker-compose file
+  --sql FILE       Explicit SQL dump to import (auto-discovered if omitted)
+  --seed FILE      Seed SQL file to apply after import
+  --only-services LIST  Comma/space separated subset of services to start (e.g. "web,api")
+  --skip-services LIST  Comma/space separated services to skip when starting (e.g. "db,admin")
+  --no-import      Skip schema import step
+  --no-seed        Skip seeding step
+  -h, --help       Show this help
+

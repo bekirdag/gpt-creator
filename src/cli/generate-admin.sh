@@ -5,6 +5,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # shellcheck disable=SC1091
 if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
   source "${ROOT_DIR}/src/constants.sh"
@@ -49,19 +53,12 @@ JIRA="$(resolve_doc "${STAGING_DIR}/jira.md" '*jira*task*.md' '*jira*.md')"; JIR
 INSTALL_DEPS=1
 
 show_help() {
-  cat <<EOF
-generate-admin — scaffold Vue 3 Admin backoffice
-
-Usage:
-  gpt-creator generate admin [options]
-
-Options:
-  --mmd <file>         Mermaid workflow for backoffice (auto-discover if omitted)
-  --out <dir>          Output directory (default: ${ADMIN_DIR})
-  --no-install         Skip pnpm install/build
-  -n, --dry-run        Create prompt only; do not call Codex
-  -h, --help           Show help
-EOF
+  (
+    set -a
+    GEN_ADMIN_OUT_DEFAULT="${ADMIN_DIR}"
+    set +a
+    gc_cli_render_template "help/generate_admin_usage.txt"
+  )
 }
 
 while [[ $# -gt 0 ]]; do
@@ -90,33 +87,15 @@ fi
 
 PROMPT_FILE="${WORK_DIR}/prompts/generate-admin.prompt.md"
 
-cat > "$PROMPT_FILE" <<'PROMPT'
-System:
-You are Codex (gpt-5-high) generating a Vue 3 + Vite Admin SPA for role-based management of content, instructors, membership tiles, schedule ingestion (upload/validate/publish), events, users (assist), and audit logs. Follow PDR/SDS acceptance and secure admin routes.
-
-Context:
-- SDS: {{SDS}}
-- PDR: {{PDR}}
-- Backoffice workflow (Mermaid): {{BACKOFFICE_MMD}}
-- Jira tasks (acceptance & task names): {{JIRA}}
-
-Deliverables (write to ADMIN_DIR):
-- Vite + Vue 3 (Pinia, Vue Router) Admin app under /admin/* routes; login gate via session API; RBAC.
-- Sections: Dashboard, Pages, Instructors (CRUD + reorder), Membership Tiles (CRUD + reorder + publish window), Program Ingestion (upload → validate row errors → publish), Events (CRUD + archive), Users (send reset link), Audit Log (list).
-- Tables with inline filters, pagination; accessible modals; destructive confirmations.
-- API client bindings to /api/v1/admin/* per SDS.
-- Dockerfile + compose fragment for 'admin'.
-- README with environment details and run/build steps.
-
-Write files only—no commentary.
-PROMPT
-
-sed -i \
-  -e "s#{{SDS}}#${SDS}#g" \
-  -e "s#{{PDR}}#${PDR}#g" \
-  -e "s#{{BACKOFFICE_MMD}}#${BACKOFFICE_MMD:-<none>}#g" \
-  -e "s#{{JIRA}}#${JIRA}#g" \
-  "$PROMPT_FILE"
+(
+  set -a
+  GEN_ADMIN_SDS="${SDS}"
+  GEN_ADMIN_PDR="${PDR}"
+  GEN_ADMIN_MMD="${BACKOFFICE_MMD:-<none>}"
+  GEN_ADMIN_JIRA="${JIRA}"
+  set +a
+  gc_cli_render_template "prompts/generate_admin.prompt.md.tmpl"
+) > "$PROMPT_FILE"
 
 log_info "Prepared Codex prompt → $PROMPT_FILE"
 log_info "Output directory         → $ADMIN_DIR"

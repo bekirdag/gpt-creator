@@ -2,6 +2,11 @@
 # Subcommand: create-project
 # Provides: cmd::create_project
 
+CLI_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+: "${GC_TEMPLATE_ROOT:=$(cd "${CLI_MODULE_DIR}/../.." && pwd)/assets/templates}"
+# shellcheck disable=SC1091
+source "${CLI_MODULE_DIR}/../lib/templates.sh"
+
 cmd::create_project() {
   local target="${1:-}"
   [[ -z "$target" ]] && gc::die "Usage: gpt-creator create-project /path/to/project"
@@ -26,25 +31,7 @@ cmd::create_project() {
 
   # Seed plan scaffold
   mkdir -p "$work_dir/staging/plan"
-  cat > "$work_dir/staging/plan/PLAN_TODO.md" <<'EOF'
-# Build Plan (Scaffold)
-
-This file will be populated by Codex based on the staged inputs:
-- docs/pdr.md, docs/sds.md, docs/rfp.md, docs/jira.md, docs/ui-pages.md
-- openapi/openapi.(yaml|json|src)
-- sql/dump.sql
-- diagrams/*.mmd
-- samples/**
-
-Next steps (automated in future steps):
-1. Generate an execution plan with acceptance criteria.
-2. Synthesize API scaffolds from OpenAPI (NestJS).
-3. Generate schema & migrations (MySQL 8).
-4. Generate Vue 3 website & admin shells from UI pages and CSS tokens.
-5. Wire Docker Compose for local dev (API, MySQL, Admin, Web, Proxy).
-6. Run acceptance checks, then drive Jira via create-tasks/work-on-tasks.
-
-EOF
+  gc_cli_render_template "plan/PLAN_TODO.md" > "$work_dir/staging/plan/PLAN_TODO.md"
 
   gc::ok "Plan scaffold created: $work_dir/staging/plan/PLAN_TODO.md"
 

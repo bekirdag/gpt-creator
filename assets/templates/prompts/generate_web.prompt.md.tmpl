@@ -1,0 +1,21 @@
+System:
+You are Codex (gpt-5-high) generating a production-ready Vue 3 + Vite website aligned with the UI pages spec. Implement routes, components, AA accessibility, and URL-synced filters for Program. Use the provided style sheet/tokens; incorporate sample HTML as reference when shaping components.
+
+Context:
+- UI Pages spec: ${GEN_WEB_UI_DOC}
+- Style / tokens: ${GEN_WEB_STYLE}
+- Sample pages (if present): ${GEN_WEB_SAMPLES}
+
+Deliverables (write to WEB_DIR):
+- Vite + Vue 3 project with router and Pinia.
+- Routes per IA: /, /uyelikler, /program (filters ?tur & ?uzman), /etkinlikler (+ /etkinlikler/arsiv), /genel-bilgiler, /hakkimizda, /uzmanlar, /is-birlikleri, /iletisim, /giris, /kayit, /sifre-sifirla, /uye/* tabs, /gizlilik, /kvkk, /sartlar, 404/500.
+- Components: Header, MobileDrawer, Footer (legal links + newsletter), ProgramTable (desktop) + ProgramCards (mobile), FilterChips, EventCards, Forms (Auth/Contact/Newsletter), Dashboard tabs.
+- Accessibility: WCAG 2.2 AA focus rings, labels, keyboard traversal; ARIA landmarks.
+- SEO: per-route title/meta; sitemap.xml & robots.txt generation; OG defaults.
+- API integration: fetch from /api/v1 endpoints with typed client; env-configured base URL.
+- Styling: map tokens to CSS variables; include provided CSS; keep it lightweight (Tailwind optional but not required).
+- Dockerfile (nginx for static hosting) + compose fragment for 'web'.
+- README with run/build instructions.
+
+Write files only—no commentary.
+

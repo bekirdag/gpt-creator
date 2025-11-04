@@ -65,6 +65,7 @@ else
 fi
 GC_REPORTS_IDLE_TIMEOUT="${GC_REPORTS_IDLE_TIMEOUT:-1800}"
 GC_REPORTS_CHECK_INTERVAL="${GC_REPORTS_CHECK_INTERVAL:-60}"
+export GC_REPORTS_IDLE_TIMEOUT GC_REPORTS_CHECK_INTERVAL
 GC_REPORTS_INITIALIZED=0
 GC_REPORTS_STORE_DIR=""
 GC_REPORTS_ACTIVITY_FILE=""
@@ -254,6 +255,42 @@ cmd_task_convert() {
 
 CLI_ROOT="$(resolve_cli_root)"
 unset -f resolve_cli_root
+
+GC_TEMPLATE_DIR="${CLI_ROOT}/assets/templates"
+
+gc_template_path() {
+  local name="${1:?template name required}"
+  printf '%s/%s' "$GC_TEMPLATE_DIR" "$name"
+}
+
+gc_render_template() {
+  local name="${1:?template name required}"
+  local template_path
+  template_path="$(gc_template_path "$name")"
+  [[ -f "$template_path" ]] || die "Template not found: ${template_path}"
+  local python_bin="${PYTHON_BIN:-python3}"
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    die "Python runtime '$python_bin' not available for template rendering"
+  fi
+  "$python_bin" -c 'import os, sys
+from string import Template
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    data = fh.read()
+tmpl = Template(data)
+sys.stdout.write(tmpl.safe_substitute(os.environ))' "$template_path"
+}
+
+gc_json_escape() {
+  local value="${1:-}"
+  local python_bin="${PYTHON_BIN:-python3}"
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    die "Python runtime '$python_bin' not available for JSON encoding"
+  fi
+  "$python_bin" -c 'import json, sys
+print(json.dumps(sys.argv[1]))' "$value"
+}
 
 gc_configure_tmpdir() {
   local base="${1:-${PROJECT_ROOT:-$PWD}}"
@@ -736,20 +773,7 @@ cmd_show_file() {
         shift
         ;;
       -h|--help)
-        cat <<'EOHELP'
-Usage: gpt-creator show-file [options] PATH
-
-Display a cached snippet of PATH without repeatedly streaming large files.
-
-Options:
-  --project DIR       Project root (defaults to current PROJECT_ROOT)
-  --range A:B         Show inclusive line range A..B (1-based)
-  --head N            Show first N lines (legacy; prefer --range/--tail for precise snippets)
-  --tail N            Show last N lines
-  --max-lines N       Default line count when no range/head/tail is provided (default: 400)
-  --diff              Show a unified diff against the cached snapshot (if any)
-  --refresh           Re-read the file and update the cache even if unchanged
-EOHELP
+        gc_render_template "help/show_file_usage.txt"
         return 0
         ;;
       --)
@@ -1094,33 +1118,19 @@ gc_create_env_if_missing() {
   db_password="$(gc_random_string)"
   local db_root_password
   db_root_password="$(gc_random_string)"
-  cat > "$env_file" <<EOF
-# gpt-creator environment
-DB_NAME=${db_name}
-DB_USER=${db_user}
-DB_PASSWORD=${db_password}
-DB_ROOT_USER=root
-DB_ROOT_PASSWORD=${db_root_password}
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_HOST_PORT=3306
-API_HOST_PORT=3000
-WEB_HOST_PORT=5173
-ADMIN_HOST_PORT=5174
-PROXY_HOST_PORT=8080
-DATABASE_URL=mysql://${db_user}:${db_password}@127.0.0.1:3306/${db_name}
-VITE_API_BASE=http://localhost:3000/api/v1
-# Optional: GitHub issue reporting
-GC_GITHUB_REPO=bekirdag/gpt-creator
-GC_GITHUB_TOKEN=
-# GC_REPORTER=
-# GC_REPORT_ASSIGNEE=
-EOF
+  (
+    GC_ENV_DB_NAME="$db_name"
+    GC_ENV_DB_USER="$db_user"
+    GC_ENV_DB_PASSWORD="$db_password"
+    GC_ENV_DB_ROOT_PASSWORD="$db_root_password"
+    gc_render_template "env/default_env_file.tmpl"
+  ) >"$env_file"
   chmod 600 "$env_file" || true
 }
 
 VERSION="0.2.0"
 APP_NAME="gpt-creator"
+export APP_NAME VERSION
 
 # Defaults (override via env)
 CODEX_BIN="${CODEX_BIN:-codex}"
@@ -1635,13 +1645,7 @@ cmd_sweep_artifacts() {
         shift 2
         ;;
       -h|--help)
-        cat <<'EOF'
-Usage: gpt-creator sweep-artifacts [--project PATH] [PATH...]
-
-Sweep legacy Codex work artifacts (tmp/final/diff/etc.) into the standard
-.gpt-creator folder structure. Defaults to the current directory when no path
-is supplied. You can pass multiple project directories to tidy them in batch.
-EOF
+        gc_render_template "help/sweep_artifacts_usage.txt"
         return 0
         ;;
       --)
@@ -3986,17 +3990,14 @@ gc_make_attempt_signature() {
 
   local py_bin="${python_bin:-${PYTHON_BIN:-python3}}"
   if command -v "$py_bin" >/dev/null 2>&1; then
-    local signature
-    signature="$("$py_bin" - "$source" <<'PYCODE' 2>/dev/null
-import hashlib
-import sys
-payload = sys.argv[1].encode("utf-8", "ignore")
-print(hashlib.sha256(payload).hexdigest())
-PYCODE
-)"
-    if [[ -n "$signature" ]]; then
-      printf '%s\n' "$signature"
-      return 0
+    local helper_path
+    if helper_path="$(gc_clone_python_tool "make_attempt_signature.py" "${PROJECT_ROOT:-$PWD}")"; then
+      local signature
+      signature="$("$py_bin" "$helper_path" "$source" 2>/dev/null || true)"
+      if [[ -n "$signature" ]]; then
+        printf '%s\n' "$signature"
+        return 0
+      fi
     fi
   fi
 
@@ -4959,22 +4960,7 @@ cmd_refresh_stack() {
       --only-services) only_services="${2:-}"; shift 2;;
       --skip-services) skip_services="${2:-}"; shift 2;;
       -h|--help)
-        cat <<'EOHELP'
-Usage: gpt-creator refresh-stack [options]
-
-Tear down, rebuild, and prime the local Docker stack (schema + seeds).
-
-Options:
-  --project PATH   Project root (defaults to current directory)
-  --compose FILE   Override docker-compose file
-  --sql FILE       Explicit SQL dump to import (auto-discovered if omitted)
-  --seed FILE      Seed SQL file to apply after import
-  --only-services LIST  Comma/space separated subset of services to start (e.g. "web,api")
-  --skip-services LIST  Comma/space separated services to skip when starting (e.g. "db,admin")
-  --no-import      Skip schema import step
-  --no-seed        Skip seeding step
-  -h, --help       Show this help
-EOHELP
+        gc_render_template "help/refresh_stack_usage.txt"
         return 0
         ;;
       *) break;;
@@ -5667,10 +5653,7 @@ codex_call() {
   if [[ -z "$prompt_file" ]]; then
     prompt_file="${prompt_dir}/${task}.md"
     if [[ ! -f "$prompt_file" ]]; then
-      cat >"$prompt_file" <<'PROMPT'
-# Instruction
-You are Codex (gpt-5-codex) assisting the gpt-creator pipeline. Apply requested changes deterministically.
-PROMPT
+      gc_render_template "prompts/default_codex_prompt.md" >"$prompt_file"
     fi
   fi
 
@@ -6177,16 +6160,7 @@ cmd_create_tasks() {
       --jira) jira="$(abs_path "$2")"; shift 2;;
       --force) force=1; shift;;
       -h|--help)
-        cat <<'EOUSAGE'
-Usage: gpt-creator create-tasks [--project PATH] [--jira FILE] [--force]
-
-Convert Jira markdown tasks into a project-scoped SQLite database stored under .gpt-creator/staging/plan/tasks.
-
-Options:
-  --project PATH  Project root (defaults to current directory)
-  --jira FILE     Jira markdown source (defaults to staging/inputs/jira.md)
-  --force         Rebuild the tasks database without restoring prior progress metadata
-EOUSAGE
+        gc_render_template "help/create_tasks_usage.txt"
         return 0
         ;;
       *) break;;
@@ -6262,22 +6236,7 @@ cmd_backlog() {
         shift 2
         ;;
       -h|--help)
-        cat <<'EOUSAGE'
-Usage: gpt-creator backlog [--project PATH|--root PATH]
-                           [--type epics|stories]
-                           [--item-children ID]
-                           [--progress]
-                           [--task-details ID]
-
-Inspect the backlog stored in .gpt-creator/staging/plan/tasks/tasks.db without an interactive prompt.
-
-  --type epics|stories     List backlog summaries (defaults to 'epics' when no other flag is provided).
-  --item-children ID       Show the direct children of the epic/story identified by ID (slug, key, or ID).
-  --progress               Print an overall progress bar summarising task completion.
-  --task-details ID        Show a detailed view for the matching task ID (case-insensitive).
-
-Pass any combination of the flags above; each requested view is printed sequentially.
-EOUSAGE
+        gc_render_template "help/backlog_usage.txt"
         return 0
         ;;
       *)
@@ -6315,11 +6274,7 @@ cmd_dag() {
         break
         ;;
       -h|--help)
-        cat <<'EOUSAGE'
-Usage: gpt-creator dag validate [--project PATH] [--story SLUG]
-
-Validate story-level DAG definitions under .gpt-creator/dag.
-EOUSAGE
+        gc_render_template "help/dag_usage.txt"
         return 0
         ;;
       *)
@@ -6340,9 +6295,7 @@ EOUSAGE
             shift 2
             ;;
           --help|-h)
-            cat <<'EOUSAGE'
-Usage: gpt-creator dag validate [--project PATH] [--story SLUG]
-EOUSAGE
+            gc_render_template "help/dag_validate_usage.txt"
             return 0
             ;;
           *)
@@ -6377,11 +6330,7 @@ cmd_next() {
         shift 2
         ;;
       -h|--help)
-        cat <<'EOUSAGE'
-Usage: gpt-creator next [--project PATH] [--story SLUG]
-
-List the next ready task(s) per story with dependency gate reasons.
-EOUSAGE
+        gc_render_template "help/next_usage.txt"
         return 0
         ;;
       *)
@@ -6424,11 +6373,7 @@ cmd_why() {
         shift 2
         ;;
       -h|--help)
-        cat <<'EOUSAGE'
-Usage: gpt-creator why --task TASK_ID [--project PATH] [--story SLUG]
-
-Explain why a task is blocked, including dependency and readiness gates.
-EOUSAGE
+        gc_render_template "help/why_usage.txt"
         return 0
         ;;
       *)
@@ -6458,16 +6403,7 @@ cmd_migrate_tasks_json() {
       --project) root="$(abs_path "$2")"; shift 2;;
       --force) force=1; shift;;
       -h|--help)
-        cat <<'EOUSAGE'
-Usage: gpt-creator migrate-tasks [--project PATH] [--force]
-
-Populate the tasks SQLite database from the JSON outputs produced by
-`gpt-creator create-jira-tasks` (under plan/create-jira-tasks/json).
-
-Options:
-  --project PATH  Project root (defaults to current directory)
-  --force         Rebuild the database without restoring prior task status metadata
-EOUSAGE
+        gc_render_template "help/migrate_tasks_usage.txt"
         return 0
         ;;
       *) break;;
@@ -6516,19 +6452,7 @@ cmd_refine_tasks() {
       --dry-run) dry_run=1; shift;;
       --force) force=1; shift;;
       -h|--help)
-        cat <<'EOUSAGE'
-Usage: gpt-creator refine-tasks [--project PATH] [--story SLUG] [--model NAME] [--dry-run] [--force]
-
-Refine tasks stored in the SQLite backlog using Codex, updating each task
-record and the refined JSON artifacts as soon as a task is enriched.
-
-Options:
-  --project PATH  Project root (defaults to current directory)
-  --story SLUG    Limit refinement to a single story slug (optional)
-  --model NAME    Override Codex model (defaults to CODEX_MODEL/GC defaults)
-  --dry-run       Build prompts without invoking Codex
-  --force         Reset refinement progress and reprocess every task
-EOUSAGE
+        gc_render_template "help/refine_tasks_usage.txt"
         return 0
         ;;
       *) break;;
@@ -6793,16 +6717,23 @@ gc_generate_auto_review() {
     fi
   fi
 
-  cat >"$review_md" <<EOF
-# Automated Review — ${banner_task_id:-${task_id:-Task ${task_number}}}
+  local review_title=""
+  if [[ -n "${banner_task_id:-}" ]]; then
+    review_title="$banner_task_id"
+  elif [[ -n "${task_id:-}" ]]; then
+    review_title="$task_id"
+  else
+    review_title="Task ${task_number}"
+  fi
 
-Generated automatically because GC_AUTO_REVIEW=1.
-
-- Status: ${task_status:-unknown}
-- Tokens used: ${tokens_used:-unknown}
-- Run: ${run_id:-unknown}
-- Generated: ${timestamp_utc}
-EOF
+  (
+    GC_REVIEW_TITLE="$review_title"
+    GC_REVIEW_STATUS="${task_status:-unknown}"
+    GC_REVIEW_TOKENS="${tokens_used:-unknown}"
+    GC_REVIEW_RUN="${run_id:-unknown}"
+    GC_REVIEW_TIMESTAMP="$timestamp_utc"
+    gc_render_template "review/auto_review.md.tmpl"
+  ) >"$review_md"
 
   if [[ -n "$log_rel" ]]; then
     printf '\nSource log: %s\n' "$log_rel" >>"$review_md"
@@ -6813,17 +6744,32 @@ EOF
     artifact_rel="${artifact_rel#$project_root/}"
   fi
 
-  cat >"$review_json" <<EOF
-{
-  "taskId": "${task_id:-${banner_task_id:-task_${task_number}}}",
-  "status": "${task_status:-unknown}",
-  "tokensUsed": "${tokens_used:-unknown}",
-  "runId": "${run_id:-unknown}",
-  "generatedAt": "${timestamp_utc}",
-  "autoGenerated": true,
-  "artifact": "${artifact_rel}"
-}
-EOF
+  local review_task_id="${task_id:-${banner_task_id:-task_${task_number}}}"
+  local review_status="${task_status:-unknown}"
+  local review_tokens="${tokens_used:-unknown}"
+  local review_run="${run_id:-unknown}"
+  local review_task_id_json
+  review_task_id_json="$(gc_json_escape "$review_task_id")"
+  local review_status_json
+  review_status_json="$(gc_json_escape "$review_status")"
+  local review_tokens_json
+  review_tokens_json="$(gc_json_escape "$review_tokens")"
+  local review_run_json
+  review_run_json="$(gc_json_escape "$review_run")"
+  local review_timestamp_json
+  review_timestamp_json="$(gc_json_escape "$timestamp_utc")"
+  local review_artifact_json
+  review_artifact_json="$(gc_json_escape "$artifact_rel")"
+
+  (
+    GC_REVIEW_JSON_TASK_ID="$review_task_id_json"
+    GC_REVIEW_JSON_STATUS="$review_status_json"
+    GC_REVIEW_JSON_TOKENS_USED="$review_tokens_json"
+    GC_REVIEW_JSON_RUN_ID="$review_run_json"
+    GC_REVIEW_JSON_TIMESTAMP="$review_timestamp_json"
+    GC_REVIEW_JSON_ARTIFACT="$review_artifact_json"
+    gc_render_template "review/auto_review.json.tmpl"
+  ) >"$review_json"
 
   printf '%s\n' "$review_md"
 }
@@ -7106,62 +7052,7 @@ cmd_work_on_tasks() {
         break
         ;;
       -h|--help)
-        cat <<'EOHELP'
-Usage: gpt-creator work-on-tasks [options]
-
-Execute tasks from the project SQLite backlog using Codex, with resumable progress.
-
-Options:
-  --project PATH       Project root (defaults to current directory)
-  --story ID|SLUG      Start from the matching story id or slug (inclusive)
-  --from-task REF      Resume from task REF (task id or story-slug:position) and continue forward
-  --fresh              Ignore saved progress and start from the first story
-  --complete-on-followup
-                        Keep task status as complete even when follow-up notes are recorded
-  --auto-push[=REMOTE/BRANCH]
-                        Push commits after each successful task (defaults to upstream or origin/current)
-  --keep-artifacts     Retain Codex prompt/output files for each task (default cleans up)
-  --memory-cycle       Process one task at a time, prune caches, and auto-resume to limit memory usage
-  --batch-size NUM     Process at most NUM tasks this run, then pause (default: unlimited)
-  --sleep-between SEC  Sleep SEC seconds between tasks (default: 0)
-  --context-lines NUM  Include the last NUM lines of shared context in each prompt (default: 400)
-  --context-none       Skip attaching shared context to task prompts
-  --context-file-lines NUM
-                        Limit each shared-context file to NUM lines before summarising (default: 200)
-  --context-skip GLOB  Ignore matching files when building shared context (repeatable)
-  --prompt-compact     Use the compact instruction/schema block (default setting)
-  --prompt-expanded    Restore the legacy verbose instruction/schema block
-  --context-doc-snippets
-                        (default) Pull scoped excerpts for referenced docs/endpoints when available
-  --no-context-doc-snippets
-                        Disable doc-snippet mode and include staged docs verbatim
-  --on-empty-apply MODE  Handle clean empty apply results: complete (default), retry, or fail
-  --plan-max-out NUM    Max output tokens for planning/status updates (default: 450; respects config/overrides)
-  --status-max-out NUM  Max output tokens for per-task status notes (default: 350)
-  --patch-max-out NUM   Max output tokens for code/diff responses (default: 7000)
-  --out-hard-cap NUM    Absolute ceiling for any Codex response (default: 12000)
-  --sample-lines NUM   Include at most NUM chunks of minified sample payloads (default: 0; increase to view raw content)
-  --max-tokens NUM     Override per-task hard token limit (defaults to model context minus reserved output)
-  --soft-limit RATIO   Override soft budget ratio (0 < ratio ≤ 1, default: 0.85)
-  --reserve-output NUM Reserve NUM tokens for model output (default: 1024)
-  --stop-on-overbudget[=true|false]
-                        Halt the run when a prompt exceeds the hard budget (default: true)
-  --max-tokens-per-stage stage=NUM
-                        Override a specific stage budget (e.g. --max-tokens-per-stage patch=15000)
-  --auto-abandon-top-offenders
-                        Force auto-abandon when prior runs exceeded stage budgets regardless of config
-  --no-auto-abandon-top-offenders
-                        Disable auto-abandon for offender stages even if configured
-  --binder-ttl DUR     Retain binder cache for duration (e.g. 7d, 12h; default: 7d)
-  --binder-max-size SIZE
-                        Maximum on-disk size for binder cache (supports KB/MB/GB suffixes; default: 200MB)
-  --binder-clear-on-migration
-                        Drop cached binders when the task migration epoch changes
-  --no-binder          Disable binder cache reuse for this run
-  --diff-repeat-limit NUM
-                        Override Codex diff repeat guard threshold (default: GC_CODEX_DIFF_REPEAT_LIMIT or 6)
-  --idle-timeout SEC   Abort the run if no forward progress occurs for SEC seconds (default: 0 → disabled)
-EOHELP
+        gc_render_template "help/work_on_tasks_usage.txt"
         return 0
         ;;
       *)
@@ -8512,17 +8403,13 @@ print(error)'
     local checkpoint_file="${checkpoint_dir}/checkpoint.md"
     mkdir -p "$checkpoint_dir" || return 1
     if [[ ! -f "$checkpoint_file" ]]; then
-      cat >"$checkpoint_file" <<EOF
-# Checkpoint — ${story_slug}/${task_id}
-
-Generated automatically because the agent response contained no actionable 'changes'.
-
-- Timestamp: $(date -u +%FT%TZ)
-- Runner: gc-empty-apply-fallback
-
-## What was attempted
-- Review the raw agent output under .gpt-creator/staging/plan/work/runs for detailed context.
-EOF
+      local checkpoint_timestamp
+      checkpoint_timestamp="$(date -u +%FT%TZ)"
+      (
+        GC_CHECKPOINT_TITLE="${story_slug}/${task_id}"
+        GC_CHECKPOINT_TIMESTAMP="$checkpoint_timestamp"
+        gc_render_template "checkpoints/empty_apply_checkpoint.md.tmpl"
+      ) >"$checkpoint_file"
     fi
     local checkpoint_rel
     local checkpoint_helper
@@ -9076,48 +8963,13 @@ EOF
 
       if command -v "$python_bin" >/dev/null 2>&1; then
         local _task_snapshot=""
-        if _task_snapshot="$("$python_bin" - "$tasks_db" "$slug" "$task_index" <<'PYCODE' 2>/dev/null
-import sqlite3
-import sys
-
-if len(sys.argv) < 4:
-    sys.exit(0)
-
-db_path, story_slug, position = sys.argv[1], sys.argv[2], sys.argv[3]
-try:
-    position_int = int(position)
-except ValueError:
-    sys.exit(0)
-
-row = None
-conn = None
-try:
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT COALESCE(last_attempt_signature, ''), "
-        "COALESCE(last_changes_count, 0), "
-        "COALESCE(last_outcome_reason, '') "
-        "FROM tasks WHERE story_slug = ? AND position = ?",
-        (story_slug, position_int),
-    )
-    row = cur.fetchone()
-except sqlite3.DatabaseError:
-    row = None
-finally:
-    if conn is not None:
-        try:
-            conn.close()
-        except Exception:
-            pass
-
-if row:
-    print("\\t".join(str(item) for item in row))
-PYCODE
-)"; then
-          if [[ -n "$_task_snapshot" ]]; then
-            IFS=$'\t' read -r task_last_signature task_last_changes_count task_last_outcome_reason <<<"$_task_snapshot"
-            previous_attempt_signature="$task_last_signature"
+        local helper_path
+        if helper_path="$(gc_clone_python_tool "fetch_task_snapshot.py" "${PROJECT_ROOT:-$PWD}")"; then
+          if _task_snapshot="$("$python_bin" "$helper_path" "$tasks_db" "$slug" "$task_index" 2>/dev/null)"; then
+            if [[ -n "$_task_snapshot" ]]; then
+              IFS=$'\t' read -r task_last_signature task_last_changes_count task_last_outcome_reason <<<"$_task_snapshot"
+              previous_attempt_signature="$task_last_signature"
+            fi
           fi
         fi
       fi
@@ -9210,13 +9062,9 @@ PYCODE
               task_notes+=("Response contract violated: plan/focus present without corresponding changes or notes.")
               apply_status="contract-violation"
               if (( attempt < max_attempts )); then
-                if (( contract_guard_injected == 0 )); then
-                  cat >>"$prompt_path" <<'REM'
-
-## Critical constraint
-- Provide at least one concrete repository change (diff or file write) or explicitly document a blocker with evidence that proves no change is required.
-- Do not repeat the previous plan without actionable modifications.
-REM
+              if (( contract_guard_injected == 0 )); then
+                  printf '\n' >>"$prompt_path"
+                  gc_render_template "prompts/work_on_tasks_contract_guard.md" >>"$prompt_path"
                   contract_guard_injected=1
                 fi
                 continue
@@ -9546,12 +9394,8 @@ print(flag("notes_contains_already_satisfied"))'
               fi
               warn "  Acceptance validators still failing; guiding Codex to produce minimal diffs."
               if (( delta_prompt_injected == 0 )); then
-                cat >>"$prompt_path" <<'REM'
-
-## Diff reminder
-- Provide explicit unified diffs for the required edits.
-- If no changes are necessary, clearly explain why the existing implementation already satisfies the task.
-REM
+                printf '\n' >>"$prompt_path"
+                gc_render_template "prompts/work_on_tasks_diff_reminder.md" >>"$prompt_path"
                 delta_prompt_injected=1
                 task_notes+=("Codex returned no diffs; prompted for explicit changes before retry.")
               fi
@@ -9591,13 +9435,8 @@ REM
             if (( attempt < max_attempts )); then
               warn "  Codex returned invalid JSON; retrying (attempt $((attempt + 1)) of ${max_attempts})."
               if (( prompt_augmented == 0 )); then
-                cat >>"$prompt_path" <<'REM'
-
-## Reminder
-- Output a single JSON object exactly as described above; do not include any explanatory text outside the JSON.
-- If no changes are required, return the JSON with an empty `changes` array and clear notes explaining why.
-- Diff entries must remain valid unified diffs.
-REM
+                printf '\n' >>"$prompt_path"
+                gc_render_template "prompts/work_on_tasks_json_reminder.md" >>"$prompt_path"
                 prompt_augmented=1
               fi
               continue
@@ -10785,24 +10624,10 @@ cmd_iterate() {
   local codex_raw_json="${PLAN_DIR}/jira-tasks.codex.raw.txt"
   local codex_json="${PLAN_DIR}/jira-tasks.codex.json"
   {
-    cat >"$codex_parse_prompt" <<'PROMPT'
-# Instruction
-You are a structured-data assistant. Convert the following Jira backlog markdown into strict JSON.
-
-## Requirements
-- Output **only** valid JSON (no prose, no code fences).
-- Structure: { "tasks": [ { "epic_id": str, "epic_title": str, "story_id": str, "story_title": str, "id": str, "title": str, "assignees": [str], "tags": [str], "estimate": str, "description": str, "acceptance_criteria": [str], "dependencies": [str] } ] }.
-- Each task begins with a bold identifier such as **T18.5.2**; treat every such block as a separate task and capture its parent story/epic when present.
-- Preserve bullet details verbatim inside the description and acceptance criteria lists. Do not repeat metadata (assignee/tags/estimate) inside the description.
-- Use empty strings/arrays when information is missing.
-- Do not include explanatory text.
-
-## Jira Markdown
-PROMPT
+    gc_render_template "prompts/iterate_parse_prefix.md" >"$codex_parse_prompt"
     cat "$jira" >>"$codex_parse_prompt"
-    cat >>"$codex_parse_prompt" <<'PROMPT'
-## End Markdown
-PROMPT
+    printf '\n' >>"$codex_parse_prompt"
+    gc_render_template "prompts/iterate_parse_suffix.md" >>"$codex_parse_prompt"
   }
 
   if codex_call "iterate-parse" --prompt "$codex_parse_prompt" --output "$codex_raw_json"; then
@@ -10853,12 +10678,7 @@ PROMPT
 cmd_binder() {
   local action="${1:-}"
   if [[ -z "$action" || "$action" == "-h" || "$action" == "--help" ]]; then
-    cat <<'EOF'
-Usage: gpt-creator binder clear --story SLUG [--project PATH] [--epic EPIC] [--task TASK]
-
-Manage task binder cache entries. The 'clear' subcommand removes cached binders for a story
-or a specific task.
-EOF
+    gc_render_template "help/binder_usage.txt"
     return 0
   fi
   shift || true
@@ -10887,9 +10707,7 @@ EOF
             shift 2
             ;;
           -h|--help)
-            cat <<'EOF'
-Usage: gpt-creator binder clear --story SLUG [--project PATH] [--epic EPIC] [--task TASK]
-EOF
+            gc_render_template "help/binder_clear_usage.txt"
             return 0
             ;;
           --)
@@ -10925,11 +10743,7 @@ cmd_estimate() {
         shift 2
         ;;
       -h|--help)
-        cat <<'USAGE'
-Usage: gpt-creator estimate [--project PATH]
-
-Estimate how long it will take to finish the remaining tasks based on story points (default 15 SP/hour; refined by work-on-tasks throughput).
-USAGE
+        gc_render_template "help/estimate_usage.txt"
         return 0
         ;;
       *)
@@ -10967,11 +10781,7 @@ cmd_tokens() {
         shift
         ;;
       -h|--help)
-        cat <<'USAGE'
-Usage: gpt-creator tokens [--project PATH] [--details] [--json]
-
-Print aggregated Codex token usage captured under .gpt-creator/logs/codex-usage.ndjson.
-USAGE
+        gc_render_template "help/tokens_usage.txt"
         return 0
         ;;
       *)
@@ -11127,22 +10937,7 @@ cmd_reports() {
         shift
         ;;
       -h|--help)
-        cat <<'USAGE'
-Usage:
-  gpt-creator reports [--project PATH]
-  gpt-creator reports list [--project PATH]
-  gpt-creator reports backlog [--project PATH]
-  gpt-creator reports auto [--project PATH] [--reporter NAME] [--no-push] [--prompt-only]
-  gpt-creator reports work [--project PATH] [--branch NAME] [--no-push] [--prompt-only] <slug>
-  gpt-creator reports [--project PATH] [--open] <slug>
-  gpt-creator reports show [--project PATH] [--open] <slug>
-  gpt-creator reports audit [--close-invalid] [--include-closed] [--limit N]
-                               [--digests FILE] [--allow VERSION=SHA256]
-                               [--label-invalid NAME|--no-label-invalid]
-                               [--comment TEXT]
-
-List captured crash/stall reports, show the open backlog, automatically resolve matching issues, assign Codex to resolve a single report, display a specific entry, or audit GitHub auto-reports for authenticity.
-USAGE
+        gc_render_template "help/reports_usage.txt"
         return 0
         ;;
       *)
@@ -11331,12 +11126,7 @@ cmd_create_project() {
         shift
         ;;
       -h|--help)
-        cat <<'USAGE'
-Usage: gpt-creator create-project [--template NAME|auto|skip] [--skip-template] <path>
-
-Create a new project root, optionally scaffold it from a project template, then
-run the full build pipeline (scan → normalize → plan → generate → db → run).
-USAGE
+        gc_render_template "help/create_project_usage.txt"
         return 0
         ;;
       *)
@@ -11396,13 +11186,7 @@ cmd_bootstrap() {
         shift
         ;;
       -h|--help)
-        cat <<'USAGE'
-Usage: gpt-creator bootstrap [--template NAME|auto|skip] [--skip-template] [--rfp FILE] [--fresh] <path>
-
-Generate a full project from an RFP in one step by running:
-  • create-pdr → create-sds → create-db-dump → create-jira-tasks → scan/normalize/plan/generate/db/run
-Templates from project_templates/ are applied first (auto-selected by default).
-USAGE
+        gc_render_template "help/bootstrap_usage.txt"
         return 0
         ;;
       *)
@@ -11600,11 +11384,7 @@ cmd_update() {
         shift
         ;;
       -h|--help)
-        cat <<EOF
-Usage: ${APP_NAME} update [--force]
-
-Fetches the latest gpt-creator sources and reinstalls the CLI.
-EOF
+        gc_render_template "help/update_usage.txt"
         return 0
         ;;
       *)
@@ -11669,13 +11449,7 @@ cmd_keys() {
       gc_api_keys_set "$target"
       ;;
     help|-h|--help)
-      cat <<EOF
-Usage: ${APP_NAME} keys [list|status]
-       ${APP_NAME} keys set <service>
-       ${APP_NAME} keys <service>
-
-Lists required third-party API keys and stores credentials under your user config directory.
-EOF
+      gc_render_template "help/keys_usage.txt"
       ;;
     *)
       if (($# > 1)); then
@@ -11730,55 +11504,12 @@ cmd_tui() {
 }
 
 usage() {
-cat <<EOF
-${APP_NAME} v${VERSION}
-
-Usage:
-  ${APP_NAME} [--reports-on|--reports-off] [--reports-idle-timeout SECONDS] <command> [args]
-  ${APP_NAME} create-project [--template NAME|auto|skip] [--skip-template] <path>
-  ${APP_NAME} bootstrap [--template NAME|auto|skip] [--skip-template] [--rfp FILE] [--fresh] <path>
-  ${APP_NAME} scan [--project <path>]
-  ${APP_NAME} normalize [--project <path>]
-  ${APP_NAME} plan [--project <path>]
-  ${APP_NAME} generate <api|web|admin|db|docker|all> [--project <path>]
-  ${APP_NAME} db <provision|import|seed> [--project <path>]
-  ${APP_NAME} run <up|down|logs|open> [--project <path>]
-  ${APP_NAME} refresh-stack [options]
-  ${APP_NAME} verify <acceptance|nfr|all> [--project <path>] [--api-url API_BASE] [--api-health URL] [--web-url URL] [--admin-url URL]
-  ${APP_NAME} create-sds [--project <path>] [--model NAME] [--dry-run] [--force]
-  ${APP_NAME} create-pdr [--project <path>] [--model NAME] [--dry-run] [--force]
-  ${APP_NAME} create-jira-tasks [--project <path>] [--model NAME] [--force] [--dry-run]
-  ${APP_NAME} create-db-dump [--project <path>] [--model NAME] [--dry-run] [--force]
-  ${APP_NAME} migrate-tasks [--project <path>] [--force]
-  ${APP_NAME} refine-tasks [--project <path>] [--story SLUG] [--model NAME] [--dry-run]
-  ${APP_NAME} create-tasks [--project <path>] [--jira <file>] [--force]
-  ${APP_NAME} backlog [--project <path>] [--type epics|stories] [--item-children ID] [--progress] [--task-details ID]
-  ${APP_NAME} dag validate [--project <path>] [--story SLUG]
-  ${APP_NAME} estimate [--project <path>]
-  ${APP_NAME} tokens [--project <path>] [--details] [--json]
-  ${APP_NAME} reports [--project <path>] [list|backlog|show|work] [--branch NAME] [--no-push] [--prompt-only] [--open] [slug]
-  ${APP_NAME} show-file [--range A:B|--head N|--tail N|--diff|--refresh] <path>
-  ${APP_NAME} task-convert [options] (deprecated; runs create-tasks)
-  ${APP_NAME} sweep-artifacts [--project <path>] [path...]
-  ${APP_NAME} tidy-progress [--project <path>] [path...] (deprecated alias of sweep-artifacts)
-  ${APP_NAME} next [--project <path>] [--story SLUG]
-  ${APP_NAME} why --task TASK_ID [--project <path>] [--story SLUG]
-  ${APP_NAME} work-on-tasks [--project <path>] [--story ID|SLUG] [--fresh] [--keep-artifacts]
-  ${APP_NAME} iterate [--project <path>] [--jira <file>] (deprecated)
-  ${APP_NAME} keys [list|set <service>]
-  ${APP_NAME} tui
-  ${APP_NAME} update [--force]
-  ${APP_NAME} version
-  ${APP_NAME} help
-
-Global flags:
-  --reports-on               Enable automatic crash/stall reports for the current invocation
-  --reports-off              Disable automatic crash/stall reports (overrides GC_REPORTS_ON=1)
-  --reports-idle-timeout <s> Override idle detection threshold in seconds (default: ${GC_REPORTS_IDLE_TIMEOUT})
-
-Environment overrides:
-  CODEX_BIN, CODEX_MODEL, DOCKER_BIN, MYSQL_BIN, EDITOR_CMD, GC_API_HEALTH_URL, GC_WEB_URL, GC_ADMIN_URL
-EOF
+  (
+    APP_NAME="$APP_NAME"
+    VERSION="$VERSION"
+    GC_REPORTS_IDLE_TIMEOUT="${GC_REPORTS_IDLE_TIMEOUT}"
+    gc_render_template "help/global_usage.txt"
+  )
 }
 
 main() {

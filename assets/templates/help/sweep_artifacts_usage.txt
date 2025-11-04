@@ -1,0 +1,6 @@
+Usage: gpt-creator sweep-artifacts [--project PATH] [PATH...]
+
+Sweep legacy Codex work artifacts (tmp/final/diff/etc.) into the standard
+.gpt-creator folder structure. Defaults to the current directory when no path
+is supplied. You can pass multiple project directories to tidy them in batch.
+

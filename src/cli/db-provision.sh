@@ -7,6 +7,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 COMPOSE_FILE="${ROOT_DIR}/docker/docker-compose.yml"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 gc_cli_log(){ printf "[db-provision] %s\n" "$*"; }
 gc_cli_die(){ printf "[db-provision][ERROR] %s\n" "$*" >&2; exit 1; }
 
@@ -37,11 +41,7 @@ DB_PASS="${DB_PASS:-${GC_DB_PASSWORD:-${PROJECT_SLUG}_pass}}"
 dc() { COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "${COMPOSE_FILE}" "$@"; }
 
 usage() {
-  cat <<'USAGE'
-Usage: gpt-creator db provision [--import path.sql]
-
-Starts MySQL container (docker-compose), waits for readiness, optionally imports an SQL dump.
-USAGE
+  gc_cli_render_template "help/db_provision_usage.txt"
 }
 
 SQL_IMPORT=""

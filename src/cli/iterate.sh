@@ -5,6 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CLI_ROOT="$ROOT_DIR"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # Load shared constants if present
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
@@ -74,21 +78,12 @@ fi
 warn "'gpt-creator iterate' is deprecated. Use 'gpt-creator create-tasks' followed by 'gpt-creator work-on-tasks'."
 
 usage() {
-  cat <<'EOF'
-Usage: gpt-creator iterate [options]
-
-Options:
-  --tasks-file PATH  Path to Jira tasks markdown (default: discover under .gpt-creator/staging)
-  --model NAME       Codex model to use (default: $GC_DEFAULT_MODEL)
-  --codex-bin PATH   Codex CLI binary (default: codex)
-  --dry-run          Build prompts only; do not invoke Codex (default: off)
-  -h, --help         Show help
-
-Behavior:
-  • Builds a consolidated context from normalized docs in .gpt-creator/staging (PDR, SDS, OpenAPI, SQL, Mermaid, UI pages, samples).
-  • Parses unchecked Jira tasks ('- [ ] ...') and runs Codex once per task with the context + task prompt.
-  • Stores outputs under .gpt-creator/codex_runs/<timestamp>/.
-EOF
+  (
+    set -a
+    ITERATE_DEFAULT_MODEL="$GC_DEFAULT_MODEL"
+    set +a
+    gc_cli_render_template "help/iterate_usage.txt"
+  )
 }
 
 : "${CODEX_BIN:=codex}"
@@ -170,24 +165,12 @@ for entry in "${TASKS[@]}"; do
   PROMPT="$RUN_DIR/task_${i}_${slug}.prompt.md"
   OUTPUT="$OUT_DIR/task_${i}_${slug}.out.md"
 
-  cat > "$PROMPT" <<EOP
-# You are Codex (model: $CODEX_MODEL)
-
-You are helping build ${PROJECT_LABEL_PROMPT} based on normalized docs. Read **all** context below, then complete the task precisely.
-Focus on: NestJS (API), MySQL 8 (Prisma/TypeORM), Vue 3 (site+admin), Docker. Adhere to PDR/SDS acceptance checks.
-
-## Task
-$title
-
-## Deliverable
-- Concrete code changes (files, paths, diffs or complete new files).
-- Any migrations (SQL/Prisma).
-- Shell commands to wire into this repo structure.
-- Highlight blockers or manual follow-up required.
-
-## Context (truncated when large)
-(Full context: context.md in this run directory)
-EOP
+  (
+    ITERATE_CODEX_MODEL="$CODEX_MODEL"
+    ITERATE_PROJECT_LABEL="$PROJECT_LABEL_PROMPT"
+    ITERATE_TASK_TITLE="$title"
+    gc_cli_render_template "prompts/iterate_task.prompt.md.tmpl"
+  ) > "$PROMPT"
 
   # Append a tail of the context (to give Codex some inline hints while keeping the full context on disk)
   tail -n 400 "$CTX_DIR/context.md" >> "$PROMPT"

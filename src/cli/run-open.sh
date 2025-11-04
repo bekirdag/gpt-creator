@@ -4,6 +4,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # Load shared constants if present
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
@@ -26,18 +30,15 @@ err(){  printf "\033[31m[%s][ERROR]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 
 usage() {
-  cat <<EOF
-Usage: $GC_NAME run-open [--web] [--admin] [--api] [--all] [--web-url URL] [--admin-url URL] [--api-url URL]
-
-Defaults:
-  --web-url   ${GC_WEB_URL:-http://localhost:5173}
-  --admin-url ${GC_ADMIN_URL:-http://localhost:5174}
-  --api-url   ${GC_API_HEALTH_URL:-http://localhost:3000/health}
-
-Examples:
-  $GC_NAME run-open --web --admin
-  $GC_NAME run-open --api --api-url http://localhost:3000/health
-EOF
+  (
+    set -a
+    RUN_OPEN_CMD_NAME="$GC_NAME"
+    RUN_OPEN_WEB_DEFAULT="${GC_WEB_URL:-http://localhost:5173}"
+    RUN_OPEN_ADMIN_DEFAULT="${GC_ADMIN_URL:-http://localhost:5174}"
+    RUN_OPEN_API_DEFAULT="${GC_API_HEALTH_URL:-http://localhost:3000/health}"
+    set +a
+    gc_cli_render_template "help/run_open_usage.txt"
+  )
 }
 
 open_cmd() {

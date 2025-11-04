@@ -1,0 +1,4 @@
+Usage: ${RUN_COMPOSE_UP_CMD_NAME} [--compose <file>] [--open]
+   --compose   Path to docker compose file (default: ./docker/compose.yaml or ./docker-compose.yml)
+   --open      Open web UI after start (uses APP_WEB_URL or http://localhost:5173)
+

@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "epics": {"status": "pending"},
+  "stories": {"status": "pending", "completed": []},
+  "tasks": {"status": "pending", "completed": []},
+  "refine": {"status": "pending", "stories": {}}
+}

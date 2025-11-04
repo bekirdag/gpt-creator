@@ -1,0 +1,4 @@
+Usage: gpt-creator db provision [--import path.sql]
+
+Starts MySQL container (docker-compose), waits for readiness, optionally imports an SQL dump.
+

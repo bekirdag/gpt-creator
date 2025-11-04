@@ -1,0 +1,20 @@
+Usage: ${VERIFY_CMD_NAME} verify [options]
+
+Service URLs:
+  --api-url URL     API health URL (default: ${VERIFY_API_DEFAULT})
+  --web-url URL     Web URL (default: ${VERIFY_WEB_DEFAULT})
+  --admin-url URL   Admin URL (default: ${VERIFY_ADMIN_DEFAULT})
+
+Database (optional, uses mysql client):
+  --db-host HOST    MySQL host (default: ${VERIFY_DB_HOST_DEFAULT})
+  --db-port PORT    MySQL port (default: ${VERIFY_DB_PORT_DEFAULT})
+  --db-user USER    MySQL user (default: ${VERIFY_DB_USER_DEFAULT})
+  --db-pass PASS    MySQL password (default: ${VERIFY_DB_PASS_DEFAULT})
+  --db-name NAME    Database name (default: ${VERIFY_DB_NAME_DEFAULT})
+
+Other:
+  --compose-file PATH  docker-compose.yml path (default: ${VERIFY_COMPOSE_FILE_DEFAULT})
+  -h, --help           Show help
+
+Exits non-zero on any failure.
+

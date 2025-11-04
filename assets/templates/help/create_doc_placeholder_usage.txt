@@ -1,0 +1,3 @@
+Usage: create-doc-placeholder.sh <path> --owner "Owner" [--summary "Summary"] [--date YYYY-MM-DD]
+
+Creates a minimal placeholder file for the referenced documentation path.

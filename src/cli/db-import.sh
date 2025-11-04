@@ -4,6 +4,10 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 # Optional shared helpers
 if [[ -f "$ROOT_DIR/src/gpt-creator.sh" ]]; then source "$ROOT_DIR/src/gpt-creator.sh"; fi
 if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then source "$ROOT_DIR/src/constants.sh"; fi
@@ -25,13 +29,12 @@ gc_cli_warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
 gc_cli_die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
 gc_cli_heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
 usage() {
-  cat <<EOF
-Usage: $(basename "$0") [-f|--file sql_file] [--service db] [--compose <file>] [-y]
-  -f, --file      Path to SQL dump (if omitted, will auto-discover under ./staging/sql or ./input)
-      --service   Docker Compose service name for MySQL (default: db)
-      --compose   Path to docker compose file (default: ./docker/compose.yaml or ./docker-compose.yml)
-  -y              Do not prompt for confirmation
-EOF
+  (
+    set -a
+    DB_IMPORT_CMD_NAME="$(basename "$0")"
+    set +a
+    gc_cli_render_template "help/db_import_usage.txt"
+  )
 }
 
 SQL_FILE=""

@@ -7,6 +7,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 COMPOSE_FILE="${ROOT_DIR}/docker/docker-compose.yml"
 
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
 log(){ printf "[db] %s\n" "$*"; }
 die(){ printf "[db][ERROR] %s\n" "$*" >&2; exit 1; }
 
@@ -37,21 +41,14 @@ dc() {
 }
 
 usage() {
-  cat <<USAGE
-Usage: gpt-creator db <subcommand> [args]
-
-Subcommands:
-  up                    Start DB service
-  down                  Stop DB service
-  status                Show container status
-  shell                 MySQL shell inside container
-  import <file.sql>     Import SQL dump into DB
-  dump [out.sql]        Dump database to file (default: dumps/backup.sql)
-  url                   Print DATABASE_URL heuristic
-
-Environment defaults (match docker-compose):
-  DB_HOST=127.0.0.1  DB_PORT=3306  DB_NAME=${DB_NAME}  DB_USER=${DB_USER}  DB_PASS=${DB_PASS}
-USAGE
+  (
+    set -a
+    DB_USAGE_DB_NAME="${DB_NAME:-${GC_DB_NAME:-${PROJECT_SLUG}_app}}"
+    DB_USAGE_DB_USER="${DB_USER:-${GC_DB_USER:-${PROJECT_SLUG}_user}}"
+    DB_USAGE_DB_PASS="${DB_PASS:-${GC_DB_PASSWORD:-${PROJECT_SLUG}_pass}}"
+    set +a
+    gc_cli_render_template "help/db_usage.txt"
+  )
 }
 
 DB_HOST="${DB_HOST:-127.0.0.1}"

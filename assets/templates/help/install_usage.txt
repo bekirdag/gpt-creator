@@ -1,0 +1,11 @@
+gpt-creator installer (macOS / Linux)
+
+Usage:
+  ./install.sh [--prefix /usr/local] [--skip-preflight] [--force]
+
+Installs:
+  • CLI symlink → $PREFIX/bin/gpt-creator
+  • App files   → $PREFIX/lib/gpt-creator
+  • Shell completions (zsh/bash/fish)
+
+Preflight checks: Docker, Node 20+, pnpm, mysql client, Codex client, OPENAI_API_KEY

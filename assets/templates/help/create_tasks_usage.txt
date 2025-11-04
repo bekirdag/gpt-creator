@@ -1,0 +1,9 @@
+Usage: gpt-creator create-tasks [--project PATH] [--jira FILE] [--force]
+
+Convert Jira markdown tasks into a project-scoped SQLite database stored under .gpt-creator/staging/plan/tasks.
+
+Options:
+  --project PATH  Project root (defaults to current directory)
+  --jira FILE     Jira markdown source (defaults to staging/inputs/jira.md)
+  --force         Rebuild the tasks database without restoring prior progress metadata
+

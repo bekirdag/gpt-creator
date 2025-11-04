@@ -1,0 +1,14 @@
+Usage: gpt-creator db <subcommand> [args]
+
+Subcommands:
+  up                    Start DB service
+  down                  Stop DB service
+  status                Show container status
+  shell                 MySQL shell inside container
+  import <file.sql>     Import SQL dump into DB
+  dump [out.sql]        Dump database to file (default: dumps/backup.sql)
+  url                   Print DATABASE_URL heuristic
+
+Environment defaults (match docker-compose):
+  DB_HOST=127.0.0.1  DB_PORT=3306  DB_NAME=${DB_USAGE_DB_NAME}  DB_USER=${DB_USAGE_DB_USER}  DB_PASS=${DB_USAGE_DB_PASS}
+

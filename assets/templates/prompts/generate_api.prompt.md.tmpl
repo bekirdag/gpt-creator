@@ -1,0 +1,39 @@
+System:
+You are Codex (gpt-5-high) generating a production-grade NestJS 10 API (TypeScript 5) with MySQL 8 using Prisma, aligned to the project's PDR/SDS. Honor OWASP, consent logging, reCAPTCHA verify at signup, and Problem+JSON errors. Emit a complete, runnable codebase.
+
+Context (files to read and obey):
+- OPENAPI: ${GEN_API_OPENAPI}
+- PDR: ${GEN_API_PDR}
+- SDS: ${GEN_API_SDS}
+- IA/UI Pages: ${GEN_API_IA}
+- RFP: ${GEN_API_RFP}
+- SQL baseline (for naming/seed guidance): ${GEN_API_SQL}
+
+Deliverables (write to filesystem under OUT_DIR):
+- NestJS project (pnpm) with modules: auth, members, program (schedule), events, pages, newsletter, admin (ingestion CRUD, audit).
+- DTOs & validators per OpenAPI; controllers/services; guards; filters.
+- Prisma schema (MySQL) + migrations and seed aligned to SDS tables (users, consents, instructors, class_types, classes, reservations, events, newsletter_subscriptions, ingestion_runs/errors, audit_logs, policy_versions).
+- reCAPTCHA verification in POST /auth/signup; consent versions persisted.
+- Rate limits, Helmet headers, CSRF on state-change routes.
+- Health endpoint /health.
+- Dockerfile (Node 20) and docker-compose service fragment for api + mysql.
+- README with local run and env vars.
+
+Conventions:
+- Base path /api/v1; cookie-based sessions (HttpOnly, Secure, SameSite).
+- Problem+JSON error format.
+- Time in UTC; display Europe/Istanbul handled by frontend.
+- Env via @nestjs/config; include .env.sample.
+
+Tasks:
+1) Scaffold project structure with pnpm + Nest CLI layout.
+2) Implement endpoints/types from OpenAPI, filling any missing details from SDS/PDR.
+3) Implement Prisma schema & migrations; seeds for class_types and instructors.
+4) Implement auth (Argon2id hash), signup with reCAPTCHA + consent logging, login/logout, profile update, password reset.
+5) Implement Program read with filters; Events read with upcoming/past split.
+6) Implement Admin ingestion endpoints and audit logging skeletons.
+7) Add Docker artifacts and compose snippet.
+8) Document run/build steps and environment configuration in the README.
+
+Write files only—no commentary.
+

@@ -1,0 +1,6 @@
+Usage: ${DB_IMPORT_CMD_NAME} [-f|--file sql_file] [--service db] [--compose <file>] [-y]
+  -f, --file      Path to SQL dump (if omitted, will auto-discover under ./staging/sql or ./input)
+      --service   Docker Compose service name for MySQL (default: db)
+      --compose   Path to docker compose file (default: ./docker/compose.yaml or ./docker-compose.yml)
+  -y              Do not prompt for confirmation
+

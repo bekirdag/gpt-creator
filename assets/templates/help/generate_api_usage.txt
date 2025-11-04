@@ -1,0 +1,12 @@
+generate-api — scaffold NestJS API
+
+Usage:
+  gpt-creator generate api [options]
+
+Options:
+  --openapi <file>     Path to OpenAPI spec (auto-discover if omitted)
+  --out <dir>          Output directory for API (default: ${GEN_API_OUT_DEFAULT})
+  --no-install         Skip pnpm install/build
+  -n, --dry-run        Create prompt only; do not call Codex
+  -h, --help           Show help
+

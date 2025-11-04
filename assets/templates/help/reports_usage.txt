@@ -1,0 +1,15 @@
+Usage:
+  gpt-creator reports [--project PATH]
+  gpt-creator reports list [--project PATH]
+  gpt-creator reports backlog [--project PATH]
+  gpt-creator reports auto [--project PATH] [--reporter NAME] [--no-push] [--prompt-only]
+  gpt-creator reports work [--project PATH] [--branch NAME] [--no-push] [--prompt-only] <slug>
+  gpt-creator reports [--project PATH] [--open] <slug>
+  gpt-creator reports show [--project PATH] [--open] <slug>
+  gpt-creator reports audit [--close-invalid] [--include-closed] [--limit N]
+                               [--digests FILE] [--allow VERSION=SHA256]
+                               [--label-invalid NAME|--no-label-invalid]
+                               [--comment TEXT]
+
+List captured crash/stall reports, show the open backlog, automatically resolve matching issues, assign Codex to resolve a single report, display a specific entry, or audit GitHub auto-reports for authenticity.
+

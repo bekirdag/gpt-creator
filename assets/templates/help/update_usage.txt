@@ -1,0 +1,4 @@
+Usage: ${APP_NAME} update [--force]
+
+Fetches the latest gpt-creator sources and reinstalls the CLI.
+

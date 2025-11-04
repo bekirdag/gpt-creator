@@ -4,6 +4,15 @@
 
 set -Eeuo pipefail
 
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
+if [[ -n "$SCRIPT_SOURCE" && "$SCRIPT_SOURCE" != "-" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd -P)"
+  TEMPLATE_ROOT="$(cd "${SCRIPT_DIR}/../assets/templates/help" && pwd -P)"
+else
+  SCRIPT_DIR=""
+  TEMPLATE_ROOT=""
+fi
+
 PREFIX="/usr/local"
 SKIP_PREFLIGHT=0
 FORCE=0
@@ -11,20 +20,28 @@ REPO_URL="https://github.com/bekirdag/gpt-creator.git"
 REF="main"
 
 usage() {
-  cat <<EOF
-gpt-creator remote installer
+  local usage_file=""
+  if [[ -n "$TEMPLATE_ROOT" ]]; then
+    usage_file="${TEMPLATE_ROOT}/install_latest_usage.txt"
+  fi
 
-Usage:
-  curl -fsSL https://raw.githubusercontent.com/bekirdag/gpt-creator/main/scripts/install-latest.sh | bash -s --
-
-Options (pass after -- when piping via curl):
-  --prefix PATH         Install prefix (default: /usr/local)
-  --skip-preflight      Skip dependency checks
-  --force               Overwrite existing symlink if present
-  --repo URL            Install from a different Git repository
-  --ref REF             Checkout a specific branch / tag / commit (default: main)
-  -h, --help            Show this help text
-EOF
+  if [[ -n "$usage_file" && -f "$usage_file" ]]; then
+    cat "$usage_file"
+  else
+    printf '%s\n' \
+      "gpt-creator remote installer" \
+      "" \
+      "Usage:" \
+      "  curl -fsSL https://raw.githubusercontent.com/bekirdag/gpt-creator/main/scripts/install-latest.sh | bash -s --" \
+      "" \
+      "Options (pass after -- when piping via curl):" \
+      "  --prefix PATH         Install prefix (default: /usr/local)" \
+      "  --skip-preflight      Skip dependency checks" \
+      "  --force               Overwrite existing symlink if present" \
+      "  --repo URL            Install from a different Git repository" \
+      "  --ref REF             Checkout a specific branch / tag / commit (default: main)" \
+      "  -h, --help            Show this help text"
+  fi
 }
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }

@@ -50,7 +50,8 @@ def main():
         _original_re_compile = re.compile
         _original_re__compile = getattr(re, "_compile", None)
         invalid_regex_patterns = []
-        START_PATCH_MARKER = "apply_patch <<'PATCH'"
+        HEREDOC_TOKEN = "<" * 2
+        START_PATCH_MARKER = f"apply_patch {HEREDOC_TOKEN}'PATCH'"
         END_PATCH_MARKER = "PATCH"
         COMMAND_BLOCK_PATTERN = re.compile(
             r'\b(sudo|chown)\b|rm\s+-rf\s+/|chmod\s+[0-7]{3}\s+/|curl\s+http|wget\s+http',
@@ -465,10 +466,12 @@ def main():
             if not lines:
                 return None
             first = lines[0].strip()
-            match = re.fullmatch(
-                r"python3\s+-\s+<<(?P<quote>['\"]?)(?P<label>[A-Za-z0-9_]+)(?P=quote)",
-                first,
+            pattern = (
+                r"python3\s+-\s+"
+                + re.escape(HEREDOC_TOKEN)
+                + r"(?P<quote>['\"]?)(?P<label>[A-Za-z0-9_]+)(?P=quote)"
             )
+            match = re.fullmatch(pattern, first)
             if not match:
                 return None
             label = match.group('label')
@@ -1880,7 +1883,7 @@ def main():
                     else:
                         script_text = ""
                 if first_token == "cat":
-                    if '<<' in command:
+                    if HEREDOC_TOKEN in command:
                         _record_blocked_command('heredoc', command)
                         continue
                 if first_token == "python":
@@ -3029,13 +3032,26 @@ def main():
             return " ".join(parts)
 
 
-        DEFAULT_WORK_PROMPT = """## work-on-tasks Prompt
-- Load the task details and acceptance criteria from the context section.
-- Consult the documentation catalog or search hits before modifying files.
-- Outline a concise plan (≤3 bullets focused on actions), execute the required edits, and capture final status notes with clear pass/fail decisions.
-- Apply changes by editing files directly via shell commands (no diff/patch output).
-- Record follow-up actions when blockers remain.
-"""
+        CLI_ROOT = Path(__file__).resolve().parents[2]
+        BUILTIN_WORK_PROMPT_PATH = CLI_ROOT / "assets" / "templates" / "prompts" / "work_on_tasks_default.prompt.md"
+        _BUILTIN_WORK_PROMPT_FALLBACK_LINES: List[str] = [
+            "## work-on-tasks Prompt",
+            "- Load the task details and acceptance criteria from the context section.",
+            "- Consult the documentation catalog or search hits before modifying files.",
+            "- Outline a concise plan (<=3 bullets focused on actions), execute the required edits, and capture final status notes with clear pass/fail decisions.",
+            "- Apply changes by editing files directly via shell commands (no diff/patch output).",
+            "- Record follow-up actions when blockers remain.",
+        ]
+
+        def _load_builtin_work_prompt_lines() -> List[str]:
+            try:
+                text = BUILTIN_WORK_PROMPT_PATH.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                return list(_BUILTIN_WORK_PROMPT_FALLBACK_LINES)
+            stripped = text.strip()
+            if not stripped:
+                return list(_BUILTIN_WORK_PROMPT_FALLBACK_LINES)
+            return stripped.splitlines()
 
         def clamp_text(text: str, limit: int) -> str:
             if limit <= 0 or not text:
@@ -3168,7 +3184,7 @@ def main():
                     instruction_prompts = [(rel_label, prompt_text.strip().splitlines())]
                     break
             else:
-                instruction_prompts = [("builtin/work_on_tasks.prompt.md", DEFAULT_WORK_PROMPT.strip().splitlines())]
+                instruction_prompts = [("builtin/work_on_tasks.prompt.md", _load_builtin_work_prompt_lines())]
 
         def build_log_excerpt(path_obj: Path, max_lines: int = 40, max_chars: int = 160) -> list[str]:
             try:

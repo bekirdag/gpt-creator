@@ -1,0 +1,13 @@
+Usage: gpt-creator show-file [options] PATH
+
+Display a cached snippet of PATH without repeatedly streaming large files.
+
+Options:
+  --project DIR       Project root (defaults to current PROJECT_ROOT)
+  --range A:B         Show inclusive line range A..B (1-based)
+  --head N            Show first N lines (legacy; prefer --range/--tail for precise snippets)
+  --tail N            Show last N lines
+  --max-lines N       Default line count when no range/head/tail is provided (default: 400)
+  --diff              Show a unified diff against the cached snapshot (if any)
+  --refresh           Re-read the file and update the cache even if unchanged
+

@@ -2157,6 +2157,31 @@ def main():
                 )
             command_failure_detected = True
 
+        declared_commands: List[str] = payload.get('commands') or []
+        commands_missing = False
+        if not declared_commands:
+            if executed_commands or blocked_command_total or written or patched or change_bytes:
+                commands_missing = True
+                manual_notes.append(
+                    _format_action_result(
+                        "commands-log-missing",
+                        "blocked — repository shows edits or executed commands but none were reported under `Commands`; rerun and list each command that edited files, ran tools, or staged changes."
+                    )
+                )
+        else:
+            missing_logged = [cmd for cmd in executed_commands if cmd not in declared_commands]
+            if missing_logged:
+                commands_missing = True
+                joined = '; '.join(_truncate_command_text(cmd) for cmd in missing_logged[:3])
+                if len(missing_logged) > 3:
+                    joined += '; …'
+                manual_notes.append(
+                    _format_action_result(
+                        "commands-log-mismatch",
+                        f"blocked — the following executed command(s) were not listed under `Commands`: {joined}"
+                    )
+                )
+
         if invalid_regex_patterns:
             logged_patterns = []
             for raw_pattern in invalid_regex_patterns:
@@ -2181,6 +2206,9 @@ def main():
             forced_canonical_status = 'RETRYABLE'
             forced_legacy_status = 'retryable'
         elif command_failure_detected:
+            forced_canonical_status = 'RETRYABLE'
+            forced_legacy_status = 'retryable'
+        elif commands_missing:
             forced_canonical_status = 'RETRYABLE'
             forced_legacy_status = 'retryable'
         if actual_changes > 0:

@@ -1108,6 +1108,463 @@ def main():
         patched = []
         noop_entries = []
         manual_notes = []
+        error_records: List[str] = []
+        required_scripts: List[str] = []
+        reports_base = project_root / ".gpt-creator" / "reports"
+        def _sanitize_for_path(value: str) -> str:
+            token = (value or "").strip()
+            if not token:
+                return "task"
+            token = token.lower()
+            token = re.sub(r"[^\w.-]+", "-", token)
+            token = token.strip("-_.")
+            return token or "task"
+
+        active_task_id = (
+            payload.get('task_id')
+            if isinstance(payload, dict) else None
+        )
+        if not active_task_id or not isinstance(active_task_id, str):
+            active_task_id = os.environ.get("GC_ACTIVE_TASK_ID") or os.environ.get("GC_BUDGET_TASK_ID")
+        task_slug = os.environ.get("GC_ACTIVE_TASK_SLUG") or os.environ.get("GC_ACTIVE_STORY_SLUG") or ""
+        task_number = os.environ.get("GC_ACTIVE_TASK_NUMBER") or os.environ.get("GC_ACTIVE_TASK_INDEX") or ""
+        task_label_components = [
+            active_task_id,
+            task_slug,
+            task_number,
+        ]
+        task_label = next((component for component in task_label_components if component), "task")
+        sanitized_task_label = _sanitize_for_path(str(task_label))
+        run_timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        report_root = reports_base / sanitized_task_label / run_timestamp
+        report_rel_path = ""
+        errors_log_path: Optional[Path] = None
+        next_commands_path: Optional[Path] = None
+        commands_log_path: Optional[Path] = None
+        tests_log_path: Optional[Path] = None
+        acceptance_log_path: Optional[Path] = None
+        final_report_path: Optional[Path] = None
+        latest_report_path: Optional[Path] = None
+        status_json_path: Optional[Path] = None
+        latest_status_path: Optional[Path] = None
+        command_history: List[Dict[str, object]] = []
+        acceptance_items: List[str] = []
+        acceptance_source_path: Optional[Path] = None
+
+        def _relativize_path(path: Optional[Path]) -> str:
+            if path is None:
+                return ""
+            try:
+                return str(path.relative_to(project_root))
+            except Exception:
+                return str(path)
+
+        def _ensure_report_dir() -> None:
+            nonlocal errors_log_path
+            nonlocal next_commands_path
+            nonlocal commands_log_path
+            nonlocal tests_log_path
+            nonlocal acceptance_log_path
+            nonlocal final_report_path
+            nonlocal latest_report_path
+            nonlocal status_json_path
+            nonlocal latest_status_path
+            nonlocal report_rel_path
+            try:
+                reports_base.mkdir(parents=True, exist_ok=True)
+                report_root.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                return
+            errors_log_path = report_root / "errors.log"
+            next_commands_path = report_root / "next-commands.txt"
+            commands_log_path = report_root / "commands.log"
+            tests_log_path = report_root / "tests.log"
+            acceptance_log_path = report_root / "acceptance.txt"
+            final_report_path = report_root / "task_report.md"
+            latest_report_path = reports_base / "last_task_report.md"
+            status_json_path = report_root / "status.json"
+            latest_status_path = reports_base / "last_status.json"
+            for target in (
+                errors_log_path,
+                next_commands_path,
+                commands_log_path,
+                tests_log_path,
+                acceptance_log_path,
+            ):
+                try:
+                    if target:
+                        target.write_text("", encoding="utf-8")
+                except Exception:
+                    continue
+            if status_json_path:
+                try:
+                    status_json_path.write_text("{}", encoding="utf-8")
+                except Exception:
+                    pass
+            report_rel_path = _relativize_path(report_root)
+
+        def _append_error_record(message: str) -> None:
+            clean = message.strip()
+            if not clean:
+                return
+            if clean not in error_records:
+                error_records.append(clean)
+            if errors_log_path is None:
+                return
+            try:
+                with errors_log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(clean + "\n")
+            except Exception:
+                return
+
+        def _append_required_script(script: str) -> None:
+            stripped = script.strip()
+            if not stripped:
+                return
+            if stripped not in required_scripts:
+                required_scripts.append(stripped)
+            if next_commands_path is None:
+                return
+            try:
+                with next_commands_path.open("a", encoding="utf-8") as handle:
+                    handle.write(stripped + "\n")
+            except Exception:
+                return
+
+        def _write_final_report(contents: str) -> None:
+            targets: List[Path] = []
+            if final_report_path is not None:
+                targets.append(final_report_path)
+            if latest_report_path is not None:
+                targets.append(latest_report_path)
+            for target in targets:
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(contents, encoding="utf-8")
+                except Exception:
+                    continue
+
+        def _compose_end_report(
+            status: str,
+            commands: Sequence[str],
+            logs_directory: str,
+            log_paths: Dict[str, str],
+            acceptance_entries: Sequence[str],
+        ) -> Tuple[str, str]:
+            headline = status.strip() or "unknown"
+            note_lines: List[str] = [
+                "END OF TASK REPORT",
+                f"Status: {headline}",
+            ]
+            if error_records:
+                note_lines.append("Errors:")
+                for item in error_records[:5]:
+                    note_lines.append(f"- {item}")
+                if len(error_records) > 5:
+                    note_lines.append(f"- … ({len(error_records) - 5} more)")
+            else:
+                note_lines.append("Errors: none")
+            scripts_section = required_scripts[:] if required_scripts else list(dict.fromkeys(commands))
+            note_lines.append("Next scripts:")
+            if scripts_section:
+                for cmd in scripts_section[:5]:
+                    note_lines.append(f"- {cmd}")
+                if len(scripts_section) > 5:
+                    note_lines.append(f"- … ({len(scripts_section) - 5} more)")
+            else:
+                note_lines.append("- (none)")
+
+            if logs_directory:
+                note_lines.append(f"Logs directory: {logs_directory}")
+            if log_paths.get("errors"):
+                note_lines.append(f"Errors log: {log_paths['errors']}")
+            if log_paths.get("next_commands"):
+                note_lines.append(f"Next-commands log: {log_paths['next_commands']}")
+            if log_paths.get("commands"):
+                note_lines.append(f"Commands log: {log_paths['commands']}")
+            if log_paths.get("tests"):
+                note_lines.append(f"Tests log: {log_paths['tests']}")
+            if log_paths.get("acceptance"):
+                note_lines.append(f"Acceptance log: {log_paths['acceptance']}")
+            if log_paths.get("report"):
+                note_lines.append(f"Report snapshot: {log_paths['report']}")
+
+            file_lines: List[str] = [
+                "## END OF TASK REPORT",
+                "",
+                f"Status: {headline}",
+                "",
+                "### Errors",
+            ]
+            if error_records:
+                for item in error_records:
+                    file_lines.append(f"- {item}")
+            else:
+                file_lines.append("- none")
+            file_lines.append("")
+            file_lines.append("### Next Scripts")
+            if scripts_section:
+                for cmd in scripts_section:
+                    file_lines.append(f"- {cmd}")
+            else:
+                file_lines.append("- (none)")
+            if logs_directory or any(log_paths.values()):
+                file_lines.append("")
+                file_lines.append("### Logs")
+                if logs_directory:
+                    file_lines.append(f"- directory: {logs_directory}")
+                for label, rel_path in log_paths.items():
+                    if label == "directory":
+                        continue
+                    if not rel_path:
+                        continue
+                    file_lines.append(f"- {label.replace('_', ' ')}: {rel_path}")
+            file_lines.append("")
+            file_lines.append("### Acceptance Criteria")
+            if acceptance_entries:
+                for entry in acceptance_entries:
+                    file_lines.append(f"- {entry}")
+            else:
+                file_lines.append("- (not available)")
+            file_lines.append("")
+            file_lines.append("Logged at: " + datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+            return "\n".join(note_lines), "\n".join(file_lines) + "\n"
+
+        def _maybe_truncate(text: str, limit: int = 20000) -> str:
+            if len(text) <= limit:
+                return text
+            return text[:limit] + f"\n... (truncated; original length {len(text)} chars)"
+
+        def _append_command_log(
+            command: str,
+            exit_code: int,
+            stdout_text: str,
+            stderr_text: str,
+            is_test: bool,
+        ) -> None:
+            nonlocal command_history
+            if commands_log_path is not None:
+                entry_lines = [
+                    f"$ {command}",
+                    f"exit_code: {exit_code}",
+                ]
+                if stdout_text:
+                    entry_lines.append("stdout:")
+                    entry_lines.append(_maybe_truncate(stdout_text.rstrip("\n")))
+                if stderr_text:
+                    entry_lines.append("stderr:")
+                    entry_lines.append(_maybe_truncate(stderr_text.rstrip("\n")))
+                entry_lines.append("---")
+                try:
+                    with commands_log_path.open("a", encoding="utf-8") as handle:
+                        handle.write("\n".join(entry_lines) + "\n")
+                except Exception:
+                    pass
+            if is_test and tests_log_path is not None:
+                test_lines = [
+                    f"$ {command}",
+                    f"exit_code: {exit_code}",
+                ]
+                if stdout_text:
+                    test_lines.append("stdout:")
+                    test_lines.append(_maybe_truncate(stdout_text.rstrip("\n")))
+                if stderr_text:
+                    test_lines.append("stderr:")
+                    test_lines.append(_maybe_truncate(stderr_text.rstrip("\n")))
+                test_lines.append("---")
+                try:
+                    with tests_log_path.open("a", encoding="utf-8") as handle:
+                        handle.write("\n".join(test_lines) + "\n")
+                except Exception:
+                    pass
+            command_history.append(
+                {
+                    "command": command,
+                    "exit_code": exit_code,
+                    "is_test": bool(is_test),
+                }
+            )
+
+        def _normalize_acceptance_entry(text: str) -> str:
+            cleaned = (text or "").strip()
+            cleaned = re.sub(r"^[\-\*\d\)\(.\s]+", "", cleaned)
+            return cleaned.strip()
+
+        def _extract_acceptance_from_text(text: str) -> List[str]:
+            if not text:
+                return []
+            lines = text.splitlines()
+            capture = False
+            items: List[str] = []
+            for line in lines:
+                if re.match(r"^#{1,6}\s+Acceptance Criteria\s*$", line.strip(), re.IGNORECASE):
+                    capture = True
+                    continue
+                if capture and re.match(r"^#{1,6}\s+\S", line.strip()):
+                    break
+                if capture:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    bullet_match = re.match(r"^[-*\u2022]\s*(.+)$", stripped)
+                    if bullet_match:
+                        item = _normalize_acceptance_entry(bullet_match.group(1))
+                        if item:
+                            items.append(item)
+                        continue
+                    ordinal_match = re.match(r"^\d+[\).]\s*(.+)$", stripped)
+                    if ordinal_match:
+                        item = _normalize_acceptance_entry(ordinal_match.group(1))
+                        if item:
+                            items.append(item)
+                        continue
+                    fallback = _normalize_acceptance_entry(stripped)
+                    if fallback:
+                        items.append(fallback)
+            return items
+
+        def _collect_acceptance_requirements(payload_obj: Dict[str, object]) -> Tuple[List[str], Optional[Path]]:
+            collected: List[str] = []
+            seen: Set[str] = set()
+
+            def _extend_from_value(value: object) -> None:
+                nonlocal collected, seen
+                entries: List[str] = []
+                if isinstance(value, list):
+                    entries = [str(item) for item in value]
+                elif isinstance(value, str):
+                    raw_lines = re.split(r"[\r\n]+", value)
+                    entries = [line for line in raw_lines if line.strip()]
+                if not entries:
+                    return
+                for entry in entries:
+                    normalized = _normalize_acceptance_entry(entry)
+                    key = normalized.lower()
+                    if normalized and key not in seen:
+                        seen.add(key)
+                        collected.append(normalized)
+
+            candidate_keys = (
+                'acceptance',
+                'acceptance_criteria',
+                'acceptanceCriteria',
+                'acceptanceRequirements',
+                'acceptance_requirements',
+            )
+
+            if isinstance(payload_obj, dict):
+                for key in candidate_keys:
+                    _extend_from_value(payload_obj.get(key))
+                for nested_key in ('task', 'context', 'details'):
+                    nested = payload_obj.get(nested_key)
+                    if isinstance(nested, dict):
+                        for key in candidate_keys:
+                            _extend_from_value(nested.get(key))
+
+            prompt_source: Optional[Path] = None
+            prompt_env = os.environ.get("GC_ACTIVE_TASK_PROMPT", "").strip()
+            if prompt_env:
+                prompt_candidate = Path(prompt_env)
+                if not prompt_candidate.is_absolute():
+                    prompt_candidate = project_root / prompt_env
+                if prompt_candidate.exists():
+                    prompt_source = prompt_candidate
+                    try:
+                        prompt_text = prompt_candidate.read_text(encoding="utf-8")
+                    except Exception:
+                        prompt_text = ""
+                    for entry in _extract_acceptance_from_text(prompt_text):
+                        key = entry.lower()
+                        if entry and key not in seen:
+                            seen.add(key)
+                            collected.append(entry)
+
+            return collected, prompt_source
+
+        def _write_acceptance_log(items: Sequence[str]) -> None:
+            if acceptance_log_path is None:
+                return
+            try:
+                acceptance_log_path.write_text(
+                    "\n".join(f"- {entry}" for entry in items) + ("\n" if items else ""),
+                    encoding="utf-8",
+                )
+            except Exception:
+                return
+
+        def _looks_like_test_command(command: str) -> bool:
+            lowered = command.lower()
+            patterns = (
+                " test",
+                "test:",
+                "pytest",
+                "jest",
+                "vitest",
+                "go test",
+                "npm test",
+                "pnpm test",
+                "yarn test",
+                "cargo test",
+                "mvn test",
+                "gradlew test",
+                "dotnet test",
+            )
+            return any(token in lowered for token in patterns)
+
+        def _write_status_snapshot(
+            status_value: str,
+            logs_directory: str,
+            acceptance_source: Optional[Path],
+        ) -> None:
+            if status_json_path is None:
+                return
+            logs_map = {
+                "directory": logs_directory,
+                "errors": _relativize_path(errors_log_path),
+                "next_commands": _relativize_path(next_commands_path),
+                "commands": _relativize_path(commands_log_path),
+                "tests": _relativize_path(tests_log_path),
+                "acceptance": _relativize_path(acceptance_log_path),
+                "report": _relativize_path(final_report_path),
+                "status": _relativize_path(status_json_path),
+            }
+            snapshot = {
+                "task": {
+                    "id": active_task_id,
+                    "slug": task_slug,
+                    "number": task_number,
+                },
+                "status": status_value,
+                "timestamp": run_timestamp,
+                "logs": logs_map,
+                "commands": command_history,
+                "acceptance": {
+                    "items": acceptance_items,
+                    "source_path": _relativize_path(acceptance_source) if acceptance_source else "",
+                    "log_path": _relativize_path(acceptance_log_path),
+                },
+            }
+            try:
+                status_json_path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                if latest_status_path is not None:
+                    latest_status_path.parent.mkdir(parents=True, exist_ok=True)
+                    latest_status_path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            except Exception:
+                return
+
+        _ensure_report_dir()
+
+        acceptance_items, acceptance_source_path = _collect_acceptance_requirements(payload)
+        _write_acceptance_log(acceptance_items)
+
+        required_scripts_env = os.environ.get("WORK_ON_TASKS_REQUIRED_SCRIPTS", "")
+        if required_scripts_env:
+            for candidate in re.split(r"[;\n,]", required_scripts_env):
+                candidate = candidate.strip()
+                if candidate:
+                    _append_required_script(candidate)
+
         if code_sample_detected:
             manual_notes.append(
                 _format_action_result(
@@ -1437,6 +1894,22 @@ def main():
                     )
                 )
                 return True, notes
+            safe_check = _run_git_command(['config', '--global', '--get-all', 'safe.directory'])
+            safe_listing = (safe_check.stdout or "").splitlines() if safe_check.returncode == 0 else []
+            if str(project_root) not in safe_listing:
+                _run_git_command(['config', '--global', '--add', 'safe.directory', str(project_root)])
+
+            def _ensure_git_identity() -> None:
+                identity_defaults = (
+                    ("user.name", os.environ.get("WORK_ON_TASKS_GIT_NAME", "automation")),
+                    ("user.email", os.environ.get("WORK_ON_TASKS_GIT_EMAIL", "automation@local")),
+                )
+                for key, default_value in identity_defaults:
+                    probe = _run_git_command(['config', '--get', key])
+                    if probe.returncode != 0 or not (probe.stdout or "").strip():
+                        _run_git_command(['config', key, default_value])
+
+            _ensure_git_identity()
             add_proc = _run_git_command(['add', '-A'])
             if add_proc.returncode != 0:
                 stderr_text = (add_proc.stderr or "").strip()
@@ -1488,6 +1961,50 @@ def main():
                     _format_action_result(
                         f"git push {push_remote} {branch_name}",
                         f"failed — exit {push_proc.returncode}; {stderr_text or 'see stderr'}"
+                    )
+                )
+                rebase_proc = _run_git_command(['pull', '--rebase', '--autostash', push_remote, branch_name])
+                if rebase_proc.returncode == 0:
+                    retry_proc = _run_git_command(['push', push_remote, branch_name])
+                    if retry_proc.returncode == 0:
+                        notes.append(
+                            _format_action_result(
+                                f"git push {push_remote} {branch_name} (after rebase)",
+                                "success"
+                            )
+                        )
+                        return True, notes
+                    retry_stderr = (retry_proc.stderr or "").strip()
+                    notes.append(
+                        _format_action_result(
+                            f"git push {push_remote} {branch_name} (after rebase)",
+                            f"failed — exit {retry_proc.returncode}; {retry_stderr or 'see stderr'}"
+                        )
+                    )
+                else:
+                    rebase_stderr = (rebase_proc.stderr or "").strip()
+                    notes.append(
+                        _format_action_result(
+                            f"git pull --rebase --autostash {push_remote} {branch_name}",
+                            f"failed — exit {rebase_proc.returncode}; {rebase_stderr or 'see stderr'}"
+                        )
+                    )
+                timestamp_suffix = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+                fallback_branch = f"{branch_name}-fallback-{timestamp_suffix}"
+                fallback_proc = _run_git_command(['push', push_remote, f"HEAD:refs/heads/{fallback_branch}"])
+                if fallback_proc.returncode == 0:
+                    notes.append(
+                        _format_action_result(
+                            f"git push {push_remote} HEAD:refs/heads/{fallback_branch}",
+                            "success (fallback branch)"
+                        )
+                    )
+                    return True, notes
+                fallback_stderr = (fallback_proc.stderr or "").strip()
+                notes.append(
+                    _format_action_result(
+                        f"git push {push_remote} HEAD:refs/heads/{fallback_branch}",
+                        f"failed — exit {fallback_proc.returncode}; {fallback_stderr or 'see stderr'}"
                     )
                 )
                 return False, notes
@@ -2083,6 +2600,7 @@ def main():
             actual_changes += 1
         command_diff_before = _git_diff_name_status(project_root)
         command_untracked_before = _git_untracked_files(project_root)
+        preexisting_pending_changes = False
         pending_changes_before: List[str] = []
         if command_diff_before:
             for path, status in sorted(command_diff_before.items()):
@@ -2111,6 +2629,8 @@ def main():
                 LAST_PENDING_CHANGES[cache_key] = snapshot
         else:
             LAST_PENDING_CHANGES.pop(cache_key, None)
+        if pending_changes_before:
+            preexisting_pending_changes = True
 
         def _record_blocked_command(reason: str, command: str) -> None:
             nonlocal blocked_command_total
@@ -2345,6 +2865,8 @@ def main():
                 if stderr_text:
                     sys.stderr.write(stderr_text)
                 executed_commands.append(command)
+                is_test_command = _looks_like_test_command(command)
+                _append_command_log(command, proc_cmd.returncode, stdout_text, stderr_text, is_test_command)
                 if proc_cmd.returncode != 0:
                     handled_note = _handle_pattern_not_found(python_heredoc_code, stdout_text, stderr_text)
                     if handled_note is not None:
@@ -2395,10 +2917,12 @@ def main():
                         summary_parts.append(stdout_summary)
                     if stderr_summary:
                         summary_parts.append(stderr_summary)
+                    failure_detail = note
                     if summary_parts:
-                        manual_notes.append(note + "\n" + '\n'.join(summary_parts))
-                    else:
-                        manual_notes.append(note)
+                        failure_detail = note + "\n" + '\n'.join(summary_parts)
+                    manual_notes.append(failure_detail)
+                    _append_error_record(failure_detail)
+                    _append_required_script(command)
                 else:
                     manual_notes.append(
                         _format_action_result(
@@ -2530,7 +3054,7 @@ def main():
         declared_commands: List[str] = payload.get('commands') or []
         commands_missing = False
         commands_drift_fatal = False
-        allow_drift = os.environ.get("WORK_ON_TASKS_ALLOW_DRIFT") == "1"
+        allow_drift = os.environ.get("WORK_ON_TASKS_ALLOW_DRIFT", "1") == "1"
         if executed_commands:
             missing_logged = [cmd for cmd in commands_to_report if cmd not in executed_commands]
             if missing_logged:
@@ -2592,24 +3116,34 @@ def main():
                     )
                 )
 
-        if actual_changes > 0:
+        force_commit_env = os.environ.get("WORK_ON_TASKS_FORCE_COMMIT", "1")
+        force_commit_policy = force_commit_env.strip().lower() not in {"0", "false", "no"}
+        should_attempt_commit = actual_changes > 0 or preexisting_pending_changes or force_commit_policy
+        if should_attempt_commit:
             auto_commit_ok, auto_commit_notes = _auto_commit_and_push_if_needed(actual_changes)
             manual_notes.extend(auto_commit_notes)
             if not auto_commit_ok:
                 command_failure_detected = True
 
+        for entry in manual_notes:
+            lowered_entry = entry.lower()
+            if any(token in lowered_entry for token in ("failed —", "blocked —", "warning —")):
+                _append_error_record(entry)
+
         summary_notes = (payload.get('notes') or []) + manual_notes
+        strict_validation = os.environ.get("WORK_ON_TASKS_STRICT_VALIDATION", "").strip().lower() in {"1", "true", "yes"}
         forced_canonical_status = None
         forced_legacy_status = None
-        if 'placeholder-ellipsis' in blocked_command_counts:
-            forced_canonical_status = 'RETRYABLE'
-            forced_legacy_status = 'retryable'
-        elif command_failure_detected:
-            forced_canonical_status = 'RETRYABLE'
-            forced_legacy_status = 'retryable'
-        elif commands_missing:
-            forced_canonical_status = 'RETRYABLE'
-            forced_legacy_status = 'retryable'
+        if strict_validation:
+            if 'placeholder-ellipsis' in blocked_command_counts:
+                forced_canonical_status = 'RETRYABLE'
+                forced_legacy_status = 'retryable'
+            elif command_failure_detected:
+                forced_canonical_status = 'RETRYABLE'
+                forced_legacy_status = 'retryable'
+            elif commands_missing:
+                forced_canonical_status = 'RETRYABLE'
+                forced_legacy_status = 'retryable'
         if actual_changes > 0:
             legacy_status = 'ok'
             canonical_status = 'COMPLETED'
@@ -2619,9 +3153,6 @@ def main():
         if forced_canonical_status:
             canonical_status = forced_canonical_status
             legacy_status = forced_legacy_status or legacy_status
-        status_note = f"STATUS: {canonical_status}"
-        if status_note not in summary_notes:
-            summary_notes.append(status_note)
         raw_commands_field = payload.get('commands') or []
         summary_commands: List[str] = []
         if isinstance(raw_commands_field, list):
@@ -2629,6 +3160,32 @@ def main():
                 if not isinstance(cmd, str):
                     continue
                 summary_commands.append(cmd.replace("\n", "\\n"))
+        status_note = f"STATUS: {canonical_status}"
+        if status_note not in summary_notes:
+            summary_notes.append(status_note)
+        report_commands = executed_commands if executed_commands else summary_commands
+        logs_directory = report_rel_path
+        log_paths = {
+            "directory": logs_directory,
+            "errors": _relativize_path(errors_log_path),
+            "next_commands": _relativize_path(next_commands_path),
+            "commands": _relativize_path(commands_log_path),
+            "tests": _relativize_path(tests_log_path),
+            "acceptance": _relativize_path(acceptance_log_path),
+            "report": _relativize_path(final_report_path),
+            "status": _relativize_path(status_json_path),
+        }
+        end_report_note, end_report_file = _compose_end_report(
+            canonical_status,
+            report_commands,
+            logs_directory,
+            log_paths,
+            acceptance_items,
+        )
+        if end_report_note not in summary_notes:
+            summary_notes.append(end_report_note)
+        _write_final_report(end_report_file)
+        _write_status_snapshot(canonical_status, logs_directory, acceptance_source_path)
         summary = {
             'written': written,
             'patched': patched,
@@ -2651,6 +3208,10 @@ def main():
             print(f"CMD {cmd}")
         for note in summary['notes']:
             print(f"NOTE {note}")
+        if status_json_path is not None:
+            meta_path_rel = _relativize_path(status_json_path)
+            if meta_path_rel:
+                print(f"META {meta_path_rel}")
         if commands_drift_fatal:
             print(
                 "ERROR executed commands diverged from declared log; set WORK_ON_TASKS_ALLOW_DRIFT=1 to override.",

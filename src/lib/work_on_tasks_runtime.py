@@ -40,6 +40,7 @@ def main():
         import os
         import re
         import shlex
+        import shutil
         import subprocess
         import tempfile
         from pathlib import Path
@@ -60,6 +61,52 @@ def main():
         COMMAND_WHITELIST_PATTERN = re.compile(
             r'^(git|pnpm|npm|node|bash|sh|python3|python|sqlite3|jq|sed|awk|perl|cat|tee|mv|cp|mkdir|touch|ls|gpt-creator)\b'
         )
+        HEREDOC_LABEL_PATTERN = re.compile(r"<<\s*['\"]?([A-Za-z0-9_]+)['\"]?")
+
+        class UnclosedHeredocError(Exception):
+            def __init__(self, delimiter: str, command_lead: str):
+                super().__init__(delimiter)
+                self.delimiter = delimiter
+                self.command_lead = command_lead
+
+        def _coalesce_command_entries(entries: Sequence[str]) -> List[str]:
+            commands: List[str] = []
+            buffer: List[str] = []
+            delimiter: Optional[str] = None
+            for entry in entries:
+                if not isinstance(entry, str):
+                    continue
+                line = entry.rstrip('\n')
+                if delimiter is None and not line.strip():
+                    continue
+                buffer.append(line)
+                if delimiter is not None:
+                    stripped = line.strip()
+                    if stripped == delimiter:
+                        commands.append("\n".join(buffer))
+                        buffer = []
+                        delimiter = None
+                        continue
+                    if stripped.startswith(delimiter):
+                        remainder = stripped[len(delimiter):].strip()
+                        if not remainder or set(remainder) <= {"'", '"'}:
+                            commands.append("\n".join(buffer))
+                            buffer = []
+                            delimiter = None
+                            continue
+                    continue
+                match = HEREDOC_LABEL_PATTERN.search(line)
+                if match:
+                    delimiter = match.group(1)
+                    continue
+                commands.append("\n".join(buffer))
+                buffer = []
+            if delimiter is not None:
+                command_lead = buffer[0] if buffer else ""
+                raise UnclosedHeredocError(delimiter, command_lead)
+            if buffer:
+                commands.append("\n".join(buffer))
+            return commands
 
         output_path = Path(sys.argv[1])
         project_root = Path(sys.argv[2])
@@ -89,6 +136,7 @@ def main():
                         return _original_re__compile(pattern, flags)
                     return _original_re_compile(pattern, flags)
                 except re.error as exc:
+                    invalid_regex_patterns.append(fragment)
                     _regex_log.warning("Invalid regex %r (%s); falling back to literal.", fragment, exc)
                     escaped = re.escape(fragment)
                     if _original_re__compile is not None:
@@ -229,7 +277,10 @@ def main():
             '--type-clear',
             '--type-not',
         }
-        SED_MAX_WINDOW = 40
+        try:
+            SED_MAX_WINDOW = int(os.getenv("WORK_ON_TASKS_SED_MAX_WINDOW", "200") or "200")
+        except ValueError:
+            SED_MAX_WINDOW = 200
         NOTE_CHAR_LIMIT = 300
         NOTE_REASONING_BUDGET_CHARS = 6000
         MAX_CONSECUTIVE_NON_ACTION_NOTES = 2
@@ -237,6 +288,7 @@ def main():
         MAX_BLOCKED_COMMAND_DETAILS = 5
         BLOCK_REASON_LABELS = {
             'heredoc': 'raw heredoc writes',
+            'heredoc-unterminated': 'unterminated heredoc commands',
             'python-non3': 'python (use python3)',
             'missing-helper': 'missing apply-block helper',
             'sed-window': 'oversized sed slices',
@@ -245,9 +297,13 @@ def main():
             'duplicate': 'duplicate commands',
             'policy': 'policy guardrails',
             'non-whitelist': 'non-whitelisted commands',
+            'multiline': 'multi-line commands unsupported',
+            'redirection': 'redirection/process substitution',
             'placeholder-ellipsis': 'incomplete command placeholder',
             'quote-mismatch': 'command quote mismatch',
         }
+        REDIRECTION_PATTERN = re.compile(r'(?<!\\)(?:>>|>\||\$\(|<\()')
+        SHELL_META_CHARS = set('|&;()<>*$`\\\n')
 
         def _token_targets_doc(token: str) -> bool:
             candidate = token.strip().strip('\'"')
@@ -586,20 +642,6 @@ def main():
             return False
 
 
-        def compile_safe(pattern: str, flags: int = 0):
-            try:
-                if _original_re__compile is not None:
-                    return _original_re__compile(pattern, flags)
-                return _original_re_compile(pattern, flags)
-            except re.error:
-                invalid_regex_patterns.append(pattern)
-                return compile_user_pattern(pattern, flags=flags, allow_regex=False)
-
-
-        re.compile = compile_safe
-        if _original_re__compile is not None:
-            re._compile = compile_safe
-
         apply_timeout_env = os.environ.get("GC_APPLY_PHASE_TIMEOUT_SECONDS", "1500")
         try:
             apply_timeout = int(apply_timeout_env)
@@ -631,7 +673,8 @@ def main():
         raw = _strip_wrapped_json_fence(raw)
 
         CODE_SAMPLE_PATTERN = re.compile(
-            r"```|(?m)^\s*(?:const|let|var|function|class|def|describe|it|expect|public\s+static)\b"
+            r"```|^\s*(?:const|let|var|function|class|def|describe|it|expect|public\s+static)\b",
+            re.MULTILINE,
         )
         code_sample_detected = bool(CODE_SAMPLE_PATTERN.search(raw))
 
@@ -1203,6 +1246,42 @@ def main():
                         pass
             return proc
 
+        def _run_shell_script(script: str) -> CompletedProcess:
+            shebang = "#!/usr/bin/env bash\n"
+            header = "set -euo pipefail\nIFS=$' \\n\\t'\n"
+            body = script if script.endswith('\n') else script + '\n'
+            tmp_path = None
+            try:
+                tmp_file = tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False, dir=str(project_root))
+                tmp_path = Path(tmp_file.name)
+                tmp_file.write(shebang)
+                tmp_file.write(header)
+                tmp_file.write(body)
+                tmp_file.flush()
+                tmp_file.close()
+                try:
+                    os.chmod(tmp_path, 0o700)
+                except OSError:
+                    pass
+                proc = subprocess.run(
+                    ['bash', str(tmp_path)],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(project_root),
+                    timeout=apply_timeout,
+                    check=False,
+                )
+            finally:
+                if tmp_path is not None:
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+            return proc
+
+        def _can_run_direct(command: str) -> bool:
+            return not any(ch in command for ch in SHELL_META_CHARS)
+
         def _parse_replacement_script(source: str):
             import ast
 
@@ -1355,6 +1434,15 @@ def main():
                     changed = True
                 rewritten.append(new_token)
             return rewritten, changed
+
+        def _apply_tool_fallbacks(tokens: List[str]) -> Tuple[List[str], bool]:
+            if not tokens:
+                return tokens, False
+            if tokens[0] == 'rg' and shutil.which('rg') is None:
+                fallback = ['grep', '-nR', '--']
+                fallback.extend(tokens[1:])
+                return fallback, True
+            return tokens, False
 
         def _rewrite_script_paths(script_text: str) -> str:
             try:
@@ -1733,12 +1821,39 @@ def main():
                     change_bytes[path] = diff_bytes
                     actual_changes += 1
 
-        command_entries = payload.get('commands') or []
+        commands_field = payload.get('commands')
+        original_command_report: List[str] = []
+        if isinstance(commands_field, list):
+            original_command_report = [item for item in commands_field if isinstance(item, str)]
+        command_entries = original_command_report[:]
+        command_coalesce_error: Optional[UnclosedHeredocError] = None
+        if command_entries:
+            try:
+                command_entries = _coalesce_command_entries(command_entries)
+            except UnclosedHeredocError as exc:
+                command_coalesce_error = exc
+                command_entries = []
         executed_commands: List[str] = []
         commands_to_report: Set[str] = set()
         seen_commands: Set[str] = set()
         blocked_command_counts: Dict[str, Dict[str, object]] = {}
         blocked_command_total = 0
+
+        def _ensure_clean_tree(root: Path) -> None:
+            if os.environ.get("WORK_ON_TASKS_ALLOW_DIRTY") == "1":
+                return
+            try:
+                proc = subprocess.run(
+                    ['git', 'status', '--porcelain'],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(root),
+                    check=False,
+                )
+            except Exception:
+                return
+            if proc.stdout.strip():
+                raise SystemExit("dirty tree; commit/stash or set WORK_ON_TASKS_ALLOW_DIRTY=1")
 
         def _git_diff_name_status(root: Path) -> Dict[str, str]:
             try:
@@ -1781,6 +1896,7 @@ def main():
                 return set()
             return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
+        _ensure_clean_tree(project_root)
         command_diff_before = _git_diff_name_status(project_root)
         command_untracked_before = _git_untracked_files(project_root)
         pending_changes_before: List[str] = []
@@ -1795,17 +1911,19 @@ def main():
         if pending_changes_before:
             snapshot = tuple(pending_changes_before)
             last_snapshot = LAST_PENDING_CHANGES.get(cache_key)
+            preview_items = pending_changes_before[:6]
+            summary = '; '.join(preview_items)
+            if len(pending_changes_before) > 6:
+                summary += '; …'
+            warning_message = f"warning — working tree already dirty before commands; recap these files: {summary}"
             if last_snapshot != snapshot:
-                preview_items = pending_changes_before[:6]
-                summary = '; '.join(preview_items)
-                if len(pending_changes_before) > 6:
-                    summary += '; …'
                 manual_notes.append(
                     _format_action_result(
                         "pending-changes",
-                        f"warning — working tree already dirty before commands; recap these files: {summary}"
+                        warning_message
                     )
                 )
+            if last_snapshot != snapshot:
                 LAST_PENDING_CHANGES[cache_key] = snapshot
         else:
             LAST_PENDING_CHANGES.pop(cache_key, None)
@@ -1830,8 +1948,20 @@ def main():
             if len(examples) < MAX_BLOCKED_COMMAND_DETAILS and label not in examples:
                 examples.append(label)
 
-        skip_command_processing = False
-        if isinstance(command_entries, list) and command_entries:
+        skip_command_processing = command_coalesce_error is not None
+        if command_coalesce_error is not None:
+            delimiter_label = command_coalesce_error.delimiter
+            command_lead = (command_coalesce_error.command_lead or "").strip()
+            label_source = command_lead or f"<<{delimiter_label}"
+            manual_notes.append(
+                _format_action_result(
+                    _truncate_command_text(label_source),
+                    f"blocked — heredoc labeled {delimiter_label!r} missing closing line; restate the command with a terminating {delimiter_label} line"
+                )
+            )
+            if command_lead:
+                _record_blocked_command('heredoc-unterminated', command_lead)
+        if command_entries and not skip_command_processing:
             filtered_commands: List[str] = []
             precheck_non_whitelisted: List[str] = []
             for raw_cmd in command_entries:
@@ -1878,6 +2008,15 @@ def main():
                     _record_blocked_command('quote-mismatch', raw_cmd)
                     continue
                 command = _hydrate_literal_command(command)
+                if '\n' in command and HEREDOC_LABEL_PATTERN.search(command) is None:
+                    _record_blocked_command('multiline', command)
+                    manual_notes.append(
+                        _format_action_result(
+                            _truncate_command_text(command),
+                            "blocked — multi-line commands must use a heredoc with matching terminator; restate as single-line or add <<LABEL/terminator pair"
+                        )
+                    )
+                    continue
                 try:
                     command_tokens = shlex.split(command)
                 except ValueError:
@@ -1900,15 +2039,12 @@ def main():
                         command_tokens[2] = script_text
                         command_changed = True
                     python_heredoc_code = _extract_python_heredoc(script_text)
-                    if python_heredoc_code is None:
-                        sed_request = _extract_simple_sed(script_text)
                 else:
                     rewritten_tokens, tokens_changed = _rewrite_tokens(command_tokens)
-                    if tokens_changed:
-                        command_tokens = rewritten_tokens
+                    fallback_tokens, fallback_changed = _apply_tool_fallbacks(rewritten_tokens)
+                    command_tokens = fallback_tokens
+                    if tokens_changed or fallback_changed:
                         command_changed = True
-                    if first_token == "sed":
-                        sed_request = _extract_simple_sed(" ".join(command_tokens))
                 if command_changed:
                     command = " ".join(shlex.quote(tok) for tok in command_tokens)
                     lower_command = command.lower()
@@ -1917,6 +2053,13 @@ def main():
                         script_text = command_tokens[2]
                     else:
                         script_text = ""
+                if REDIRECTION_PATTERN.search(command):
+                    _record_blocked_command('redirection', command)
+                    continue
+                if first_token in {"bash", "sh"} and python_heredoc_code is None and script_text:
+                    sed_request = _extract_simple_sed(script_text)
+                elif first_token == "sed":
+                    sed_request = _extract_simple_sed(" ".join(command_tokens))
                 if first_token == "cat":
                     if HEREDOC_TOKEN in command:
                         _record_blocked_command('heredoc', command)
@@ -1992,14 +2135,17 @@ def main():
                             check=False,
                         )
                     else:
-                        proc_cmd = subprocess.run(
-                            ['bash', '-lc', command_to_run],
-                            capture_output=True,
-                            text=True,
-                            cwd=str(project_root),
-                            timeout=apply_timeout,
-                            check=False,
-                        )
+                        if _can_run_direct(command_to_run) and command_tokens:
+                            proc_cmd = subprocess.run(
+                                command_tokens,
+                                capture_output=True,
+                                text=True,
+                                cwd=str(project_root),
+                                timeout=apply_timeout,
+                                check=False,
+                            )
+                        else:
+                            proc_cmd = _run_shell_script(command_to_run)
                 except Exception as exc:
                     manual_notes.append(
                         _format_action_result(
@@ -2014,6 +2160,7 @@ def main():
                     sys.stdout.write(stdout_text)
                 if stderr_text:
                     sys.stderr.write(stderr_text)
+                executed_commands.append(command)
                 if proc_cmd.returncode != 0:
                     handled_note = _handle_pattern_not_found(python_heredoc_code, stdout_text, stderr_text)
                     if handled_note is not None:
@@ -2075,7 +2222,6 @@ def main():
                             "success"
                         )
                     )
-                    executed_commands.append(command)
             post_status = _git_status_porcelain(project_root)
             delta_status = _status_delta(baseline_status, post_status)
             if delta_status:
@@ -2106,6 +2252,9 @@ def main():
                         "warning — commands ran but produced no tracked changes; confirm if additional steps are required"
                     )
                 )
+
+        if executed_commands:
+            payload['commands'] = executed_commands[:]
 
         command_diff_after = _git_diff_name_status(project_root)
         command_untracked_after = _git_untracked_files(project_root)
@@ -2196,17 +2345,26 @@ def main():
 
         declared_commands: List[str] = payload.get('commands') or []
         commands_missing = False
-        if not declared_commands:
-            if commands_to_report or blocked_command_total or written or patched or change_bytes or command_failure_detected:
+        commands_drift_fatal = False
+        allow_drift = os.environ.get("WORK_ON_TASKS_ALLOW_DRIFT") == "1"
+        if executed_commands:
+            missing_logged = [cmd for cmd in commands_to_report if cmd not in executed_commands]
+            if missing_logged:
                 commands_missing = True
+                joined = '; '.join(_truncate_command_text(cmd) for cmd in missing_logged[:3])
+                if len(missing_logged) > 3:
+                    joined += '; …'
                 manual_notes.append(
                     _format_action_result(
-                        "commands-log-missing",
-                        "blocked — repository shows edits or executed commands but none were reported under `Commands`; rerun and list each command that edited files, ran tools, or staged changes."
+                        "commands-log-mismatch",
+                        f"blocked — the following executed command(s) were not captured in the auto-generated log: {joined}"
                     )
                 )
-        else:
-            missing_logged = [cmd for cmd in commands_to_report if cmd not in declared_commands]
+                command_failure_detected = True
+                if not allow_drift:
+                    commands_drift_fatal = True
+        elif original_command_report:
+            missing_logged = [cmd for cmd in commands_to_report if cmd not in original_command_report]
             if missing_logged:
                 commands_missing = True
                 joined = '; '.join(_truncate_command_text(cmd) for cmd in missing_logged[:3])
@@ -2218,6 +2376,20 @@ def main():
                         f"blocked — the following executed command(s) were not listed under `Commands`: {joined}"
                     )
                 )
+                command_failure_detected = True
+                if not allow_drift:
+                    commands_drift_fatal = True
+        elif commands_to_report or blocked_command_total or written or patched or change_bytes or command_failure_detected:
+            commands_missing = True
+            manual_notes.append(
+                _format_action_result(
+                    "commands-log-missing",
+                    "blocked — repository shows edits or executed commands but none were reported under `Commands`; rerun and list each command that edited files, ran tools, or staged changes."
+                )
+            )
+            command_failure_detected = True
+            if not allow_drift:
+                commands_drift_fatal = True
 
         if invalid_regex_patterns:
             logged_patterns = []
@@ -2260,11 +2432,18 @@ def main():
         status_note = f"STATUS: {canonical_status}"
         if status_note not in summary_notes:
             summary_notes.append(status_note)
+        raw_commands_field = payload.get('commands') or []
+        summary_commands: List[str] = []
+        if isinstance(raw_commands_field, list):
+            for cmd in raw_commands_field:
+                if not isinstance(cmd, str):
+                    continue
+                summary_commands.append(cmd.replace("\n", "\\n"))
         summary = {
             'written': written,
             'patched': patched,
             'noop': noop_entries,
-            'commands': payload.get('commands') or [],
+            'commands': summary_commands,
             'notes': summary_notes,
         }
         print(f'STATUS {legacy_status}')
@@ -2282,6 +2461,12 @@ def main():
             print(f"CMD {cmd}")
         for note in summary['notes']:
             print(f"NOTE {note}")
+        if commands_drift_fatal:
+            print(
+                "ERROR executed commands diverged from declared log; set WORK_ON_TASKS_ALLOW_DRIFT=1 to override.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     elif mode == "prompt":
         if len(args) != 8:
             print("prompt requires 8 arguments", file=sys.stderr)
@@ -2689,6 +2874,75 @@ def main():
             return results
 
 
+        def _run_grep_fallback(
+            project_root: Optional[Path],
+            terms: Sequence[str],
+            limit: int,
+            exclude: Set[str],
+        ) -> List[Dict[str, object]]:
+            if not project_root or not project_root.exists() or limit <= 0:
+                return []
+            if shutil.which("grep") is None:
+                return []
+            docs_dir = project_root / "docs"
+            if not docs_dir.exists():
+                return []
+            pattern_terms = [term.strip() for term in terms if len(term.strip()) >= 3]
+            if not pattern_terms:
+                return []
+            pattern = "|".join(re.escape(term) for term in pattern_terms)
+            max_per_file = max(1, min(limit, 2))
+            cmd = [
+                "grep",
+                "-R",
+                "-I",
+                "-n",
+                "-m",
+                str(max_per_file),
+                "--binary-files=without-match",
+                "-E",
+                pattern,
+                str(docs_dir),
+            ]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return []
+            if proc.returncode not in (0, 1):
+                return []
+            hits: List[Dict[str, object]] = []
+            for line in proc.stdout.splitlines():
+                parts = line.split(":", 2)
+                if len(parts) < 3:
+                    continue
+                path_str, line_number, snippet = parts
+                candidate_path = Path(path_str).resolve()
+                entry = _build_doc_entry(candidate_path)
+                if not entry:
+                    continue
+                doc_id = entry.get("doc_id")
+                if not doc_id or doc_id in exclude:
+                    continue
+                hits.append(
+                    {
+                        "doc_id": doc_id,
+                        "method": "grep",
+                        "line": line_number,
+                        "snippet": snippet.strip(),
+                    }
+                )
+                exclude.add(doc_id)
+                if len(hits) >= limit:
+                    break
+            return hits
+
+
         def _run_ripgrep_search(
             project_root: Optional[Path],
             terms: Sequence[str],
@@ -2698,7 +2952,7 @@ def main():
             if not project_root or not project_root.exists() or limit <= 0:
                 return []
             if shutil.which("rg") is None:
-                return []
+                return _run_grep_fallback(project_root, terms, limit, exclude)
             query_term = next((term for term in terms if len(term) >= 3), "")
             if not query_term:
                 return []

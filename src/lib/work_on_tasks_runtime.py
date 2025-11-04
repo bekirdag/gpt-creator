@@ -412,17 +412,38 @@ def main():
             while len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'`', '"', "'"}:
                 normalized = normalized[1:-1].strip()
 
-            def _escape_unescaped_quotes(body: str, quote: str) -> str:
-                result_chars: List[str] = []
-                prev = ''
-                for ch in body:
-                    if ch == quote and prev != '\\':
-                        result_chars.append('\\')
-                        result_chars.append(ch)
-                    else:
-                        result_chars.append(ch)
-                    prev = ch
-                return ''.join(result_chars)
+            def _single_quote(body: str) -> str:
+                if not body:
+                    return "''"
+                return "'" + body.replace("'", "'\"'\"'") + "'"
+
+            def _normalize_rg(command: str) -> str:
+                try:
+                    tokens = shlex.split(command)
+                except ValueError:
+                    return command
+                if not tokens or tokens[0] != 'rg' or '--' in tokens:
+                    return command
+                options: List[str] = []
+                pattern: Optional[str] = None
+                paths: List[str] = []
+                for token in tokens[1:]:
+                    if pattern is None and token.startswith('-'):
+                        options.append(token)
+                        continue
+                    if pattern is None:
+                        pattern = token
+                        continue
+                    paths.append(token)
+                if pattern is None:
+                    return command
+                new_tokens: List[str] = ['rg']
+                new_tokens.extend(options)
+                new_tokens.append(pattern)
+                if paths:
+                    new_tokens.append('--')
+                    new_tokens.extend(paths)
+                return shlex.join(new_tokens)
 
             # Many plans wrap commands as: bash -lc "cmd with \"nested\" quotes".
             # When quotes inside the script are not escaped the inner bash fails with
@@ -446,8 +467,11 @@ def main():
                 elif script_body.startswith('"') and script_body.endswith('"') and len(script_body) >= 2:
                     script_body = script_body[1:-1]
                 script_body = script_body.replace('\\"', '"')
-                escaped_inner = _escape_unescaped_quotes(script_body, '"')
-                normalized = f"{match.group(1)} -lc \"{escaped_inner}\""
+                script_body = _normalize_rg(script_body)
+                normalized = f"{match.group(1)} -lc {_single_quote(script_body)}"
+                return normalized
+
+            normalized = _normalize_rg(normalized)
             return normalized
 
         def _is_valid_bash_wrapper(command: str) -> bool:

@@ -263,11 +263,45 @@ gc_template_path() {
   printf '%s/%s' "$GC_TEMPLATE_DIR" "$name"
 }
 
+gc_render_template_fallback() {
+  local name="${1:?template name required}"
+  case "$name" in
+    prompts/work_on_tasks_diff_reminder.md)
+      printf '%s\n' \
+        "## Diff reminder" \
+        "- Provide explicit unified diffs for the required edits." \
+        "- If no changes are necessary, clearly explain why the existing implementation already satisfies the task."
+      return 0
+      ;;
+    prompts/work_on_tasks_json_reminder.md)
+      printf '%s\n' \
+        "## Reminder" \
+        "- Output a single JSON object exactly as described above; do not include any explanatory text outside the JSON." \
+        "- If no changes are required, return the JSON with an empty \`changes\` array and clear notes explaining why." \
+        "- Diff entries must remain valid unified diffs."
+      return 0
+      ;;
+    prompts/work_on_tasks_contract_guard.md)
+      printf '%s\n' \
+        "## Critical constraint" \
+        "- Provide at least one concrete repository change (diff or file write) or explicitly document a blocker with evidence that proves no change is required." \
+        "- Do not repeat the previous plan without actionable modifications."
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 gc_render_template() {
   local name="${1:?template name required}"
   local template_path
   template_path="$(gc_template_path "$name")"
-  [[ -f "$template_path" ]] || die "Template not found: ${template_path}"
+  if [[ ! -f "$template_path" ]]; then
+    if gc_render_template_fallback "$name"; then
+      return 0
+    fi
+    die "Template not found: ${template_path}"
+  fi
   local python_bin="${PYTHON_BIN:-python3}"
   if ! command -v "$python_bin" >/dev/null 2>&1; then
     die "Python runtime '$python_bin' not available for template rendering"

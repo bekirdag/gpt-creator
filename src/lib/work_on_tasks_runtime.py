@@ -1403,9 +1403,8 @@ def main():
             return "work-on-tasks"
 
         def _auto_commit_and_push_if_needed(changes_detected: int) -> Tuple[bool, List[str]]:
+            _ = changes_detected  # retained for backward compatibility; behavior no longer gated by this count
             notes: List[str] = []
-            if changes_detected <= 0:
-                return True, notes
             if os.environ.get("WORK_ON_TASKS_AUTO_COMMIT", "1") == "0":
                 notes.append(
                     _format_action_result(
@@ -1986,9 +1985,10 @@ def main():
             return changed
 
         def _ensure_clean_tree(root: Path) -> None:
+            # Allow runs to proceed even with a dirty tree; the guard remains as a warning.
             if os.environ.get("WORK_ON_TASKS_ALLOW_DIRTY") == "1":
                 return
-            ignore_raw = os.environ.get("WORK_ON_TASKS_DIRTY_IGNORE", ".gpt-creator/*:.gitignore")
+            ignore_raw = os.environ.get("WORK_ON_TASKS_DIRTY_IGNORE", ".gpt-creator/**:.gitignore")
             ignore_patterns = [pattern for pattern in (segment.strip() for segment in ignore_raw.split(":")) if pattern]
             try:
                 proc = subprocess.run(
@@ -2009,7 +2009,9 @@ def main():
                     continue
                 dirty_entries.append(raw_line)
             if dirty_entries:
-                raise SystemExit("dirty tree; commit/stash or set WORK_ON_TASKS_ALLOW_DIRTY=1")
+                warning = "warning: proceeding with dirty working tree; ensure final commit captures all changes"
+                print(warning, file=sys.stderr)
+                return
 
         def _git_diff_name_status(root: Path) -> Dict[str, str]:
             try:

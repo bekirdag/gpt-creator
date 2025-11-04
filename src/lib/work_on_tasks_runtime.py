@@ -246,6 +246,7 @@ def main():
             'policy': 'policy guardrails',
             'non-whitelist': 'non-whitelisted commands',
             'placeholder-ellipsis': 'incomplete command placeholder',
+            'quote-mismatch': 'command quote mismatch',
         }
 
         def _token_targets_doc(token: str) -> bool:
@@ -371,12 +372,39 @@ def main():
             # nested quoting cannot break command execution.
             match = re.match(r'^(bash|sh)\s+-[lc]\s+(.+)$', normalized)
             if match:
-                script = match.group(2).strip()
-                if script.startswith('"') and script.endswith('"') and len(script) >= 2:
-                    inner = script[1:-1]
-                    escaped_inner = _escape_unescaped_quotes(inner, '"')
-                    normalized = f"{match.group(1)} -lc \"{escaped_inner}\""
+                try:
+                    parts = shlex.split(normalized)
+                except ValueError:
+                    parts = None
+                script_original = match.group(2).strip()
+                script_body = ""
+                if parts and len(parts) >= 3:
+                    script_body = ' '.join(parts[2:])
+                else:
+                    script_body = script_original
+                script_body = script_body.strip()
+                if script_body.startswith('\\"') and script_body.endswith('\\"') and len(script_body) >= 4:
+                    script_body = script_body[2:-2]
+                elif script_body.startswith('"') and script_body.endswith('"') and len(script_body) >= 2:
+                    script_body = script_body[1:-1]
+                script_body = script_body.replace('\\"', '"')
+                escaped_inner = _escape_unescaped_quotes(script_body, '"')
+                normalized = f"{match.group(1)} -lc \"{escaped_inner}\""
             return normalized
+
+        def _is_valid_bash_wrapper(command: str) -> bool:
+            stripped = command.strip()
+            match = re.match(r'^(bash|sh)\s+-[lc]\s+(.+)$', stripped)
+            if not match:
+                return True
+            script = match.group(2).strip()
+            if not script:
+                return False
+            if not (script.startswith('"') and script.endswith('"')):
+                return False
+            if script.startswith('\\"') or script.endswith('\\"'):
+                return False
+            return True
 
         def _hydrate_literal_command(text: str) -> str:
             """Convert common escaped control sequences to real characters for bash/sh wrappers."""
@@ -1812,6 +1840,9 @@ def main():
                 trimmed = _normalize_command_wrapper(raw_cmd)
                 if not trimmed:
                     continue
+                if not _is_valid_bash_wrapper(trimmed):
+                    _record_blocked_command('quote-mismatch', raw_cmd)
+                    continue
                 if COMMAND_WHITELIST_PATTERN.match(trimmed):
                     filtered_commands.append(raw_cmd)
                 else:
@@ -1842,6 +1873,9 @@ def main():
                     continue
                 command = _normalize_command_wrapper(raw_cmd)
                 if not command:
+                    continue
+                if not _is_valid_bash_wrapper(command):
+                    _record_blocked_command('quote-mismatch', raw_cmd)
                     continue
                 command = _hydrate_literal_command(command)
                 try:

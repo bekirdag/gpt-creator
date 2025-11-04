@@ -35,6 +35,7 @@ def main():
             print("apply requires 2 arguments", file=sys.stderr)
             sys.exit(1)
         sys.argv = [sys.argv[0]] + args
+        import fnmatch
         import json
         import logging
         import os
@@ -43,6 +44,7 @@ def main():
         import shutil
         import subprocess
         import tempfile
+        from datetime import datetime
         from pathlib import Path
         from subprocess import CompletedProcess
         from collections import OrderedDict
@@ -1374,6 +1376,124 @@ def main():
                 return "skipped — Jest workers crashed immediately in this environment; rerun locally once the worker issue is resolved"
             return None
 
+        def _run_git_command(args: Sequence[str]) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ['git'] + list(args),
+                capture_output=True,
+                text=True,
+                cwd=str(project_root),
+                check=False,
+            )
+
+        def _resolve_task_commit_ref() -> str:
+            task_id = os.environ.get("GC_ACTIVE_TASK_ID") or os.environ.get("GC_BUDGET_TASK_ID")
+            if task_id:
+                return task_id
+            slug = os.environ.get("GC_ACTIVE_TASK_SLUG") or os.environ.get("GC_ACTIVE_STORY_SLUG")
+            task_number = os.environ.get("GC_ACTIVE_TASK_NUMBER")
+            if slug and task_number:
+                return f"{slug}-{task_number}"
+            task_index = os.environ.get("GC_ACTIVE_TASK_INDEX")
+            if slug and task_index and task_index.isdigit():
+                try:
+                    ordinal = int(task_index) + 1
+                except ValueError:
+                    ordinal = task_index
+                return f"{slug}-{ordinal}"
+            return "work-on-tasks"
+
+        def _auto_commit_and_push_if_needed(changes_detected: int) -> Tuple[bool, List[str]]:
+            notes: List[str] = []
+            if changes_detected <= 0:
+                return True, notes
+            if os.environ.get("WORK_ON_TASKS_AUTO_COMMIT", "1") == "0":
+                notes.append(
+                    _format_action_result(
+                        "auto-commit",
+                        "skip — WORK_ON_TASKS_AUTO_COMMIT=0"
+                    )
+                )
+                return True, notes
+            add_proc = _run_git_command(['add', '-A'])
+            if add_proc.returncode != 0:
+                stderr_text = (add_proc.stderr or "").strip()
+                notes.append(
+                    _format_action_result(
+                        "git add -A",
+                        f"failed — exit {add_proc.returncode}; {stderr_text or 'see stderr'}"
+                    )
+                )
+                return False, notes
+            diff_proc = _run_git_command(['diff', '--cached', '--quiet'])
+            if diff_proc.returncode == 0:
+                notes.append(
+                    _format_action_result(
+                        "auto-commit",
+                        "note — no staged changes after git add; skipping commit"
+                    )
+                )
+                return True, notes
+            if diff_proc.returncode not in (0, 1):
+                stderr_text = (diff_proc.stderr or "").strip()
+                notes.append(
+                    _format_action_result(
+                        "git diff --cached --quiet",
+                        f"failed — exit {diff_proc.returncode}; {stderr_text or 'see stderr'}"
+                    )
+                )
+                return False, notes
+            commit_message = os.environ.get("WORK_ON_TASKS_COMMIT_MESSAGE")
+            if not commit_message:
+                task_ref = _resolve_task_commit_ref()
+                commit_suffix = os.environ.get("WORK_ON_TASKS_COMMIT_SUFFIX", "automated changes")
+                timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+                commit_message = f"{task_ref}: {commit_suffix} ({timestamp} UTC)"
+            commit_proc = _run_git_command(['commit', '-m', commit_message])
+            if commit_proc.returncode != 0:
+                stderr_text = (commit_proc.stderr or "").strip()
+                notes.append(
+                    _format_action_result(
+                        "git commit",
+                        f"failed — exit {commit_proc.returncode}; {stderr_text or 'see stderr'}"
+                    )
+                )
+                return False, notes
+            notes.append(
+                _format_action_result(
+                    "git commit",
+                    f"success — {commit_message}"
+                )
+            )
+            push_remote = os.environ.get("WORK_ON_TASKS_PUSH_REMOTE", "origin")
+            branch_proc = _run_git_command(['rev-parse', '--abbrev-ref', 'HEAD'])
+            branch_name = branch_proc.stdout.strip() if branch_proc.returncode == 0 else ""
+            if branch_proc.returncode != 0 or not branch_name:
+                stderr_text = (branch_proc.stderr or "").strip()
+                notes.append(
+                    _format_action_result(
+                        "git rev-parse --abbrev-ref HEAD",
+                        f"failed — exit {branch_proc.returncode}; {stderr_text or 'see stderr'}"
+                    )
+                )
+                return False, notes
+            push_proc = _run_git_command(['push', push_remote, branch_name])
+            if push_proc.returncode != 0:
+                stderr_text = (push_proc.stderr or "").strip()
+                notes.append(
+                    _format_action_result(
+                        f"git push {push_remote} {branch_name}",
+                        f"failed — exit {push_proc.returncode}; {stderr_text or 'see stderr'}"
+                    )
+                )
+                return False, notes
+            notes.append(
+                _format_action_result(
+                    f"git push {push_remote} {branch_name}",
+                    "success"
+                )
+            )
+            return True, notes
+
         def _resolve_alt_path(rel_path: str) -> Optional[str]:
             if not rel_path:
                 return None
@@ -1839,9 +1959,37 @@ def main():
         blocked_command_counts: Dict[str, Dict[str, object]] = {}
         blocked_command_total = 0
 
+        REQUIRED_GITIGNORE_LINES = [
+            "# gpt-creator",
+            ".gpt-creator/tmp/",
+            ".gpt-creator/logs/",
+            ".gpt-creator/cache/",
+            ".gpt-creator/staging/",
+        ]
+
+        def _ensure_gitignore_entries(root: Path) -> bool:
+            gitignore_path = root / ".gitignore"
+            try:
+                existing_lines = gitignore_path.read_text(encoding='utf-8').splitlines()
+            except FileNotFoundError:
+                existing_lines = []
+            normalized = {line.strip() for line in existing_lines}
+            changed = False
+            for entry in REQUIRED_GITIGNORE_LINES:
+                key = entry.strip()
+                if key not in normalized:
+                    existing_lines.append(entry)
+                    normalized.add(key)
+                    changed = True
+            if changed:
+                gitignore_path.write_text("\n".join(existing_lines) + "\n", encoding='utf-8')
+            return changed
+
         def _ensure_clean_tree(root: Path) -> None:
             if os.environ.get("WORK_ON_TASKS_ALLOW_DIRTY") == "1":
                 return
+            ignore_raw = os.environ.get("WORK_ON_TASKS_DIRTY_IGNORE", ".gpt-creator/*:.gitignore")
+            ignore_patterns = [pattern for pattern in (segment.strip() for segment in ignore_raw.split(":")) if pattern]
             try:
                 proc = subprocess.run(
                     ['git', 'status', '--porcelain'],
@@ -1852,7 +2000,15 @@ def main():
                 )
             except Exception:
                 return
-            if proc.stdout.strip():
+            dirty_entries: List[str] = []
+            for raw_line in proc.stdout.splitlines():
+                if not raw_line:
+                    continue
+                path_fragment = raw_line[3:].strip() if len(raw_line) >= 4 else raw_line.strip()
+                if ignore_patterns and any(fnmatch.fnmatch(path_fragment, pattern) for pattern in ignore_patterns):
+                    continue
+                dirty_entries.append(raw_line)
+            if dirty_entries:
                 raise SystemExit("dirty tree; commit/stash or set WORK_ON_TASKS_ALLOW_DIRTY=1")
 
         def _git_diff_name_status(root: Path) -> Dict[str, str]:
@@ -1896,7 +2052,26 @@ def main():
                 return set()
             return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
+        gitignore_auto_added = False
+        if _ensure_gitignore_entries(project_root):
+            gitignore_auto_added = True
+            manual_notes.append(
+                _format_action_result(
+                    ".gitignore",
+                    "note — ensured gpt-creator artifacts are ignored"
+                )
+            )
         _ensure_clean_tree(project_root)
+        if gitignore_auto_added:
+            gitignore_label = ".gitignore (auto)"
+            if gitignore_label not in patched:
+                patched.append(gitignore_label)
+            try:
+                gitignore_size = (project_root / ".gitignore").stat().st_size
+            except Exception:
+                gitignore_size = 0
+            change_bytes[".gitignore"] = gitignore_size
+            actual_changes += 1
         command_diff_before = _git_diff_name_status(project_root)
         command_untracked_before = _git_untracked_files(project_root)
         pending_changes_before: List[str] = []
@@ -2407,6 +2582,12 @@ def main():
                         f"warning — pattern {snippet!r} invalid; treated as literal match"
                     )
                 )
+
+        if actual_changes > 0:
+            auto_commit_ok, auto_commit_notes = _auto_commit_and_push_if_needed(actual_changes)
+            manual_notes.extend(auto_commit_notes)
+            if not auto_commit_ok:
+                command_failure_detected = True
 
         summary_notes = (payload.get('notes') or []) + manual_notes
         forced_canonical_status = None

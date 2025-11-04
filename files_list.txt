@@ -25,6 +25,11 @@ docs/USAGE.md
 docs/CONFIG.md
 docs/TROUBLESHOOTING.md
 
+assets/templates/prompts/work_on_tasks_contract_guard.md
+assets/templates/prompts/work_on_tasks_default.prompt.md
+assets/templates/prompts/work_on_tasks_diff_reminder.md
+assets/templates/prompts/work_on_tasks_json_reminder.md
+
 src/gpt-creator.sh
 src/constants.sh
 src/banner.txt

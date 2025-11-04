@@ -1707,6 +1707,7 @@ def main():
 
         command_entries = payload.get('commands') or []
         executed_commands: List[str] = []
+        commands_to_report: Set[str] = set()
         seen_commands: Set[str] = set()
         blocked_command_counts: Dict[str, Dict[str, object]] = {}
         blocked_command_total = 0
@@ -2017,6 +2018,7 @@ def main():
                         )
                         continue
                     command_failure_detected = True
+                    commands_to_report.add(command)
                     note = _format_action_result(
                         _truncate_command_text(command),
                         f"failed — exit {proc_cmd.returncode}; revise before retrying"
@@ -2043,6 +2045,7 @@ def main():
             post_status = _git_status_porcelain(project_root)
             delta_status = _status_delta(baseline_status, post_status)
             if delta_status:
+                commands_to_report.add(command)
                 for path, status in delta_status.items():
                     label = f"{path} (command)"
                     status_code = status.strip()
@@ -2160,7 +2163,7 @@ def main():
         declared_commands: List[str] = payload.get('commands') or []
         commands_missing = False
         if not declared_commands:
-            if executed_commands or blocked_command_total or written or patched or change_bytes:
+            if commands_to_report or blocked_command_total or written or patched or change_bytes or command_failure_detected:
                 commands_missing = True
                 manual_notes.append(
                     _format_action_result(
@@ -2169,7 +2172,7 @@ def main():
                     )
                 )
         else:
-            missing_logged = [cmd for cmd in executed_commands if cmd not in declared_commands]
+            missing_logged = [cmd for cmd in commands_to_report if cmd not in declared_commands]
             if missing_logged:
                 commands_missing = True
                 joined = '; '.join(_truncate_command_text(cmd) for cmd in missing_logged[:3])

@@ -175,9 +175,11 @@ def main() -> None:
         else:
             next_index = total
 
-        current_status = (story["status"] or "").strip()
+        current_status_raw = story["status"]
+        current_status = (current_status_raw or "").strip()
+        current_is_terminal = _is_terminal_status(current_status_raw)
 
-        if resume_flag and not story_filter and _is_terminal_status(current_status):
+        if current_is_terminal and not story_filter:
             continue
 
         if resume_flag:

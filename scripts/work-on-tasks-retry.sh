@@ -85,20 +85,40 @@ attempt=1
 status=0
 
 mkdir -p "${ROOT_DIR}/.gpt-creator/logs"
-git rev-parse HEAD > "${ROOT_DIR}/.gpt-creator/logs/last_run.base_sha" 2>/dev/null || true
+MAX_SPINS="${MAX_SPINS:-1000}"
+spins=0
+prev_story=""
 
-while (( attempt <= max_attempts )); do
-  if run_once; then
-    status=0
+while (( spins < MAX_SPINS )); do
+  git rev-parse HEAD > "${ROOT_DIR}/.gpt-creator/logs/last_run.base_sha" 2>/dev/null || true
+  attempt=1
+  status=0
+
+  while (( attempt <= max_attempts )); do
+    if run_once; then
+      status=0
+      break
+    fi
+    status=$?
+    if (( status == 124 && attempt < max_attempts )); then
+      echo "[info] work-on-tasks exited with timeout (124); retrying task ${task_ref}..." >&2
+      ((attempt++))
+      continue
+    fi
+    break
+  done
+
+  if (( status != 0 )); then
     break
   fi
-  status=$?
-  if (( status == 124 && attempt < max_attempts )); then
-    echo "[info] work-on-tasks exited with timeout (124); retrying task ${task_ref}..." >&2
-    ((attempt++))
-    continue
+
+  current_story="$(grep -Eo "Preparing prompt for story '[^']+'" "${ROOT_DIR}/.gpt-creator/logs/last_run.log" | tail -n1 | sed -E "s/.*'([^']+)'.*/\1/" || true)"
+  if [[ -z "$current_story" || "$current_story" == "$prev_story" ]]; then
+    break
   fi
-  break
+
+  prev_story="$current_story"
+  ((spins++))
 done
 
 exit "$status"

@@ -624,6 +624,7 @@ def estimate(db_path: Path) -> int:
         ewma_rate = rate
 
     eta_stalled_reason: Optional[str] = None
+    eta_warning_reason: Optional[str] = None
     meta_stalled = bool(rate_meta.get("stalled"))
     meta_stall_reason = str(rate_meta.get("stall_reason") or "").strip()
     meta_frozen = bool(rate_meta.get("frozen"))
@@ -631,18 +632,25 @@ def estimate(db_path: Path) -> int:
     contamination_threshold = float(rate_meta.get("contamination_threshold", DEFAULT_CONTAMINATION_THRESHOLD))
 
     if meta_stalled:
-        eta_stalled_reason = meta_stall_reason or "stalled"
+        reason = meta_stall_reason or "stalled"
+        if reason.lower().startswith("throughput"):
+            eta_warning_reason = reason
+        else:
+            eta_stalled_reason = reason
     elif contamination_ratio >= contamination_threshold and rate_samples > 0:
         eta_stalled_reason = f"contamination {contamination_ratio * 100:.0f}%"
     elif ewma_rate > 0 and rate_samples > 0 and ewma_rate < eta_floor:
-        eta_stalled_reason = f"throughput below floor ({eta_floor:.1f} SP/h)"
+        eta_warning_reason = f"throughput below floor ({eta_floor:.1f} SP/h)"
     elif blocked_ratio >= blocked_threshold and rate_samples >= stalled_samples:
         reason = f"blocked {blocked_ratio * 100:.0f}% of recent tasks"
         if blocked_dominant:
             reason += f" ({blocked_dominant})"
         eta_stalled_reason = reason
     elif meta_frozen and meta_stall_reason:
-        eta_stalled_reason = meta_stall_reason
+        if meta_stall_reason.lower().startswith("throughput"):
+            eta_warning_reason = meta_stall_reason
+        else:
+            eta_stalled_reason = meta_stall_reason
 
     effective_rate = ewma_rate if ewma_rate > 0 else rate
     total_minutes = math.ceil((total_points / effective_rate) * 60) if total_points > 0 and eta_stalled_reason is None else 0
@@ -708,6 +716,8 @@ def estimate(db_path: Path) -> int:
         )
     if eta_stalled_reason is not None:
         throughput_rows.append(("Run status", f"Stalled ({eta_stalled_reason})"))
+    elif eta_warning_reason is not None:
+        throughput_rows.append(("Run status", f"Warning ({eta_warning_reason})"))
     if blocked_ratio > 0:
         blocked_value = f"{blocked_ratio * 100:.0f}% of recent runs"
         if blocked_dominant:

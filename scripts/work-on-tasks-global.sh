@@ -3,7 +3,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
-DB_PATH="${DB_PATH:-${ROOT_DIR}/.gpt-creator/cache/progress.db}"
+if [[ -n "${PROJECT_ROOT:-}" && -d "${PROJECT_ROOT}" ]]; then
+  PROJECT_ROOT_DIR="$(cd "${PROJECT_ROOT}" && pwd -P)"
+else
+  PROJECT_ROOT_DIR="$(pwd -P)"
+fi
+if [[ -n "${PLAN_DIR:-}" ]]; then
+  DB_DEFAULT="$(cd "${PLAN_DIR}" 2>/dev/null && pwd -P)/tasks/tasks.db"
+else
+  DB_DEFAULT="${PROJECT_ROOT_DIR}/.gpt-creator/staging/plan/tasks/tasks.db"
+fi
+DB_PATH="${DB_PATH:-$DB_DEFAULT}"
 
 story_override="${STORY_FILTER:-}"
 task_override="${TASK_FILTER:-}"
@@ -100,7 +110,7 @@ PY
 )"
 
 if [[ "$needs_update" == "update" ]]; then
-  (cd "$ROOT_DIR" && python3 "${SCRIPT_DIR}/python/update_global_task_order.py" "$DB_PATH" >/dev/null)
+  (cd "$ROOT_DIR" && python3 "${SCRIPT_DIR}/python/update_global_task_order.py" "$DB_PATH" --project-root "$PROJECT_ROOT_DIR" >/dev/null)
 fi
 
 readarray -t queue < <(cd "$ROOT_DIR" && python3 "${SCRIPT_DIR}/python/list_global_task_queue.py" "$DB_PATH")

@@ -9,6 +9,7 @@ import glob
 import json
 import sqlite3
 from collections import defaultdict, deque
+import os
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -164,7 +165,7 @@ def _toposort(nodes: Iterable[str], edges: Iterable[Tuple[str, str]]) -> List[st
     return order
 
 
-def compute_order(db_path: Path) -> int:
+def compute_order(db_path: Path, project_root: Path) -> int:
     if not db_path.exists():
         raise FileNotFoundError(f"Task database not found: {db_path}")
 
@@ -200,7 +201,7 @@ def compute_order(db_path: Path) -> int:
         return 0
 
     edges = _load_dependencies_from_db(cur, tasks_by_key)
-    binder_root = Path(".gpt-creator/cache/task-binder")
+    binder_root = project_root / ".gpt-creator" / "cache" / "task-binder"
     edges.extend(_load_dependencies_from_binder(binder_root, tasks_by_key))
 
     base_order = sorted(
@@ -236,9 +237,20 @@ def compute_order(db_path: Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compute and persist the global task order.")
     parser.add_argument("db_path", type=Path, help="Path to the tasks SQLite database.")
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="Project root containing .gpt-creator cache directories (defaults to PROJECT_ROOT or cwd).",
+    )
     args = parser.parse_args()
 
-    total = compute_order(args.db_path)
+    project_root = args.project_root
+    if project_root is None:
+        project_root = Path(os.environ.get("PROJECT_ROOT") or os.getcwd())
+    project_root = project_root.resolve()
+
+    total = compute_order(args.db_path, project_root)
     print(f"Computed global order for {total} task(s).")
     return 0
 

@@ -9351,6 +9351,19 @@ print(flag("notes_contains_already_satisfied"))'
           fi
 
           if (( task_changes_applied == 0 )); then
+            if [[ -n "${PROJECT_ROOT:-}" && -d "${PROJECT_ROOT}/.git" ]]; then
+              local diff_after_probe=""
+              diff_after_probe="$(gc_diff_fingerprint)"
+              if [[ -n "$diff_before" && -n "$diff_after_probe" && "$diff_after_probe" != "$diff_before" ]]; then
+                task_changes_applied=1
+                if (( task_last_change_operations == 0 )); then
+                  task_last_change_operations=1
+                fi
+              fi
+            fi
+          fi
+
+          if (( task_changes_applied == 0 )); then
             if (( empty_checkpoint_created == 0 )); then
               local checkpoint_story="${story_id:-$slug}"
               local checkpoint_task="${task_id:-$banner_task_id}"
@@ -10130,20 +10143,6 @@ print(flag("notes_contains_already_satisfied"))'
         task_notes=("${task_notes_without_status[@]}")
       fi
 
-      local story_status_hint="in-progress"
-      case "$task_result_status" in
-        blocked|blocked-budget|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|retryable|blocked-push|dead-letter|permanent-fail) story_status_hint="blocked" ;;
-        on-hold) story_status_hint="on-hold" ;;
-      esac
-
-      local completed_hint="$task_index"
-      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
-        completed_hint=$((task_index + 1))
-      fi
-
-      gc_update_task_state "$tasks_db" "$slug" "$task_index" "$task_result_status" "$run_stamp"
-      gc_update_work_state "$tasks_db" "$slug" "$story_status_hint" "$completed_hint" "$total_tasks_int" "$run_stamp"
-
       local attempt_label=$(( attempt > 0 ? attempt : 1 ))
 
       if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
@@ -10201,6 +10200,45 @@ print(flag("notes_contains_already_satisfied"))'
           task_notes+=("Snapshot auto-push failed after ${GC_RETRY_PUSH_MAX:-3} attempt(s); resolve manually.")
         fi
       fi
+
+      if [[ "$task_result_status" == "completed-no-changes" && "${GC_LAST_AUTO_COMMIT_STATUS:-}" == "committed" ]]; then
+        info "    Auto-finalize produced a commit; promoting status to complete."
+        task_result_status="complete"
+        task_changes_applied=1
+        if (( task_last_change_operations == 0 )); then
+          task_last_change_operations=1
+        fi
+        local -a _task_notes_refreshed=()
+        local note_entry=""
+        for note_entry in "${task_notes[@]}"; do
+          if [[ "$note_entry" =~ ^STATUS[[:space:]:=] ]]; then
+            continue
+          fi
+          if [[ "$note_entry" == *"no actionable changes"* ]]; then
+            continue
+          fi
+          if [[ "$note_entry" == *"empty-apply checkpoint"* ]]; then
+            continue
+          fi
+          _task_notes_refreshed+=("$note_entry")
+        done
+        _task_notes_refreshed+=("STATUS: COMPLETED")
+        task_notes=("${_task_notes_refreshed[@]}")
+      fi
+
+      local story_status_hint="in-progress"
+      case "$task_result_status" in
+        blocked|blocked-budget|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|retryable|blocked-push|dead-letter|permanent-fail) story_status_hint="blocked" ;;
+        on-hold) story_status_hint="on-hold" ;;
+      esac
+
+      local completed_hint="$task_index"
+      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
+        completed_hint=$((task_index + 1))
+      fi
+
+      gc_update_task_state "$tasks_db" "$slug" "$task_index" "$task_result_status" "$run_stamp"
+      gc_update_work_state "$tasks_db" "$slug" "$story_status_hint" "$completed_hint" "$total_tasks_int" "$run_stamp"
 
       if (( blocked_stop_run )); then
         task_notes+=("Auto-push issues recorded; continuing to the next task.")

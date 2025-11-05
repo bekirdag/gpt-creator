@@ -1,12 +1,62 @@
 import re
 import sqlite3
+import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 db_path, type_arg, item_children, progress_flag, task_details = sys.argv[1:6]
 
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
+
+
+def infer_project_root(db_file: str) -> Path:
+    resolved = Path(db_file).resolve()
+    for parent in resolved.parents:
+        if parent.name == ".gpt-creator":
+            return parent.parent
+    return resolved.parent
+
+
+PROJECT_ROOT = infer_project_root(db_path)
+STATUS_OVERRIDE_DIR = PROJECT_ROOT / ".gpt-creator" / "logs" / "status-overrides"
+_RECENT_SUBJECTS = None
+
+
+def _load_status_overrides() -> set[str]:
+    tasks: set[str] = set()
+    if not STATUS_OVERRIDE_DIR.exists():
+        return tasks
+    for path in STATUS_OVERRIDE_DIR.glob("*.applied"):
+        try:
+            name = path.stem.upper()
+            if name:
+                tasks.add(name)
+        except OSError:
+            continue
+    return tasks
+
+
+def _recent_commit_subjects() -> list[str]:
+    global _RECENT_SUBJECTS
+    if _RECENT_SUBJECTS is not None:
+        return _RECENT_SUBJECTS
+    try:
+        output = subprocess.check_output(
+            ["git", "log", "-n", "40", "--pretty=format:%s"],
+            cwd=PROJECT_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        _RECENT_SUBJECTS = []
+        return _RECENT_SUBJECTS
+    _RECENT_SUBJECTS = [line.strip() for line in output.splitlines() if line.strip()]
+    return _RECENT_SUBJECTS
+
+
+STATUS_OVERRIDE_TASKS = _load_status_overrides()
 
 
 def _task_column_exists(column: str) -> bool:
@@ -53,6 +103,23 @@ def status_is_completed(value: str) -> bool:
     return False
 
 
+def apply_status_override(task_id: str, status: str) -> str:
+    normalised = normalise_status(status)
+    if normalised != "completed-no-changes":
+        return status
+    clean_id = (task_id or "").strip().upper()
+    if not clean_id:
+        return status
+    if clean_id in STATUS_OVERRIDE_TASKS:
+        return "complete"
+    subjects = _recent_commit_subjects()
+    for subject in subjects:
+        if clean_id in subject.upper():
+            STATUS_OVERRIDE_TASKS.add(clean_id)
+            return "complete"
+    return status
+
+
 def status_is_in_progress(value: str) -> bool:
     status = normalise_status(value)
     if not status:
@@ -88,8 +155,10 @@ def empty_counts():
 
 def count_remaining_tasks(cur: sqlite3.Connection) -> int:
     remaining = 0
-    for row in cur.execute("SELECT status FROM tasks"):
-        status = row[0] if not isinstance(row, sqlite3.Row) else row["status"]
+    for row in cur.execute("SELECT status, task_id FROM tasks"):
+        status = row["status"] if isinstance(row, sqlite3.Row) else row[0]
+        task_id = row["task_id"] if isinstance(row, sqlite3.Row) else row[1] if len(row) > 1 else ""
+        status = apply_status_override(task_id, status)
         if not status_is_completed(status):
             remaining += 1
     return remaining
@@ -113,11 +182,11 @@ def fetch_epics():
 
 def fetch_task_counts():
     counts = {}
-    for row in conn.execute("SELECT story_slug, status FROM tasks"):
+    for row in conn.execute("SELECT story_slug, status, task_id FROM tasks"):
         slug = (row["story_slug"] or "").strip()
         entry = counts.setdefault(slug, {"total": 0, "completed": 0, "in_progress": 0})
         entry["total"] += 1
-        status = row["status"]
+        status = apply_status_override(row["task_id"], row["status"])
         if status_is_completed(status):
             entry["completed"] += 1
         elif status_is_in_progress(status):
@@ -132,7 +201,12 @@ def fetch_tasks_for_story(slug):
         WHERE story_slug = ?
         ORDER BY position
     """
-    return [dict(row) for row in conn.execute(query, (slug,))]
+    results = []
+    for row in conn.execute(query, (slug,)):
+        row_dict = dict(row)
+        row_dict["status"] = apply_status_override(row_dict.get("task_id"), row_dict.get("status"))
+        results.append(row_dict)
+    return results
 
 UNASSIGNED_KEY = "__unassigned__"
 UNASSIGNED_LABEL = "Unassigned backlog"

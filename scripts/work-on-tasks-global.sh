@@ -3,24 +3,28 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
-if [[ -n "${PROJECT_ROOT:-}" && -d "${PROJECT_ROOT}" ]]; then
-  PROJECT_ROOT_DIR="$(cd "${PROJECT_ROOT}" && pwd -P)"
-else
-  PROJECT_ROOT_DIR="$(pwd -P)"
-fi
-if [[ -n "${PLAN_DIR:-}" ]]; then
-  DB_DEFAULT="$(cd "${PLAN_DIR}" 2>/dev/null && pwd -P)/tasks/tasks.db"
-else
-  DB_DEFAULT="${PROJECT_ROOT_DIR}/.gpt-creator/staging/plan/tasks/tasks.db"
-fi
-DB_PATH="${DB_PATH:-$DB_DEFAULT}"
 
 story_override="${STORY_FILTER:-}"
 task_override="${TASK_FILTER:-}"
+project_override=""
 declare -a extra_args=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --project|--root)
+      if [[ $# -ge 2 ]]; then
+        project_override="$2"
+        extra_args+=("$1" "$2")
+        shift 2
+        continue
+      fi
+      ;;
+    --project=*|--root=*)
+      project_override="${1#*=}"
+      extra_args+=("$1")
+      shift
+      continue
+      ;;
     --story|--from-story)
       if [[ $# -ge 2 ]]; then
         story_override="$2"
@@ -49,6 +53,26 @@ while [[ $# -gt 0 ]]; do
   extra_args+=("$1")
   shift
 done
+
+if [[ -n "$project_override" ]]; then
+  if [[ ! -d "$project_override" ]]; then
+    echo "Project directory not found: $project_override" >&2
+    exit 1
+  fi
+  PROJECT_ROOT_DIR="$(cd "$project_override" && pwd -P)"
+elif [[ -n "${PROJECT_ROOT:-}" && -d "${PROJECT_ROOT}" ]]; then
+  PROJECT_ROOT_DIR="$(cd "${PROJECT_ROOT}" && pwd -P)"
+else
+  PROJECT_ROOT_DIR="$(pwd -P)"
+fi
+export PROJECT_ROOT="$PROJECT_ROOT_DIR"
+
+if [[ -n "${PLAN_DIR:-}" ]]; then
+  DB_DEFAULT="$(cd "${PLAN_DIR}" 2>/dev/null && pwd -P)/tasks/tasks.db"
+else
+  DB_DEFAULT="${PROJECT_ROOT_DIR}/.gpt-creator/staging/plan/tasks/tasks.db"
+fi
+DB_PATH="${DB_PATH:-$DB_DEFAULT}"
 
 if [[ ! -f "$DB_PATH" ]]; then
   echo "Task database not found at $DB_PATH; run 'gpt-creator create-tasks' first." >&2

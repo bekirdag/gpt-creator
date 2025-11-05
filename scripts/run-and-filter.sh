@@ -33,8 +33,13 @@ fi
 
 # Run the child and capture output
 set +e
-"$@" >"${LOG_FILE}" 2>&1
-status=$?
+if [[ "${TEE}" == "1" ]]; then
+  "$@" 2>&1 | tee "${LOG_FILE}"
+  status=${PIPESTATUS[0]}
+else
+  "$@" >"${LOG_FILE}" 2>&1
+  status=$?
+fi
 set -e
 
 # Apply exit code policy
@@ -45,8 +50,8 @@ if [[ -x "${POLICY}" ]]; then
   fi
 fi
 
-# Stream output
-if [[ "${TEE}" == "1" ]]; then
+# When teeing we already streamed the output; when not teeing, surface it now.
+if [[ "${TEE}" != "1" ]]; then
   cat "${LOG_FILE}"
 fi
 

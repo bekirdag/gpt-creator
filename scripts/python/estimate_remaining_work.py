@@ -275,12 +275,18 @@ def fetch_progress_status_map(cur: sqlite3.Cursor) -> Dict[str, str]:
     return overrides
 
 
+SKIP_PROGRESS_OVERRIDES = {"verified", "noop-accepted"}
+
+
 def determine_effective_status(
     base_status: str,
     task_row: sqlite3.Row,
     progress_overrides: Dict[str, str],
     has_task_progress_state: bool,
-) -> str:
+    *,
+    include_last_apply_status: bool = False,
+    include_last_verify_status: bool = False,
+) -> tuple[str, list[str]]:
     candidate_keys = []
     if "id" in task_row.keys():
         candidate_keys.append(str(task_row["id"]))
@@ -294,19 +300,55 @@ def determine_effective_status(
         if slug and position is not None:
             candidate_keys.append(f"{slug}:{int(position)}")
 
+    candidates: list[tuple[str, str]] = []
     for key in candidate_keys:
         override = progress_overrides.get(key)
         if override:
-            return coerce_status(override, base_status)
+            candidates.append((override, "override"))
 
+    progress_value = ""
     if has_task_progress_state and "progress_state" in task_row.keys():
         raw_progress = task_row["progress_state"] or ""
         if raw_progress and str(raw_progress).strip():
-            progress_norm = normalize_status(raw_progress)
-            if progress_norm not in {"verified", "noop-accepted"}:
-                return coerce_status(raw_progress, base_status)
+            progress_value = raw_progress
+            candidates.append((raw_progress, "progress_state"))
 
-    return coerce_status(base_status, "pending") or "pending"
+    candidates.append((base_status, "base"))
+
+    if include_last_apply_status and "last_apply_status" in task_row.keys():
+        apply_status = task_row["last_apply_status"]
+        if apply_status and str(apply_status).strip():
+            candidates.append((apply_status, "last_apply_status"))
+
+    if include_last_verify_status and "last_verify_status" in task_row.keys():
+        verify_status = task_row["last_verify_status"]
+        if verify_status and str(verify_status).strip():
+            candidates.append((verify_status, "last_verify_status"))
+
+    base_normalized = coerce_status(base_status, "pending") or "pending"
+    effective_status = base_normalized
+
+    for value, origin in candidates:
+        candidate_normalized = coerce_status(value, "")
+        if not candidate_normalized:
+            continue
+        if origin == "progress_state":
+            if candidate_normalized in SKIP_PROGRESS_OVERRIDES:
+                continue
+        effective_status = candidate_normalized
+        break
+
+    normalized_candidates: list[str] = []
+    seen: set[str] = set()
+    for value, _ in candidates:
+        candidate_normalized = coerce_status(value, "")
+        if candidate_normalized and candidate_normalized not in seen:
+            normalized_candidates.append(candidate_normalized)
+            seen.add(candidate_normalized)
+    if base_normalized not in seen:
+        normalized_candidates.append(base_normalized)
+
+    return effective_status, normalized_candidates
 
 
 def fmt_float(value: float) -> str:
@@ -363,8 +405,14 @@ def estimate(db_path: Path) -> int:
     task_columns = {str(info[1] or "").strip().lower() for info in cur.execute("PRAGMA table_info(tasks)")}
     select_fields = ["id", "story_slug", "position", "story_points", "status", "task_id"]
     include_progress_state = "progress_state" in task_columns
+    include_last_apply_status = "last_apply_status" in task_columns
+    include_last_verify_status = "last_verify_status" in task_columns
     if include_progress_state:
         select_fields.append("progress_state")
+    if include_last_apply_status:
+        select_fields.append("last_apply_status")
+    if include_last_verify_status:
+        select_fields.append("last_verify_status")
     try:
         rows = cur.execute(f"SELECT {', '.join(select_fields)} FROM tasks").fetchall()
     except sqlite3.DatabaseError as exc:
@@ -383,17 +431,31 @@ def estimate(db_path: Path) -> int:
         total_tasks_count += 1
         base_status = row["status"] or ""
         points = parse_points(row["story_points"])
-        effective_status = determine_effective_status(
+        effective_status, candidate_statuses = determine_effective_status(
             base_status,
             row,
             progress_overrides,
             include_progress_state,
+            include_last_apply_status=include_last_apply_status,
+            include_last_verify_status=include_last_verify_status,
         )
-        resolved_status = effective_status or coerce_status(base_status) or "pending"
+        status_options: list[str] = []
+        for candidate in [effective_status, *candidate_statuses, coerce_status(base_status)]:
+            candidate_norm = coerce_status(candidate, "") if candidate is not None else ""
+            if not candidate_norm:
+                continue
+            if candidate_norm not in status_options:
+                status_options.append(candidate_norm)
+        if not status_options:
+            status_options.append("pending")
+        resolved_status = ""
+        for candidate in status_options:
+            if is_done_status(candidate):
+                resolved_status = candidate
+                break
+        if not resolved_status:
+            resolved_status = status_options[0]
         is_done = is_done_status(resolved_status)
-        if not is_done and is_done_status(base_status):
-            resolved_status = coerce_status(base_status) or resolved_status
-            is_done = True
         task_key_primary = str(row["id"])
         task_info[task_key_primary] = {"points": points, "status": resolved_status}
         story_slug = (row["story_slug"] or "").strip()

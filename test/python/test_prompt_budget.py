@@ -66,7 +66,9 @@ def _build_minimal_db(db_path: Path, story_slug: str, description: str) -> None:
             last_tokens_total INTEGER,
             last_duration_seconds INTEGER,
             story_slug TEXT,
-            position INTEGER
+            position INTEGER,
+            global_order INTEGER DEFAULT 0,
+            global_order_updated_at TEXT
         );
         """
     )

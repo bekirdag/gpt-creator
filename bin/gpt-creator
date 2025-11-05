@@ -6817,7 +6817,7 @@ gc_generate_auto_review() {
 }
 
 cmd_work_on_tasks() {
-  local root="" resume=1 story_filter="" start_task_ref="" keep_artifacts=0 memory_cycle=0 force_reset=0
+  local root="" resume=1 story_filter="" task_filter="" start_task_ref="" keep_artifacts=0 memory_cycle=0 force_reset=0
   local batch_size=0 sleep_between=0 sleep_between_positive=0 context_lines=400 context_file_lines=200 prompt_compact=1 sample_lines=0 doc_snippets=1
   local -a context_skip_patterns=()
   local override_max_tokens=""
@@ -6907,10 +6907,20 @@ cmd_work_on_tasks() {
     case "$1" in
       --project) root="$(abs_path "$2")"; shift 2;;
       --story|--from-story) story_filter="$2"; shift 2;;
-      --from-task|--fresh-from|--task)
+      --from-task|--fresh-from)
         start_task_ref="${2:-}"
         [[ -n "$start_task_ref" ]] || die "--from-task requires a task id or story:position reference"
         shift 2
+        ;;
+      --task)
+        task_filter="${2:-}"
+        [[ -n "$task_filter" ]] || die "--task requires a task identifier"
+        shift 2
+        ;;
+      --task=*)
+        task_filter="${1#--task=}"
+        [[ -n "$task_filter" ]] || die "--task requires a task identifier"
+        shift
         ;;
       --fresh) resume=0; shift;;
       --force)
@@ -7151,6 +7161,19 @@ cmd_work_on_tasks() {
   export GC_BINDER_TTL_SECONDS="$binder_ttl_seconds"
   export GC_BINDER_MAX_BYTES="$binder_max_size_bytes"
   export GC_BINDER_CLEAR_ON_MIGRATION="$binder_clear_on_migration"
+
+  if [[ -z "$task_filter" && -n "${TASK_FILTER:-}" ]]; then
+    task_filter="${TASK_FILTER}"
+  fi
+  local task_filter_normalized="${task_filter,,}"
+  local single_task_mode=0
+  local single_task_consumed=0
+  if [[ -n "$task_filter_normalized" ]]; then
+    single_task_mode=1
+    export TASK_FILTER="$task_filter_normalized"
+  else
+    unset TASK_FILTER 2>/dev/null || true
+  fi
 
   if [[ $# -gt 0 ]]; then
     die "Unexpected argument for work-on-tasks: ${1}"
@@ -8608,6 +8631,7 @@ print(error)'
     local task_index
     info "  Preparing prompts and context…"
     local story_failed=0
+    local story_task_consumed=0
     for (( task_index = next_task_int; task_index < total_tasks_int; task_index++ )); do
       gc_clear_active_task
       if ! gc_check_idle_timeout; then
@@ -8647,6 +8671,7 @@ print(error)'
         work_failed=1
         continue
       fi
+      local prompt_meta_path="${prompt_path}.meta.json"
       if [[ -z "$prompt_slim_helper" ]]; then
         prompt_slim_helper="$(gc_clone_python_tool "wot_slim_prompt.py" "${PROJECT_ROOT:-$PWD}")" || return 1
       fi
@@ -8660,6 +8685,25 @@ print(error)'
 
       local task_id="" task_title="" task_story_points="" task_status_current="" task_locked_flag="0" task_status_reason=""
       IFS=$'\t' read -r task_id task_title task_story_points task_status_current task_locked_flag task_status_reason <<<"$prompt_meta"
+      local task_id_lower="${task_id,,}"
+      if (( single_task_mode )); then
+        local fallback_key="${slug,,}:${task_index + 1}"
+        local matches_filter=0
+        if [[ -n "$task_filter_normalized" ]]; then
+          if [[ -n "$task_id_lower" && "$task_id_lower" == "$task_filter_normalized" ]]; then
+            matches_filter=1
+          elif [[ "$fallback_key" == "$task_filter_normalized" ]]; then
+            matches_filter=1
+          fi
+        fi
+        if (( matches_filter == 0 )); then
+          if (( keep_artifacts == 0 )); then
+            rm -f "$prompt_path" "$output_path" "$prompt_meta_path"
+          fi
+          continue
+        fi
+        story_task_consumed=1
+      fi
       local banner_task_id="${task_id:-no-id}"
       local task_start_epoch
       task_start_epoch="$(date +%s)"
@@ -10478,7 +10522,15 @@ print(flag("notes_contains_already_satisfied"))'
         sleep "$sleep_between"
       fi
 
+      if (( single_task_mode )); then
+        break
+      fi
+
     done
+
+    if (( story_task_consumed )); then
+      single_task_consumed=1
+    fi
 
     if (( batch_limit_reached )); then
       break
@@ -10487,11 +10539,25 @@ print(flag("notes_contains_already_satisfied"))'
     if (( story_failed )); then
       warn "Continuing after issues in story ${slug}; moving to the next story."
       story_failed=0
+      if (( single_task_mode )); then
+        gc_sync_story_totals "$tasks_db"
+        gc_touch_progress
+        break
+      fi
       continue
     fi
 
     if (( idle_timeout_triggered )); then
       break
+    fi
+
+    if (( single_task_mode )); then
+      gc_sync_story_totals "$tasks_db"
+      gc_touch_progress
+      if (( story_task_consumed )); then
+        break
+      fi
+      continue
     fi
 
     gc_update_work_state "$tasks_db" "$slug" "complete" "$total_tasks_int" "$total_tasks_int" "$run_stamp"
@@ -10501,6 +10567,10 @@ print(flag("notes_contains_already_satisfied"))'
       rmdir "${story_run_dir}/out" 2>/dev/null || true
     fi
   done < <("$python_bin" "$story_plan_helper" "$tasks_db" "${story_filter}" "$resume_flag")
+
+    if (( single_task_mode )) && (( single_task_consumed )); then
+      break
+    fi
 
     if (( migration_transition_hard_stop )); then
       break
@@ -11648,7 +11718,13 @@ main() {
     tidy-progress)  cmd_tidy_progress "$@" ;;
     next)           cmd_next "$@" ;;
     why)            cmd_why "$@" ;;
-    work-on-tasks)  cmd_work_on_tasks "$@" ;;
+    work-on-tasks)
+      if [[ "${GC_TASK_ORDER:-global-dag}" == "global-dag" ]]; then
+        "$shell_bin" "$CLI_ROOT/scripts/work-on-tasks-global.sh" "$@"
+      else
+        cmd_work_on_tasks "$@"
+      fi
+      ;;
     iterate)        cmd_iterate "$@" ;;
     keys)           cmd_keys "$@" ;;
     binder)         cmd_binder "$@" ;;

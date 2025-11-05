@@ -40,6 +40,7 @@ fi
 
 args=("$@")
 story_filter=""
+task_filter=""
 for (( idx = 0; idx < ${#args[@]}; idx++ )); do
   arg="${args[idx]}"
   case "$arg" in
@@ -50,6 +51,14 @@ for (( idx = 0; idx < ${#args[@]}; idx++ )); do
       ;;
     --story=*|--from-story=*)
       story_filter="${arg#*=}"
+      ;;
+    --task)
+      if (( idx + 1 < ${#args[@]} )); then
+        task_filter="${args[idx + 1]}"
+      fi
+      ;;
+    --task=*)
+      task_filter="${arg#*=}"
       ;;
   esac
 done
@@ -62,6 +71,10 @@ declare -a base_args=(
 
 if [[ -n "$task_ref" ]]; then
   base_args+=(--from-task "$task_ref")
+fi
+
+if [[ -z "$task_filter" && -n "${TASK_FILTER:-}" ]]; then
+  task_filter="${TASK_FILTER}"
 fi
 
 if (( ${#args[@]} > 0 )); then
@@ -103,6 +116,8 @@ run_with_retries() {
   local retry_label=""
   if [[ -n "$task_ref" ]]; then
     retry_label="$task_ref"
+  elif [[ -n "$task_filter" ]]; then
+    retry_label="$task_filter"
   elif [[ -n "$story_filter" ]]; then
     retry_label="$story_filter"
   fi

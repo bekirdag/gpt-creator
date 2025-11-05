@@ -187,6 +187,8 @@ def main() -> int:
               story_title TEXT,
               epic_key TEXT,
               epic_title TEXT,
+              global_order INTEGER NOT NULL DEFAULT 0,
+              global_order_updated_at TEXT,
               uid TEXT,
               updated_at TEXT NOT NULL,
               created_at TEXT NOT NULL,
@@ -562,6 +564,8 @@ def main() -> int:
                 story_title or None,
                 epic_key,
                 epic_title or None,
+                0,
+                None,
                 task_uid,
                 generated_at,
                 generated_at,
@@ -581,6 +585,7 @@ def main() -> int:
                   locked_by, locked_by_migration, migration_epoch, reopened_by_migration_at, reopened_by_migration,
                   started_at, completed_at, last_run,
                   story_id, story_title, epic_key, epic_title,
+                  global_order, global_order_updated_at,
                   uid, updated_at, created_at
                 ) VALUES ({placeholders})
             """,

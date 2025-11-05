@@ -5,7 +5,17 @@ from __future__ import annotations
 
 import json
 import sys
+import os
 from pathlib import Path
+from typing import Any
+
+
+def _normalized_task_id(task: dict[str, Any]) -> str:
+    for key in ("id", "task_id", "slug"):
+        value = task.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return ""
 
 
 def build_lines(index: int, task: dict[str, object], project_root: str) -> list[str]:
@@ -84,6 +94,9 @@ def main() -> None:
 
     data = json.loads(source.read_text(encoding="utf-8"))
     tasks = data.get("tasks", []) if isinstance(data, dict) else []
+    task_filter = (os.getenv("TASK_FILTER") or "").strip().lower()
+    if task_filter:
+        tasks = [task for task in tasks if _normalized_task_id(task) == task_filter]
 
     out_dir.mkdir(parents=True, exist_ok=True)
     index_path = out_dir / "tasks-order.txt"

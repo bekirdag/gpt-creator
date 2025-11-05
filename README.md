@@ -17,8 +17,8 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Verification toolkit**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks for teams that still want to run them manually outside the core workflow.
 - **Doc synthesis**: `create-pdr` converts the staged RFP into a multi-level Product Requirements Document (PDR) by iteratively asking Codex to draft the table of contents, sections, and detailed subsections. `create-sds` continues the loop, transforming the staged PDR into a System Design Specification that drills from architecture overview down to low-level operational detail.
 - **Database synthesis**: `create-db-dump` reads the SDS (and PDR context) to draft a full MySQL schema plus production-grade seed data, then reviews both dumps for consistency before storing them under `.gpt-creator/staging/plan/create-db-dump/sql/`.
-- **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, and `work-on-tasks` executes/resumes backlog items. The legacy `iterate` command is deprecated.
-- **Backlog browser**: `backlog` prints non-interactive terminal summaries so you can list epics, enumerate stories, inspect children, or dump task details straight from the SQLite backlog.
+- **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, and `work-on-tasks` executes/resumes backlog items using a globally persisted DAG order so dependencies get handled first. The legacy `iterate` command is deprecated.
+- **Backlog browser**: `backlog` prints non-interactive terminal summaries so you can list epics, enumerate stories, inspect children, dump task details, or preview the next DAG-prioritised tasks straight from the SQLite backlog.
 - **Backlog ETA**: `estimate` aggregates remaining story points in `.gpt-creator/staging/plan/tasks/tasks.db` and translates them into a formatted duration using the throughput observed during `work-on-tasks` runs (defaults to 15 story points per hour until telemetry is captured). Point `--project` at another workspace if needed.
 - **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
 
@@ -157,13 +157,13 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
   - `migrate-tasks` regenerates `.gpt-creator/staging/plan/tasks/tasks.db` directly from the JSON artifacts — ideal when you want to sync the DB without re-running Codex.
   - `refine-tasks` streams tasks from `tasks.db` one at a time, rehydrates the original story context, runs Codex against the staged docs, writes the refined JSON to `json/refined`, and updates the task row in SQLite immediately after each successful response. Use `--force` to reset refinement flags and reprocess every task.
   - `create-tasks` snapshots a Jira markdown export into the same database if you already maintain backlog files.
-  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, `--from-task TASK` (or `--fresh-from`) to rewind the backlog so execution resumes from that task id or `story-slug:position` reference, and `--force` to reset all story/task statuses to `pending` before the run. The command now blocks early if the workspace has merge conflicts, dirty/untracked files, or Prisma schema drift (detected via `prisma migrate diff`), so resolve those issues before retrying.
-  - `backlog` renders summaries directly to the terminal: run it with no extra flags (or `--type epics`) to list each epic with progress metrics, `--type stories` for an all-story table, `--item-children <slug>` to drill into an epic or story, `--task-details <id>` to print a single task, and `--progress` to draw an overall task progress bar. Use `--project` (or legacy `--root`) to point at a different workspace.
+  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, `--from-task TASK` (or `--fresh-from`) to rewind the backlog so execution resumes from that task id or `story-slug:position` reference, and `--force` to reset all story/task statuses to `pending` before the run. The runner now computes a deterministic, cross-story DAG queue (persisted to the `global_order` column in `tasks.db`) and always advances to the next ready task across the entire backlog. It still blocks early if the workspace has merge conflicts, dirty/untracked files, or Prisma schema drift (detected via `prisma migrate diff`), so resolve those issues before retrying.
+  - `backlog` renders summaries directly to the terminal: run it with no extra flags (or `--type epics`) to list each epic with progress metrics, `--type stories` for an all-story table, `--item-children <slug>` to drill into an epic or story, `--task-details <id>` to print a single task, and `--progress` to draw an overall task progress bar. Task tables now show the stored DAG order, and `--dag-limit N` prints the next `N` globally prioritised tasks (default 20). Use `--project` (or legacy `--root`) to point at a different workspace.
   - The legacy `iterate` command is deprecated.
 
 ### Backlog Browser
 
-`gpt-creator backlog` emits structured summaries straight to the console, backed by `.gpt-creator/staging/plan/tasks/tasks.db`.
+`gpt-creator backlog` emits structured summaries straight to the console, backed by `.gpt-creator/staging/plan/tasks/tasks.db`. Task listings now surface the persisted DAG order so you can see both per-story positions and the global execution queue.
 
 ```bash
 $ gpt-creator backlog --project ~/projects/sample-app
@@ -198,9 +198,9 @@ GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)
   ```bash
   $ gpt-creator backlog --project ~/projects/sample-app --item-children user-onboard
   Tasks for story: User onboarding flow (user-onboard)
-#  Task ID    Title                                                Status      Story Points
-  1  GC-101     Implement signup API                                 in-progress 3d
-  2  GC-102     Persist marketing opt-in                             pending     1d
+#  Order  Task ID    Title                                                Status      Story Points
+  1  12     GC-101     Implement signup API                                 in-progress 3d
+  2  15     GC-102     Persist marketing opt-in                             pending     1d
   ```
 
 - `--task-details <id>` prints a single task in detail:
@@ -226,6 +226,19 @@ GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)
   Tasks complete: 210/300 (70.0%)
   In-progress: 45, Pending: 45
   [######################--------]
+  ```
+
+- `--dag-limit N` prints the next `N` tasks using the persisted DAG priority (defaults to 20 when omitted):
+
+  ```bash
+  $ gpt-creator backlog --project ~/projects/sample-app --dag-limit 10
+  Next tasks by DAG priority
+  Order  Story Slug     Task ID    Title                                       Status
+  -----  -------------  ---------  ------------------------------------------  ----------
+  12     user-onboard   GC-101     Implement signup API                        in-progress
+  15     user-onboard   GC-102     Persist marketing opt-in                    pending
+  18     reporting-api  GC-305     Expose GET /reports summary endpoint        pending
+  ...
   ```
 
 - Run `gpt-creator create-tasks` or the `create-jira-tasks` + `migrate-tasks` pipeline first; the backlog commands require a populated tasks database. Use `--project` (or backward-compatible `--root`) to target an alternate workspace.

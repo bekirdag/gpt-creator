@@ -5,7 +5,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-db_path, type_arg, item_children, progress_flag, task_details = sys.argv[1:6]
+db_path, type_arg, item_children, progress_flag, task_details, dag_limit = sys.argv[1:7]
 
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
@@ -198,7 +198,7 @@ def fetch_tasks_for_story(slug):
     if HAS_TASK_ESTIMATE_COLUMN:
         story_points_expr = "COALESCE(story_points, estimate)"
     query = f"""
-        SELECT position, task_id, title, status, {story_points_expr} AS story_points
+        SELECT position, task_id, title, status, {story_points_expr} AS story_points, global_order
         FROM tasks
         WHERE story_slug = ?
         ORDER BY position
@@ -489,11 +489,19 @@ def print_task_children(story):
     if not tasks:
         print(f"No tasks found for story '{slug or story.get('story_id') or story.get('story_title')}'.")
         return
-    headers = ["#", "Task ID", "Title", "Status", "Story Points"]
+    headers = ["#", "Order", "Task ID", "Title", "Status", "Story Points"]
     rows = []
     for task in tasks:
         position = task.get("position")
         index = str((position if position is not None else 0) + 1)
+        global_order = task.get("global_order")
+        order_display = "-"
+        try:
+            order_int = int(global_order)
+        except (TypeError, ValueError):
+            order_int = 0
+        if order_int > 0:
+            order_display = str(order_int)
         task_id = (task.get("task_id") or "").strip() or "-"
         title = truncate(task.get("title"), width=80)
         status = (task.get("status") or "pending").strip().lower().replace("_", "-")
@@ -502,7 +510,7 @@ def print_task_children(story):
             story_points = "-"
         else:
             story_points = str(points_value).strip() or "-"
-        rows.append([index, task_id, title, status, story_points])
+        rows.append([index, order_display, task_id, title, status, story_points])
     print_table(headers, rows)
 
 def compute_story_metrics(total, complete, in_progress, pending, status_field):
@@ -683,23 +691,64 @@ try:
         else:
             print(f"Unsupported backlog type: {type_arg}", file=sys.stderr)
             sys.exit(1)
-        if printed and (item_children or progress_flag == "1" or task_details):
+        if printed and (item_children or progress_flag == "1" or task_details or dag_limit):
             print()
     if item_children:
         show_item_children(item_children)
         printed = True
-        if progress_flag == "1" or task_details:
+        if progress_flag == "1" or task_details or dag_limit:
             print()
     if progress_flag == "1":
         print_progress()
         printed = True
-        if task_details:
+        if task_details or dag_limit:
             print()
     if task_details:
         print_task_details(task_details)
+        printed = True
+        if dag_limit:
+            print()
+    if dag_limit:
+        try:
+            limit_val = int(dag_limit)
+        except (TypeError, ValueError):
+            limit_val = 0
+        if limit_val <= 0:
+            limit_val = 20
+        print_global_order_queue(limit_val)
+        printed = True
 finally:
     canonical_remaining = count_remaining_tasks(conn)
     if 'printed' in locals() and printed:
         print()
     print(f"Remaining tasks (canonical): {canonical_remaining}")
     conn.close()
+def print_global_order_queue(limit: int) -> None:
+    query = """
+        SELECT global_order, story_slug, task_id, title, status
+          FROM tasks
+         WHERE global_order > 0
+         ORDER BY global_order ASC
+         LIMIT ?
+    """
+    rows = []
+    for row in conn.execute(query, (limit,)):
+        order_value = row["global_order"]
+        try:
+            order_int = int(order_value)
+        except (TypeError, ValueError):
+            order_int = 0
+        if order_int <= 0:
+            continue
+        story_slug = (row["story_slug"] or "").strip()
+        task_id = (row["task_id"] or "").strip() or "-"
+        title = truncate(row["title"], width=80)
+        status = normalise_status(row["status"] or "pending")
+        rows.append([str(order_int), story_slug or "-", task_id, title, status])
+
+    headers = ["Order", "Story", "Task ID", "Title", "Status"]
+    if not rows:
+        print(f"No tasks found with global order.")
+    else:
+        print("Next tasks by DAG priority")
+        print_table(headers, rows)

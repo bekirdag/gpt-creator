@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 MAX_STORY_SPINS="${MAX_STORY_SPINS:-1000}"
 spins=0
 prev_story=""
+mkdir -p "${ROOT_DIR}/.gpt-creator/logs"
 
 while (( spins < MAX_STORY_SPINS )); do
   if ! "${SCRIPT_DIR}/work-on-tasks-retry.sh" "$@"; then

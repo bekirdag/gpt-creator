@@ -20,6 +20,7 @@ def main():
         r'JSON not found in Codex output',
         r'Structured instructions not found in Codex output',
         r'apply-failed-migration-context|empty-apply checkpoint',
+        r'Template not found: .*empty_apply_checkpoint',
     ]
     for pat in transient_patterns:
         if re.search(pat, text, re.IGNORECASE):

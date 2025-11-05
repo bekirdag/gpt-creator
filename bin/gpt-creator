@@ -8687,7 +8687,7 @@ print(error)'
       IFS=$'\t' read -r task_id task_title task_story_points task_status_current task_locked_flag task_status_reason <<<"$prompt_meta"
       local task_id_lower="${task_id,,}"
       if (( single_task_mode )); then
-        local fallback_key="${slug,,}:${task_index + 1}"
+        local fallback_key="$(printf '%s:%d' "${slug,,}" $((task_index + 1)))"
         local matches_filter=0
         if [[ -n "$task_filter_normalized" ]]; then
           if [[ -n "$task_id_lower" && "$task_id_lower" == "$task_filter_normalized" ]]; then

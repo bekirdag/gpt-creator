@@ -2,7 +2,11 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+if [[ -n "${PROJECT_ROOT:-}" && -d "${PROJECT_ROOT}" ]]; then
+  ROOT_DIR="$(cd "${PROJECT_ROOT}" && pwd -P)"
+else
+  ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+fi
 HELP_DIR="${ROOT_DIR}/assets/templates/help"
 
 usage() {

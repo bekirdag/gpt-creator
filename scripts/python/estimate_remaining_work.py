@@ -29,6 +29,7 @@ IN_PROGRESS_PREFIXES = (
     "in progress",
 )
 DEFAULT_CONTAMINATION_THRESHOLD = 0.2
+RECENT_SAMPLE_LIMIT = 10
 STATUS_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -231,6 +232,37 @@ def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
         if name == needle:
             return True
     return False
+
+
+def fetch_recent_productive_samples(
+    cursor: sqlite3.Cursor, limit: int = RECENT_SAMPLE_LIMIT
+) -> list[sqlite3.Row]:
+    if limit <= 0:
+        return []
+    if not table_exists(cursor, "metric_samples"):
+        return []
+    sample_cap = max(limit, RECENT_SAMPLE_LIMIT)
+    try:
+        rows = cursor.execute(
+            """
+            SELECT task_key,
+                   story_slug,
+                   task_position,
+                   sp_delivered,
+                   duration_seconds,
+                   tokens_total,
+                   occurred_at
+              FROM metric_samples
+             WHERE sp_delivered IS NOT NULL
+               AND sp_delivered > 0
+             ORDER BY occurred_at DESC
+             LIMIT ?
+            """,
+            (sample_cap,),
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return []
+    return list(rows)
 
 
 def fetch_progress_status_map(cur: sqlite3.Cursor) -> Dict[str, str]:
@@ -518,42 +550,67 @@ def estimate(db_path: Path) -> int:
         remaining_tasks += 1
         total_points += points
 
+    recent_samples = fetch_recent_productive_samples(cur, RECENT_SAMPLE_LIMIT)
+    recent_sample_count = len(recent_samples)
     tokens_total = 0.0
     token_samples = 0
     covered_points = 0.0
+    using_recent_velocity = False
 
-    token_by_task: Dict[str, float] = {}
+    if recent_samples:
+        recent_points_total = 0.0
+        recent_duration_seconds = 0.0
+        for sample in recent_samples:
+            sp_value = max(float(sample["sp_delivered"] or 0.0), 0.0)
+            duration_value = float(sample["duration_seconds"] or 0.0)
+            tokens_value = float(sample["tokens_total"] or 0.0)
+            recent_points_total += sp_value
+            if duration_value > 0:
+                recent_duration_seconds += max(duration_value, 0.0)
+            if tokens_value > 0:
+                tokens_total += tokens_value
+                token_samples += 1
+                covered_points += sp_value
+        if recent_points_total > 0 and recent_duration_seconds > 0:
+            recent_rate = recent_points_total / (recent_duration_seconds / 3600.0)
+            if recent_rate > 0:
+                rate = recent_rate
+                ewma_rate = recent_rate
+                rate_samples = recent_sample_count
+                using_recent_velocity = True
+    else:
+        token_by_task: Dict[str, float] = {}
 
-    if table_exists(cur, "doc_observations"):
-        try:
-            for observation in cur.execute(
-                "SELECT task_id, SUM(tokens) AS total_tokens FROM doc_observations GROUP BY task_id"
-            ):
-                task_key = observation["task_id"]
-                tokens_value = observation["total_tokens"] or 0
-                if task_key:
-                    token_by_task[str(task_key)] = float(tokens_value)
-        except sqlite3.DatabaseError:
-            token_by_task = {}
-    elif table_exists(cur, "task_progress"):
-        try:
-            for progress in cur.execute(
-                "SELECT task_id, tokens_total FROM task_progress "
-                "WHERE tokens_total IS NOT NULL AND tokens_total > 0 ORDER BY id"
-            ):
-                task_id = progress["task_id"]
-                if task_id is None:
-                    continue
-                token_by_task[str(task_id)] = float(progress["tokens_total"])
-        except sqlite3.DatabaseError:
-            token_by_task = {}
+        if table_exists(cur, "doc_observations"):
+            try:
+                for observation in cur.execute(
+                    "SELECT task_id, SUM(tokens) AS total_tokens FROM doc_observations GROUP BY task_id"
+                ):
+                    task_key = observation["task_id"]
+                    tokens_value = observation["total_tokens"] or 0
+                    if task_key:
+                        token_by_task[str(task_key)] = float(tokens_value)
+            except sqlite3.DatabaseError:
+                token_by_task = {}
+        elif table_exists(cur, "task_progress"):
+            try:
+                for progress in cur.execute(
+                    "SELECT task_id, tokens_total FROM task_progress "
+                    "WHERE tokens_total IS NOT NULL AND tokens_total > 0 ORDER BY id"
+                ):
+                    task_id = progress["task_id"]
+                    if task_id is None:
+                        continue
+                    token_by_task[str(task_id)] = float(progress["tokens_total"])
+            except sqlite3.DatabaseError:
+                token_by_task = {}
 
-    token_samples = len(token_by_task)
-    for task_key, tokens in token_by_task.items():
-        tokens_total += tokens
-        info = task_info.get(task_key)
-        if info and is_done_status(str(info.get("status", ""))):
-            covered_points += float(info.get("points", 0.0))
+        token_samples = len(token_by_task)
+        for task_key, tokens in token_by_task.items():
+            tokens_total += tokens
+            info = task_info.get(task_key)
+            if info and is_done_status(str(info.get("status", ""))):
+                covered_points += float(info.get("points", 0.0))
 
     conn.close()
 
@@ -626,13 +683,22 @@ def estimate(db_path: Path) -> int:
 
     throughput_rows: list[tuple[str, str]] = []
     if rate_samples > 0 and effective_rate > 0:
-        sample_label = "run" if rate_samples == 1 else "runs"
-        throughput_rows.append(
-            ("Throughput basis", f"Measured from {rate_samples} {sample_label}")
-        )
-        throughput_rows.append(
-            ("Effective throughput", f"{fmt_float(effective_rate)} SP/hour (EWMA)")
-        )
+        if using_recent_velocity:
+            sample_label = "task" if rate_samples == 1 else "tasks"
+            throughput_rows.append(
+                ("Throughput basis", f"Last {rate_samples} {sample_label}")
+            )
+            throughput_rows.append(
+                ("Effective throughput", f"{fmt_float(effective_rate)} SP/hour (recent window)")
+            )
+        else:
+            sample_label = "run" if rate_samples == 1 else "runs"
+            throughput_rows.append(
+                ("Throughput basis", f"Measured from {rate_samples} {sample_label}")
+            )
+            throughput_rows.append(
+                ("Effective throughput", f"{fmt_float(effective_rate)} SP/hour (EWMA)")
+            )
     else:
         throughput_rows.append(
             ("Throughput basis", f"Default assumption ({fmt_float(DEFAULT_RATE)} SP/hour)")
@@ -655,8 +721,11 @@ def estimate(db_path: Path) -> int:
 
     token_rows: list[tuple[str, str]] = []
     if tokens_total > 0 and token_samples > 0:
+        basis_note = ""
+        if recent_sample_count:
+            basis_note = f" (last {recent_sample_count} task(s))"
         token_rows.append(
-            ("Observed tokens", f"{fmt_tokens(tokens_total)} across {token_samples} task(s)")
+            ("Observed tokens", f"{fmt_tokens(tokens_total)} across {token_samples} task(s){basis_note}")
         )
         if covered_points > 0:
             avg_tokens_per_point = tokens_total / covered_points

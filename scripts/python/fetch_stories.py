@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import sys
 import textwrap
@@ -6,6 +7,15 @@ db_path, type_arg, item_children, progress_flag, task_details = sys.argv[1:6]
 
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
+
+DONE_PREFIXES = (
+    "complete",
+    "completed",
+    "done",
+    "skipped",
+    "skip",
+)
+
 
 def normalise_status(value: str) -> str:
     text = (value or "").strip().lower()
@@ -16,16 +26,14 @@ def status_is_completed(value: str) -> bool:
     status = normalise_status(value)
     if not status:
         return False
-    if status.startswith("complete"):
-        return True
-    if status.startswith("completed"):
-        return True
-    if status.startswith("done"):
-        return True
-    if status.startswith("skipped-already-complete"):
-        return True
-    if status.startswith("skipped-no-changes"):
-        return True
+    tokens = [status]
+    split_tokens = [token for token in re.split(r"[^a-z0-9]+", status) if token]
+    if split_tokens:
+        tokens.extend(split_tokens)
+    for prefix in DONE_PREFIXES:
+        for token in tokens:
+            if token.startswith(prefix):
+                return True
     return False
 
 

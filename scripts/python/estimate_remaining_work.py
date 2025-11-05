@@ -29,6 +29,7 @@ IN_PROGRESS_PREFIXES = (
     "in progress",
 )
 DEFAULT_CONTAMINATION_THRESHOLD = 0.2
+STATUS_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
 
 def normalize_status(value: str) -> str:
@@ -50,9 +51,14 @@ def is_done_status(value: str) -> bool:
     status = coerce_status(value)
     if not status:
         return False
+    tokens = [status]
+    tokenised = [token for token in STATUS_TOKEN_SPLIT_RE.split(status) if token]
+    if tokenised:
+        tokens.extend(tokenised)
     for prefix in DONE_STATUS_PREFIXES:
-        if status.startswith(prefix):
-            return True
+        for candidate in tokens:
+            if candidate.startswith(prefix):
+                return True
     return False
 
 

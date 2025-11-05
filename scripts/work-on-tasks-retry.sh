@@ -76,12 +76,16 @@ run_once() {
   fi
   mkdir -p "${ROOT_DIR}/.gpt-creator/logs"
   cp "$log_file" "${ROOT_DIR}/.gpt-creator/logs/last_run.log"
+  python3 "${SCRIPT_DIR}/python/git_change_detector.py" >/dev/null 2>&1 || true
   return "$status"
 }
 
 max_attempts="${MAX_ATTEMPTS:-3}"
 attempt=1
 status=0
+
+mkdir -p "${ROOT_DIR}/.gpt-creator/logs"
+git rev-parse HEAD > "${ROOT_DIR}/.gpt-creator/logs/last_run.base_sha" 2>/dev/null || true
 
 while (( attempt <= max_attempts )); do
   if run_once; then

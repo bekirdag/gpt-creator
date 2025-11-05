@@ -4,9 +4,14 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import sqlite3
 import sys
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+OVERRIDE_DIR = REPO_ROOT / ".gpt-creator" / "logs" / "status-overrides"
+_RECENT_SUBJECTS: list[str] | None = None
 
 def _normalize_status(value: str | None) -> str:
     cleaned = (value or "").strip().lower().replace("_", "-")
@@ -21,6 +26,41 @@ def _is_terminal_status(value: str | None) -> bool:
     if s in {"complete", "completed", "completed-no-changes", "done", "skipped", "skipped-already-complete"}:
         return True
     return s.startswith("completed-") or s.startswith("done-") or s.startswith("skipped-")
+
+def _recent_commit_subjects() -> list[str]:
+    global _RECENT_SUBJECTS
+    if _RECENT_SUBJECTS is not None:
+        return _RECENT_SUBJECTS
+    try:
+        output = subprocess.check_output(
+            ["git", "log", "-n", "30", "--pretty=format:%s"],
+            cwd=REPO_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        _RECENT_SUBJECTS = []
+        return _RECENT_SUBJECTS
+    _RECENT_SUBJECTS = [line.strip() for line in output.splitlines() if line.strip()]
+    return _RECENT_SUBJECTS
+
+
+def _override_completed_no_changes(task_id: str | None, status: str | None) -> str:
+    raw_status = (status or "").strip()
+    if _normalize_status(raw_status) != "completed-no-changes":
+        return raw_status
+    task_id_clean = (task_id or "").strip()
+    if not task_id_clean:
+        return raw_status
+    marker = OVERRIDE_DIR / f"{task_id_clean.upper()}.applied"
+    if marker.exists():
+        return "complete"
+    subjects = _recent_commit_subjects()
+    task_id_upper = task_id_clean.upper()
+    for subject in subjects:
+        if task_id_upper in subject.upper():
+            return "complete"
+    return raw_status
 
 
 def norm(value: str | None) -> str:
@@ -85,7 +125,7 @@ def main() -> None:
         slug_lower = norm(slug)
         if slug_lower:
             task_rows = cur.execute(
-                'SELECT position, status FROM tasks WHERE LOWER(COALESCE(story_slug, "")) = ? ORDER BY position ASC',
+                'SELECT position, status, task_id FROM tasks WHERE LOWER(COALESCE(story_slug, "")) = ? ORDER BY position ASC',
                 (slug_lower,),
             ).fetchall()
 
@@ -93,11 +133,14 @@ def main() -> None:
             story_id_lower = norm(story_id)
             if story_id_lower:
                 rows = cur.execute(
-                    'SELECT id, position, status, story_slug FROM tasks WHERE LOWER(COALESCE(story_id, "")) = ? ORDER BY position ASC',
+                    'SELECT id, position, status, story_slug, task_id FROM tasks WHERE LOWER(COALESCE(story_id, "")) = ? ORDER BY position ASC',
                     (story_id_lower,),
                 ).fetchall()
                 if rows:
-                    task_rows = [(row["position"], row["status"]) for row in rows]
+                    task_rows = [
+                        (row["position"], row["status"], row["task_id"])
+                        for row in rows
+                    ]
                     if slug_lower:
                         cur.execute(
                             'UPDATE tasks SET story_slug = ? WHERE LOWER(COALESCE(story_id, "")) = ?',
@@ -109,7 +152,7 @@ def main() -> None:
             slug_key = slug_norm(slug)
             if slug_key:
                 task_rows = cur.execute(
-                    'SELECT position, status FROM tasks WHERE LOWER(COALESCE(story_slug, "")) = ? ORDER BY position ASC',
+                    'SELECT position, status, task_id FROM tasks WHERE LOWER(COALESCE(story_slug, "")) = ? ORDER BY position ASC',
                     (slug_key,),
                 ).fetchall()
 
@@ -117,11 +160,17 @@ def main() -> None:
         completed = 0
         next_index = 0
         for row in task_rows:
-            status = (row[1] or "")
-            if _is_terminal_status(status):
+            if isinstance(row, sqlite3.Row):
+                position = row["position"]
+                status_value = row["status"]
+                task_id = row["task_id"]
+            else:
+                position, status_value, task_id = row
+            effective_status = _override_completed_no_changes(task_id, status_value)
+            if _is_terminal_status(effective_status):
                 completed += 1
                 continue
-            next_index = row[0] or 0
+            next_index = position or 0
             break
         else:
             next_index = total

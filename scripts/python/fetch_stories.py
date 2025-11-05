@@ -5,7 +5,10 @@ import sys
 import textwrap
 from pathlib import Path
 
-db_path, type_arg, item_children, progress_flag, task_details, dag_limit = sys.argv[1:7]
+args = list(sys.argv[1:])
+while len(args) < 6:
+    args.append("")
+db_path, type_arg, item_children, progress_flag, task_details, dag_limit = args[:6]
 
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row

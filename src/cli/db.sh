@@ -43,6 +43,7 @@ dc() {
 usage() {
   (
     set -a
+    # shellcheck disable=SC2034
     DB_USAGE_DB_NAME="${DB_NAME:-${GC_DB_NAME:-${PROJECT_SLUG}_app}}"
     DB_USAGE_DB_USER="${DB_USER:-${GC_DB_USER:-${PROJECT_SLUG}_user}}"
     DB_USAGE_DB_PASS="${DB_PASS:-${GC_DB_PASSWORD:-${PROJECT_SLUG}_pass}}"

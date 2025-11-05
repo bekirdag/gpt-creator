@@ -135,6 +135,7 @@ fi
 usage() {
   (
     set -a
+    # shellcheck disable=SC2034
     GEN_DOCKER_OUT_DEFAULT="${OUT_DIR:-docker}"
     set +a
     gc_cli_render_template "help/generate_docker_usage.txt"
@@ -160,12 +161,13 @@ admin_df="${OUT_PATH}/admin.Dockerfile"
 nginx_conf="${OUT_PATH}/nginx.conf"
 env_example="${ROOT_DIR}/.env.example"
 
-(
-  set -a
-  GEN_DOCKER_PROJECT_SLUG="${PROJECT_SLUG}"
-  GEN_DOCKER_DB_ROOT_PASS="${DB_ROOT_PASS}"
-  GEN_DOCKER_DB_NAME="${DB_NAME}"
-  GEN_DOCKER_DB_USER="${DB_USER}"
+  (
+    set -a
+    # shellcheck disable=SC2034
+    GEN_DOCKER_PROJECT_SLUG="${PROJECT_SLUG}"
+    GEN_DOCKER_DB_ROOT_PASS="${DB_ROOT_PASS}"
+    GEN_DOCKER_DB_NAME="${DB_NAME}"
+    GEN_DOCKER_DB_USER="${DB_USER}"
   GEN_DOCKER_DB_PASS="${DB_PASS}"
   GEN_DOCKER_DB_HOST_PORT="${DB_HOST_PORT}"
   GEN_DOCKER_API_HOST_PORT="${API_HOST_PORT}"
@@ -184,12 +186,13 @@ gc_cli_render_template "docker/admin.Dockerfile" > "${admin_df}"
 
 gc_cli_render_template "docker/nginx.conf.tmpl" > "${nginx_conf}"
 
-(
-  set -a
-  GEN_DOCKER_ENV_DB_URL="mysql://${DB_USER}:${DB_PASS}@127.0.0.1:${DB_HOST_PORT}/${DB_NAME}"
-  GEN_DOCKER_DB_HOST_PORT="${DB_HOST_PORT}"
-  GEN_DOCKER_API_HOST_PORT="${API_HOST_PORT}"
-  GEN_DOCKER_WEB_HOST_PORT="${WEB_HOST_PORT}"
+  (
+    set -a
+    # shellcheck disable=SC2034
+    GEN_DOCKER_ENV_DB_URL="mysql://${DB_USER}:${DB_PASS}@127.0.0.1:${DB_HOST_PORT}/${DB_NAME}"
+    GEN_DOCKER_DB_HOST_PORT="${DB_HOST_PORT}"
+    GEN_DOCKER_API_HOST_PORT="${API_HOST_PORT}"
+    GEN_DOCKER_WEB_HOST_PORT="${WEB_HOST_PORT}"
   GEN_DOCKER_ADMIN_HOST_PORT="${ADMIN_HOST_PORT}"
   GEN_DOCKER_PROXY_HOST_PORT="${PROXY_HOST_PORT}"
   GEN_DOCKER_API_BASE_URL="${API_BASE_URL}"

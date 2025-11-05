@@ -52,6 +52,7 @@ INSTALL_DEPS=1
 show_help() {
   (
     set -a
+    # shellcheck disable=SC2034
     GEN_API_OUT_DEFAULT="${OUT_DIR}"
     set +a
     gc_cli_render_template "help/generate_api_usage.txt"
@@ -95,13 +96,14 @@ SQL="$(resolve_doc "${STAGING_DIR}/schema.sql" '*schema.sql' '*sql_dump*.sql' '*
 
 PROMPT_FILE="${WORK_DIR}/prompts/generate-api.prompt.md"
 
-(
-  set -a
-  GEN_API_OPENAPI="${OPENAPI_PATH}"
-  GEN_API_PDR="${PDR}"
-  GEN_API_SDS="${SDS}"
-  GEN_API_IA="${IA}"
-  GEN_API_RFP="${RFP}"
+  (
+    set -a
+    # shellcheck disable=SC2034
+    GEN_API_OPENAPI="${OPENAPI_PATH}"
+    GEN_API_PDR="${PDR}"
+    GEN_API_SDS="${SDS}"
+    GEN_API_IA="${IA}"
+    GEN_API_RFP="${RFP}"
   GEN_API_SQL="${SQL}"
   set +a
   gc_cli_render_template "prompts/generate_api.prompt.md.tmpl"

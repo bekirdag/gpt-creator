@@ -54,6 +54,7 @@ INSTALL_DEPS=1
 show_help() {
   (
     set -a
+    # shellcheck disable=SC2034
     GEN_WEB_OUT_DEFAULT="${WEB_DIR}"
     set +a
     gc_cli_render_template "help/generate_web_usage.txt"
@@ -93,12 +94,13 @@ fi
 [[ -f "$STYLE_CSS" ]] || log_warn "Style CSS/tokens not found; proceeding without."
 
 PROMPT_FILE="${WORK_DIR}/prompts/generate-web.prompt.md"
-(
-  set -a
-  GEN_WEB_UI_DOC="${UI_DOC}"
-  GEN_WEB_STYLE="${STYLE_CSS:-<none>}"
-  GEN_WEB_SAMPLES="${SAMPLES_DIR:-<none>}"
-  set +a
+  (
+    set -a
+    # shellcheck disable=SC2034
+    GEN_WEB_UI_DOC="${UI_DOC}"
+    GEN_WEB_STYLE="${STYLE_CSS:-<none>}"
+    GEN_WEB_SAMPLES="${SAMPLES_DIR:-<none>}"
+    set +a
   gc_cli_render_template "prompts/generate_web.prompt.md.tmpl"
 ) > "$PROMPT_FILE"
 

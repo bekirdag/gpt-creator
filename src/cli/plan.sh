@@ -4,6 +4,7 @@
 set -Eeuo pipefail
 
 __DIR__="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC2034
 GC_TEMPLATE_ROOT="$(cd "${__DIR__}/../.." && pwd)/assets/templates"
 # shellcheck disable=SC1091
 source "${__DIR__}/../lib/templates.sh"

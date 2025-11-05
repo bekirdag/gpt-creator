@@ -32,6 +32,7 @@ die(){ err "$*"; exit 1; }
 usage() {
   (
     set -a
+    # shellcheck disable=SC2034
     RUN_LOGS_CMD_NAME="$GC_NAME"
     RUN_LOGS_DEFAULT_TAIL="$TAIL"
     set +a

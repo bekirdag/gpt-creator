@@ -82,6 +82,7 @@ if [[ "$review_log_path" == "$ROOT/"* ]]; then
 fi
 
 (
+  # shellcheck disable=SC2034
   EF_REVIEW_TASK_ID="${task_id:-unknown}"
   EF_REVIEW_STATUS="${status:-unknown}"
   EF_REVIEW_TOKENS="${tokens:-unknown}"
@@ -98,6 +99,7 @@ summary_run_json="$(json_escape "$run_id")"
 summary_timestamp_json="$(json_escape "$timestamp")"
 
 (
+  # shellcheck disable=SC2034
   EF_SUMMARY_TASK_ID="$summary_task_id_json"
   EF_SUMMARY_STATUS="$summary_status_json"
   EF_SUMMARY_TOKENS="$summary_tokens_json"

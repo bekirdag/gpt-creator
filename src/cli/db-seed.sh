@@ -34,6 +34,7 @@ gc_cli_heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
 usage() {
   (
     set -a
+    # shellcheck disable=SC2034
     DB_SEED_CMD_NAME="$(basename "$0")"
     set +a
     gc_cli_render_template "help/db_seed_usage.txt"

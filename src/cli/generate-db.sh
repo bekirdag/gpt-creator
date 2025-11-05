@@ -56,6 +56,7 @@ humanize_name() {
 usage() {
   (
     set -a
+    # shellcheck disable=SC2034
     GEN_DB_CODEX_MODEL_DEFAULT="${CODEX_MODEL:-gpt-5-high}"
     set +a
     gc_cli_render_template "help/generate_db_usage.txt"
@@ -166,12 +167,13 @@ mkdir -p "${PROMPT_DIR}"
 
 gc_cli_render_template "prompts/generate_db.system.md" > "${PROMPT_DIR}/db.system.md"
 
-(
-  set -a
-  GEN_DB_PROJECT_LABEL="${PROJECT_LABEL_PROMPT}"
-  set +a
-  gc_cli_render_template "prompts/generate_db.task.md.tmpl"
-) > "${PROMPT_DIR}/db.task.md"
+  (
+    set -a
+    # shellcheck disable=SC2034
+    GEN_DB_PROJECT_LABEL="${PROJECT_LABEL_PROMPT}"
+    set +a
+    gc_cli_render_template "prompts/generate_db.task.md.tmpl"
+  ) > "${PROMPT_DIR}/db.task.md"
 
 # Collect likely inputs
 ATTACH=()

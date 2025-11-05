@@ -24,6 +24,7 @@ type die      >/dev/null 2>&1 || die(){ log_err "$*"; exit 1; }
 show_usage() {
   (
     set -a
+    # shellcheck disable=SC2034
     GENERATE_USAGE_CODEX_MODEL="${CODEX_MODEL:-gpt-5-high}"
     GENERATE_USAGE_CODEX_CMD="${CODEX_CMD:-codex}"
     GENERATE_USAGE_OUT_ROOT="${PROJECT_ROOT:-$ROOT_DIR}/apps"

@@ -80,6 +80,7 @@ warn "'gpt-creator iterate' is deprecated. Use 'gpt-creator create-tasks' follow
 usage() {
   (
     set -a
+    # shellcheck disable=SC2034
     ITERATE_DEFAULT_MODEL="$GC_DEFAULT_MODEL"
     set +a
     gc_cli_render_template "help/iterate_usage.txt"
@@ -166,9 +167,12 @@ for entry in "${TASKS[@]}"; do
   OUTPUT="$OUT_DIR/task_${i}_${slug}.out.md"
 
   (
+    set -a
+    # shellcheck disable=SC2034
     ITERATE_CODEX_MODEL="$CODEX_MODEL"
     ITERATE_PROJECT_LABEL="$PROJECT_LABEL_PROMPT"
     ITERATE_TASK_TITLE="$title"
+    set +a
     gc_cli_render_template "prompts/iterate_task.prompt.md.tmpl"
   ) > "$PROMPT"
 

@@ -32,6 +32,7 @@ die(){ err "$*"; exit 1; }
 usage() {
   (
     set -a
+    # shellcheck disable=SC2034
     VERIFY_CMD_NAME="$GC_NAME"
     VERIFY_API_DEFAULT="${GC_API_HEALTH_URL:-http://localhost:3000/health}"
     VERIFY_WEB_DEFAULT="${GC_WEB_URL:-http://localhost:5173}"

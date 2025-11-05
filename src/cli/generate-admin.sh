@@ -55,6 +55,7 @@ INSTALL_DEPS=1
 show_help() {
   (
     set -a
+    # shellcheck disable=SC2034
     GEN_ADMIN_OUT_DEFAULT="${ADMIN_DIR}"
     set +a
     gc_cli_render_template "help/generate_admin_usage.txt"
@@ -87,13 +88,14 @@ fi
 
 PROMPT_FILE="${WORK_DIR}/prompts/generate-admin.prompt.md"
 
-(
-  set -a
-  GEN_ADMIN_SDS="${SDS}"
-  GEN_ADMIN_PDR="${PDR}"
-  GEN_ADMIN_MMD="${BACKOFFICE_MMD:-<none>}"
-  GEN_ADMIN_JIRA="${JIRA}"
-  set +a
+  (
+    set -a
+    # shellcheck disable=SC2034
+    GEN_ADMIN_SDS="${SDS}"
+    GEN_ADMIN_PDR="${PDR}"
+    GEN_ADMIN_MMD="${BACKOFFICE_MMD:-<none>}"
+    GEN_ADMIN_JIRA="${JIRA}"
+    set +a
   gc_cli_render_template "prompts/generate_admin.prompt.md.tmpl"
 ) > "$PROMPT_FILE"
 

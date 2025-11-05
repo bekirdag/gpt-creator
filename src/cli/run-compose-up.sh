@@ -31,6 +31,7 @@ export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_SLUG}"
 usage() {
   (
     set -a
+    # shellcheck disable=SC2034
     RUN_COMPOSE_UP_CMD_NAME="$(basename "$0")"
     set +a
     gc_cli_render_template "help/run_compose_up_usage.txt"

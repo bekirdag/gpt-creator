@@ -32,6 +32,7 @@ die(){ err "$*"; exit 1; }
 usage() {
   (
     set -a
+    # shellcheck disable=SC2034
     RUN_OPEN_CMD_NAME="$GC_NAME"
     RUN_OPEN_WEB_DEFAULT="${GC_WEB_URL:-http://localhost:5173}"
     RUN_OPEN_ADMIN_DEFAULT="${GC_ADMIN_URL:-http://localhost:5174}"

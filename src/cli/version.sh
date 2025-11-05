@@ -39,12 +39,13 @@ if [[ -z "${VER}" || "${VER}" == "0.0.0" ]]; then
   fi
 fi
 
-(
-  set -a
-  VERSION_OUTPUT_NAME="$GC_NAME"
-  VERSION_OUTPUT_VERSION="$VER"
-  VERSION_OUTPUT_MODEL="$GC_DEFAULT_MODEL"
-  VERSION_OUTPUT_ROOT="$ROOT_DIR"
+  (
+    set -a
+    # shellcheck disable=SC2034
+    VERSION_OUTPUT_NAME="$GC_NAME"
+    VERSION_OUTPUT_VERSION="$VER"
+    VERSION_OUTPUT_MODEL="$GC_DEFAULT_MODEL"
+    VERSION_OUTPUT_ROOT="$ROOT_DIR"
   set +a
   gc_cli_render_template "meta/version_output.txt"
 )

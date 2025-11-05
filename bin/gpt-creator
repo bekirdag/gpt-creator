@@ -1153,10 +1153,13 @@ gc_create_env_if_missing() {
   local db_root_password
   db_root_password="$(gc_random_string)"
   (
+    set -a
+    # shellcheck disable=SC2034
     GC_ENV_DB_NAME="$db_name"
     GC_ENV_DB_USER="$db_user"
     GC_ENV_DB_PASSWORD="$db_password"
     GC_ENV_DB_ROOT_PASSWORD="$db_root_password"
+    set +a
     gc_render_template "env/default_env_file.tmpl"
   ) >"$env_file"
   chmod 600 "$env_file" || true
@@ -6737,7 +6740,8 @@ gc_generate_auto_review() {
   if [[ -z "$run_dir" || "$run_dir" == "$story_run_dir" ]]; then
     run_dir="$(dirname "$story_run_dir")"
   fi
-  local run_id="$(basename "$run_dir")"
+  local run_id
+  run_id="$(basename "$run_dir")"
   local timestamp_utc
   timestamp_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
@@ -6761,11 +6765,14 @@ gc_generate_auto_review() {
   fi
 
   (
+    set -a
+    # shellcheck disable=SC2034
     GC_REVIEW_TITLE="$review_title"
     GC_REVIEW_STATUS="${task_status:-unknown}"
     GC_REVIEW_TOKENS="${tokens_used:-unknown}"
     GC_REVIEW_RUN="${run_id:-unknown}"
     GC_REVIEW_TIMESTAMP="$timestamp_utc"
+    set +a
     gc_render_template "review/auto_review.md.tmpl"
   ) >"$review_md"
 
@@ -6796,12 +6803,15 @@ gc_generate_auto_review() {
   review_artifact_json="$(gc_json_escape "$artifact_rel")"
 
   (
+    set -a
+    # shellcheck disable=SC2034
     GC_REVIEW_JSON_TASK_ID="$review_task_id_json"
     GC_REVIEW_JSON_STATUS="$review_status_json"
     GC_REVIEW_JSON_TOKENS_USED="$review_tokens_json"
     GC_REVIEW_JSON_RUN_ID="$review_run_json"
     GC_REVIEW_JSON_TIMESTAMP="$review_timestamp_json"
     GC_REVIEW_JSON_ARTIFACT="$review_artifact_json"
+    set +a
     gc_render_template "review/auto_review.json.tmpl"
   ) >"$review_json"
 
@@ -7100,6 +7110,7 @@ cmd_work_on_tasks() {
   GC_ALLOW_EMPTY_COMMIT="${GC_ALLOW_EMPTY_COMMIT:-1}"
   GC_AUTO_PUSH_MAIN="${GC_AUTO_PUSH_MAIN:-1}"
   GC_RETRY_PUSH_MAX="${GC_RETRY_PUSH_MAX:-3}"
+  # shellcheck disable=SC2034
   GC_LAST_VERIFY_STATUS="skipped"
   GC_LAST_VERIFY_SUMMARY=""
   GC_LAST_VERIFY_REPORT=""
@@ -8017,6 +8028,7 @@ cmd_work_on_tasks() {
   [[ $resume -eq 1 ]] || resume_flag=0
 
   local work_failed=0
+  # shellcheck disable=SC2034
   local any_changes=0
   local manual_followups=0
   local usage_limit_triggered=0
@@ -8436,15 +8448,18 @@ print(error)'
     local checkpoint_dir="${root}/.gpt-creator/logs/empty-apply/${story_slug}/${task_id}"
     local checkpoint_file="${checkpoint_dir}/checkpoint.md"
     mkdir -p "$checkpoint_dir" || return 1
-    if [[ ! -f "$checkpoint_file" ]]; then
-      local checkpoint_timestamp
-      checkpoint_timestamp="$(date -u +%FT%TZ)"
-      (
-        GC_CHECKPOINT_TITLE="${story_slug}/${task_id}"
-        GC_CHECKPOINT_TIMESTAMP="$checkpoint_timestamp"
-        gc_render_template "checkpoints/empty_apply_checkpoint.md.tmpl"
-      ) >"$checkpoint_file"
-    fi
+  if [[ ! -f "$checkpoint_file" ]]; then
+    local checkpoint_timestamp
+    checkpoint_timestamp="$(date -u +%FT%TZ)"
+    (
+      set -a
+      # shellcheck disable=SC2034
+      GC_CHECKPOINT_TITLE="${story_slug}/${task_id}"
+      GC_CHECKPOINT_TIMESTAMP="$checkpoint_timestamp"
+      set +a
+      gc_render_template "checkpoints/empty_apply_checkpoint.md.tmpl"
+    ) >"$checkpoint_file"
+  fi
     local checkpoint_rel
     local checkpoint_helper
     checkpoint_helper="$(gc_clone_python_tool "checkpoint_relative_path.py" "${PROJECT_ROOT:-$PWD}")" || checkpoint_helper=""
@@ -8683,7 +8698,7 @@ print(error)'
       local attempt=0
       local max_attempts=2
       gc_touch_progress
-      local prompt_augmented=0 prompt_change_reminder=0
+      local prompt_augmented=0
       local contract_guard_injected=0
       local keep_output=$keep_artifacts
       local break_after_update=0
@@ -8944,7 +8959,6 @@ print(error)'
         fi
       fi
 
-      local prompt_stop_flag="${prompt_stop_on_overbudget,,}"
       if [[ -n "$prompt_binder_status" ]]; then
         case "${prompt_binder_status,,}" in
           hit)
@@ -9001,7 +9015,7 @@ print(error)'
         if helper_path="$(gc_clone_python_tool "fetch_task_snapshot.py" "${PROJECT_ROOT:-$PWD}")"; then
           if _task_snapshot="$("$python_bin" "$helper_path" "$tasks_db" "$slug" "$task_index" 2>/dev/null)"; then
             if [[ -n "$_task_snapshot" ]]; then
-              IFS=$'\t' read -r task_last_signature task_last_changes_count task_last_outcome_reason <<<"$_task_snapshot"
+              IFS=$'\t' read -r task_last_signature task_last_changes_count _ <<<"$_task_snapshot"
               previous_attempt_signature="$task_last_signature"
             fi
           fi

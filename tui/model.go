@@ -9029,8 +9029,8 @@ func (m *model) buildBacklogTreeItems() []list.Item {
 				if task.Assignee != "" {
 					summary = append(summary, task.Assignee)
 				}
-				if task.Estimate != "" {
-					summary = append(summary, task.Estimate)
+				if task.StoryPoints != "" {
+					summary = append(summary, task.StoryPoints)
 				}
 				if task.LastRun != "" {
 					summary = append(summary, task.LastRun)
@@ -9330,8 +9330,8 @@ func (m *model) renderBacklogPreview(row backlogRow) string {
 			if task.Assignee != "" {
 				b.WriteString(fmt.Sprintf("Assignee: %s\n", task.Assignee))
 			}
-			if task.Estimate != "" {
-				b.WriteString(fmt.Sprintf("Estimate: %s\n", task.Estimate))
+			if task.StoryPoints != "" {
+				b.WriteString(fmt.Sprintf("Story Points: %s\n", task.StoryPoints))
 			}
 			if !task.UpdatedAt.IsZero() {
 				b.WriteString(fmt.Sprintf("Updated: %s ago\n", formatRelativeTime(task.UpdatedAt)))

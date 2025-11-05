@@ -101,8 +101,9 @@ def detect_gaps(task):
             gaps.append(f"{field.replace('_', ' ')} missing or empty")
     if not is_positive(task.get("story_points")):
         gaps.append("story_points should be a positive integer (1-13)")
-    if not is_positive(task.get("estimate")):
-        gaps.append("estimate should be a positive number of hours")
+    story_points_raw = task.get("estimate") or task.get("story_points")
+    if not is_positive(story_points_raw):
+        gaps.append("story_points should be a positive number")
     return gaps
 
 def extract_keywords(story_data, task_data):
@@ -339,7 +340,7 @@ def build_compact_task(task: dict) -> dict:
         "data_contracts",
         "qa_notes",
         "user_roles",
-        "estimate",
+        "story_points",
         "story_points",
         "analytics",
         "observability",
@@ -445,7 +446,7 @@ with prompt_path.open("w", encoding="utf-8") as fh:
     fh.write("- Update only the fields above that need attention; keep correct data unchanged.\n")
     fh.write("- Cite documentation by identifier (SDS §#, SQL:table, API:/path) rather than pasting prose.\n")
     fh.write("- Fill in missing technical specifics (APIs, data contracts, QA, analytics, RBAC) using the references.\n")
-    fh.write("- Keep estimates/story_points realistic and adjust tags, assignees, and dependencies when necessary.\n")
+    fh.write("- Keep story points realistic and adjust tags, assignees, and dependencies when necessary.\n")
     fh.write("- Return the complete task as valid JSON with no markdown or commentary outside the object.\n\n")
 
     task_id = target_task.get("id") or target_task.get("task_id") or "TASK-ID"
@@ -459,7 +460,7 @@ with prompt_path.open("w", encoding="utf-8") as fh:
         "    \"acceptance_criteria\": [\"...\"],\n"
         "    \"tags\": [\"Web-FE\"],\n"
         "    \"assignees\": [\"FE dev\"],\n"
-        "    \"estimate\": 5,\n"
+        "    \"story_points\": 5,\n"
         "    \"story_points\": 5,\n"
         "    \"dependencies\": [\"WEB-01-T00\"],\n"
         "    \"document_references\": [\"SDS §10.1.1\"],\n"

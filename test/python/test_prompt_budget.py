@@ -32,7 +32,6 @@ def _build_minimal_db(db_path: Path, story_slug: str, description: str) -> None:
             task_id TEXT,
             title TEXT,
             description TEXT,
-            estimate INTEGER,
             assignees_json TEXT,
             tags_json TEXT,
             acceptance_json TEXT,
@@ -81,7 +80,7 @@ def _build_minimal_db(db_path: Path, story_slug: str, description: str) -> None:
     conn.execute(
         """
         INSERT INTO tasks (
-            task_id, title, description, estimate, assignees_json, tags_json, acceptance_json, dependencies_json,
+            task_id, title, description, assignees_json, tags_json, acceptance_json, dependencies_json,
             tags_text, story_points, dependencies_text, assignee_text, document_reference, idempotency, rate_limits,
             rbac, messaging_workflows, performance_targets, observability, acceptance_text, endpoints,
             sample_create_request, sample_create_response, user_story_ref_id, epic_ref_id, status,
@@ -90,7 +89,7 @@ def _build_minimal_db(db_path: Path, story_slug: str, description: str) -> None:
             last_duration_seconds, story_slug, position
         )
         VALUES (
-            ?, ?, ?, 1, '[]', '[]', '[]', '[]', '', 1, '', '', '',
+            ?, ?, ?, '[]', '[]', '[]', '[]', '', 1, '', '', '',
             '', '', '', '', '', '', '', '', '', '', '', '', 'pending',
             '', '', '', '', '', '', '', '', 0, 0, 0, ?, 0
         )

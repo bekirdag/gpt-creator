@@ -169,8 +169,7 @@ def load_tasks(
             dependencies = ensure_list(task.get("dependencies"))
             tags = ensure_list(task.get("tags"))
             assignees = ensure_list(task.get("assignees"))
-            story_points = coerce_str(task.get("story_points") or task.get("estimate"))
-            estimate = coerce_str(task.get("estimate")) or story_points
+            story_points = coerce_str(task.get("estimate") or task.get("story_points"))
             status = (
                 normalize_status(
                     task.get("status")
@@ -192,7 +191,6 @@ def load_tasks(
                 "dependencies": dependencies,
                 "tags": tags,
                 "assignees": assignees,
-                "estimate": estimate,
                 "story_points": story_points,
                 "document_reference": join_field(task.get("document_references") or task.get("document_reference")),
                 "endpoints": join_field(task.get("endpoints")),

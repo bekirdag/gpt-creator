@@ -3928,7 +3928,7 @@ def main():
             raise SystemExit(f"Story slug not found: {STORY_SLUG}")
 
         task_rows = cur.execute(
-            'SELECT task_id, title, description, estimate, assignees_json, tags_json, acceptance_json, dependencies_json, '
+            'SELECT task_id, title, description, story_points, assignees_json, tags_json, acceptance_json, dependencies_json, '
             'tags_text, story_points, dependencies_text, assignee_text, document_reference, idempotency, rate_limits, rbac, '
             'messaging_workflows, performance_targets, observability, acceptance_text, endpoints, sample_create_request, '
             'sample_create_response, user_story_ref_id, epic_ref_id, status, last_progress_at, last_progress_run, '
@@ -4278,6 +4278,12 @@ def main():
         def clean(value: str) -> str:
             return (value or '').strip()
 
+        def row_get(row: sqlite3.Row, key: str):
+            try:
+                return row[key]
+            except (KeyError, IndexError):
+                return None
+
 
         def project_display_name(root: str) -> str:
             if not root:
@@ -4313,7 +4319,7 @@ def main():
             description_lines = []
 
         tags_text = clean(task['tags_text'])
-        story_points = clean(task['story_points'])
+        story_points = clean(row_get(task, 'estimate')) or clean(row_get(task, 'story_points'))
         dependencies_text = clean(task['dependencies_text'])
         assignee_text = clean(task['assignee_text'])
         document_reference = clean(task['document_reference'])
@@ -4475,7 +4481,7 @@ def main():
         lines.append("## Task")
         task_id = clean(task['task_id'])
         task_title = clean(task['title'])
-        estimate = clean(task['estimate'])
+        story_points = clean(row_get(task, 'estimate')) or clean(row_get(task, 'story_points'))
 
         if compact_mode:
             task_label = task_id or f"Task {TASK_INDEX + 1}"
@@ -4484,10 +4490,8 @@ def main():
                 summary += f" — {task_title}"
             lines.append(summary)
             meta_bits = []
-            if estimate:
-                meta_bits.append(f"estimate {estimate}")
-            if story_points and story_points != estimate:
-                meta_bits.append(f"story points {story_points}")
+        if story_points:
+            meta_bits.append(f"story points {story_points}")
             if assignees or assignee_text:
                 assigned = ", ".join(assignees) if assignees else assignee_text
                 meta_bits.append(f"assignees {assigned}")
@@ -4509,8 +4513,8 @@ def main():
                 lines.append(f"- Task ID: {task_id}")
             if task_title:
                 lines.append(f"- Title: {task_title}")
-            if estimate:
-                lines.append(f"- Estimate: {estimate}")
+        if story_points:
+            lines.append(f"- Story points: {story_points}")
             if assignees:
                 lines.append("- Assignees: " + ", ".join(assignees))
             elif assignee_text:
@@ -4519,10 +4523,7 @@ def main():
                 lines.append("- Tags: " + ", ".join(tags))
             elif tags_text:
                 lines.append(f"- Tags: {tags_text}")
-            if story_points and story_points != estimate:
-                lines.append(f"- Story points: {story_points}")
-            elif story_points and not estimate:
-                lines.append(f"- Story points: {story_points}")
+        # Story points already emitted above if present
             if document_reference:
                 lines.append(f"- Document reference: {document_reference}")
             if idempotency_text:

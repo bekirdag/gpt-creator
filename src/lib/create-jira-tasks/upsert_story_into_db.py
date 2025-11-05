@@ -156,7 +156,6 @@ def ensure_schema(cur: sqlite3.Cursor) -> None:
           task_id TEXT,
           title TEXT,
           description TEXT,
-          estimate TEXT,
           assignees_json TEXT,
           tags_json TEXT,
           acceptance_json TEXT,
@@ -423,10 +422,12 @@ def upsert_story(db_path: Path, story_path: Path, story_slug: str) -> None:
         if status_value == "complete":
             completed_count += 1
 
+        story_points_value = _text(task.get("estimate")) or _text(task.get("story_points")) or None
+
         cur.execute(
             """
             INSERT INTO tasks (
-              story_slug, position, task_id, title, description, estimate,
+              story_slug, position, task_id, title, description,
               assignees_json, tags_json, acceptance_json, dependencies_json,
               tags_text, story_points, dependencies_text, assignee_text,
               document_reference, idempotency, rate_limits, rbac,
@@ -435,7 +436,7 @@ def upsert_story(db_path: Path, story_path: Path, story_slug: str) -> None:
               sample_create_response, user_story_ref_id, epic_ref_id,
               refined, refined_at, status, started_at, completed_at, last_run,
               story_id, story_title, epic_key, epic_title, updated_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 story_slug,
@@ -443,13 +444,12 @@ def upsert_story(db_path: Path, story_path: Path, story_slug: str) -> None:
                 task_id_value,
                 _text(task.get("title")) or None,
                 _text(task.get("description")) or None,
-                _text(task.get("estimate")) or None,
                 _json_dump(task.get("assignees")),
                 _json_dump(task.get("tags")),
                 _json_dump(task.get("acceptance_criteria")),
                 _json_dump(task.get("dependencies")),
                 _text(task.get("tags_text")) or None,
-                _text(task.get("story_points")) or None,
+                story_points_value,
                 _text(task.get("dependencies_text")) or None,
                 _text(task.get("assignee_text")) or None,
                 _text(task.get("document_reference") or task.get("document_references")) or None,

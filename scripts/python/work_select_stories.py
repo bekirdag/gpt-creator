@@ -8,6 +8,20 @@ import sqlite3
 import sys
 from pathlib import Path
 
+def _normalize_status(value: str | None) -> str:
+    cleaned = (value or "").strip().lower().replace("_", "-")
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned
+
+def _is_terminal_status(value: str | None) -> bool:
+    s = _normalize_status(value)
+    if not s:
+        return False
+    if s in {"complete", "completed", "completed-no-changes", "done", "skipped", "skipped-already-complete"}:
+        return True
+    return s.startswith("completed-") or s.startswith("done-") or s.startswith("skipped-")
+
 
 def norm(value: str | None) -> str:
     return (value or "").strip().lower()
@@ -22,29 +36,6 @@ def slug_norm(value: str | None) -> str:
     if not slug:
         return ""
     return re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
-
-
-def _normalize_status(value: str | None) -> str:
-    cleaned = (value or "").strip().lower().replace("_", "-")
-    while "--" in cleaned:
-        cleaned = cleaned.replace("--", "-")
-    return cleaned
-
-
-def _is_terminal_status(value: str | None) -> bool:
-    s = _normalize_status(value)
-    if not s:
-        return False
-    if s in {
-        "complete",
-        "completed",
-        "completed-no-changes",
-        "done",
-        "skipped",
-        "skipped-already-complete",
-    }:
-        return True
-    return s.startswith("completed-") or s.startswith("done-") or s.startswith("skipped-")
 
 
 def sanitize_field(value: str) -> str:
@@ -126,11 +117,10 @@ def main() -> None:
         completed = 0
         next_index = 0
         for row in task_rows:
-            status = row[1] or ""
+            status = (row[1] or "")
             if _is_terminal_status(status):
                 completed += 1
                 continue
-            # first non-completed task in this story
             next_index = row[0] or 0
             break
         else:

@@ -436,7 +436,6 @@ def estimate(db_path: Path) -> int:
     include_progress_state = "progress_state" in task_columns
     include_last_apply_status = "last_apply_status" in task_columns
     include_last_verify_status = "last_verify_status" in task_columns
-    include_estimate = "estimate" in task_columns
     include_last_story_points = "last_story_points" in task_columns
     if include_progress_state:
         select_fields.append("progress_state")
@@ -444,8 +443,6 @@ def estimate(db_path: Path) -> int:
         select_fields.append("last_apply_status")
     if include_last_verify_status:
         select_fields.append("last_verify_status")
-    if include_estimate:
-        select_fields.append("estimate")
     if include_last_story_points:
         select_fields.append("last_story_points")
     try:
@@ -468,11 +465,6 @@ def estimate(db_path: Path) -> int:
         total_tasks_count += 1
         base_status = row["status"] or ""
         points = parse_points(row["story_points"])
-        if points <= 0 and include_estimate and "estimate" in row.keys():
-            estimate_value = row["estimate"]
-            fallback_points = parse_points(estimate_value)
-            if fallback_points > 0:
-                points = fallback_points
         if points <= 0 and include_last_story_points and "last_story_points" in row.keys():
             fallback_last = parse_points(row["last_story_points"])
             if fallback_last > 0:

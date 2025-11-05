@@ -146,7 +146,6 @@ def main() -> int:
               task_id TEXT,
               title TEXT,
               description TEXT,
-              estimate TEXT,
               assignees_json TEXT,
               tags_json TEXT,
               acceptance_json TEXT,
@@ -458,7 +457,7 @@ def main() -> int:
         for position, task in enumerate(tasks):
             task_id = (task.get("id") or "").strip()
             description = (task.get("description") or "").strip()
-            estimate = (task.get("estimate") or "").strip()
+            estimate_raw = (task.get("estimate") or "").strip()
             assignees = task.get("assignees") or []
             tags = task.get("tags") or []
             acceptance = task.get("acceptance_criteria") or []
@@ -489,7 +488,7 @@ def main() -> int:
             tags_text = list_to_text(tags)
             dependencies_text = list_to_text(dependencies)
             assignee_text = list_to_text(assignees)
-            story_points = as_text(task.get("story_points")) or (estimate if estimate else None)
+            story_points = estimate_raw or as_text(task.get("story_points"))
             document_reference = as_text(task.get("document_reference") or task.get("document_ref"))
             idempotency_text = as_text(task.get("idempotency"))
             rate_limits = as_text(task.get("rate_limits"))
@@ -519,10 +518,59 @@ def main() -> int:
             reopened_by_migration_at = (restore or {}).get("reopened_by_migration_at")
             reopened_by_migration = int((restore or {}).get("reopened_by_migration") or 0)
 
+            task_values = (
+                story_slug,
+                position,
+                task_id or None,
+                (task.get("title") or "").strip() or None,
+                description or None,
+                json.dumps(assignees, ensure_ascii=False),
+                json.dumps(tags, ensure_ascii=False),
+                json.dumps(acceptance, ensure_ascii=False),
+                json.dumps(dependencies, ensure_ascii=False),
+                tags_text,
+                story_points,
+                dependencies_text,
+                assignee_text,
+                document_reference,
+                idempotency_text,
+                rate_limits,
+                rbac_text,
+                messaging_workflows,
+                performance_targets,
+                observability,
+                acceptance_text,
+                endpoints,
+                sample_create_request,
+                sample_create_response,
+                user_story_ref_id,
+                epic_ref_id,
+                status,
+                status_reason,
+                evidence_ptr,
+                doc_refs,
+                last_verified_commit,
+                locked_by_value,
+                locked_by_migration,
+                migration_epoch,
+                reopened_by_migration_at,
+                reopened_by_migration,
+                started_at,
+                completed_at,
+                last_run,
+                story_id or None,
+                story_title or None,
+                epic_key,
+                epic_title or None,
+                task_uid,
+                generated_at,
+                generated_at,
+            )
+            placeholders = ", ".join("?" for _ in task_values)
             cur.execute(
-                """
+                f"""
                 INSERT INTO tasks (
-                  story_slug, position, task_id, title, description, estimate,
+                  story_slug, position, task_id, title, description,
                   assignees_json, tags_json, acceptance_json, dependencies_json,
                   tags_text, story_points, dependencies_text, assignee_text,
                   document_reference, idempotency, rate_limits, rbac,
@@ -534,57 +582,9 @@ def main() -> int:
                   started_at, completed_at, last_run,
                   story_id, story_title, epic_key, epic_title,
                   uid, updated_at, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES ({placeholders})
             """,
-                (
-                    story_slug,
-                    position,
-                    task_id or None,
-                    (task.get("title") or "").strip() or None,
-                    description or None,
-                    estimate or None,
-                    json.dumps(assignees, ensure_ascii=False),
-                    json.dumps(tags, ensure_ascii=False),
-                    json.dumps(acceptance, ensure_ascii=False),
-                    json.dumps(dependencies, ensure_ascii=False),
-                    tags_text,
-                    story_points,
-                    dependencies_text,
-                    assignee_text,
-                    document_reference,
-                    idempotency_text,
-                    rate_limits,
-                    rbac_text,
-                    messaging_workflows,
-                    performance_targets,
-                    observability,
-                    acceptance_text,
-                    endpoints,
-                    sample_create_request,
-                    sample_create_response,
-                    user_story_ref_id,
-                    epic_ref_id,
-                    status,
-                    status_reason,
-                    evidence_ptr,
-                    doc_refs,
-                    last_verified_commit,
-                    locked_by_value,
-                    locked_by_migration,
-                    migration_epoch,
-                    reopened_by_migration_at,
-                    reopened_by_migration,
-                    started_at,
-                    completed_at,
-                    last_run,
-                    story_id or None,
-                    story_title or None,
-                    epic_key,
-                    epic_title or None,
-                    task_uid,
-                    generated_at,
-                    generated_at,
-                ),
+                task_values,
             )
 
         if completed_tasks >= story_total and story_total > 0:

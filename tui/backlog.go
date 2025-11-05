@@ -175,7 +175,7 @@ type backlogTask struct {
 	Title       string
 	Description string
 	Status      string
-	Estimate    string
+	StoryPoints string
 	Assignee    string
 	Acceptance  string
 	UpdatedAt   time.Time
@@ -303,29 +303,44 @@ func loadBacklogData(projectPath string) (*backlogData, error) {
 	}
 	rows.Close()
 
-	rows, err = db.Query(`
-		SELECT story_slug,
-		       position,
-		       COALESCE(task_id, ''),
-		       COALESCE(title, ''),
-		       COALESCE(description, ''),
-		       COALESCE(status, ''),
-		       COALESCE(assignee_text, ''),
-		       COALESCE(estimate, ''),
-		       COALESCE(acceptance_text, ''),
-		       COALESCE(updated_at, created_at),
-		       COALESCE(last_run, ''),
-		       COALESCE(endpoints, '')
-		  FROM tasks
-		 ORDER BY story_slug, position
-	`)
+	hasEstimate := false
+	if row := db.QueryRow(`SELECT 1 FROM pragma_table_info('tasks') WHERE lower(name) = 'estimate' LIMIT 1`); row != nil {
+		var dummy int
+		if err := row.Scan(&dummy); err == nil {
+			hasEstimate = true
+		}
+	}
+
+	storyPointsExpr := "COALESCE(story_points, '')"
+	if hasEstimate {
+		storyPointsExpr = "COALESCE(estimate, story_points, '')"
+	}
+
+	query := fmt.Sprintf(`
+        SELECT story_slug,
+               position,
+               COALESCE(task_id, ''),
+               COALESCE(title, ''),
+               COALESCE(description, ''),
+               COALESCE(status, ''),
+               COALESCE(assignee_text, ''),
+               %s,
+               COALESCE(acceptance_text, ''),
+               COALESCE(updated_at, created_at),
+               COALESCE(last_run, ''),
+               COALESCE(endpoints, '')
+          FROM tasks
+         ORDER BY story_slug, position
+    `, storyPointsExpr)
+
+	rows, err = db.Query(query)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var slug, taskID, title, desc, status, assignee, estimate, acceptance, ts, lastRun, endpoints string
+		var slug, taskID, title, desc, status, assignee, storyPoints, acceptance, ts, lastRun, endpoints string
 		var position int
-		if err := rows.Scan(&slug, &position, &taskID, &title, &desc, &status, &assignee, &estimate, &acceptance, &ts, &lastRun, &endpoints); err != nil {
+		if err := rows.Scan(&slug, &position, &taskID, &title, &desc, &status, &assignee, &storyPoints, &acceptance, &ts, &lastRun, &endpoints); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -336,7 +351,7 @@ func loadBacklogData(projectPath string) (*backlogData, error) {
 			Title:       strings.TrimSpace(title),
 			Description: strings.TrimSpace(desc),
 			Status:      normalizeBacklogStatus(status),
-			Estimate:    strings.TrimSpace(estimate),
+			StoryPoints: strings.TrimSpace(storyPoints),
 			Assignee:    strings.TrimSpace(assignee),
 			Acceptance:  strings.TrimSpace(acceptance),
 			UpdatedAt:   parseBacklogTime(ts),

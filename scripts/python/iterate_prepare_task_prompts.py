@@ -12,7 +12,7 @@ def build_lines(index: int, task: dict[str, object], project_root: str) -> list[
     title = (task.get("title") or "").strip() or f"Task {index}"
     task_id = (task.get("id") or "").strip()
     description = (task.get("description") or "").strip() or "(No additional details provided.)"
-    estimate = (task.get("estimate") or "").strip()
+    story_points = (task.get("estimate") or task.get("story_points") or "").strip()
     tags = ", ".join(task.get("tags") or [])
     assignees = ", ".join(task.get("assignees") or [])
     story_bits = [
@@ -28,8 +28,8 @@ def build_lines(index: int, task: dict[str, object], project_root: str) -> list[
         lines.append(f"- Story: {' — '.join(story_bits)}")
     if assignees:
         lines.append(f"- Assignees: {assignees}")
-    if estimate:
-        lines.append(f"- Estimate: {estimate}")
+    if story_points:
+        lines.append(f"- Story Points: {story_points}")
     if tags:
         lines.append(f"- Tags: {tags}")
 

@@ -114,7 +114,6 @@ def main() -> None:
                 "id": task_id,
                 "title": (row_dict.get("title") or "").strip(),
                 "description": (row_dict.get("description") or "").strip(),
-                "estimate": (row_dict.get("estimate") or "").strip(),
                 "story_points": (row_dict.get("story_points") or "").strip(),
                 "acceptance_criteria": parse_json_field(row_dict.get("acceptance_json")),
                 "dependencies": parse_json_field(row_dict.get("dependencies_json")),

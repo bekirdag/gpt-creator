@@ -82,17 +82,18 @@ def main() -> None:
     if task_id_value:
         task_id_value = task_id_value.upper()
 
+    story_points_raw = _text(task.get("estimate")) or _text(task.get("story_points")) or None
+
     payload = {
         "task_id": task_id_value or None,
         "title": _text(task.get("title")) or None,
         "description": _text(task.get("description")) or None,
-        "estimate": _text(task.get("estimate")) or None,
         "assignees_json": json.dumps(assignees, ensure_ascii=False),
         "tags_json": json.dumps(tags, ensure_ascii=False),
         "acceptance_json": json.dumps(acceptance, ensure_ascii=False),
         "dependencies_json": json.dumps(dependencies, ensure_ascii=False),
         "tags_text": _join(tags) or None,
-        "story_points": _text(task.get("story_points")) or None,
+        "story_points": story_points_raw,
         "dependencies_text": _join(dependencies) or None,
         "assignee_text": _join(assignees) or None,
         "document_reference": _text(task.get("document_reference") or task.get("document_references")) or None,

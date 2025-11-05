@@ -217,7 +217,7 @@ def write_task_prompt(
         fh.write("## Requirements\n")
         fh.write("- Cover happy paths, error handling, analytics, and release readiness considerations.\n")
         fh.write("- Assign owners, note dependencies, and tag each task for the impacted surfaces (Web-FE, API, DB, etc.).\n")
-        fh.write("- Provide numeric story points and hour estimates consistent with the workload.\n")
+        fh.write("- Provide numeric story points consistent with the workload.\n")
         fh.write("- Reference documentation by identifier (e.g., SDS §10.1.1, SQL:users, API:/v1/auth) instead of pasting content.\n")
         fh.write("- Describe APIs, data contracts, and validations.\n\n")
         if sds_refs:
@@ -243,7 +243,6 @@ def write_task_prompt(
             '      "acceptance_criteria": ["..."],\n'
             '      "tags": ["Web-FE"],\n'
             '      "assignees": ["FE dev"],\n'
-            '      "estimate": 5,\n'
             '      "story_points": 5,\n'
             '      "dependencies": ["WEB-01-T00"],\n'
             '      "document_references": ["SDS §10.1.1"],\n'

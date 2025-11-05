@@ -198,7 +198,7 @@ GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)
   ```bash
   $ gpt-creator backlog --project ~/projects/sample-app --item-children user-onboard
   Tasks for story: User onboarding flow (user-onboard)
-  #  Task ID    Title                                                Status      Estimate
+#  Task ID    Title                                                Status      Story Points
   1  GC-101     Implement signup API                                 in-progress 3d
   2  GC-102     Persist marketing opt-in                             pending     1d
   ```

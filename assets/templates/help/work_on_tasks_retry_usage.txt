@@ -1,6 +1,7 @@
-Usage: work-on-tasks-retry.sh <task-ref> [additional gpt-creator args]
+Usage: work-on-tasks-retry.sh [task-ref] [additional gpt-creator args]
 
-Runs `gpt-creator work-on-tasks` scoped to a single task (batch size 1) and
+Runs `gpt-creator work-on-tasks` (batch size 1, memory enabled) and optionally
+scopes execution to a specific task when `task-ref` is supplied. The wrapper
 automatically retries when the CLI exits with 124 or reports transient Codex
 failures (unterminated heredoc, context stream dropped, empty apply). Retries
 up to `MAX_ATTEMPTS` times (default 3).
@@ -10,3 +11,4 @@ Environment:
 
 Examples:
   scripts/work-on-tasks-retry.sh story-slug:003 --project /path/to/project
+  scripts/work-on-tasks-retry.sh --project /path/to/project

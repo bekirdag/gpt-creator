@@ -49,9 +49,8 @@ def needs_refine(task: dict) -> bool:
     for field in REQUIRED_LIST_FIELDS:
         if not normalized_list(task.get(field)):
             return True
-    if not is_positive(task.get("story_points"), zero_ok=False):
-        return True
-    if not is_positive(task.get("estimate"), zero_ok=False):
+    points_value = task.get("estimate") or task.get("story_points")
+    if not is_positive(points_value, zero_ok=False):
         return True
     return False
 

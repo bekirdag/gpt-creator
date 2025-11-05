@@ -11,19 +11,19 @@ usage() {
     cat "$usage_file" >&2
   else
     printf '%s\n' \
-      "Usage: work-on-tasks-retry.sh <task-ref> [additional gpt-creator args]" \
+      "Usage: work-on-tasks-retry.sh [task-ref] [additional gpt-creator args]" \
       "" \
-      "Runs \`gpt-creator work-on-tasks\` scoped to a single task (batch size 1) and" \
-      "automatically retries when the CLI exits with 124 or reports transient Codex errors." \
-      "Set MAX_ATTEMPTS to change the retry limit (default 3)." \
+      "Runs \`gpt-creator work-on-tasks\` (batch size 1, memory enabled) and" \
+      "automatically retries once when the CLI reports a timeout (exit 124)." \
       "" \
       "Examples:" \
-      "  scripts/work-on-tasks-retry.sh story-slug:003 --project /path/to/project" >&2
+      "  scripts/work-on-tasks-retry.sh story-slug:003 --project /path/to/project" \
+      "  scripts/work-on-tasks-retry.sh --project /path/to/project" >&2
   fi
   exit 2
 }
 
-if [[ $# -lt 1 ]]; then
+if [[ $# -gt 0 && "$1" == "--help" ]]; then
   usage
 fi
 
@@ -31,13 +31,21 @@ if [[ -z "${TMUX:-}" && -z "${STY:-}" ]]; then
   echo "[warn] Not running inside tmux/screen; start a session manager for long Codex runs." >&2
 fi
 
-task_ref="$1"; shift
+task_ref=""
+if [[ $# -gt 0 && "$1" != -* ]]; then
+  task_ref="$1"
+  shift
+fi
+
 declare -a base_args=(
   gpt-creator work-on-tasks
-  --from-task "$task_ref"
   --batch-size 1
   --memory-cycle
 )
+
+if [[ -n "$task_ref" ]]; then
+  base_args+=(--from-task "$task_ref")
+fi
 
 if [[ $# -gt 0 ]]; then
   base_args+=("$@")
@@ -60,25 +68,14 @@ trap 'forward_signal TERM' TERM
 run_once() {
   local log_file
   log_file="$(mktemp -t gc_work_XXXX.log)"
-  "${base_args[@]}" >"$log_file" 2>&1 &
-  child_pid=$!
-  wait "$child_pid"
-  local status=$?
-  child_pid=""
-  # Treat transient LLM/tooling failures as retryable
-  if (( status != 0 )); then
-    if grep -Eiq '(heredoc[^\n]*(missing closing|unterminated)|blocked-?heredoc-?unterminated)' "$log_file"; then
-      echo "[warn] Detected unterminated heredoc; marking as retryable (124)." >&2
-      status=124
-    elif grep -Eiq '(stream disconnected before completion|context window|exceeds the context window|produced no output|JSON not found in Codex output|Structured instructions not found in Codex output)' "$log_file"; then
-      echo "[warn] Detected model stream/context failure; marking as retryable (124)." >&2
-      status=124
-    elif grep -Eiq 'apply-failed-migration-context|empty-apply checkpoint' "$log_file"; then
-      echo "[warn] Detected empty-apply/migration-context issue; marking as retryable (124)." >&2
-      status=124
-    fi
+  local status=0
+  if "${SCRIPT_DIR}/run-and-filter.sh" --log "$log_file" -- "${base_args[@]}"; then
+    status=0
+  else
+    status=$?
   fi
-  cat "$log_file"; rm -f "$log_file"
+  mkdir -p "${ROOT_DIR}/.gpt-creator/logs"
+  cp "$log_file" "${ROOT_DIR}/.gpt-creator/logs/last_run.log"
   return "$status"
 }
 
@@ -87,22 +84,13 @@ attempt=1
 status=0
 
 while (( attempt <= max_attempts )); do
-  if (( attempt > 1 )); then
-    export CJT_REFINE_SDS_OVERVIEW_LIMIT="${CJT_REFINE_SDS_OVERVIEW_LIMIT:-2}"
-    export CJT_REFINE_SDS_CHUNK_LIMIT="${CJT_REFINE_SDS_CHUNK_LIMIT:-1}"
-    export CJT_REFINE_OTHER_TASKS_LIMIT="${CJT_REFINE_OTHER_TASKS_LIMIT:-2}"
-    export CJT_REFINE_TASK_FIELD_LIST_LIMIT="${CJT_REFINE_TASK_FIELD_LIST_LIMIT:-2}"
-    export CJT_REFINE_TASK_FIELD_CHAR_LIMIT="${CJT_REFINE_TASK_FIELD_CHAR_LIMIT:-160}"
-    export CJT_REFINE_SDS_SNIPPET_CHAR_LIMIT="${CJT_REFINE_SDS_SNIPPET_CHAR_LIMIT:-160}"
-    export CJT_REFINE_SDS_SUMMARY_CHAR_LIMIT="${CJT_REFINE_SDS_SUMMARY_CHAR_LIMIT:-140}"
-  fi
   if run_once; then
     status=0
     break
   fi
   status=$?
   if (( status == 124 && attempt < max_attempts )); then
-    echo "[info] work-on-tasks marked retryable (exit 124); retrying task ${task_ref}..." >&2
+    echo "[info] work-on-tasks exited with timeout (124); retrying task ${task_ref}..." >&2
     ((attempt++))
     continue
   fi

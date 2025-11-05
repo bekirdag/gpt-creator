@@ -110,7 +110,7 @@ def parse_jira(lines):
                 "title": task_title.strip(),
                 "assignees": [],
                 "tags": [],
-                "estimate": "",
+                "story_points": "",
                 "description_lines": [],
                 "acceptance_criteria": [],
                 "dependencies": [],
@@ -175,8 +175,8 @@ def parse_jira(lines):
                     meta_consumed = True
             elif lower.startswith("estimate:"):
                 value = plain.split(":", 1)[1].strip()
-                if value and not current["estimate"]:
-                    current["estimate"] = value
+                if value and not current["story_points"]:
+                    current["story_points"] = value
                     meta_consumed = True
 
         if section == "description" or (not meta_consumed and section is None):

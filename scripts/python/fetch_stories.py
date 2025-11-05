@@ -8,6 +8,22 @@ db_path, type_arg, item_children, progress_flag, task_details = sys.argv[1:6]
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 
+
+def _task_column_exists(column: str) -> bool:
+    try:
+        info = conn.execute("PRAGMA table_info(tasks)").fetchall()
+    except sqlite3.DatabaseError:
+        return False
+    column_norm = (column or "").strip().lower()
+    for entry in info:
+        name = (entry[1] or "").strip().lower()
+        if name == column_norm:
+            return True
+    return False
+
+
+HAS_TASK_ESTIMATE_COLUMN = _task_column_exists("estimate")
+
 DONE_PREFIXES = (
     "complete",
     "completed",
@@ -109,8 +125,9 @@ def fetch_task_counts():
     return counts
 
 def fetch_tasks_for_story(slug):
-    query = """
-        SELECT position, task_id, title, status, estimate
+    story_points_expr = "COALESCE(estimate, story_points)" if HAS_TASK_ESTIMATE_COLUMN else "story_points"
+    query = f"""
+        SELECT position, task_id, title, status, {story_points_expr} AS story_points
         FROM tasks
         WHERE story_slug = ?
         ORDER BY position
@@ -396,7 +413,7 @@ def print_task_children(story):
     if not tasks:
         print(f"No tasks found for story '{slug or story.get('story_id') or story.get('story_title')}'.")
         return
-    headers = ["#", "Task ID", "Title", "Status", "Estimate"]
+    headers = ["#", "Task ID", "Title", "Status", "Story Points"]
     rows = []
     for task in tasks:
         position = task.get("position")
@@ -404,8 +421,8 @@ def print_task_children(story):
         task_id = (task.get("task_id") or "").strip() or "-"
         title = truncate(task.get("title"), width=80)
         status = (task.get("status") or "pending").strip().lower().replace("_", "-")
-        estimate = (task.get("estimate") or "").strip() or "-"
-        rows.append([index, task_id, title, status, estimate])
+        story_points = (task.get("story_points") or "").strip() or "-"
+        rows.append([index, task_id, title, status, story_points])
     print_table(headers, rows)
 
 def compute_story_metrics(total, complete, in_progress, pending, status_field):
@@ -528,7 +545,6 @@ def print_task_details(task_identifier):
     emit("Story Title", row["story_title"])
     emit("Epic", row["epic_title"] or row["epic_key"])
     emit("Status", row["status"])
-    emit("Estimate", row["estimate"])
     emit("Assignees", row["assignee_text"])
     emit("Tags", row["tags_text"])
     emit("Dependencies", row["dependencies_text"])

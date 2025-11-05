@@ -102,12 +102,21 @@ def main() -> None:
         total = len(task_rows)
         completed = 0
         next_index = 0
+        # Treat terminal states as completed so selection can advance.
+        COMPLETED_STATUSES = {
+            "complete",
+            "completed",
+            "completed-no-changes",
+            "skipped-already-complete",
+        }
         for row in task_rows:
             status = (row[1] or "").strip().lower()
-            if status == "complete":
+            is_completed = status in COMPLETED_STATUSES or status.startswith("completed-")
+            if is_completed:
                 completed += 1
                 continue
-            next_index = row[0] or 0
+            # first non-completed task in this story
+            next_index = int(row[0] or 0)
             break
         else:
             next_index = total

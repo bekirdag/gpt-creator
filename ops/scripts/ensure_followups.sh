@@ -78,17 +78,16 @@ timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 review_log_path="$LOG"
 if [[ "$review_log_path" == "$ROOT/"* ]]; then
-  review_log_path="${review_log_path#$ROOT/}"
+  review_log_path="${review_log_path#"$ROOT"/}"
 fi
 
 (
-  # shellcheck disable=SC2034
-  EF_REVIEW_TASK_ID="${task_id:-unknown}"
-  EF_REVIEW_STATUS="${status:-unknown}"
-  EF_REVIEW_TOKENS="${tokens:-unknown}"
-  EF_REVIEW_RUN_ID="$run_id"
-  EF_REVIEW_TIMESTAMP="$timestamp"
-  EF_REVIEW_LOG_PATH="$review_log_path"
+  export EF_REVIEW_TASK_ID="${task_id:-unknown}"
+  export EF_REVIEW_STATUS="${status:-unknown}"
+  export EF_REVIEW_TOKENS="${tokens:-unknown}"
+  export EF_REVIEW_RUN_ID="$run_id"
+  export EF_REVIEW_TIMESTAMP="$timestamp"
+  export EF_REVIEW_LOG_PATH="$review_log_path"
   render_template "review/stub_followup_review.md.tmpl"
 ) >"$REVIEW_DIR/review.md"
 
@@ -99,12 +98,11 @@ summary_run_json="$(json_escape "$run_id")"
 summary_timestamp_json="$(json_escape "$timestamp")"
 
 (
-  # shellcheck disable=SC2034
-  EF_SUMMARY_TASK_ID="$summary_task_id_json"
-  EF_SUMMARY_STATUS="$summary_status_json"
-  EF_SUMMARY_TOKENS="$summary_tokens_json"
-  EF_SUMMARY_RUN_ID="$summary_run_json"
-  EF_SUMMARY_TIMESTAMP="$summary_timestamp_json"
+  export EF_SUMMARY_TASK_ID="$summary_task_id_json"
+  export EF_SUMMARY_STATUS="$summary_status_json"
+  export EF_SUMMARY_TOKENS="$summary_tokens_json"
+  export EF_SUMMARY_RUN_ID="$summary_run_json"
+  export EF_SUMMARY_TIMESTAMP="$summary_timestamp_json"
   render_template "review/stub_followup_summary.json.tmpl"
 ) >"$REVIEW_DIR/summary.json"
 

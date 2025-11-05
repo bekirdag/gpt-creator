@@ -8731,6 +8731,7 @@ print(error)'
       local task_outcome_reason=""
       local task_last_signature=""
       local task_last_changes_count="0"
+      # shellcheck disable=SC2034
       local task_last_outcome_reason=""
       local previous_attempt_signature=""
       local apply_status="pending"
@@ -8756,6 +8757,7 @@ print(error)'
       local prompt_status="ok"
       local prompt_soft_limit_value=0
       local prompt_hard_limit_value=0
+      # shellcheck disable=SC2034
       local prompt_stop_on_overbudget="true"
       local prompt_token_estimate=0
       local prompt_pruned_bytes=0
@@ -8918,7 +8920,9 @@ print(error)'
         prompt_status="blocked-quota"
         prompt_hard_limit_value="$current_prompt_cap_int"
         prompt_token_estimate="$prompt_estimate_tokens"
-        prompt_stop_on_overbudget="true"
+        if [[ "$prompt_stop_on_overbudget" != "true" ]]; then
+          prompt_stop_on_overbudget="true"
+        fi
         task_prompt_estimate=$((prompt_estimate_tokens))
         task_notes+=("Prompt estimated at ~${prompt_estimate_tokens} tokens exceeds maximum automatic cap ${current_prompt_cap_int}; retry will run with trimmed context once budgets refresh.")
         break_after_update=1
@@ -9214,7 +9218,7 @@ print(error)'
               WRITE\ *)
                 local written_path="${change_line#WRITE }"
                 info "    Wrote ${written_path}"
-                any_changes=1
+                (( any_changes |= 1 ))
                 task_changes_applied=1
                 ((task_change_operations++))
                 task_written_paths+=("$written_path")
@@ -9223,7 +9227,7 @@ print(error)'
               PATCH\ *)
                 local patched_path="${change_line#PATCH }"
                 info "    Patched ${patched_path}"
-                any_changes=1
+                (( any_changes |= 1 ))
                 task_changes_applied=1
                 ((task_change_operations++))
                 task_patched_paths+=("$patched_path")
@@ -9232,7 +9236,7 @@ print(error)'
               DELETE\ *)
                 local deleted_path="${change_line#DELETE }"
                 info "    Deleted ${deleted_path}"
-                any_changes=1
+                (( any_changes |= 1 ))
                 task_changes_applied=1
                 ((task_change_operations++))
                 task_auto_push_records+=("D\t${deleted_path}")
@@ -9240,7 +9244,7 @@ print(error)'
               RENAME\ *)
                 local rename_entry="${change_line#RENAME }"
                 info "    Renamed ${rename_entry}"
-                any_changes=1
+                (( any_changes |= 1 ))
                 task_changes_applied=1
                 ((task_change_operations++))
                 task_auto_push_records+=("R\t${rename_entry}")
@@ -9248,7 +9252,7 @@ print(error)'
               MOVE\ *)
                 local move_entry="${change_line#MOVE }"
                 info "    Moved ${move_entry}"
-                any_changes=1
+                (( any_changes |= 1 ))
                 task_changes_applied=1
                 ((task_change_operations++))
                 task_auto_push_records+=("R\t${move_entry}")

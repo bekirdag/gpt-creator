@@ -557,6 +557,7 @@ def estimate(db_path: Path) -> int:
 
     summary_rows = [
         ("Completed tasks (detected)", f"{completed_tasks_count:,}"),
+        ("Completed story points", fmt_number(completed_points)),
         ("Remaining tasks", f"{remaining_tasks:,}"),
         ("Total tasks", f"{total_tasks_count:,}"),
         ("Remaining story points", fmt_number(total_points)),

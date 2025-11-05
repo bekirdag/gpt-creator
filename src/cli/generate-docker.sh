@@ -6,7 +6,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+export GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
 
@@ -47,7 +47,7 @@ export PROJECT_SLUG
 
 if [[ -f "${ROOT_DIR}/.env" ]]; then
   set -a
-  # shellcheck disable=SC1090
+  # shellcheck disable=SC1090,SC1091
   source "${ROOT_DIR}/.env"
   set +a
 fi
@@ -133,13 +133,9 @@ if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
 fi
 
 usage() {
-  (
-    set -a
-    # shellcheck disable=SC2034
-    GEN_DOCKER_OUT_DEFAULT="${OUT_DIR:-docker}"
-    set +a
+  env \
+    GEN_DOCKER_OUT_DEFAULT="${OUT_DIR:-docker}" \
     gc_cli_render_template "help/generate_docker_usage.txt"
-  )
 }
 
 OUT_DIR="docker"
@@ -161,24 +157,20 @@ admin_df="${OUT_PATH}/admin.Dockerfile"
 nginx_conf="${OUT_PATH}/nginx.conf"
 env_example="${ROOT_DIR}/.env.example"
 
-  (
-    set -a
-    # shellcheck disable=SC2034
-    GEN_DOCKER_PROJECT_SLUG="${PROJECT_SLUG}"
-    GEN_DOCKER_DB_ROOT_PASS="${DB_ROOT_PASS}"
-    GEN_DOCKER_DB_NAME="${DB_NAME}"
-    GEN_DOCKER_DB_USER="${DB_USER}"
-  GEN_DOCKER_DB_PASS="${DB_PASS}"
-  GEN_DOCKER_DB_HOST_PORT="${DB_HOST_PORT}"
-  GEN_DOCKER_API_HOST_PORT="${API_HOST_PORT}"
-  GEN_DOCKER_WEB_HOST_PORT="${WEB_HOST_PORT}"
-  GEN_DOCKER_ADMIN_HOST_PORT="${ADMIN_HOST_PORT}"
-  GEN_DOCKER_PROXY_HOST_PORT="${PROXY_HOST_PORT}"
-  GEN_DOCKER_API_BASE_URL="${API_BASE_URL}"
-  GEN_DOCKER_DATABASE_URL_CONTAINER="mysql://${DB_USER}:${DB_PASS}@db:3306/${DB_NAME}"
-  set +a
-  gc_cli_render_template "docker/docker-compose.yml.tmpl"
-) > "${compose}"
+env \
+  GEN_DOCKER_PROJECT_SLUG="${PROJECT_SLUG}" \
+  GEN_DOCKER_DB_ROOT_PASS="${DB_ROOT_PASS}" \
+  GEN_DOCKER_DB_NAME="${DB_NAME}" \
+  GEN_DOCKER_DB_USER="${DB_USER}" \
+  GEN_DOCKER_DB_PASS="${DB_PASS}" \
+  GEN_DOCKER_DB_HOST_PORT="${DB_HOST_PORT}" \
+  GEN_DOCKER_API_HOST_PORT="${API_HOST_PORT}" \
+  GEN_DOCKER_WEB_HOST_PORT="${WEB_HOST_PORT}" \
+  GEN_DOCKER_ADMIN_HOST_PORT="${ADMIN_HOST_PORT}" \
+  GEN_DOCKER_PROXY_HOST_PORT="${PROXY_HOST_PORT}" \
+  GEN_DOCKER_API_BASE_URL="${API_BASE_URL}" \
+  GEN_DOCKER_DATABASE_URL_CONTAINER="mysql://${DB_USER}:${DB_PASS}@db:3306/${DB_NAME}" \
+  gc_cli_render_template "docker/docker-compose.yml.tmpl" > "${compose}"
 
 gc_cli_render_template "docker/api.Dockerfile" > "${api_df}"
 gc_cli_render_template "docker/web.Dockerfile" > "${web_df}"
@@ -186,18 +178,14 @@ gc_cli_render_template "docker/admin.Dockerfile" > "${admin_df}"
 
 gc_cli_render_template "docker/nginx.conf.tmpl" > "${nginx_conf}"
 
-  (
-    set -a
-    # shellcheck disable=SC2034
-    GEN_DOCKER_ENV_DB_URL="mysql://${DB_USER}:${DB_PASS}@127.0.0.1:${DB_HOST_PORT}/${DB_NAME}"
-    GEN_DOCKER_DB_HOST_PORT="${DB_HOST_PORT}"
-    GEN_DOCKER_API_HOST_PORT="${API_HOST_PORT}"
-    GEN_DOCKER_WEB_HOST_PORT="${WEB_HOST_PORT}"
-  GEN_DOCKER_ADMIN_HOST_PORT="${ADMIN_HOST_PORT}"
-  GEN_DOCKER_PROXY_HOST_PORT="${PROXY_HOST_PORT}"
-  GEN_DOCKER_API_BASE_URL="${API_BASE_URL}"
-  set +a
-  gc_cli_render_template "env/docker.env.example.tmpl"
-) > "${env_example}"
+env \
+  GEN_DOCKER_ENV_DB_URL="mysql://${DB_USER}:${DB_PASS}@127.0.0.1:${DB_HOST_PORT}/${DB_NAME}" \
+  GEN_DOCKER_DB_HOST_PORT="${DB_HOST_PORT}" \
+  GEN_DOCKER_API_HOST_PORT="${API_HOST_PORT}" \
+  GEN_DOCKER_WEB_HOST_PORT="${WEB_HOST_PORT}" \
+  GEN_DOCKER_ADMIN_HOST_PORT="${ADMIN_HOST_PORT}" \
+  GEN_DOCKER_PROXY_HOST_PORT="${PROXY_HOST_PORT}" \
+  GEN_DOCKER_API_BASE_URL="${API_BASE_URL}" \
+  gc_cli_render_template "env/docker.env.example.tmpl" > "${env_example}"
 
 log "Wrote docker assets to: ${OUT_PATH}"

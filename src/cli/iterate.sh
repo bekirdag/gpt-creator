@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CLI_ROOT="$ROOT_DIR"
 
-GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+export GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
 
@@ -78,13 +78,9 @@ fi
 warn "'gpt-creator iterate' is deprecated. Use 'gpt-creator create-tasks' followed by 'gpt-creator work-on-tasks'."
 
 usage() {
-  (
-    set -a
-    # shellcheck disable=SC2034
-    ITERATE_DEFAULT_MODEL="$GC_DEFAULT_MODEL"
-    set +a
+  env \
+    ITERATE_DEFAULT_MODEL="$GC_DEFAULT_MODEL" \
     gc_cli_render_template "help/iterate_usage.txt"
-  )
 }
 
 : "${CODEX_BIN:=codex}"
@@ -166,15 +162,11 @@ for entry in "${TASKS[@]}"; do
   PROMPT="$RUN_DIR/task_${i}_${slug}.prompt.md"
   OUTPUT="$OUT_DIR/task_${i}_${slug}.out.md"
 
-  (
-    set -a
-    # shellcheck disable=SC2034
-    ITERATE_CODEX_MODEL="$CODEX_MODEL"
-    ITERATE_PROJECT_LABEL="$PROJECT_LABEL_PROMPT"
-    ITERATE_TASK_TITLE="$title"
-    set +a
-    gc_cli_render_template "prompts/iterate_task.prompt.md.tmpl"
-  ) > "$PROMPT"
+  env \
+    ITERATE_CODEX_MODEL="$CODEX_MODEL" \
+    ITERATE_PROJECT_LABEL="$PROJECT_LABEL_PROMPT" \
+    ITERATE_TASK_TITLE="$title" \
+    gc_cli_render_template "prompts/iterate_task.prompt.md.tmpl" > "$PROMPT"
 
   # Append a tail of the context (to give Codex some inline hints while keeping the full context on disk)
   tail -n 400 "$CTX_DIR/context.md" >> "$PROMPT"

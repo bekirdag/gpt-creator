@@ -6,7 +6,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+export GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
 
@@ -22,15 +22,11 @@ type log_err  >/dev/null 2>&1 || log_err(){  printf "[%s] \033[31mERROR\033[0m %
 type die      >/dev/null 2>&1 || die(){ log_err "$*"; exit 1; }
 
 show_usage() {
-  (
-    set -a
-    # shellcheck disable=SC2034
-    GENERATE_USAGE_CODEX_MODEL="${CODEX_MODEL:-gpt-5-high}"
-    GENERATE_USAGE_CODEX_CMD="${CODEX_CMD:-codex}"
-    GENERATE_USAGE_OUT_ROOT="${PROJECT_ROOT:-$ROOT_DIR}/apps"
-    set +a
+  env \
+    GENERATE_USAGE_CODEX_MODEL="${CODEX_MODEL:-gpt-5-high}" \
+    GENERATE_USAGE_CODEX_CMD="${CODEX_CMD:-codex}" \
+    GENERATE_USAGE_OUT_ROOT="${PROJECT_ROOT:-$ROOT_DIR}/apps" \
     gc_cli_render_template "help/generate_usage.txt"
-  )
 }
 
 # Defaults (may be overridden by constants.sh or env)

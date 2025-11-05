@@ -4,7 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+export GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
 
@@ -30,16 +30,12 @@ err(){  printf "\033[31m[%s][ERROR]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 
 usage() {
-  (
-    set -a
-    # shellcheck disable=SC2034
-    RUN_OPEN_CMD_NAME="$GC_NAME"
-    RUN_OPEN_WEB_DEFAULT="${GC_WEB_URL:-http://localhost:5173}"
-    RUN_OPEN_ADMIN_DEFAULT="${GC_ADMIN_URL:-http://localhost:5174}"
-    RUN_OPEN_API_DEFAULT="${GC_API_HEALTH_URL:-http://localhost:3000/health}"
-    set +a
+  env \
+    RUN_OPEN_CMD_NAME="$GC_NAME" \
+    RUN_OPEN_WEB_DEFAULT="${GC_WEB_URL:-http://localhost:5173}" \
+    RUN_OPEN_ADMIN_DEFAULT="${GC_ADMIN_URL:-http://localhost:5174}" \
+    RUN_OPEN_API_DEFAULT="${GC_API_HEALTH_URL:-http://localhost:3000/health}" \
     gc_cli_render_template "help/run_open_usage.txt"
-  )
 }
 
 open_cmd() {

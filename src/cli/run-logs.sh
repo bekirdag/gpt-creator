@@ -4,7 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+export GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
 
@@ -30,14 +30,10 @@ err(){  printf "\033[31m[%s][ERROR]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 
 usage() {
-  (
-    set -a
-    # shellcheck disable=SC2034
-    RUN_LOGS_CMD_NAME="$GC_NAME"
-    RUN_LOGS_DEFAULT_TAIL="$TAIL"
-    set +a
+  env \
+    RUN_LOGS_CMD_NAME="$GC_NAME" \
+    RUN_LOGS_DEFAULT_TAIL="$TAIL" \
     gc_cli_render_template "help/run_logs_usage.txt"
-  )
 }
 
 SERVICE=""

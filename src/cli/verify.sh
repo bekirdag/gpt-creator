@@ -4,7 +4,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+export GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
 
@@ -30,22 +30,18 @@ err(){  printf "\033[31m[%s][ERROR]\033[0m %s\n" "$GC_NAME" "$*" >&2; }
 die(){ err "$*"; exit 1; }
 
 usage() {
-  (
-    set -a
-    # shellcheck disable=SC2034
-    VERIFY_CMD_NAME="$GC_NAME"
-    VERIFY_API_DEFAULT="${GC_API_HEALTH_URL:-http://localhost:3000/health}"
-    VERIFY_WEB_DEFAULT="${GC_WEB_URL:-http://localhost:5173}"
-    VERIFY_ADMIN_DEFAULT="${GC_ADMIN_URL:-http://localhost:5174}"
-    VERIFY_DB_HOST_DEFAULT="${MYSQL_HOST:-localhost}"
-    VERIFY_DB_PORT_DEFAULT="${MYSQL_PORT:-3306}"
-    VERIFY_DB_USER_DEFAULT="${MYSQL_USER:-root}"
-    VERIFY_DB_PASS_DEFAULT="${MYSQL_PASSWORD:-}"
-    VERIFY_DB_NAME_DEFAULT="${MYSQL_DATABASE:-app}"
-    VERIFY_COMPOSE_FILE_DEFAULT="$GC_COMPOSE_FILE"
-    set +a
+  env \
+    VERIFY_CMD_NAME="$GC_NAME" \
+    VERIFY_API_DEFAULT="${GC_API_HEALTH_URL:-http://localhost:3000/health}" \
+    VERIFY_WEB_DEFAULT="${GC_WEB_URL:-http://localhost:5173}" \
+    VERIFY_ADMIN_DEFAULT="${GC_ADMIN_URL:-http://localhost:5174}" \
+    VERIFY_DB_HOST_DEFAULT="${MYSQL_HOST:-localhost}" \
+    VERIFY_DB_PORT_DEFAULT="${MYSQL_PORT:-3306}" \
+    VERIFY_DB_USER_DEFAULT="${MYSQL_USER:-root}" \
+    VERIFY_DB_PASS_DEFAULT="${MYSQL_PASSWORD:-}" \
+    VERIFY_DB_NAME_DEFAULT="${MYSQL_DATABASE:-app}" \
+    VERIFY_COMPOSE_FILE_DEFAULT="$GC_COMPOSE_FILE" \
     gc_cli_render_template "help/verify_usage.txt"
-  )
 }
 
 : "${GC_API_HEALTH_URL:=http://localhost:3000/health}"
@@ -123,7 +119,7 @@ fi
 info "== Docs presence (staging) =="
 missing=0
 for f in pdr.* sds.* openapi.* *.mmd *.sql "*JIRA*".md "*Jira*".md "*jira*".md; do
-  if ls "$GC_STAGING_DIR"/$f >/dev/null 2>&1; then
+  if ls "$GC_STAGING_DIR"/"$f" >/dev/null 2>&1; then
     ok "Found: $f"
     ((pass++)) || true
   else

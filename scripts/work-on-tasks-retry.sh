@@ -18,7 +18,8 @@ usage() {
       "" \
       "Examples:" \
       "  scripts/work-on-tasks-retry.sh story-slug:003 --project /path/to/project" \
-      "  scripts/work-on-tasks-retry.sh --project /path/to/project" >&2
+      "  scripts/work-on-tasks-retry.sh --project /path/to/project" \
+      "  scripts/work-on-tasks-retry.sh --story story-slug --project /path/to/project" >&2
   fi
   exit 2
 }
@@ -37,6 +38,22 @@ if [[ $# -gt 0 && "$1" != -* ]]; then
   shift
 fi
 
+args=("$@")
+story_filter=""
+for (( idx = 0; idx < ${#args[@]}; idx++ )); do
+  arg="${args[idx]}"
+  case "$arg" in
+    --story|--from-story)
+      if (( idx + 1 < ${#args[@]} )); then
+        story_filter="${args[idx + 1]}"
+      fi
+      ;;
+    --story=*|--from-story=*)
+      story_filter="${arg#*=}"
+      ;;
+  esac
+done
+
 declare -a base_args=(
   gpt-creator work-on-tasks
   --batch-size 1
@@ -47,8 +64,8 @@ if [[ -n "$task_ref" ]]; then
   base_args+=(--from-task "$task_ref")
 fi
 
-if [[ $# -gt 0 ]]; then
-  base_args+=("$@")
+if (( ${#args[@]} > 0 )); then
+  base_args+=("${args[@]}")
 fi
 
 child_pid=0
@@ -80,19 +97,15 @@ run_once() {
   return "$status"
 }
 
-max_attempts="${MAX_ATTEMPTS:-3}"
-attempt=1
-status=0
-
-mkdir -p "${ROOT_DIR}/.gpt-creator/logs"
-MAX_SPINS="${MAX_SPINS:-1000}"
-spins=0
-prev_story=""
-
-while (( spins < MAX_SPINS )); do
-  git rev-parse HEAD > "${ROOT_DIR}/.gpt-creator/logs/last_run.base_sha" 2>/dev/null || true
-  attempt=1
-  status=0
+run_with_retries() {
+  local attempt=1
+  local status=0
+  local retry_label=""
+  if [[ -n "$task_ref" ]]; then
+    retry_label="$task_ref"
+  elif [[ -n "$story_filter" ]]; then
+    retry_label="$story_filter"
+  fi
 
   while (( attempt <= max_attempts )); do
     if run_once; then
@@ -101,14 +114,51 @@ while (( spins < MAX_SPINS )); do
     fi
     status=$?
     if (( status == 124 && attempt < max_attempts )); then
-      echo "[info] work-on-tasks exited with timeout (124); retrying task ${task_ref}..." >&2
+      if [[ -n "$retry_label" ]]; then
+        echo "[info] work-on-tasks exited with timeout (124); retrying ${retry_label}..." >&2
+      else
+        echo "[info] work-on-tasks exited with timeout (124); retrying..." >&2
+      fi
       ((attempt++))
       continue
     fi
     break
   done
 
-  if (( status != 0 )); then
+  return "$status"
+}
+
+max_attempts="${MAX_ATTEMPTS:-3}"
+status=0
+
+mkdir -p "${ROOT_DIR}/.gpt-creator/logs"
+LAST_BASE_SHA="${ROOT_DIR}/.gpt-creator/logs/last_run.base_sha"
+
+record_base_sha() {
+  git rev-parse HEAD > "$LAST_BASE_SHA" 2>/dev/null || true
+}
+
+record_base_sha
+
+if [[ -n "$story_filter" ]]; then
+  if run_with_retries; then
+    exit 0
+  fi
+  status=$?
+  exit "$status"
+fi
+
+MAX_SPINS="${MAX_SPINS:-1000}"
+spins=0
+prev_story=""
+
+while (( spins < MAX_SPINS )); do
+  record_base_sha
+
+  if run_with_retries; then
+    status=0
+  else
+    status=$?
     break
   fi
 

@@ -383,16 +383,21 @@ def estimate(db_path: Path) -> int:
             progress_overrides,
             include_progress_state,
         )
+        resolved_status = effective_status or coerce_status(base_status) or "pending"
+        is_done = is_done_status(resolved_status)
+        if not is_done and is_done_status(base_status):
+            resolved_status = coerce_status(base_status) or resolved_status
+            is_done = True
         task_key_primary = str(row["id"])
-        task_info[task_key_primary] = {"points": points, "status": effective_status}
+        task_info[task_key_primary] = {"points": points, "status": resolved_status}
         story_slug = (row["story_slug"] or "").strip()
         position = row["position"]
         if story_slug and position is not None:
-            task_info[f"{story_slug}:{position}"] = {"points": points, "status": effective_status}
+            task_info[f"{story_slug}:{position}"] = {"points": points, "status": resolved_status}
         task_id_value = (row["task_id"] or "").strip()
         if task_id_value:
-            task_info[task_id_value] = {"points": points, "status": effective_status}
-        if is_done_status(effective_status):
+            task_info[task_id_value] = {"points": points, "status": resolved_status}
+        if is_done:
             completed_tasks_count += 1
             completed_points += points
             continue

@@ -7862,6 +7862,9 @@ cmd_work_on_tasks() {
   fi
   local migration_epoch_baseline="$migration_epoch_initial"
   local migration_transition_triggered=0
+  local migration_epoch_refreshes=0
+  local migration_epoch_refresh_limit=5
+  local migration_transition_hard_stop=0
 
   local start_task_story_slug="" start_task_story_title="" start_task_position="" start_task_id="" start_task_title=""
   if [[ -n "$start_task_ref" ]]; then
@@ -8529,6 +8532,10 @@ print(error)'
       next_task_int=$((next_task))
     fi
 
+    if (( migration_transition_hard_stop )); then
+      break
+    fi
+
     if (( migration_transition_triggered )); then
       break
     fi
@@ -8537,22 +8544,20 @@ print(error)'
     if migration_epoch_current="$(gc_fetch_migration_epoch "$tasks_db" 2>/dev/null)"; then
       if [[ "$migration_epoch_current" != "$migration_epoch_baseline" ]]; then
         migration_transition_triggered=1
-        work_failed=1
-        manual_followups=1
-        local block_position="$next_task_int"
-        if (( block_position >= total_tasks_int )); then
-          if (( total_tasks_int > 0 )); then
-            block_position=$((total_tasks_int - 1))
-          else
-            block_position=0
-          fi
+        (( migration_epoch_refreshes++ ))
+        local prior_epoch="$migration_epoch_baseline"
+        if (( migration_epoch_refreshes > migration_epoch_refresh_limit )); then
+          warn "  Migration epoch changed ${migration_epoch_refreshes} times within a single work-on-tasks run; pausing to avoid an infinite loop."
+          work_failed=1
+          manual_followups=1
+          migration_transition_hard_stop=1
+          break
         fi
-        gc_update_task_state "$tasks_db" "$slug" "$block_position" "blocked-migration-transition" "$run_stamp" 2>/dev/null || true
         if (( binder_clear_on_migration )); then
           gc_binder_clear_story "$PROJECT_ROOT" "${epic_id:-}" "$slug"
           info "  Cleared binder cache for story ${slug} due to migration epoch change."
         fi
-        info "  Migration epoch changed ($migration_epoch_baseline → $migration_epoch_current); deferring remaining tasks to a fresh run."
+        info "  Migration epoch changed (${prior_epoch} → ${migration_epoch_current}); refreshing backlog before continuing."
         migration_epoch_baseline="$migration_epoch_current"
         break
       fi
@@ -10459,8 +10464,16 @@ print(flag("notes_contains_already_satisfied"))'
     fi
   done < <("$python_bin" "$story_plan_helper" "$tasks_db" "${story_filter}" "$resume_flag")
 
-    if (( migration_transition_triggered )); then
+    if (( migration_transition_hard_stop )); then
       break
+    fi
+
+    if (( migration_transition_triggered )); then
+      migration_transition_triggered=0
+      if (( iteration_processed_any )); then
+        processed_any_total=1
+      fi
+      continue
     fi
 
     if (( idle_timeout_triggered )); then
@@ -10614,8 +10627,10 @@ print(flag("notes_contains_already_satisfied"))'
     warn "Run terminated because a prompt exceeded the configured token budget (status: blocked-quota)."
   fi
 
-  if (( migration_transition_triggered )); then
-    warn "Run paused because migration_epoch changed mid-execution; rerun work-on-tasks to continue with the updated task mapping."
+  if (( migration_transition_hard_stop )); then
+    warn "Run paused because the migration epoch changed too many times during a single run; rerun work-on-tasks after investigating pending migrations."
+  elif (( migration_epoch_refreshes > 0 )); then
+    info "Migration epoch refreshed ${migration_epoch_refreshes} time(s) during this run; backlog was reloaded automatically."
   fi
 
   local budget_report_helper

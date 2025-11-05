@@ -24,6 +24,29 @@ def slug_norm(value: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
 
 
+def _normalize_status(value: str | None) -> str:
+    cleaned = (value or "").strip().lower().replace("_", "-")
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return cleaned
+
+
+def _is_terminal_status(value: str | None) -> bool:
+    s = _normalize_status(value)
+    if not s:
+        return False
+    if s in {
+        "complete",
+        "completed",
+        "completed-no-changes",
+        "done",
+        "skipped",
+        "skipped-already-complete",
+    }:
+        return True
+    return s.startswith("completed-") or s.startswith("done-") or s.startswith("skipped-")
+
+
 def sanitize_field(value: str) -> str:
     return value.replace("\t", " ").replace("\n", " ")
 
@@ -102,28 +125,20 @@ def main() -> None:
         total = len(task_rows)
         completed = 0
         next_index = 0
-        # Treat terminal states as completed so selection can advance.
-        COMPLETED_STATUSES = {
-            "complete",
-            "completed",
-            "completed-no-changes",
-            "skipped-already-complete",
-        }
         for row in task_rows:
-            status = (row[1] or "").strip().lower()
-            is_completed = status in COMPLETED_STATUSES or status.startswith("completed-")
-            if is_completed:
+            status = row[1] or ""
+            if _is_terminal_status(status):
                 completed += 1
                 continue
             # first non-completed task in this story
-            next_index = int(row[0] or 0)
+            next_index = row[0] or 0
             break
         else:
             next_index = total
 
         current_status = (story["status"] or "").strip()
 
-        if resume_flag and not story_filter and current_status.lower() == "complete":
+        if resume_flag and not story_filter and _is_terminal_status(current_status):
             continue
 
         if resume_flag:

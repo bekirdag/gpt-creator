@@ -1,7 +1,12 @@
 Usage: work-on-tasks-retry.sh <task-ref> [additional gpt-creator args]
 
 Runs `gpt-creator work-on-tasks` scoped to a single task (batch size 1) and
-automatically retries once when the CLI reports a timeout (exit 124).
+automatically retries when the CLI exits with 124 or reports transient Codex
+failures (unterminated heredoc, context stream dropped, empty apply). Retries
+up to `MAX_ATTEMPTS` times (default 3).
+
+Environment:
+  MAX_ATTEMPTS   Override retry limit (default 3).
 
 Examples:
   scripts/work-on-tasks-retry.sh story-slug:003 --project /path/to/project

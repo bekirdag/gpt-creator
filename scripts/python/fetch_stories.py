@@ -194,7 +194,9 @@ def fetch_task_counts():
     return counts
 
 def fetch_tasks_for_story(slug):
-    story_points_expr = "COALESCE(estimate, story_points)" if HAS_TASK_ESTIMATE_COLUMN else "story_points"
+    story_points_expr = "story_points"
+    if HAS_TASK_ESTIMATE_COLUMN:
+        story_points_expr = "COALESCE(story_points, estimate)"
     query = f"""
         SELECT position, task_id, title, status, {story_points_expr} AS story_points
         FROM tasks
@@ -495,7 +497,11 @@ def print_task_children(story):
         task_id = (task.get("task_id") or "").strip() or "-"
         title = truncate(task.get("title"), width=80)
         status = (task.get("status") or "pending").strip().lower().replace("_", "-")
-        story_points = (task.get("story_points") or "").strip() or "-"
+        points_value = task.get("story_points")
+        if points_value is None:
+            story_points = "-"
+        else:
+            story_points = str(points_value).strip() or "-"
         rows.append([index, task_id, title, status, story_points])
     print_table(headers, rows)
 

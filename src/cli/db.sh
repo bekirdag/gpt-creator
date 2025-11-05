@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 COMPOSE_FILE="${ROOT_DIR}/docker/docker-compose.yml"
 
-GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+export GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
 
@@ -43,10 +43,9 @@ dc() {
 usage() {
   (
     set -a
-    # shellcheck disable=SC2034
-    DB_USAGE_DB_NAME="${DB_NAME:-${GC_DB_NAME:-${PROJECT_SLUG}_app}}"
-    DB_USAGE_DB_USER="${DB_USER:-${GC_DB_USER:-${PROJECT_SLUG}_user}}"
-    DB_USAGE_DB_PASS="${DB_PASS:-${GC_DB_PASSWORD:-${PROJECT_SLUG}_pass}}"
+    export DB_USAGE_DB_NAME="${DB_NAME:-${GC_DB_NAME:-${PROJECT_SLUG}_app}}"
+    export DB_USAGE_DB_USER="${DB_USER:-${GC_DB_USER:-${PROJECT_SLUG}_user}}"
+    export DB_USAGE_DB_PASS="${DB_PASS:-${GC_DB_PASSWORD:-${PROJECT_SLUG}_pass}}"
     set +a
     gc_cli_render_template "help/db_usage.txt"
   )

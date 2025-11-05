@@ -5,7 +5,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+export GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
 
@@ -90,14 +90,13 @@ PROMPT_FILE="${WORK_DIR}/prompts/generate-admin.prompt.md"
 
   (
     set -a
-    # shellcheck disable=SC2034
-    GEN_ADMIN_SDS="${SDS}"
-    GEN_ADMIN_PDR="${PDR}"
-    GEN_ADMIN_MMD="${BACKOFFICE_MMD:-<none>}"
-    GEN_ADMIN_JIRA="${JIRA}"
+    export GEN_ADMIN_SDS="${SDS}"
+    export GEN_ADMIN_PDR="${PDR}"
+    export GEN_ADMIN_MMD="${BACKOFFICE_MMD:-<none>}"
+    export GEN_ADMIN_JIRA="${JIRA}"
     set +a
-  gc_cli_render_template "prompts/generate_admin.prompt.md.tmpl"
-) > "$PROMPT_FILE"
+    gc_cli_render_template "prompts/generate_admin.prompt.md.tmpl"
+  ) > "$PROMPT_FILE"
 
 log_info "Prepared Codex prompt → $PROMPT_FILE"
 log_info "Output directory         → $ADMIN_DIR"

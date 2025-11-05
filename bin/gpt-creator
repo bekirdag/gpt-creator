@@ -1154,11 +1154,10 @@ gc_create_env_if_missing() {
   db_root_password="$(gc_random_string)"
   (
     set -a
-    # shellcheck disable=SC2034
-    GC_ENV_DB_NAME="$db_name"
-    GC_ENV_DB_USER="$db_user"
-    GC_ENV_DB_PASSWORD="$db_password"
-    GC_ENV_DB_ROOT_PASSWORD="$db_root_password"
+    export GC_ENV_DB_NAME="$db_name"
+    export GC_ENV_DB_USER="$db_user"
+    export GC_ENV_DB_PASSWORD="$db_password"
+    export GC_ENV_DB_ROOT_PASSWORD="$db_root_password"
     set +a
     gc_render_template "env/default_env_file.tmpl"
   ) >"$env_file"
@@ -6548,21 +6547,22 @@ cmd_refine_tasks() {
   local skip_refine=0
   local dry_flag="$dry_run"
   cjt::init "$PROJECT_ROOT" "$model_name" "$force_flag" "$skip_refine" "$dry_flag"
+  # shellcheck disable=SC2034
   CJT_DOC_FILES=()
   cjt::build_context_files
 
-  CJT_SYNC_DB=1
-  CJT_TASKS_DB_PATH="$tasks_db"
-  CJT_IGNORE_REFINE_STATE=1
-  CJT_REFINE_FORCE=$force
-  CJT_HAVE_REFINED_COLUMN="$have_refined"
-  CJT_REFINE_TOTAL_TASKS="$total_tasks"
-  CJT_REFINE_REFINED_TASKS="$refined_tasks"
-  CJT_REFINE_PENDING_TASKS="$pending_tasks"
-  CJT_REFINE_TOTAL_STORIES="$total_stories"
-  CJT_REFINE_PENDING_STORIES="$pending_stories"
+  export CJT_SYNC_DB=1
+  export CJT_TASKS_DB_PATH="$tasks_db"
+  export CJT_IGNORE_REFINE_STATE=1
+  export CJT_REFINE_FORCE=$force
+  export CJT_HAVE_REFINED_COLUMN="$have_refined"
+  export CJT_REFINE_TOTAL_TASKS="$total_tasks"
+  export CJT_REFINE_REFINED_TASKS="$refined_tasks"
+  export CJT_REFINE_PENDING_TASKS="$pending_tasks"
+  export CJT_REFINE_TOTAL_STORIES="$total_stories"
+  export CJT_REFINE_PENDING_STORIES="$pending_stories"
   if [[ -n "$story_filter" ]]; then
-    CJT_ONLY_STORY_SLUG="$story_filter"
+    export CJT_ONLY_STORY_SLUG="$story_filter"
   fi
 
   cjt::refine_tasks
@@ -6766,12 +6766,11 @@ gc_generate_auto_review() {
 
   (
     set -a
-    # shellcheck disable=SC2034
-    GC_REVIEW_TITLE="$review_title"
-    GC_REVIEW_STATUS="${task_status:-unknown}"
-    GC_REVIEW_TOKENS="${tokens_used:-unknown}"
-    GC_REVIEW_RUN="${run_id:-unknown}"
-    GC_REVIEW_TIMESTAMP="$timestamp_utc"
+    export GC_REVIEW_TITLE="$review_title"
+    export GC_REVIEW_STATUS="${task_status:-unknown}"
+    export GC_REVIEW_TOKENS="${tokens_used:-unknown}"
+    export GC_REVIEW_RUN="${run_id:-unknown}"
+    export GC_REVIEW_TIMESTAMP="$timestamp_utc"
     set +a
     gc_render_template "review/auto_review.md.tmpl"
   ) >"$review_md"
@@ -6804,13 +6803,12 @@ gc_generate_auto_review() {
 
   (
     set -a
-    # shellcheck disable=SC2034
-    GC_REVIEW_JSON_TASK_ID="$review_task_id_json"
-    GC_REVIEW_JSON_STATUS="$review_status_json"
-    GC_REVIEW_JSON_TOKENS_USED="$review_tokens_json"
-    GC_REVIEW_JSON_RUN_ID="$review_run_json"
-    GC_REVIEW_JSON_TIMESTAMP="$review_timestamp_json"
-    GC_REVIEW_JSON_ARTIFACT="$review_artifact_json"
+    export GC_REVIEW_JSON_TASK_ID="$review_task_id_json"
+    export GC_REVIEW_JSON_STATUS="$review_status_json"
+    export GC_REVIEW_JSON_TOKENS_USED="$review_tokens_json"
+    export GC_REVIEW_JSON_RUN_ID="$review_run_json"
+    export GC_REVIEW_JSON_TIMESTAMP="$review_timestamp_json"
+    export GC_REVIEW_JSON_ARTIFACT="$review_artifact_json"
     set +a
     gc_render_template "review/auto_review.json.tmpl"
   ) >"$review_json"
@@ -7112,9 +7110,9 @@ cmd_work_on_tasks() {
   GC_RETRY_PUSH_MAX="${GC_RETRY_PUSH_MAX:-3}"
   # shellcheck disable=SC2034
   GC_LAST_VERIFY_STATUS="skipped"
-  GC_LAST_VERIFY_SUMMARY=""
-  GC_LAST_VERIFY_REPORT=""
-  GC_LAST_VERIFY_DETAILS=""
+  export GC_LAST_VERIFY_SUMMARY=""
+  export GC_LAST_VERIFY_REPORT=""
+  export GC_LAST_VERIFY_DETAILS=""
   GC_LAST_AUTO_PUSH_ERROR=""
   if [[ -z "${GC_VERIFY_CONFIG:-}" ]]; then
     GC_VERIFY_CONFIG=""
@@ -8453,9 +8451,8 @@ print(error)'
     checkpoint_timestamp="$(date -u +%FT%TZ)"
     (
       set -a
-      # shellcheck disable=SC2034
-      GC_CHECKPOINT_TITLE="${story_slug}/${task_id}"
-      GC_CHECKPOINT_TIMESTAMP="$checkpoint_timestamp"
+      export GC_CHECKPOINT_TITLE="${story_slug}/${task_id}"
+      export GC_CHECKPOINT_TIMESTAMP="$checkpoint_timestamp"
       set +a
       gc_render_template "checkpoints/empty_apply_checkpoint.md.tmpl"
     ) >"$checkpoint_file"

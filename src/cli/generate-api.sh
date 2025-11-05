@@ -5,7 +5,7 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+export GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
 
@@ -98,16 +98,15 @@ PROMPT_FILE="${WORK_DIR}/prompts/generate-api.prompt.md"
 
   (
     set -a
-    # shellcheck disable=SC2034
-    GEN_API_OPENAPI="${OPENAPI_PATH}"
-    GEN_API_PDR="${PDR}"
-    GEN_API_SDS="${SDS}"
-    GEN_API_IA="${IA}"
-    GEN_API_RFP="${RFP}"
-  GEN_API_SQL="${SQL}"
-  set +a
-  gc_cli_render_template "prompts/generate_api.prompt.md.tmpl"
-) > "$PROMPT_FILE"
+    export GEN_API_OPENAPI="${OPENAPI_PATH}"
+    export GEN_API_PDR="${PDR}"
+    export GEN_API_SDS="${SDS}"
+    export GEN_API_IA="${IA}"
+    export GEN_API_RFP="${RFP}"
+    export GEN_API_SQL="${SQL}"
+    set +a
+    gc_cli_render_template "prompts/generate_api.prompt.md.tmpl"
+  ) > "$PROMPT_FILE"
 
 log_info "Prepared Codex prompt → $PROMPT_FILE"
 log_info "Output directory         → $OUT_DIR"

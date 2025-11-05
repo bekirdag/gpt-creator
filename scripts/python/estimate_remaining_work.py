@@ -275,6 +275,35 @@ def fetch_progress_status_map(cur: sqlite3.Cursor) -> Dict[str, str]:
     return overrides
 
 
+def fetch_progress_story_points_map(cur: sqlite3.Cursor) -> Dict[str, float]:
+    if not table_exists(cur, "task_progress"):
+        return {}
+    if not column_exists(cur, "task_progress", "story_points"):
+        return {}
+    mapping: Dict[str, float] = {}
+    try:
+        rows = cur.execute(
+            "SELECT task_id, story_slug, task_position, story_points "
+            "FROM task_progress "
+            "WHERE story_points IS NOT NULL "
+            "ORDER BY id"
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return mapping
+    for entry in rows:
+        points = parse_points(entry["story_points"])
+        if points <= 0:
+            continue
+        task_id_value = str(entry["task_id"] or "").strip()
+        if task_id_value:
+            mapping[task_id_value] = points
+        slug = str(entry["story_slug"] or "").strip()
+        position = entry["task_position"]
+        if slug and position is not None:
+            mapping[f"{slug}:{int(position)}"] = points
+    return mapping
+
+
 SKIP_PROGRESS_OVERRIDES = {"verified", "noop-accepted"}
 
 
@@ -286,7 +315,7 @@ def determine_effective_status(
     *,
     include_last_apply_status: bool = False,
     include_last_verify_status: bool = False,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[str]]:
     candidate_keys = []
     if "id" in task_row.keys():
         candidate_keys.append(str(task_row["id"]))
@@ -348,7 +377,7 @@ def determine_effective_status(
     if base_normalized not in seen:
         normalized_candidates.append(base_normalized)
 
-    return effective_status, normalized_candidates
+    return effective_status, normalized_candidates, candidate_keys
 
 
 def fmt_float(value: float) -> str:
@@ -408,6 +437,7 @@ def estimate(db_path: Path) -> int:
     include_last_apply_status = "last_apply_status" in task_columns
     include_last_verify_status = "last_verify_status" in task_columns
     include_estimate = "estimate" in task_columns
+    include_last_story_points = "last_story_points" in task_columns
     if include_progress_state:
         select_fields.append("progress_state")
     if include_last_apply_status:
@@ -416,6 +446,8 @@ def estimate(db_path: Path) -> int:
         select_fields.append("last_verify_status")
     if include_estimate:
         select_fields.append("estimate")
+    if include_last_story_points:
+        select_fields.append("last_story_points")
     try:
         rows = cur.execute(f"SELECT {', '.join(select_fields)} FROM tasks").fetchall()
     except sqlite3.DatabaseError as exc:
@@ -423,11 +455,13 @@ def estimate(db_path: Path) -> int:
         raise SystemExit(f"Failed to read tasks: {exc}")
 
     progress_overrides = fetch_progress_status_map(cur)
+    progress_story_points = fetch_progress_story_points_map(cur)
     remaining_tasks = 0
     total_tasks_count = 0
     completed_tasks_count = 0
     total_points = 0.0
     completed_points = 0.0
+    completed_tasks_missing_points = 0
     task_info: Dict[str, Dict[str, float | str]] = {}
 
     for row in rows:
@@ -439,7 +473,11 @@ def estimate(db_path: Path) -> int:
             fallback_points = parse_points(estimate_value)
             if fallback_points > 0:
                 points = fallback_points
-        effective_status, candidate_statuses = determine_effective_status(
+        if points <= 0 and include_last_story_points and "last_story_points" in row.keys():
+            fallback_last = parse_points(row["last_story_points"])
+            if fallback_last > 0:
+                points = fallback_last
+        effective_status, candidate_statuses, candidate_keys = determine_effective_status(
             base_status,
             row,
             progress_overrides,
@@ -447,6 +485,12 @@ def estimate(db_path: Path) -> int:
             include_last_apply_status=include_last_apply_status,
             include_last_verify_status=include_last_verify_status,
         )
+        if points <= 0 and progress_story_points:
+            for key in candidate_keys:
+                candidate_points = progress_story_points.get(key)
+                if candidate_points and candidate_points > 0:
+                    points = candidate_points
+                    break
         status_options: list[str] = []
         for candidate in [effective_status, *candidate_statuses, coerce_status(base_status)]:
             candidate_norm = coerce_status(candidate, "") if candidate is not None else ""
@@ -476,6 +520,8 @@ def estimate(db_path: Path) -> int:
         if is_done:
             completed_tasks_count += 1
             completed_points += points
+            if points <= 0:
+                completed_tasks_missing_points += 1
             continue
         remaining_tasks += 1
         total_points += points
@@ -566,10 +612,18 @@ def estimate(db_path: Path) -> int:
     summary_rows = [
         ("Completed tasks (detected)", f"{completed_tasks_count:,}"),
         ("Completed story points", fmt_number(completed_points)),
+    ]
+    if completed_tasks_missing_points > 0:
+        summary_rows.append(
+            ("Completed tasks without points", f"{completed_tasks_missing_points:,}")
+        )
+    summary_rows.extend(
+        [
         ("Remaining tasks", f"{remaining_tasks:,}"),
         ("Total tasks", f"{total_tasks_count:,}"),
         ("Remaining story points", fmt_number(total_points)),
-    ]
+        ]
+    )
     if eta_stalled_reason is not None:
         summary_rows.append(("Estimated completion", f"Stalled ({eta_stalled_reason})"))
     else:

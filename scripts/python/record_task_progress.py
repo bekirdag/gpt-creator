@@ -533,6 +533,7 @@ def record_task_progress(
 
     binder_enabled = os.getenv("GC_BINDER_ENABLED", "").strip().lower() not in {"0", "false", "no", "off"}
     if binder_enabled and task_row:
+        task_row_dict = dict(task_row)
         project_root = os.getenv("PROJECT_ROOT", "").strip()
         if project_root:
             binder_reopened = False
@@ -553,9 +554,9 @@ def record_task_progress(
 
             binder_update_after_progress(
                 Path(project_root),
-                epic_slug=task_row.get("epic_key") or "",
-                story_slug=task_row.get("story_slug") or story_slug,
-                task_id=task_row.get("task_id") or f"{story_slug}:{position_int}",
+                epic_slug=task_row_dict.get("epic_key") or "",
+                story_slug=task_row_dict.get("story_slug") or story_slug,
+                task_id=task_row_dict.get("task_id") or f"{story_slug}:{position_int}",
                 status=final_status or "",
                 apply_status=apply_status,
                 notes=split_lines(notes_text),

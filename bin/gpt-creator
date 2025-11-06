@@ -288,6 +288,17 @@ gc_render_template_fallback() {
         "- Do not repeat the previous plan without actionable modifications."
       return 0
       ;;
+    checkpoints/empty_apply_checkpoint.md.tmpl)
+      local checkpoint_title="${GC_CHECKPOINT_TITLE:-story/task}"
+      local checkpoint_timestamp="${GC_CHECKPOINT_TIMESTAMP:-$(date -u +%FT%TZ)}"
+      printf '# Checkpoint — %s\n\n' "$checkpoint_title"
+      printf 'Generated automatically because the agent response contained no actionable '\''changes'\''.\n\n'
+      printf -- '- Timestamp: %s\n' "$checkpoint_timestamp"
+      printf -- '- Runner: gc-empty-apply-fallback\n\n'
+      printf '## What was attempted\n'
+      printf -- '- Review the raw agent output under .gpt-creator/staging/plan/work/runs for detailed context.\n'
+      return 0
+      ;;
   esac
   return 1
 }
@@ -9878,6 +9889,34 @@ print(flag("notes_contains_already_satisfied"))'
             loop_guard_triggered=1
             work_failed=1
             break
+          elif (( codex_status >= 128 && codex_status <= 255 )); then
+            local signal_name=""
+            case "$codex_status" in
+              129) signal_name="HUP" ;;
+              130) signal_name="INT" ;;
+              131) signal_name="QUIT" ;;
+              132) signal_name="ILL" ;;
+              133) signal_name="TRAP" ;;
+              134) signal_name="ABRT" ;;
+              135) signal_name="BUS" ;;
+              136) signal_name="FPE" ;;
+              137) signal_name="KILL" ;;
+              138) signal_name="USR1" ;;
+              139) signal_name="SEGV" ;;
+              140) signal_name="USR2" ;;
+              141) signal_name="PIPE" ;;
+              142) signal_name="ALRM" ;;
+              143) signal_name="TERM" ;;
+              147) signal_name="XCPU" ;;
+              148) signal_name="XFSZ" ;;
+            esac
+            if [[ -n "$signal_name" ]]; then
+              warn "  Codex execution interrupted by signal ${signal_name}; stopping work-on-tasks."
+              gc_interrupt_handler "$signal_name"
+            else
+              warn "  Codex execution terminated by signal (exit ${codex_status}); stopping work-on-tasks."
+              exit "$codex_status"
+            fi
           fi
           warn "  Codex execution failed for ${call_name}; progress saved."
           task_result_status="permanent-fail"

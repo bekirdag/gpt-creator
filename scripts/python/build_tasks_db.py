@@ -152,6 +152,9 @@ def main() -> int:
               dependencies_json TEXT,
               tags_text TEXT,
               story_points TEXT,
+              priority INTEGER,
+              due_at TEXT,
+              points REAL,
               dependencies_text TEXT,
               assignee_text TEXT,
               document_reference TEXT,
@@ -243,6 +246,42 @@ def main() -> int:
             )
         """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS task_dependencies (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id TEXT NOT NULL,
+              blocker_id TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            )
+        """
+        )
+        cur.execute(
+            """
+            DELETE FROM task_dependencies
+             WHERE rowid NOT IN (
+               SELECT MIN(rowid) FROM task_dependencies GROUP BY task_id, blocker_id
+             )
+            """
+        )
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_task_dependencies_unique
+              ON task_dependencies (task_id, blocker_id)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_dependencies_task
+              ON task_dependencies (task_id)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocker
+              ON task_dependencies (blocker_id)
+        """
+        )
 
     ensure_table()
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_uid ON tasks(uid)")
@@ -275,6 +314,9 @@ def main() -> int:
     ensure_column("tasks", "last_run", "TEXT")
     ensure_column("tasks", "tags_text", "TEXT")
     ensure_column("tasks", "story_points", "TEXT")
+    ensure_column("tasks", "priority", "INTEGER")
+    ensure_column("tasks", "due_at", "TEXT")
+    ensure_column("tasks", "points", "REAL")
     ensure_column("tasks", "dependencies_text", "TEXT")
     ensure_column("tasks", "assignee_text", "TEXT")
     ensure_column("tasks", "document_reference", "TEXT")

@@ -79,63 +79,7 @@ if [[ ! -f "$DB_PATH" ]]; then
   exit 1
 fi
 
-needs_update="$(
-  python3 - "$DB_PATH" <<'PY'
-import sqlite3, sys
-from pathlib import Path
-
-TERMINAL = {
-    "complete",
-    "completed",
-    "completed-no-changes",
-    "done",
-    "skipped",
-    "skipped-already-complete",
-}
-PREFIXES = ("completed-", "done-", "skipped-")
-
-db_path = Path(sys.argv[1])
-conn = sqlite3.connect(str(db_path))
-conn.row_factory = sqlite3.Row
-cur = conn.cursor()
-
-needs = False
-try:
-    info = cur.execute("PRAGMA table_info(tasks)").fetchall()
-except sqlite3.DatabaseError:
-    print("update")
-    sys.exit(0)
-
-has_column = any(row[1] == "global_order" for row in info)
-if not has_column:
-    print("update")
-    sys.exit(0)
-
-rows = cur.execute("SELECT status, global_order FROM tasks").fetchall()
-pending_found = False
-for row in rows:
-    status = (row["status"] or "").strip().lower().replace("_", "-")
-    is_terminal = bool(status) and (status in TERMINAL or any(status.startswith(prefix) for prefix in PREFIXES))
-    if is_terminal:
-        continue
-    pending_found = True
-    order = row["global_order"] if row["global_order"] is not None else 0
-    if int(order or 0) <= 0:
-        needs = True
-        break
-
-if needs:
-    print("update")
-elif not pending_found:
-    print("idle")
-else:
-    print("ready")
-PY
-)"
-
-if [[ "$needs_update" == "update" ]]; then
-  (cd "$ROOT_DIR" && python3 "${SCRIPT_DIR}/python/update_global_task_order.py" "$DB_PATH" --project-root "$PROJECT_ROOT_DIR" >/dev/null)
-fi
+"$ROOT_DIR/bin/gpt-creator" order-tasks --project "$PROJECT_ROOT_DIR" >/dev/null
 
 readarray -t queue < <(cd "$ROOT_DIR" && python3 "${SCRIPT_DIR}/python/list_global_task_queue.py" "$DB_PATH")
 

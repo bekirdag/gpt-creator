@@ -7,11 +7,12 @@ import argparse
 import datetime as dt
 import glob
 import json
+import os
+import re
 import sqlite3
 from collections import defaultdict, deque
-import os
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Set
 
 TERMINAL_STATUSES = {
     "complete",
@@ -75,6 +76,45 @@ def _ensure_metadata_column(cur: sqlite3.Cursor) -> None:
         cur.execute("ALTER TABLE tasks ADD COLUMN global_order_updated_at TEXT")
 
 
+def _ensure_task_dependencies_table(cur: sqlite3.Cursor) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS task_dependencies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            blocker_id TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        )
+        """
+    )
+    cur.execute(
+        """
+        DELETE FROM task_dependencies
+         WHERE rowid NOT IN (
+           SELECT MIN(rowid) FROM task_dependencies GROUP BY task_id, blocker_id
+         )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_task_dependencies_unique
+          ON task_dependencies (task_id, blocker_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_dependencies_task
+          ON task_dependencies (task_id)
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_task_dependencies_blocker
+            ON task_dependencies (blocker_id)
+        """
+    )
+
+
 def _load_dependencies_from_db(cur: sqlite3.Cursor, known_keys: Dict[str, int]) -> List[Tuple[str, str]]:
     edges: List[Tuple[str, str]] = []
     try:
@@ -134,37 +174,6 @@ def _load_dependencies_from_binder(cache_root: Path, known_keys: Dict[str, int])
     return edges
 
 
-def _toposort(nodes: Iterable[str], edges: Iterable[Tuple[str, str]]) -> List[str]:
-    nodes_list = list(dict.fromkeys(nodes))
-    indegree: Dict[str, int] = defaultdict(int)
-    adjacency: Dict[str, List[str]] = defaultdict(list)
-
-    for src, dst in edges:
-        if src == dst:
-            continue
-        adjacency[src].append(dst)
-        indegree[dst] += 1
-        indegree.setdefault(src, indegree.get(src, 0))
-
-    for node in nodes_list:
-        indegree.setdefault(node, 0)
-
-    queue: deque[str] = deque([node for node in nodes_list if indegree[node] == 0])
-    order: List[str] = []
-
-    while queue:
-        node = queue.popleft()
-        order.append(node)
-        for neighbor in adjacency.get(node, []):
-            indegree[neighbor] -= 1
-            if indegree[neighbor] == 0:
-                queue.append(neighbor)
-
-    if len(order) != len(indegree):
-        return nodes_list
-    return order
-
-
 def compute_order(db_path: Path, project_root: Path) -> int:
     if not db_path.exists():
         raise FileNotFoundError(f"Task database not found: {db_path}")
@@ -175,10 +184,23 @@ def compute_order(db_path: Path, project_root: Path) -> int:
 
     _ensure_global_order_column(cur)
     _ensure_metadata_column(cur)
+    _ensure_task_dependencies_table(cur)
 
     rows = cur.execute(
         """
-        SELECT id, task_id, story_slug, position, status, story_id, story_title, epic_key, epic_title
+        SELECT id,
+               task_id,
+               story_slug,
+               position,
+               status,
+               story_id,
+               story_title,
+               epic_key,
+               epic_title,
+               priority,
+               due_at,
+               points,
+               story_points
           FROM tasks
         """
     ).fetchall()
@@ -204,23 +226,155 @@ def compute_order(db_path: Path, project_root: Path) -> int:
     binder_root = project_root / ".gpt-creator" / "cache" / "task-binder"
     edges.extend(_load_dependencies_from_binder(binder_root, tasks_by_key))
 
-    base_order = sorted(
-        nodes,
-        key=lambda key: (
-            _normalize(tasks_by_key[key]["story_slug"]).lower(),
-            _normalize(tasks_by_key[key]["task_id"]).lower(),
-            tasks_by_key[key]["position"],
-        ),
-    )
+    indegree: Dict[str, int] = {key: 0 for key in nodes}
+    adjacency: Dict[str, Set[str]] = defaultdict(set)
 
-    topo = _toposort(base_order, edges)
+    for blocker, target in edges:
+        if blocker == target:
+            continue
+        if blocker not in tasks_by_key or target not in tasks_by_key:
+            continue
+        if target not in adjacency[blocker]:
+            adjacency[blocker].add(target)
+            indegree[target] += 1
+
+    def _parse_priority(value) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _parse_due(value: Optional[str]) -> float:
+        if not value:
+            return float("inf")
+        text = value.strip()
+        if not text:
+            return float("inf")
+        try:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            return dt.datetime.fromisoformat(text).timestamp()
+        except Exception:
+            return float("inf")
+
+    points_pattern = re.compile(r"[-+]?\d*\.?\d+")
+
+    def _parse_points(primary, fallback) -> float:
+        for candidate in (primary, fallback):
+            if candidate is None:
+                continue
+            if isinstance(candidate, (int, float)):
+                try:
+                    val = float(candidate)
+                    if val >= 0:
+                        return val
+                except (TypeError, ValueError):
+                    continue
+            if isinstance(candidate, str):
+                stripped = candidate.strip()
+                if not stripped:
+                    continue
+                match = points_pattern.search(stripped)
+                if not match:
+                    continue
+                try:
+                    val = float(match.group(0))
+                    if val >= 0:
+                        return val
+                except ValueError:
+                    continue
+        return float("inf")
+
+    READY_STATUSES = {"pending", "retryable"}
+
+    task_meta: Dict[str, Dict[str, object]] = {}
+    for key, row in tasks_by_key.items():
+        status_text = _normalize_status(row["status"])
+        status_ready = status_text in READY_STATUSES
+        priority = _parse_priority(row["priority"])
+        due_ts = _parse_due(row["due_at"])
+        points_value = _parse_points(row["points"], row["story_points"])
+        epic_sort = (_normalize(row["epic_key"]) or _normalize(row["epic_title"]) or "").lower()
+        story_sort = _normalize(row["story_slug"]).lower()
+        display_label = _normalize(row["task_id"]) or key
+        task_meta[key] = {
+            "row": row,
+            "status": status_text,
+            "ready": status_ready,
+            "priority": priority,
+            "due_ts": due_ts,
+            "points": points_value,
+            "epic_sort": epic_sort,
+            "story_sort": story_sort,
+            "display_id": display_label,
+            "display_sort": (display_label or "").lower(),
+        }
+
+    import heapq
+
+    heap: List[Tuple[Tuple, int, str]] = []
+    counter = 0
+
+    def push_ready(key: str) -> None:
+        info = task_meta.get(key)
+        if not info or not info["ready"]:
+            return
+        priority_tuple = (
+            -int(info["priority"]),
+            float(info["due_ts"]),
+            float(info["points"]),
+            info["epic_sort"],
+            info["story_sort"],
+            info["display_sort"],
+        )
+        nonlocal counter
+        heapq.heappush(heap, (priority_tuple, counter, key))
+        counter += 1
+
+    for key in nodes:
+        if indegree[key] == 0:
+            push_ready(key)
+
+    order: List[str] = []
+    processed: Set[str] = set()
+
+    while heap:
+        _, _, key = heapq.heappop(heap)
+        if key in processed:
+            continue
+        order.append(key)
+        processed.add(key)
+        for neighbor in adjacency.get(key, ()):
+            indegree[neighbor] -= 1
+            if indegree[neighbor] == 0:
+                push_ready(neighbor)
+
+    remaining_ready = [
+        key for key in nodes if key not in processed and task_meta.get(key, {}).get("ready")
+    ]
+
+    if remaining_ready:
+        sample = ", ".join(task_meta[key]["display_id"] for key in remaining_ready[:10])
+        print(
+            f"[order] Warning: {len(remaining_ready)} task(s) could not be scheduled (cycle or missing dependency); examples: {sample}",
+            file=sys.stderr,
+        )
+
+    remaining_nodes = [key for key in nodes if key not in processed]
+    cycle_nodes = [key for key in remaining_nodes if indegree.get(key, 0) > 0]
+    if cycle_nodes:
+        sample = ", ".join(task_meta[key]["display_id"] for key in cycle_nodes[:10])
+        print(
+            f"[order] Warning: detected potential dependency cycle involving {len(cycle_nodes)} task(s); examples: {sample}",
+            file=sys.stderr,
+        )
 
     now = dt.datetime.utcnow().isoformat() + "Z"
 
     cur.execute("UPDATE tasks SET global_order = 0 WHERE global_order <> 0")
     cur.execute("UPDATE tasks SET global_order_updated_at = ?", (now,))
 
-    for index, key in enumerate(topo, start=1):
+    for index, key in enumerate(order, start=1):
         row = tasks_by_key.get(key)
         if not row:
             continue
@@ -231,7 +385,7 @@ def compute_order(db_path: Path, project_root: Path) -> int:
 
     conn.commit()
     conn.close()
-    return len(topo)
+    return len(order)
 
 
 def main() -> int:

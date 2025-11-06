@@ -6296,6 +6296,52 @@ cmd_backlog() {
   python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}"
 }
 
+cmd_order_tasks() {
+  local root="" force=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project|--root|-p)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      --force)
+        force=1
+        shift
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: gpt-creator order-tasks [--project PATH] [--force]
+
+Populate the task_dependencies table (if empty or --force) and recompute the global DAG order.
+EOF
+        return 0
+        ;;
+      *)
+        die "Unknown argument for order-tasks: $1"
+        ;;
+    esac
+  done
+
+  ensure_ctx "$root"
+  local tasks_db="${PLAN_DIR}/tasks/tasks.db"
+  [[ -f "$tasks_db" ]] || die "Tasks database not found at ${tasks_db}. Run 'gpt-creator create-tasks' first."
+
+  local populate_helper
+  populate_helper="$(gc_clone_python_tool "populate_task_dependencies.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local -a populate_args=("$populate_helper" "$tasks_db")
+  if (( force )); then
+    populate_args+=("--force")
+  else
+    populate_args+=("--only-if-empty")
+  fi
+  python3 "${populate_args[@]}"
+
+  local order_helper
+  order_helper="$(gc_clone_python_tool "update_global_task_order.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$order_helper" "$tasks_db" --project-root "${PROJECT_ROOT:-$PWD}"
+  info "Task ordering refreshed for ${tasks_db}."
+}
+
 cmd_dag() {
   local root="" action="" story=""
   while [[ $# -gt 0 ]]; do
@@ -11708,6 +11754,7 @@ main() {
     create-db-dump) "$shell_bin" "$CLI_ROOT/src/cli/create-db-dump.sh" "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
     backlog)        cmd_backlog "$@" ;;
+    order-tasks)    cmd_order_tasks "$@" ;;
     dag)            cmd_dag "$@" ;;
     estimate)       cmd_estimate "$@" ;;
     tokens)         cmd_tokens "$@" ;;

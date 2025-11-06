@@ -93,7 +93,7 @@ task_override_norm="${task_override,,}"
 ran_any=0
 
 for entry in "${queue[@]}"; do
-  IFS=$'\t' read -r order story_slug task_token position <<<"$entry"
+  IFS=$'\t' read -r order story_slug task_token _position <<<"$entry"
   [[ -n "$story_slug" && -n "$task_token" ]] || continue
   local_story="${story_slug}"
   local_token="${task_token}"

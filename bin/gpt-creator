@@ -6248,7 +6248,7 @@ cmd_create_tasks() {
 }
 
 cmd_backlog() {
-  local root="" type_arg="" item_children="" show_progress=0 task_details=""
+  local root="" type_arg="" item_children="" show_progress=0 task_details="" dag_limit=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project|--root)
@@ -6269,6 +6269,10 @@ cmd_backlog() {
         ;;
       --task-details)
         task_details="$2"
+        shift 2
+        ;;
+      --dag-limit)
+        dag_limit="$2"
         shift 2
         ;;
       -h|--help)
@@ -6293,7 +6297,7 @@ cmd_backlog() {
 
   local backlog_helper
   backlog_helper="$(gc_clone_python_tool "fetch_stories.py" "${PROJECT_ROOT:-$PWD}")" || die "Failed to prepare backlog helper script"
-  python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}"
+  python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
 }
 
 cmd_order_tasks() {

@@ -659,6 +659,54 @@ def print_task_details(task_identifier):
     emit("Created At", row["created_at"])
     emit("Updated At", row["updated_at"])
 
+
+def print_global_order_queue(limit: int) -> None:
+    if limit <= 0:
+        limit = 20
+    query = """
+        SELECT global_order,
+               story_slug,
+               task_id,
+               title,
+               status,
+               priority,
+               due_at,
+               COALESCE(points, story_points) AS points
+          FROM tasks
+         WHERE global_order > 0
+         ORDER BY global_order ASC
+         LIMIT ?
+    """
+    rows = conn.execute(query, (limit,)).fetchall()
+    if not rows:
+        print("No tasks have been ordered yet (global_order column is empty).")
+        return
+
+    headers = ["Order", "Story", "Task ID", "Title", "Status", "Priority", "Due", "Points"]
+    table_rows: list[list[str]] = []
+    for row in rows:
+        order_value = row["global_order"]
+        story_slug = (row["story_slug"] or "").strip()
+        task_id = (row["task_id"] or "").strip() or "-"
+        title = truncate(row["title"], width=80)
+        status = normalise_status(row["status"] or "pending")
+        priority = row["priority"] if row["priority"] is not None else "-"
+        due = (row["due_at"] or "").strip() or "-"
+        points = row["points"] if row["points"] is not None else "-"
+        table_rows.append([
+            str(order_value),
+            story_slug or "-",
+            task_id,
+            title,
+            status,
+            str(priority),
+            due,
+            str(points),
+        ])
+
+    print("Next tasks by DAG priority")
+    print_table(headers, table_rows)
+
 def print_progress():
     total = 0
     complete = 0

@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 from collections import defaultdict, deque
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Set

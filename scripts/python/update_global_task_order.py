@@ -115,6 +115,17 @@ def _ensure_task_dependencies_table(cur: sqlite3.Cursor) -> None:
     )
 
 
+def _ensure_task_metadata_columns(cur: sqlite3.Cursor) -> None:
+    info = cur.execute("PRAGMA table_info(tasks)").fetchall()
+    columns = {row[1] for row in info}
+    if "priority" not in columns:
+        cur.execute("ALTER TABLE tasks ADD COLUMN priority INTEGER")
+    if "due_at" not in columns:
+        cur.execute("ALTER TABLE tasks ADD COLUMN due_at TEXT")
+    if "points" not in columns:
+        cur.execute("ALTER TABLE tasks ADD COLUMN points REAL")
+
+
 def _load_dependencies_from_db(cur: sqlite3.Cursor, known_keys: Dict[str, int]) -> List[Tuple[str, str]]:
     edges: List[Tuple[str, str]] = []
     try:
@@ -185,6 +196,7 @@ def compute_order(db_path: Path, project_root: Path) -> int:
     _ensure_global_order_column(cur)
     _ensure_metadata_column(cur)
     _ensure_task_dependencies_table(cur)
+    _ensure_task_metadata_columns(cur)
 
     rows = cur.execute(
         """

@@ -19,7 +19,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Database synthesis**: `create-db-dump` reads the SDS (and PDR context) to draft a full MySQL schema plus production-grade seed data, then reviews both dumps for consistency before storing them under `.gpt-creator/staging/plan/create-db-dump/sql/`.
 - **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, `order-tasks` rebuilds dependency metadata and DAG priority, and `work-on-tasks` executes/resumes backlog items using that persisted order so dependencies land first. The legacy `iterate` command is deprecated.
 - **Backlog browser**: `backlog` prints non-interactive terminal summaries so you can list epics, enumerate stories, inspect children, dump task details, or preview the next DAG-prioritised tasks straight from the SQLite backlog.
-- **Backlog ETA**: `estimate` aggregates remaining story points in `.gpt-creator/staging/plan/tasks/tasks.db` and translates them into a formatted duration using the throughput observed during `work-on-tasks` runs (defaults to 15 story points per hour until telemetry is captured). Point `--project` at another workspace if needed.
+- **Backlog ETA**: `estimate` aggregates remaining story points in `.gpt-creator/staging/plan/tasks/tasks.db` and translates them into a formatted duration using the throughput observed during `work-on-tasks` runs (defaults to a 10-task window at 15 story points per hour until telemetry is captured). Use `--recent-tasks COUNT|all` to widen the sample window and `--project` to point at another workspace when needed.
 - **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
 
 ---
@@ -433,8 +433,9 @@ Use these when running ad-hoc experiments or tightening budgets in CI without ed
 gpt-creator estimate --project /path/to/project
 ```
 - Aggregates story points for every non-complete task in `.gpt-creator/staging/plan/tasks/tasks.db`.
-- Converts the remaining total into a formatted duration using the latest measured throughput from `work-on-tasks` (falls back to 15 story points per hour, for example `1d 2h 30m`).
+- Converts the remaining total into a formatted duration using the latest measured throughput from `work-on-tasks` (defaults to the last 10 tasks and falls back to 15 story points per hour, for example `1d 2h 30m`).
 - Defaults to the current directory; point `--project` at another workspace when estimating elsewhere.
+- Accepts `--recent-tasks COUNT|all` when you need a larger (or full-history) sample window for throughput and token telemetry.
 - Exits early with a friendly message if all tasks are already complete.
 
 ### 10. Migrate & Refine Tasks

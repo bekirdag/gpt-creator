@@ -10997,11 +10997,18 @@ cmd_binder() {
 }
 
 cmd_estimate() {
-  local root=""
+  local root="" recent_tasks=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project)
         root="$(abs_path "$2")"
+        shift 2
+        ;;
+      --recent-tasks)
+        if [[ $# -lt 2 ]]; then
+          die "--recent-tasks requires a value (positive integer or 'all')"
+        fi
+        recent_tasks="$2"
         shift 2
         ;;
       -h|--help)
@@ -11022,7 +11029,11 @@ cmd_estimate() {
 
   local helper_path
   helper_path="$(gc_clone_python_tool "estimate_remaining_work.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path" "$tasks_db"
+  if [[ -n "$recent_tasks" ]]; then
+    python3 "$helper_path" "$tasks_db" --recent-tasks "$recent_tasks"
+  else
+    python3 "$helper_path" "$tasks_db"
+  fi
 }
 
 

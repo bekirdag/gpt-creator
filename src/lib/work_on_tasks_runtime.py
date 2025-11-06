@@ -105,7 +105,13 @@ def main():
                 buffer = []
             if delimiter is not None:
                 command_lead = buffer[0] if buffer else ""
-                raise UnclosedHeredocError(delimiter, command_lead)
+                joined = "\n".join(buffer)
+                if joined and ("..." in joined or "\u2026" in joined):
+                    commands.append(joined)
+                else:
+                    raise UnclosedHeredocError(delimiter, command_lead)
+                buffer = []
+                delimiter = None
             if buffer:
                 commands.append("\n".join(buffer))
             return commands
@@ -832,9 +838,10 @@ def main():
                         sections.setdefault(current, []).append(line)
                     continue
                 if not in_fence:
-                    candidate = stripped.rstrip(':').lower()
-                    if candidate in headings:
-                        current = candidate
+                    candidate = stripped.rstrip(':').strip()
+                    normalized = candidate.strip("*_# ").lower()
+                    if normalized in headings:
+                        current = normalized
                         sections.setdefault(current, [])
                         continue
                 if current:

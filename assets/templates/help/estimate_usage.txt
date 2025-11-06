@@ -1,4 +1,6 @@
-Usage: gpt-creator estimate [--project PATH]
+Usage: gpt-creator estimate [--project PATH] [--recent-tasks COUNT|all]
 
 Estimate how long it will take to finish the remaining tasks based on story points (default 15 SP/hour; refined by work-on-tasks throughput).
 
+Options:
+  --recent-tasks COUNT|all  Use COUNT recent tasks when computing throughput (default: 10). Pass `all` to use the full history.

@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
+import argparse
 import math
 import re
 import sqlite3
-import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -31,6 +31,22 @@ IN_PROGRESS_PREFIXES = (
 DEFAULT_CONTAMINATION_THRESHOLD = 0.2
 RECENT_SAMPLE_LIMIT = 10
 STATUS_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def resolve_sample_limit(limit: Optional[int]) -> Optional[int]:
+    if limit is None:
+        return None
+    return max(int(limit), RECENT_SAMPLE_LIMIT)
+
+
+def describe_recent_window(limit: Optional[int]) -> str:
+    if limit is None:
+        return "all recorded tasks"
+    resolved = resolve_sample_limit(limit)
+    if resolved is None:
+        return ""
+    label = "task" if resolved == 1 else "tasks"
+    return f"last {resolved} {label}"
 
 
 def normalize_status(value: str) -> str:
@@ -235,31 +251,29 @@ def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
 
 
 def fetch_recent_productive_samples(
-    cursor: sqlite3.Cursor, limit: int = RECENT_SAMPLE_LIMIT
+    cursor: sqlite3.Cursor, limit: Optional[int] = RECENT_SAMPLE_LIMIT
 ) -> list[sqlite3.Row]:
-    if limit <= 0:
-        return []
     if not table_exists(cursor, "metric_samples"):
         return []
-    sample_cap = max(limit, RECENT_SAMPLE_LIMIT)
+    resolved_limit = resolve_sample_limit(limit)
+    sql = """
+        SELECT task_key,
+               story_slug,
+               task_position,
+               sp_delivered,
+               duration_seconds,
+               tokens_total,
+               occurred_at
+          FROM metric_samples
+         WHERE sp_delivered IS NOT NULL
+           AND sp_delivered > 0
+         ORDER BY occurred_at DESC
+    """
     try:
-        rows = cursor.execute(
-            """
-            SELECT task_key,
-                   story_slug,
-                   task_position,
-                   sp_delivered,
-                   duration_seconds,
-                   tokens_total,
-                   occurred_at
-              FROM metric_samples
-             WHERE sp_delivered IS NOT NULL
-               AND sp_delivered > 0
-             ORDER BY occurred_at DESC
-             LIMIT ?
-            """,
-            (sample_cap,),
-        ).fetchall()
+        if resolved_limit is None:
+            rows = cursor.execute(sql).fetchall()
+        else:
+            rows = cursor.execute(f"{sql} LIMIT ?", (int(resolved_limit),)).fetchall()
     except sqlite3.DatabaseError:
         return []
     return list(rows)
@@ -444,7 +458,7 @@ def print_section(title: str, rows: list[tuple[str, str]]) -> None:
     print()
 
 
-def estimate(db_path: Path) -> int:
+def estimate(db_path: Path, recent_task_limit: Optional[int] = RECENT_SAMPLE_LIMIT) -> int:
     project_root = infer_project_root(db_path)
     eta_cfg = load_eta_config(project_root)
 
@@ -550,7 +564,8 @@ def estimate(db_path: Path) -> int:
         remaining_tasks += 1
         total_points += points
 
-    recent_samples = fetch_recent_productive_samples(cur, RECENT_SAMPLE_LIMIT)
+    recent_window_descriptor = describe_recent_window(recent_task_limit)
+    recent_samples = fetch_recent_productive_samples(cur, recent_task_limit)
     recent_sample_count = len(recent_samples)
     tokens_total = 0.0
     token_samples = 0
@@ -701,11 +716,18 @@ def estimate(db_path: Path) -> int:
             )
         else:
             sample_label = "run" if rate_samples == 1 else "runs"
-            throughput_rows.append(
-                ("Throughput basis", f"Measured from {rate_samples} {sample_label}")
-            )
-            throughput_rows.append(
-                ("Effective throughput", f"{fmt_float(effective_rate)} SP/hour (EWMA)")
+        throughput_rows.append(
+            ("Throughput basis", f"Measured from {rate_samples} {sample_label}")
+        )
+        throughput_rows.append(
+            ("Effective throughput", f"{fmt_float(effective_rate)} SP/hour (EWMA)")
+        )
+    if using_recent_velocity and recent_window_descriptor:
+        base_value = throughput_rows[0][1]
+        if recent_window_descriptor.lower() != base_value.lower():
+            throughput_rows[0] = (
+                throughput_rows[0][0],
+                f"{base_value} (window: {recent_window_descriptor})",
             )
     else:
         throughput_rows.append(
@@ -732,8 +754,8 @@ def estimate(db_path: Path) -> int:
     token_rows: list[tuple[str, str]] = []
     if tokens_total > 0 and token_samples > 0:
         basis_note = ""
-        if recent_sample_count:
-            basis_note = f" (last {recent_sample_count} task(s))"
+        if recent_sample_count and recent_window_descriptor:
+            basis_note = f" ({recent_window_descriptor})"
         token_rows.append(
             ("Observed tokens", f"{fmt_tokens(tokens_total)} across {token_samples} task(s){basis_note}")
         )
@@ -784,13 +806,37 @@ def estimate(db_path: Path) -> int:
     return 0
 
 
-def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit(1)
-    db_path = Path(sys.argv[1])
+def parse_recent_tasks_arg(raw: str) -> Optional[int]:
+    text = str(raw or "").strip().lower()
+    if text in {"", "default"}:
+        return RECENT_SAMPLE_LIMIT
+    if text in {"all", "everything", "full"}:
+        return None
+    try:
+        value = int(text, 10)
+    except ValueError:
+        raise SystemExit(f"Invalid --recent-tasks value: {raw!r}. Expected a positive integer or 'all'.")
+    if value <= 0:
+        raise SystemExit("--recent-tasks must be a positive integer or 'all'.")
+    return value
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Estimate remaining work from throughput data.")
+    parser.add_argument("db_path", help="Path to the tasks SQLite database.")
+    parser.add_argument(
+        "--recent-tasks",
+        dest="recent_tasks",
+        default=str(RECENT_SAMPLE_LIMIT),
+        help="Number of recent tasks to use for throughput metrics (use 'all' for entire history).",
+    )
+    args = parser.parse_args(argv)
+
+    db_path = Path(args.db_path)
     if not db_path.exists():
         raise SystemExit(f"Tasks database not found: {db_path}")
-    raise SystemExit(estimate(db_path))
+    recent_limit = parse_recent_tasks_arg(args.recent_tasks)
+    raise SystemExit(estimate(db_path, recent_limit))
 
 
 if __name__ == "__main__":

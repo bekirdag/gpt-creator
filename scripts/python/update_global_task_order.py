@@ -381,6 +381,12 @@ def compute_order(db_path: Path, project_root: Path) -> int:
             f"[order] Warning: detected potential dependency cycle involving {len(cycle_nodes)} task(s); examples: {sample}",
             file=sys.stderr,
         )
+        # Append cycle participants in deterministic order (earliest id first).
+        for key in sorted(cycle_nodes, key=lambda k: task_meta[k]["display_sort"]):
+            if key in processed:
+                continue
+            order.append(key)
+            processed.add(key)
 
     now = dt.datetime.utcnow().isoformat() + "Z"
 

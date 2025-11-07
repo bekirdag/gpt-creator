@@ -145,7 +145,7 @@ for schema_path in "${schema_paths[@]}"; do
       break
     fi
     if [[ "$prisma_output" == *"shadow-database-url"* ]]; then
-      printf 'preflight-prisma-guard: skipping %s (shadow database required by prisma migrate diff).\n' "$(normalize_path "$schema_path")" >&2
+      printf 'preflight-prisma-guard: %s requires PRISMA_MIGRATE_SHADOW_DATABASE_URL (e.g. mysql://user:pass@host:3306/db_shadow); skipping guard.\n' "$(normalize_path "$schema_path")" >&2
       schema_ok=1
       break
     fi

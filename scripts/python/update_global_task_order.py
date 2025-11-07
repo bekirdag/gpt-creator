@@ -198,6 +198,65 @@ def _ensure_task_metadata_columns(cur: sqlite3.Cursor) -> None:
         cur.execute("ALTER TABLE tasks ADD COLUMN story_order INTEGER")
 
 
+def _select_edge_to_drop(
+    comp: List[str],
+    adjacency: Dict[str, Set[str]],
+    task_meta: Dict[str, Dict[str, Any]],
+) -> Optional[Tuple[str, str]]:
+    best: Optional[Tuple[str, str, Tuple]] = None
+    for u in comp:
+        for v in adjacency.get(u, ()):
+            if v not in comp:
+                continue
+            meta_u = task_meta.get(u, {})
+            meta_v = task_meta.get(v, {})
+            story_u = meta_u.get("story_sort")
+            story_v = meta_v.get("story_sort")
+            cross_story = (story_u or "") != (story_v or "")
+            descending = (meta_u.get("display_sort") or u) > (meta_v.get("display_sort") or v)
+            score = (
+                0 if cross_story else 1,
+                0 if descending else 1,
+                meta_u.get("display_sort") or u,
+                meta_v.get("display_sort") or v,
+            )
+            if best is None or score < best[2]:
+                best = (u, v, score)
+    if best:
+        return best[0], best[1]
+    return None
+
+
+def _decycle_graph(
+    adjacency: Dict[str, Set[str]],
+    indegree: Dict[str, int],
+    task_meta: Dict[str, Dict[str, Any]],
+    nodes: List[str],
+) -> List[Tuple[str, str]]:
+    removed: List[Tuple[str, str]] = []
+    for _ in range(1000):
+        scc_list = _sccs(adjacency, nodes)
+        edge_removed = False
+        for comp in scc_list:
+            if len(comp) <= 1:
+                continue
+            drop = _select_edge_to_drop(comp, adjacency, task_meta)
+            if not drop:
+                continue
+            u, v = drop
+            if v in adjacency.get(u, set()):
+                adjacency[u].discard(v)
+                indegree[v] = max(0, indegree.get(v, 0) - 1)
+                removed.append((u, v))
+                edge_removed = True
+                break
+        if not edge_removed:
+            break
+    return removed
+    if "story_order" not in columns:
+        cur.execute("ALTER TABLE tasks ADD COLUMN story_order INTEGER")
+
+
 def _ensure_metadata_table(cur: sqlite3.Cursor) -> None:
     cur.execute(
         """
@@ -470,6 +529,24 @@ def compute_order(db_path: Path, project_root: Path, skip_if_exists: bool = Fals
         nonlocal counter
         heapq.heappush(heap, (priority_tuple, counter, key))
         counter += 1
+
+    removed_edges = _decycle_graph(
+        adjacency=adjacency,
+        indegree=indegree,
+        task_meta=task_meta,
+        nodes=nodes,
+    )
+    if removed_edges:
+        def _edge_label(u: str, v: str) -> str:
+            u_label = task_meta.get(u, {}).get("display_id") or u
+            v_label = task_meta.get(v, {}).get("display_id") or v
+            return f"{u_label}->{v_label}"
+
+        sample_removed = ", ".join(_edge_label(a, b) for a, b in removed_edges[:5])
+        print(
+            f"[order] Info: removed {len(removed_edges)} cycle edge(s) prior to scheduling{': ' + sample_removed if sample_removed else ''}.",
+            file=sys.stderr,
+        )
 
     _break_cycles_with_lowest_first(
         adjacency=adjacency,

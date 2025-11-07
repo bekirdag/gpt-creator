@@ -7023,7 +7023,7 @@ cmd_work_on_tasks() {
   local prompt_slim_helper=""
   local prompt_safeguard_helper=""
   local empty_apply_mode=""
-  local prepare_prompts=0
+  local prepare_prompts=1
 
   local auto_review_enabled=1
   if [[ -n "${GC_AUTO_REVIEW:-}" ]]; then
@@ -7698,13 +7698,13 @@ cmd_work_on_tasks() {
 
   local prepare_prompts_flag="$prepare_prompts"
   if [[ -n "${GC_WORK_PREPARE_PROMPTS:-}" ]]; then
-    prepare_prompts_flag="${GC_WORK_PREPARE_PROMPTS}"
-  fi
-  if [[ "$prepare_prompts_flag" != "1" ]]; then
-    prepare_prompts_flag=0
+    case "${GC_WORK_PREPARE_PROMPTS,,}" in
+      0|false|no) prepare_prompts_flag=0 ;;
+      1|true|yes) prepare_prompts_flag=1 ;;
+    esac
   fi
   export GC_WORK_PREPARE_PROMPTS="$prepare_prompts_flag"
-  if [[ "$GC_WORK_PREPARE_PROMPTS" == "1" ]]; then
+  if [[ "${GC_WORK_PREPARE_PROMPTS}" == "1" ]]; then
     export GC_SKIP_STORY_PROMPT_SYNC=0
   else
     export GC_SKIP_STORY_PROMPT_SYNC=1
@@ -7714,14 +7714,14 @@ cmd_work_on_tasks() {
   mkdir -p "$work_state_dir"
   local prompt_guard="${work_state_dir}/.prompt_sync.once"
   export GC_WORK_PROMPT_SYNC_RUN_GUARD="$prompt_guard"
-  if [[ "$GC_WORK_PREPARE_PROMPTS" == "1" ]]; then
+  if [[ "${GC_WORK_PREPARE_PROMPTS}" == "1" ]]; then
     rm -f "$prompt_guard" 2>/dev/null || true
   else
     : > "$prompt_guard"
   fi
 
   if [[ -z "${GC_PROMPT_PUBLISH_DISABLE:-}" ]]; then
-    if [[ "$GC_WORK_PREPARE_PROMPTS" == "1" ]]; then
+    if [[ "${GC_WORK_PREPARE_PROMPTS}" == "1" ]]; then
       export GC_PROMPT_PUBLISH_DISABLE=0
     else
       export GC_PROMPT_PUBLISH_DISABLE=1

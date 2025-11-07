@@ -6464,6 +6464,14 @@ EOF
   local order_helper
   order_helper="$(gc_clone_python_tool "update_global_task_order.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   python3 "$order_helper" "$tasks_db" --project-root "${PROJECT_ROOT:-$PWD}"
+  local order_marker_dir
+  order_marker_dir="$(cd "$(dirname "$tasks_db")" && pwd -P)"
+  if [[ -n "$order_marker_dir" ]]; then
+    local order_marker="${order_marker_dir}/ORDERED.ok"
+    if ! date -u +"%Y-%m-%dT%H:%M:%SZ" >"$order_marker" 2>/dev/null; then
+      : > "$order_marker" 2>/dev/null || true
+    fi
+  fi
   info "Task ordering refreshed for ${tasks_db}."
 }
 
@@ -7015,6 +7023,7 @@ cmd_work_on_tasks() {
   local prompt_slim_helper=""
   local prompt_safeguard_helper=""
   local empty_apply_mode=""
+  local prepare_prompts=0
 
   local auto_review_enabled=1
   if [[ -n "${GC_AUTO_REVIEW:-}" ]]; then
@@ -7162,6 +7171,14 @@ cmd_work_on_tasks() {
         ;;
       --prompt-expanded)
         prompt_compact=0
+        shift
+        ;;
+      --prepare-prompts)
+        prepare_prompts=1
+        shift
+        ;;
+      --no-prepare-prompts)
+        prepare_prompts=0
         shift
         ;;
       --context-doc-snippets|--doc-snippets)
@@ -7663,25 +7680,40 @@ cmd_work_on_tasks() {
   local work_plan_tasks_db="${PLAN_DIR}/tasks/tasks.db"
   [[ -f "$work_plan_tasks_db" ]] || die "Tasks database not found at ${work_plan_tasks_db}. Run 'gpt-creator create-tasks' first."
 
-  local _gc_order_stamp="" _gc_order_status=0 need_order_bootstrap=0
-  if command -v sqlite3 >/dev/null 2>&1; then
-    set +e
-    _gc_order_stamp="$(
-      sqlite3 "$work_plan_tasks_db" "SELECT value FROM metadata WHERE key='global_order_last_computed_at' LIMIT 1;" 2>/dev/null
-    )"
-    _gc_order_status=$?
-    set -e
-    if (( _gc_order_status != 0 )) || [[ -z "$_gc_order_stamp" ]]; then
-      need_order_bootstrap=1
+  local order_marker_dir
+  order_marker_dir="$(cd "$(dirname "$work_plan_tasks_db")" && pwd -P)"
+  local order_marker="${order_marker_dir}/ORDERED.ok"
+  if [[ ! -f "$order_marker" ]]; then
+    info "work-on-tasks: no prior global ordering → computing once (skip refine)."
+    if ! GC_SKIP_REFINE_PREFLIGHT=1 cmd_order_tasks --project "${PROJECT_ROOT:-$PWD}" --force >/dev/null 2>&1; then
+      die "work-on-tasks: failed to compute ordering"
     fi
-  else
-    need_order_bootstrap=1
   fi
 
-  if (( need_order_bootstrap )); then
-    info "work-on-tasks: no recorded global order → running 'order-tasks --no-refine-preflight'."
-    if ! cmd_order_tasks --project "${PROJECT_ROOT:-$PWD}" --no-refine-preflight >/dev/null 2>&1; then
-      warn "work-on-tasks: automatic order bootstrap failed; continuing with existing queue."
+  local prepare_prompts_flag="$prepare_prompts"
+  if [[ -n "${GC_WORK_PREPARE_PROMPTS:-}" ]]; then
+    prepare_prompts_flag="${GC_WORK_PREPARE_PROMPTS}"
+  fi
+  if [[ "$prepare_prompts_flag" != "1" ]]; then
+    prepare_prompts_flag=0
+  fi
+  export GC_WORK_PREPARE_PROMPTS="$prepare_prompts_flag"
+
+  local work_state_dir="${PLAN_DIR}/work"
+  mkdir -p "$work_state_dir"
+  local prompt_guard="${work_state_dir}/.prompt_sync.once"
+  export GC_WORK_PROMPT_SYNC_RUN_GUARD="$prompt_guard"
+  if [[ "$GC_WORK_PREPARE_PROMPTS" == "1" ]]; then
+    rm -f "$prompt_guard" 2>/dev/null || true
+  else
+    : > "$prompt_guard"
+  fi
+
+  if [[ -z "${GC_PROMPT_PUBLISH_DISABLE:-}" ]]; then
+    if [[ "$GC_WORK_PREPARE_PROMPTS" == "1" ]]; then
+      export GC_PROMPT_PUBLISH_DISABLE=0
+    else
+      export GC_PROMPT_PUBLISH_DISABLE=1
     fi
   fi
 

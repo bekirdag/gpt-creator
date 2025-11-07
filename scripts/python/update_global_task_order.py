@@ -320,7 +320,6 @@ def compute_order(db_path: Path, project_root: Path) -> int:
     binder_root = project_root / ".gpt-creator" / "cache" / "task-binder"
     edges.extend(_load_dependencies_from_binder(binder_root, tasks_by_key))
 
-    indegree: Dict[str, int] = {key: 0 for key in nodes}
     adjacency: Dict[str, Set[str]] = defaultdict(set)
 
     for blocker, target in edges:
@@ -328,9 +327,18 @@ def compute_order(db_path: Path, project_root: Path) -> int:
             continue
         if blocker not in tasks_by_key or target not in tasks_by_key:
             continue
-        if target not in adjacency[blocker]:
-            adjacency[blocker].add(target)
-            indegree[target] += 1
+        adjacency[blocker].add(target)
+
+    known_nodes: Set[str] = set(nodes)
+    for source in list(adjacency.keys()):
+        invalid = {dest for dest in adjacency[source] if dest not in known_nodes}
+        if invalid:
+            adjacency[source].difference_update(invalid)
+
+    indegree: Dict[str, int] = {key: 0 for key in nodes}
+    for outs in adjacency.values():
+        for dest in outs:
+            indegree[dest] = indegree.get(dest, 0) + 1
 
     def _parse_priority(value) -> int:
         try:
@@ -458,26 +466,19 @@ def compute_order(db_path: Path, project_root: Path) -> int:
             f"[order] Warning: residual cycles after rewiring involving {len(cycle_nodes)} task(s); examples: {sample}",
             file=sys.stderr,
         )
-        rem_graph = {u: {v for v in adjacency.get(u, set()) if v in cycle_nodes} for u in cycle_nodes}
-        for comp in _sccs(rem_graph, list(cycle_nodes)):
-            for key in sorted(comp, key=lambda k: (task_meta.get(k, {}).get("display_sort") or k)):
-                if key in processed:
-                    continue
-                if not task_meta.get(key, {}).get("ready"):
-                    continue
-                order.append(key)
-                processed.add(key)
 
-    remaining_ready = [
-        key for key in nodes if key not in processed and task_meta.get(key, {}).get("ready")
-    ]
-
-    if remaining_ready:
-        sample = ", ".join(task_meta[key]["display_id"] for key in remaining_ready[:10])
+    unscheduled = [key for key in nodes if key not in processed]
+    if unscheduled:
+        sample = ", ".join(task_meta[key]["display_id"] for key in unscheduled[:10])
         print(
-            f"[order] Warning: {len(remaining_ready)} task(s) could not be scheduled (cycle or missing dependency); examples: {sample}",
+            f"[order] Info: {len(unscheduled)} task(s) scheduled via fallback; examples: {sample}",
             file=sys.stderr,
         )
+        for key in sorted(unscheduled, key=lambda s: (task_meta.get(s, {}).get("display_sort") or s)):
+            if key in processed:
+                continue
+            order.append(key)
+            processed.add(key)
 
     now = dt.datetime.utcnow().isoformat() + "Z"
 
@@ -501,6 +502,13 @@ def compute_order(db_path: Path, project_root: Path) -> int:
         """,
         (now,),
     )
+
+    marker_path = db_path.parent / "ORDERED.ok"
+    try:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(now + "\n", encoding="utf-8")
+    except Exception:
+        pass
 
     conn.commit()
     conn.close()

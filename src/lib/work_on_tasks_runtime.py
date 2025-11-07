@@ -4,7 +4,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 LAST_PENDING_CHANGES: Dict[str, Tuple[str, ...]] = {}
 
@@ -5866,9 +5866,20 @@ def main():
             }
             _atomic_write_text(meta_path, json.dumps(meta_payload, indent=2, ensure_ascii=False) + "\n")
 
-        if os.getenv("GC_PROMPT_PUBLISH_DISABLE", "").strip().lower() not in {"1", "true", "yes"}:
+        publish_disabled = os.getenv("GC_PROMPT_PUBLISH_DISABLE", "").strip().lower()
+        guard_path = os.getenv("GC_WORK_PROMPT_SYNC_RUN_GUARD", "").strip()
+        guard_blocking = False
+        guard_file: Optional[Path] = None
+        if guard_path:
+            guard_file = Path(guard_path)
+            if guard_file.exists():
+                guard_blocking = True
+        if publish_disabled not in {"1", "true", "yes"} and not guard_blocking:
             try:
                 publish_prompt(prompt_path, meta_path, project_root_path)
+                if guard_file is not None:
+                    guard_file.parent.mkdir(parents=True, exist_ok=True)
+                    guard_file.write_text(f"{int(time.time())}\n", encoding="utf-8")
             except Exception:
                 pass
 

@@ -7680,16 +7680,6 @@ cmd_work_on_tasks() {
   local work_plan_tasks_db="${PLAN_DIR}/tasks/tasks.db"
   [[ -f "$work_plan_tasks_db" ]] || die "Tasks database not found at ${work_plan_tasks_db}. Run 'gpt-creator create-tasks' first."
 
-  local order_marker_dir
-  order_marker_dir="$(cd "$(dirname "$work_plan_tasks_db")" && pwd -P)"
-  local order_marker="${order_marker_dir}/ORDERED.ok"
-  if [[ ! -f "$order_marker" ]]; then
-    info "work-on-tasks: no prior global ordering → computing once (skip refine)."
-    if ! GC_SKIP_REFINE_PREFLIGHT=1 cmd_order_tasks --project "${PROJECT_ROOT:-$PWD}" --force >/dev/null 2>&1; then
-      die "work-on-tasks: failed to compute ordering"
-    fi
-  fi
-
   local order_helper
   order_helper="$(gc_clone_python_tool "update_global_task_order.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   if ! python3 "$order_helper" "$work_plan_tasks_db" --project-root "${PROJECT_ROOT:-$PWD}" --ensure >/dev/null 2>&1; then

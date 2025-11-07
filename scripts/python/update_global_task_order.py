@@ -6,14 +6,15 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import glob
+import heapq
 import json
 import os
 import re
 import sqlite3
 import sys
-from collections import defaultdict, deque
+from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Set
+from typing import Dict, Iterable, List, Optional, Tuple, Set
 
 TERMINAL_STATUSES = {
     "complete",
@@ -155,34 +156,89 @@ def _sccs(adjacency: Dict[str, Set[str]], nodes: List[str]) -> List[List[str]]:
             visit(v)
     return result
 
+_ID_TOKEN_PATTERN = re.compile(r"[A-Za-z]+|\d+")
 
-def _break_cycles_with_lowest_first(
-    adjacency: Dict[str, Set[str]],
-    indegree: Dict[str, int],
-    task_meta: Dict[str, Dict[str, Any]],
-    nodes: List[str],
-) -> None:
-    """Within each SCC create a deterministic forward chain."""
-    scc_list = _sccs(adjacency, nodes)
-    for comp in scc_list:
-        is_cycle = len(comp) > 1 or any(member in adjacency.get(member, ()) for member in comp)
-        if not is_cycle:
+
+def _id_key(task_id: str) -> Tuple[Tuple[int, object], ...]:
+    """Split IDs into alpha/numeric tokens so T8 < T10."""
+    tokens = _ID_TOKEN_PATTERN.findall(task_id or "")
+    if not tokens:
+        return ((1, ""),)
+    key_parts: List[Tuple[int, object]] = []
+    for token in tokens:
+        if token.isdigit():
+            key_parts.append((0, int(token)))
+        else:
+            key_parts.append((1, token.lower()))
+    return tuple(key_parts)
+
+
+def _stable_toposort(task_ids: Iterable[str], dep_edges: Iterable[Tuple[str, str]]) -> List[str]:
+    """
+    Deterministically order tasks by ID, respecting dependency edges.
+
+    Dependencies are tuples (u, v) meaning u must come before v.
+    """
+    ids = list(dict.fromkeys(task_ids))
+    nodes: Set[str] = set(ids)
+    adjacency: Dict[str, Set[str]] = defaultdict(set)
+    for blocker, target in dep_edges:
+        if not blocker or not target or blocker == target:
             continue
-        ordered = sorted(comp, key=lambda k: (task_meta.get(k, {}).get("display_sort") or k))
-        positions = {name: idx for idx, name in enumerate(ordered)}
-        for u in list(comp):
-            for v in list(adjacency.get(u, ())):
-                if v == u:
-                    adjacency[u].discard(v)
-                elif v in positions and positions[u] > positions[v]:
-                    if v in adjacency[u]:
-                        adjacency[u].discard(v)
-                        indegree[v] = max(0, indegree.get(v, 0) - 1)
-        for i in range(len(ordered) - 1):
-            u, v = ordered[i], ordered[i + 1]
-            if v not in adjacency[u]:
-                adjacency[u].add(v)
-                indegree[v] = indegree.get(v, 0) + 1
+        nodes.add(blocker)
+        nodes.add(target)
+        adjacency[blocker].add(target)
+
+    for node in list(nodes):
+        adjacency.setdefault(node, set())
+
+    key_map: Dict[str, Tuple[Tuple[int, object], ...]] = {}
+    for node in nodes:
+        key_map[node] = _id_key(node)
+
+    indegree: Dict[str, int] = {node: 0 for node in nodes}
+    for targets in adjacency.values():
+        for dest in targets:
+            indegree[dest] = indegree.get(dest, 0) + 1
+
+    # Break cycles per strongly connected component, stripping backward edges.
+    for comp in _sccs(adjacency, list(nodes)):
+        if len(comp) <= 1 and not any(member in adjacency.get(member, ()) for member in comp):
+            continue
+        ordered_comp = sorted(comp, key=lambda name: (key_map.get(name), name))
+        position = {name: idx for idx, name in enumerate(ordered_comp)}
+        for src in list(comp):
+            for dest in list(adjacency.get(src, ())):
+                if dest == src:
+                    adjacency[src].discard(dest)
+                    continue
+                if dest in position and position[src] > position[dest]:
+                    adjacency[src].discard(dest)
+                    indegree[dest] = max(0, indegree.get(dest, 0) - 1)
+
+    heap: List[Tuple[Tuple[int, object], str]] = []
+    for node in nodes:
+        if indegree.get(node, 0) == 0:
+            heapq.heappush(heap, (key_map[node], node))
+
+    ordered: List[str] = []
+    while heap:
+        _, node = heapq.heappop(heap)
+        ordered.append(node)
+        for dest in list(adjacency[node]):
+            indegree[dest] = indegree.get(dest, 0) - 1
+            if indegree[dest] == 0:
+                heapq.heappush(heap, (key_map[dest], dest))
+        adjacency[node].clear()
+
+    if len(ordered) < len(nodes):
+        remaining = sorted(
+            (node for node in nodes if node not in ordered),
+            key=lambda name: (key_map.get(name), name),
+        )
+        ordered.extend(remaining)
+
+    return ordered
 
 
 def _ensure_task_metadata_columns(cur: sqlite3.Cursor) -> None:
@@ -194,65 +250,6 @@ def _ensure_task_metadata_columns(cur: sqlite3.Cursor) -> None:
         cur.execute("ALTER TABLE tasks ADD COLUMN due_at TEXT")
     if "points" not in columns:
         cur.execute("ALTER TABLE tasks ADD COLUMN points REAL")
-    if "story_order" not in columns:
-        cur.execute("ALTER TABLE tasks ADD COLUMN story_order INTEGER")
-
-
-def _select_edge_to_drop(
-    comp: List[str],
-    adjacency: Dict[str, Set[str]],
-    task_meta: Dict[str, Dict[str, Any]],
-) -> Optional[Tuple[str, str]]:
-    best: Optional[Tuple[str, str, Tuple]] = None
-    for u in comp:
-        for v in adjacency.get(u, ()):
-            if v not in comp:
-                continue
-            meta_u = task_meta.get(u, {})
-            meta_v = task_meta.get(v, {})
-            story_u = meta_u.get("story_sort")
-            story_v = meta_v.get("story_sort")
-            cross_story = (story_u or "") != (story_v or "")
-            descending = (meta_u.get("display_sort") or u) > (meta_v.get("display_sort") or v)
-            score = (
-                0 if cross_story else 1,
-                0 if descending else 1,
-                meta_u.get("display_sort") or u,
-                meta_v.get("display_sort") or v,
-            )
-            if best is None or score < best[2]:
-                best = (u, v, score)
-    if best:
-        return best[0], best[1]
-    return None
-
-
-def _decycle_graph(
-    adjacency: Dict[str, Set[str]],
-    indegree: Dict[str, int],
-    task_meta: Dict[str, Dict[str, Any]],
-    nodes: List[str],
-) -> List[Tuple[str, str]]:
-    removed: List[Tuple[str, str]] = []
-    for _ in range(1000):
-        scc_list = _sccs(adjacency, nodes)
-        edge_removed = False
-        for comp in scc_list:
-            if len(comp) <= 1:
-                continue
-            drop = _select_edge_to_drop(comp, adjacency, task_meta)
-            if not drop:
-                continue
-            u, v = drop
-            if v in adjacency.get(u, set()):
-                adjacency[u].discard(v)
-                indegree[v] = max(0, indegree.get(v, 0) - 1)
-                removed.append((u, v))
-                edge_removed = True
-                break
-        if not edge_removed:
-            break
-    return removed
     if "story_order" not in columns:
         cur.execute("ALTER TABLE tasks ADD COLUMN story_order INTEGER")
 
@@ -388,30 +385,18 @@ def compute_order(db_path: Path, project_root: Path, skip_if_exists: bool = Fals
     binder_root = project_root / ".gpt-creator" / "cache" / "task-binder"
     edges.extend(_load_dependencies_from_binder(binder_root, tasks_by_key))
 
-    adjacency: Dict[str, Set[str]] = defaultdict(set)
+    valid_edges: List[Tuple[str, str]] = []
     missing_dependency_edges = 0
-    missing_dependency_targets: Set[str] = set()
 
     for blocker, target in edges:
         if blocker == target:
             continue
         blocker_known = blocker in tasks_by_key
         target_known = target in tasks_by_key
-        if not blocker_known or not target_known:
+        if not (blocker_known and target_known):
             missing_dependency_edges += 1
-            if target_known:
-                missing_dependency_targets.add(target)
             continue
-        adjacency[blocker].add(target)
-
-    for key in nodes:
-        adjacency.setdefault(key, set())
-
-    known_nodes: Set[str] = set(nodes)
-    for source in list(adjacency.keys()):
-        invalid = {dest for dest in adjacency[source] if dest not in known_nodes}
-        if invalid:
-            adjacency[source].difference_update(invalid)
+        valid_edges.append((blocker, target))
 
     if missing_dependency_edges:
         print(
@@ -419,190 +404,7 @@ def compute_order(db_path: Path, project_root: Path, skip_if_exists: bool = Fals
             file=sys.stderr,
         )
 
-    indegree: Dict[str, int] = {key: 0 for key in nodes}
-    for outs in adjacency.values():
-        for dest in outs:
-            indegree[dest] = indegree.get(dest, 0) + 1
-
-    def _pretty_label(row: sqlite3.Row) -> str:
-        task_label = _normalize(row["task_id"])
-        if task_label:
-            return task_label
-        story_slug = _normalize(row["story_slug"])
-        try:
-            position_val = int(row["position"])
-        except (TypeError, ValueError):
-            position_val = 0
-        if story_slug:
-            return f"{story_slug}:{position_val + 1}"
-        return f"id#{row['id']}"
-
-    def _parse_priority(value) -> int:
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return 0
-
-    def _parse_due(value: Optional[str]) -> float:
-        if not value:
-            return float("inf")
-        text = value.strip()
-        if not text:
-            return float("inf")
-        try:
-            if text.endswith("Z"):
-                text = text[:-1] + "+00:00"
-            return dt.datetime.fromisoformat(text).timestamp()
-        except Exception:
-            return float("inf")
-
-    points_pattern = re.compile(r"[-+]?\d*\.?\d+")
-
-    def _parse_points(primary, fallback) -> float:
-        for candidate in (primary, fallback):
-            if candidate is None:
-                continue
-            if isinstance(candidate, (int, float)):
-                try:
-                    val = float(candidate)
-                    if val >= 0:
-                        return val
-                except (TypeError, ValueError):
-                    continue
-            if isinstance(candidate, str):
-                stripped = candidate.strip()
-                if not stripped:
-                    continue
-                match = points_pattern.search(stripped)
-                if not match:
-                    continue
-                try:
-                    val = float(match.group(0))
-                    if val >= 0:
-                        return val
-                except ValueError:
-                    continue
-        return float("inf")
-
-    READY_STATUSES = {"pending", "retryable"}
-
-    task_meta: Dict[str, Dict[str, object]] = {}
-    for key, row in tasks_by_key.items():
-        status_text = _normalize_status(row["status"])
-        status_ready = status_text in READY_STATUSES
-        priority = _parse_priority(row["priority"])
-        due_ts = _parse_due(row["due_at"])
-        points_value = _parse_points(row["points"], row["story_points"])
-        epic_sort = (_normalize(row["epic_key"]) or _normalize(row["epic_title"]) or "").lower()
-        story_sort = _normalize(row["story_slug"]).lower()
-        display_label = _normalize(row["task_id"]) or key
-        task_meta[key] = {
-            "row": row,
-            "status": status_text,
-            "ready": status_ready,
-            "priority": priority,
-            "due_ts": due_ts,
-            "points": points_value,
-            "epic_sort": epic_sort,
-            "story_sort": story_sort,
-            "display_id": display_label,
-            "display_sort": (display_label or "").lower(),
-        }
-
-    import heapq
-
-    heap: List[Tuple[Tuple, int, str]] = []
-    counter = 0
-
-    def push_ready(key: str) -> None:
-        info = task_meta.get(key)
-        if not info or not info["ready"]:
-            return
-        priority_tuple = (
-            -int(info["priority"]),
-            float(info["due_ts"]),
-            float(info["points"]),
-            info["epic_sort"],
-            info["story_sort"],
-            info["display_sort"],
-        )
-        nonlocal counter
-        heapq.heappush(heap, (priority_tuple, counter, key))
-        counter += 1
-
-    removed_edges = _decycle_graph(
-        adjacency=adjacency,
-        indegree=indegree,
-        task_meta=task_meta,
-        nodes=nodes,
-    )
-    if removed_edges:
-        def _edge_label(u: str, v: str) -> str:
-            u_label = task_meta.get(u, {}).get("display_id") or u
-            v_label = task_meta.get(v, {}).get("display_id") or v
-            return f"{u_label}->{v_label}"
-
-        sample_removed = ", ".join(_edge_label(a, b) for a, b in removed_edges[:5])
-        print(
-            f"[order] Info: removed {len(removed_edges)} cycle edge(s) prior to scheduling{': ' + sample_removed if sample_removed else ''}.",
-            file=sys.stderr,
-        )
-
-    _break_cycles_with_lowest_first(
-        adjacency=adjacency,
-        indegree=indegree,
-        task_meta=task_meta,
-        nodes=nodes,
-    )
-
-    for key in nodes:
-        if indegree.get(key, 0) == 0:
-            push_ready(key)
-
-    order: List[str] = []
-    processed: Set[str] = set()
-
-    while heap:
-        _, _, key = heapq.heappop(heap)
-        if key in processed:
-            continue
-        order.append(key)
-        processed.add(key)
-        for neighbor in adjacency.get(key, ()):
-            indegree[neighbor] -= 1
-            if indegree[neighbor] == 0:
-                push_ready(neighbor)
-
-    remaining_nodes = [key for key in nodes if key not in processed]
-    cycle_nodes = [key for key in remaining_nodes if indegree.get(key, 0) > 0]
-    if cycle_nodes:
-        sample = ", ".join(task_meta[key]["display_id"] for key in cycle_nodes[:10])
-        print(
-            f"[order] Warning: residual cycles after rewiring involving {len(cycle_nodes)} task(s); examples: {sample}",
-            file=sys.stderr,
-        )
-
-    unscheduled = [key for key in nodes if key not in processed]
-    if unscheduled:
-        missing_priority = sorted(
-            (key for key in unscheduled if key in missing_dependency_targets),
-            key=lambda s: (task_meta.get(s, {}).get("display_sort") or s),
-        )
-        remaining_priority = sorted(
-            (key for key in unscheduled if key not in missing_dependency_targets),
-            key=lambda s: (task_meta.get(s, {}).get("display_sort") or s),
-        )
-        fallback = missing_priority + remaining_priority
-        sample = ", ".join(task_meta[key]["display_id"] for key in fallback[:10])
-        print(
-            f"[order] Info: {len(fallback)} task(s) scheduled via fallback; examples: {sample}",
-            file=sys.stderr,
-        )
-        for key in fallback:
-            if key in processed:
-                continue
-            order.append(key)
-            processed.add(key)
+    order = _stable_toposort(nodes, valid_edges)
 
     now = dt.datetime.utcnow().isoformat() + "Z"
 
@@ -622,6 +424,16 @@ def compute_order(db_path: Path, project_root: Path, skip_if_exists: bool = Fals
         cur.execute(
             "UPDATE tasks SET global_order = ?, story_order = ?, global_order_updated_at = ? WHERE id = ?",
             (current_index, story_positions[story_slug_norm], now, row["id"]),
+        )
+
+    remaining_rows = cur.execute(
+        "SELECT id FROM tasks WHERE global_order = 0 ORDER BY id"
+    ).fetchall()
+    for row in remaining_rows:
+        current_index += 1
+        cur.execute(
+            "UPDATE tasks SET global_order = ?, global_order_updated_at = ? WHERE id = ?",
+            (current_index, now, row["id"]),
         )
 
     cur.execute(

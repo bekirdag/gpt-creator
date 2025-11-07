@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Runtime helpers extracted from bin/gpt-creator."""
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -24,7 +25,25 @@ if _EXTRA_HELPER_DIR:
     except Exception:
         pass
 
+
+def _silence_prompt_logs() -> None:
+    """Keep noisy prompt-generation loggers from spamming stdout."""
+    targets = (
+        "gpt_creator.promptgen",
+        "gpt_creator.prompt",
+        "openai",
+        "httpx",
+        "urllib3",
+    )
+    for name in targets:
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.WARNING)
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+
+
 def main():
+    _silence_prompt_logs()
     if len(sys.argv) < 2:
         print("Usage: work_on_tasks_runtime.py <apply|prompt> …", file=sys.stderr)
         sys.exit(1)

@@ -79,7 +79,9 @@ if [[ ! -f "$DB_PATH" ]]; then
   exit 1
 fi
 
-"$ROOT_DIR/bin/gpt-creator" order-tasks --project "$PROJECT_ROOT_DIR" >/dev/null
+if ! "$ROOT_DIR/bin/gpt-creator" order-tasks --project "$PROJECT_ROOT_DIR" >/dev/null; then
+  echo "[work-on-tasks] 'order-tasks' failed; continuing with existing queue." >&2
+fi
 
 readarray -t queue < <(cd "$ROOT_DIR" && python3 "${SCRIPT_DIR}/python/list_global_task_queue.py" "$DB_PATH")
 

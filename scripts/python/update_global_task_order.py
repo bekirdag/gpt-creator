@@ -194,6 +194,8 @@ def _ensure_task_metadata_columns(cur: sqlite3.Cursor) -> None:
         cur.execute("ALTER TABLE tasks ADD COLUMN due_at TEXT")
     if "points" not in columns:
         cur.execute("ALTER TABLE tasks ADD COLUMN points REAL")
+    if "story_order" not in columns:
+        cur.execute("ALTER TABLE tasks ADD COLUMN story_order INTEGER")
 
 
 def _ensure_metadata_table(cur: sqlite3.Cursor) -> None:
@@ -266,13 +268,19 @@ def _load_dependencies_from_binder(cache_root: Path, known_keys: Dict[str, int])
     return edges
 
 
-def compute_order(db_path: Path, project_root: Path) -> int:
+def compute_order(db_path: Path, project_root: Path, skip_if_exists: bool = False) -> Optional[int]:
     if not db_path.exists():
         raise FileNotFoundError(f"Task database not found: {db_path}")
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
+
+    if skip_if_exists:
+        existing = cur.execute("SELECT 1 FROM tasks WHERE global_order > 0 LIMIT 1").fetchone()
+        if existing:
+            conn.close()
+            return None
 
     _ensure_global_order_column(cur)
     _ensure_metadata_column(cur)
@@ -311,6 +319,7 @@ def compute_order(db_path: Path, project_root: Path) -> int:
 
     if not nodes:
         cur.execute("UPDATE tasks SET global_order = 0")
+        cur.execute("UPDATE tasks SET story_order = NULL")
         cur.execute("UPDATE tasks SET global_order_updated_at = ?", (dt.datetime.utcnow().isoformat() + "Z",))
         conn.commit()
         conn.close()
@@ -322,14 +331,22 @@ def compute_order(db_path: Path, project_root: Path) -> int:
 
     adjacency: Dict[str, Set[str]] = defaultdict(set)
     missing_dependency_edges = 0
+    missing_dependency_targets: Set[str] = set()
 
     for blocker, target in edges:
         if blocker == target:
             continue
-        if blocker not in tasks_by_key or target not in tasks_by_key:
+        blocker_known = blocker in tasks_by_key
+        target_known = target in tasks_by_key
+        if not blocker_known or not target_known:
             missing_dependency_edges += 1
+            if target_known:
+                missing_dependency_targets.add(target)
             continue
         adjacency[blocker].add(target)
+
+    for key in nodes:
+        adjacency.setdefault(key, set())
 
     known_nodes: Set[str] = set(nodes)
     for source in list(adjacency.keys()):
@@ -490,12 +507,21 @@ def compute_order(db_path: Path, project_root: Path) -> int:
 
     unscheduled = [key for key in nodes if key not in processed]
     if unscheduled:
-        sample = ", ".join(task_meta[key]["display_id"] for key in unscheduled[:10])
+        missing_priority = sorted(
+            (key for key in unscheduled if key in missing_dependency_targets),
+            key=lambda s: (task_meta.get(s, {}).get("display_sort") or s),
+        )
+        remaining_priority = sorted(
+            (key for key in unscheduled if key not in missing_dependency_targets),
+            key=lambda s: (task_meta.get(s, {}).get("display_sort") or s),
+        )
+        fallback = missing_priority + remaining_priority
+        sample = ", ".join(task_meta[key]["display_id"] for key in fallback[:10])
         print(
-            f"[order] Info: {len(unscheduled)} task(s) scheduled via fallback; examples: {sample}",
+            f"[order] Info: {len(fallback)} task(s) scheduled via fallback; examples: {sample}",
             file=sys.stderr,
         )
-        for key in sorted(unscheduled, key=lambda s: (task_meta.get(s, {}).get("display_sort") or s)):
+        for key in fallback:
             if key in processed:
                 continue
             order.append(key)
@@ -506,41 +532,20 @@ def compute_order(db_path: Path, project_root: Path) -> int:
     cur.execute("UPDATE tasks SET global_order = 0 WHERE global_order <> 0")
     cur.execute("UPDATE tasks SET global_order_updated_at = ?", (now,))
 
-    assigned_row_ids: Set[int] = set()
+    cur.execute("UPDATE tasks SET story_order = NULL WHERE story_order IS NOT NULL")
     current_index = 0
+    story_positions: Dict[str, int] = defaultdict(int)
     for key in order:
         row = tasks_by_key.get(key)
         if not row:
             continue
         current_index += 1
-        assigned_row_ids.add(row["id"])
+        story_slug_norm = _normalize(row["story_slug"]).lower()
+        story_positions[story_slug_norm] = story_positions.get(story_slug_norm, 0) + 1
         cur.execute(
-            "UPDATE tasks SET global_order = ?, global_order_updated_at = ? WHERE id = ?",
-            (current_index, now, row["id"]),
+            "UPDATE tasks SET global_order = ?, story_order = ?, global_order_updated_at = ? WHERE id = ?",
+            (current_index, story_positions[story_slug_norm], now, row["id"]),
         )
-
-    leftovers: List[sqlite3.Row] = []
-    for row in rows:
-        if _is_terminal(row["status"]):
-            continue
-        if row["id"] in assigned_row_ids:
-            continue
-        leftovers.append(row)
-
-    if leftovers:
-        leftovers.sort(key=lambda r: (_pretty_label(r), r["id"]))
-        sample = ", ".join(_pretty_label(r) for r in leftovers[:10])
-        print(
-            f"[order] Warning: {len(leftovers)} task(s) were missing from DAG ordering; assigned fallback positions; examples: {sample}",
-            file=sys.stderr,
-        )
-        for row in leftovers:
-            current_index += 1
-            assigned_row_ids.add(row["id"])
-            cur.execute(
-                "UPDATE tasks SET global_order = ?, global_order_updated_at = ? WHERE id = ?",
-                (current_index, now, row["id"]),
-            )
 
     cur.execute(
         """
@@ -572,6 +577,11 @@ def main() -> int:
         default=None,
         help="Project root containing .gpt-creator cache directories (defaults to PROJECT_ROOT or cwd).",
     )
+    parser.add_argument(
+        "--ensure",
+        action="store_true",
+        help="Skip recomputing if tasks already have a global order.",
+    )
     args = parser.parse_args()
 
     project_root = args.project_root
@@ -579,8 +589,11 @@ def main() -> int:
         project_root = Path(os.environ.get("PROJECT_ROOT") or os.getcwd())
     project_root = project_root.resolve()
 
-    total = compute_order(args.db_path, project_root)
-    print(f"Computed global order for {total} task(s).")
+    total = compute_order(args.db_path, project_root, skip_if_exists=args.ensure)
+    if total is None:
+        print("[order] Global task order already present; skipping.")
+    else:
+        print(f"Computed global order for {total} task(s).")
     return 0
 
 

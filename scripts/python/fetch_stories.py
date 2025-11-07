@@ -201,7 +201,13 @@ def fetch_tasks_for_story(slug):
     if HAS_TASK_ESTIMATE_COLUMN:
         story_points_expr = "COALESCE(story_points, estimate)"
     query = f"""
-        SELECT position, task_id, title, status, {story_points_expr} AS story_points, global_order
+        SELECT position,
+               task_id,
+               title,
+               status,
+               {story_points_expr} AS story_points,
+               global_order,
+               COALESCE(NULLIF(story_order, 0), NULLIF(global_order, 0)) AS story_display_order
         FROM tasks
         WHERE story_slug = ?
         ORDER BY position
@@ -497,10 +503,12 @@ def print_task_children(story):
     for task in tasks:
         position = task.get("position")
         index = str((position if position is not None else 0) + 1)
-        global_order = task.get("global_order")
         order_display = "-"
+        order_source = task.get("story_display_order")
+        if order_source is None:
+            order_source = task.get("global_order")
         try:
-            order_int = int(global_order)
+            order_int = int(order_source)
         except (TypeError, ValueError):
             order_int = 0
         if order_int > 0:

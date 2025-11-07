@@ -7690,6 +7690,12 @@ cmd_work_on_tasks() {
     fi
   fi
 
+  local order_helper
+  order_helper="$(gc_clone_python_tool "update_global_task_order.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  if ! python3 "$order_helper" "$work_plan_tasks_db" --project-root "${PROJECT_ROOT:-$PWD}" --ensure >/dev/null 2>&1; then
+    warn "work-on-tasks: unable to verify global task order; continuing with existing queue."
+  fi
+
   local prepare_prompts_flag="$prepare_prompts"
   if [[ -n "${GC_WORK_PREPARE_PROMPTS:-}" ]]; then
     prepare_prompts_flag="${GC_WORK_PREPARE_PROMPTS}"
@@ -7698,6 +7704,11 @@ cmd_work_on_tasks() {
     prepare_prompts_flag=0
   fi
   export GC_WORK_PREPARE_PROMPTS="$prepare_prompts_flag"
+  if [[ "$GC_WORK_PREPARE_PROMPTS" == "1" ]]; then
+    export GC_SKIP_STORY_PROMPT_SYNC=0
+  else
+    export GC_SKIP_STORY_PROMPT_SYNC=1
+  fi
 
   local work_state_dir="${PLAN_DIR}/work"
   mkdir -p "$work_state_dir"
@@ -8857,7 +8868,11 @@ print(error)'
     gc_update_work_state "$tasks_db" "$slug" "in-progress" "$next_task_int" "$total_tasks_int" "$run_stamp"
 
     local task_index
-    info "  Preparing prompts and context…"
+    if [[ "${GC_SKIP_STORY_PROMPT_SYNC:-0}" == "1" ]]; then
+      info "  Skipping prompt preparation (GC_WORK_PREPARE_PROMPTS=0)."
+    else
+      info "  Preparing prompts and context…"
+    fi
     local story_failed=0
     local story_task_consumed=0
     local single_task_fallback="${TASK_FALLBACK:-}"

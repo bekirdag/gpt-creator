@@ -1763,6 +1763,53 @@ def main():
                 raise ValueError(f"Path {path} escapes project root")
             return full
 
+        PLAN_ARTIFACT_CANDIDATES: Tuple[str, ...] = (
+            "PLAN.md",
+            "Plan.md",
+            "plan.md",
+            "PLAN",
+            "Plan",
+            "plan",
+        )
+
+        def _remove_plan_artifacts(trigger_label: str = "") -> None:
+            removed: List[str] = []
+            for candidate_name in PLAN_ARTIFACT_CANDIDATES:
+                try:
+                    candidate_path = ensure_within_root(Path(candidate_name))
+                except Exception:
+                    continue
+                try:
+                    if not candidate_path.exists():
+                        continue
+                    if candidate_path.is_symlink() or candidate_path.is_file():
+                        candidate_path.unlink()
+                    elif candidate_path.is_dir():
+                        shutil.rmtree(candidate_path)
+                    else:
+                        candidate_path.unlink()
+                    removed.append(candidate_name)
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    manual_notes.append(
+                        _format_action_result(
+                            "plan-guard",
+                            f"warning — unable to remove forbidden {candidate_name}: {exc}"
+                        )
+                    )
+            if removed:
+                unique = ", ".join(sorted(set(removed)))
+                suffix = f" after {trigger_label}" if trigger_label else ""
+                manual_notes.append(
+                    _format_action_result(
+                        "plan-guard",
+                        f"auto-removed forbidden PLAN artifact(s): {unique}{suffix}"
+                    )
+                )
+
+        _remove_plan_artifacts("startup")
+
         def _run_python_heredoc(code: str) -> CompletedProcess:
             script_text = code if code.endswith('\n') else code + '\n'
             tmp_path = None
@@ -2285,6 +2332,7 @@ def main():
                     manual_notes.append(
                         _format_action_result("doc-update-followup", "note — verify related code changes before letting doc edits stand")
                     )
+                _remove_plan_artifacts(f"change[{index}] {rel_path}")
             elif ctype == 'patch':
                 diff = change.get('diff')
                 diff = rewrite_patch_paths(diff)
@@ -2355,6 +2403,7 @@ def main():
                         patched.append(path + ' (3way)')
                         change_bytes[path] = diff_bytes
                         actual_changes += 1
+                        _remove_plan_artifacts(f"change[{index}] {path}")
                         continue
 
                     git_err += three_way.stderr.decode('utf-8') if three_way.stderr else ''
@@ -2439,6 +2488,7 @@ def main():
                                 patched.append(path + ' (reconstructed)')
                                 change_bytes[path] = len(new_content.encode('utf-8'))
                                 actual_changes += 1
+                                _remove_plan_artifacts(f"change[{index}] {path}")
                                 continue
 
                         if new_content is None:
@@ -2455,6 +2505,7 @@ def main():
                                     patched.append(path + ' (partial apply)')
                                     change_bytes[path] = diff_bytes
                                     actual_changes += 1
+                                    _remove_plan_artifacts(f"change[{index}] {path}")
                                     continue
                                 else:
                                     git_err += proc_noctx.stderr.decode('utf-8')
@@ -2503,6 +2554,7 @@ def main():
                                 )
                             )
                             patched.append(path + ' (auto)')
+                            _remove_plan_artifacts(f"change[{index}] {path}")
                         else:
                             manual_notes.append(
                                 _format_action_result(
@@ -2513,14 +2565,19 @@ def main():
                             patched.append(path + ' (manual)')
                             sys.stderr.write(git_err)
                             sys.stderr.write(fallback.stderr.decode('utf-8'))
+                        _remove_plan_artifacts(f"change[{index}] {path}")
                         continue
                     patched.append(path + ' (patch)')
                     change_bytes[path] = diff_bytes
                     actual_changes += 1
+                    _remove_plan_artifacts(f"change[{index}] {path}")
                 else:
                     patched.append(path)
                     change_bytes[path] = diff_bytes
                     actual_changes += 1
+                    _remove_plan_artifacts(f"change[{index}] {path}")
+
+        _remove_plan_artifacts("post-changes")
 
         commands_field = payload.get('commands')
         original_command_report: List[str] = []
@@ -2926,6 +2983,7 @@ def main():
                 executed_commands.append(command)
                 is_test_command = _looks_like_test_command(command)
                 _append_command_log(command, proc_cmd.returncode, stdout_text, stderr_text, is_test_command)
+                _remove_plan_artifacts(f"command {_truncate_command_text(command)}")
                 if proc_cmd.returncode != 0:
                     handled_note = _handle_pattern_not_found(python_heredoc_code, stdout_text, stderr_text)
                     if handled_note is not None:
@@ -3022,6 +3080,7 @@ def main():
 
         if executed_commands:
             payload['commands'] = executed_commands[:]
+        _remove_plan_artifacts("post-commands")
 
         command_diff_after = _git_diff_name_status(project_root)
         command_untracked_after = _git_untracked_files(project_root)
@@ -4181,7 +4240,9 @@ def main():
             "- Load the task details and acceptance criteria from the context section.",
             "- Consult the documentation catalog or search hits before modifying files.",
             "- Outline a concise plan (<=3 bullets focused on actions), execute the required edits, and capture final status notes with clear pass/fail decisions.",
+            "- Never create files named `PLAN.md` (or any case variant); summarize plans inline instead of emitting that artifact.",
             "- Apply changes by editing files directly via shell commands (no diff/patch output).",
+            "- Every time you run a command that edits files, writes content, stages changes, or runs tests/tools, list that exact command under the `Commands` heading; if you truly ran nothing, state `- (none)` explicitly.",
             "- Record follow-up actions when blockers remain.",
         ]
 

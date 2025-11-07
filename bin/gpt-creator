@@ -1848,7 +1848,9 @@ gc_run_install_guard() {
   fi
 
   local -a blocked=()
-  mapfile -t blocked < <(gc_install_guard_list_forbidden)
+  if ! mapfile -t blocked < <(gc_install_guard_list_forbidden); then
+    blocked=()
+  fi
 
   if (( ${#blocked[@]} )); then
     {

@@ -378,6 +378,7 @@ pdr_excerpt = safe_excerpt(pdr_path, PDR_CHAR_LIMIT)
 sql_excerpt = safe_excerpt(sql_path, SQL_CHAR_LIMIT)
 other_tasks = load_other_tasks(db_path, story_slug, task_index)
 gaps = detect_gaps(target_task)
+snapshot = build_compact_task(target_task)
 
 story_summary = {
     "epic_id": epic_id,

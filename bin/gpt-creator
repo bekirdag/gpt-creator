@@ -1785,6 +1785,8 @@ ensure_ctx() {
     gc_reports_initialize
     gc_reports_touch_activity "$(date +%s)"
   fi
+
+  gc_run_install_guard
 }
 
 gc_project_templates_root() {
@@ -1802,6 +1804,71 @@ gc_find_primary_rfp() {
 
 gc_bootstrap_state_dir() {
   printf '%s\n' "${PLAN_DIR}/bootstrap"
+}
+
+gc_install_guard_version() {
+  printf 'plan-file-v1'
+}
+
+gc_install_guard_sentinel() {
+  local guard_dir="${GC_DIR}/install-guard"
+  mkdir -p "$guard_dir"
+  printf '%s/%s.ok' "$guard_dir" "$(gc_install_guard_version)"
+}
+
+gc_install_guard_forbidden_paths() {
+  printf '%s\n' "PLAN" "Plan" "plan" "PLAN.md" "Plan.md" "plan.md"
+}
+
+gc_install_guard_list_forbidden() {
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    local path="${PROJECT_ROOT}/${candidate}"
+    if [[ -e "$path" ]]; then
+      printf '%s\n' "$path"
+    fi
+  done < <(gc_install_guard_forbidden_paths)
+}
+
+gc_install_guard_has_forbidden() {
+  local found=0
+  while IFS= read -r _path; do
+    found=1
+    break
+  done < <(gc_install_guard_list_forbidden)
+  (( found )) && return 0
+  return 1
+}
+
+gc_run_install_guard() {
+  local sentinel
+  sentinel="$(gc_install_guard_sentinel)"
+  if [[ -f "$sentinel" ]] && ! gc_install_guard_has_forbidden; then
+    return 0
+  fi
+
+  local -a blocked=()
+  mapfile -t blocked < <(gc_install_guard_list_forbidden)
+
+  if (( ${#blocked[@]} )); then
+    {
+      echo "[install-guard] Blocked by PLAN artifact(s):"
+      printf '  - %s\n' "${blocked[@]}"
+      cat <<'EOF'
+Resolve by removing or archiving the listed files (e.g., run scripts/install_guard_cleanup.sh --project <path>).
+This guard prevents automation loops that rewrite PLAN.md. Once resolved, rerun your command.
+EOF
+    } >&2
+    exit 1
+  fi
+
+  umask 077
+  local guard_dir tmp
+  guard_dir="$(dirname "$sentinel")"
+  mkdir -p "$guard_dir"
+  tmp="$(mktemp "${guard_dir}/.sentinel.XXXXXX")"
+  printf 'install-guard %s ok at %s\n' "$(gc_install_guard_version)" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >"$tmp"
+  mv -f "$tmp" "$sentinel"
 }
 
 gc_bootstrap_state_file() {

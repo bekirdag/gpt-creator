@@ -34,6 +34,8 @@ coverage/
 .gpt-creator/logs/codex-usage.ndjson
 .gpt-creator/scan.tsv
 .gpt-creator/scan.tsv.*
+.gpt-creator/install-guard/
+.gpt-creator/install-guard/**
 .gpt-creator/tmp/v8-compile-cache-*/
 .gpt-creator/tmp/v8-compile-cache-*/**/*
 .gpt-creator/state/

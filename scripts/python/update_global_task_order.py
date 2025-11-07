@@ -196,6 +196,17 @@ def _ensure_task_metadata_columns(cur: sqlite3.Cursor) -> None:
         cur.execute("ALTER TABLE tasks ADD COLUMN points REAL")
 
 
+def _ensure_metadata_table(cur: sqlite3.Cursor) -> None:
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
+
 def _load_dependencies_from_db(cur: sqlite3.Cursor, known_keys: Dict[str, int]) -> List[Tuple[str, str]]:
     edges: List[Tuple[str, str]] = []
     try:
@@ -267,6 +278,7 @@ def compute_order(db_path: Path, project_root: Path) -> int:
     _ensure_metadata_column(cur)
     _ensure_task_dependencies_table(cur)
     _ensure_task_metadata_columns(cur)
+    _ensure_metadata_table(cur)
 
     rows = cur.execute(
         """
@@ -438,6 +450,24 @@ def compute_order(db_path: Path, project_root: Path) -> int:
             if indegree[neighbor] == 0:
                 push_ready(neighbor)
 
+    remaining_nodes = [key for key in nodes if key not in processed]
+    cycle_nodes = [key for key in remaining_nodes if indegree.get(key, 0) > 0]
+    if cycle_nodes:
+        sample = ", ".join(task_meta[key]["display_id"] for key in cycle_nodes[:10])
+        print(
+            f"[order] Warning: residual cycles after rewiring involving {len(cycle_nodes)} task(s); examples: {sample}",
+            file=sys.stderr,
+        )
+        rem_graph = {u: {v for v in adjacency.get(u, set()) if v in cycle_nodes} for u in cycle_nodes}
+        for comp in _sccs(rem_graph, list(cycle_nodes)):
+            for key in sorted(comp, key=lambda k: (task_meta.get(k, {}).get("display_sort") or k)):
+                if key in processed:
+                    continue
+                if not task_meta.get(key, {}).get("ready"):
+                    continue
+                order.append(key)
+                processed.add(key)
+
     remaining_ready = [
         key for key in nodes if key not in processed and task_meta.get(key, {}).get("ready")
     ]
@@ -446,15 +476,6 @@ def compute_order(db_path: Path, project_root: Path) -> int:
         sample = ", ".join(task_meta[key]["display_id"] for key in remaining_ready[:10])
         print(
             f"[order] Warning: {len(remaining_ready)} task(s) could not be scheduled (cycle or missing dependency); examples: {sample}",
-            file=sys.stderr,
-        )
-
-    remaining_nodes = [key for key in nodes if key not in processed]
-    cycle_nodes = [key for key in remaining_nodes if indegree.get(key, 0) > 0]
-    if cycle_nodes:
-        sample = ", ".join(task_meta[key]["display_id"] for key in cycle_nodes[:10])
-        print(
-            f"[order] Warning: residual cycles after rewiring involving {len(cycle_nodes)} task(s); examples: {sample}",
             file=sys.stderr,
         )
 
@@ -471,6 +492,15 @@ def compute_order(db_path: Path, project_root: Path) -> int:
             "UPDATE tasks SET global_order = ?, global_order_updated_at = ? WHERE id = ?",
             (index, now, row["id"]),
         )
+
+    cur.execute(
+        """
+        INSERT INTO metadata(key, value)
+        VALUES('global_order_last_computed_at', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """,
+        (now,),
+    )
 
     conn.commit()
     conn.close()

@@ -79,8 +79,26 @@ if [[ ! -f "$DB_PATH" ]]; then
   exit 1
 fi
 
-if ! "$ROOT_DIR/bin/gpt-creator" order-tasks --project "$PROJECT_ROOT_DIR" >/dev/null; then
-  echo "[work-on-tasks] 'order-tasks' failed; continuing with existing queue." >&2
+needs_order=0
+order_stamp=""
+order_query_status=0
+if command -v sqlite3 >/dev/null 2>&1; then
+  set +e
+  order_stamp="$(sqlite3 "$DB_PATH" "SELECT value FROM metadata WHERE key='global_order_last_computed_at' LIMIT 1;" 2>/dev/null)"
+  order_query_status=$?
+  set -e
+  if (( order_query_status != 0 )) || [[ -z "$order_stamp" ]]; then
+    needs_order=1
+  fi
+else
+  needs_order=1
+fi
+
+if (( needs_order )); then
+  echo "[work-on-tasks] No recorded global order; running 'order-tasks --no-refine-preflight' once." >&2
+  if ! GC_SKIP_REFINE_PREFLIGHT=1 "$ROOT_DIR/bin/gpt-creator" order-tasks --project "$PROJECT_ROOT_DIR" --no-refine-preflight >/dev/null; then
+    echo "[work-on-tasks] 'order-tasks' failed; continuing with existing queue." >&2
+  fi
 fi
 
 readarray -t queue < <(cd "$ROOT_DIR" && python3 "${SCRIPT_DIR}/python/list_global_task_queue.py" "$DB_PATH")

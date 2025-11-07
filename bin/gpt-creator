@@ -7660,6 +7660,30 @@ cmd_work_on_tasks() {
   }
 
   ensure_ctx "$root"
+  local work_plan_tasks_db="${PLAN_DIR}/tasks/tasks.db"
+  [[ -f "$work_plan_tasks_db" ]] || die "Tasks database not found at ${work_plan_tasks_db}. Run 'gpt-creator create-tasks' first."
+
+  local _gc_order_stamp="" _gc_order_status=0 need_order_bootstrap=0
+  if command -v sqlite3 >/dev/null 2>&1; then
+    set +e
+    _gc_order_stamp="$(
+      sqlite3 "$work_plan_tasks_db" "SELECT value FROM metadata WHERE key='global_order_last_computed_at' LIMIT 1;" 2>/dev/null
+    )"
+    _gc_order_status=$?
+    set -e
+    if (( _gc_order_status != 0 )) || [[ -z "$_gc_order_stamp" ]]; then
+      need_order_bootstrap=1
+    fi
+  else
+    need_order_bootstrap=1
+  fi
+
+  if (( need_order_bootstrap )); then
+    info "work-on-tasks: no recorded global order → running 'order-tasks --no-refine-preflight'."
+    if ! cmd_order_tasks --project "${PROJECT_ROOT:-$PWD}" --no-refine-preflight >/dev/null 2>&1; then
+      warn "work-on-tasks: automatic order bootstrap failed; continuing with existing queue."
+    fi
+  fi
 
   local preflight_script="${CLI_ROOT}/scripts/preflight_git_blockers.sh"
   local auto_conflict_script="${CLI_ROOT}/scripts/auto_resolve_conflicts.sh"

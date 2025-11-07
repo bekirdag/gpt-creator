@@ -97,6 +97,10 @@ for entry in "${queue[@]}"; do
   [[ -n "$story_slug" && -n "$task_token" ]] || continue
   local_story="${story_slug}"
   local_token="${task_token}"
+  fallback_token=""
+  if [[ "${_position:-}" =~ ^[0-9]+$ ]]; then
+    printf -v fallback_token "%s:%d" "${story_slug,,}" $((_position + 1))
+  fi
 
   if [[ -n "$story_override_norm" && "${local_story,,}" != "$story_override_norm" ]]; then
     continue
@@ -111,6 +115,7 @@ for entry in "${queue[@]}"; do
   GC_TASK_ORDER=list \
   STORY_FILTER="${local_story}" \
   TASK_FILTER="${local_token,,}" \
+  TASK_FALLBACK="${fallback_token}" \
   bash "${SCRIPT_DIR}/work-on-tasks-retry.sh" --story "${local_story}" --task "$local_token" "${extra_args[@]}" || true
 done
 

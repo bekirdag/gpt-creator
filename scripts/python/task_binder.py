@@ -347,10 +347,45 @@ def prepare_binder_payload(
     return path, binder
 
 
-def write_binder(path: Path, binder: Dict[str, Any], *, max_bytes: int) -> None:
-    _write_json(path, binder)
+def write_binder(path: Path, binder: Dict[str, Any], *, max_bytes: int) -> bool:
+    """
+    Persist binder metadata only when it changes.
+
+    Returns True when a write occurred, False when the cached file was
+    already up to date.
+    """
+
+    def _normalise_payload(payload: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        try:
+            normalised_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            normalised_dict: Dict[str, Any] = json.loads(normalised_json)
+            return normalised_json, normalised_dict
+        except TypeError:
+            # Fall back to stringifying unsupported values.
+            coerced = json.loads(json.dumps(payload, default=str))
+            normalised_json = json.dumps(coerced, ensure_ascii=False, sort_keys=True)
+            normalised_dict = json.loads(normalised_json)
+            return normalised_json, normalised_dict
+
+    new_json, normalised_payload = _normalise_payload(binder)
+    new_digest = hashlib.sha256(new_json.encode("utf-8", "ignore")).hexdigest()
+
+    existing_digest = ""
+    if path.exists():
+        try:
+            existing_payload = json.loads(path.read_text(encoding="utf-8"))
+            existing_json = json.dumps(existing_payload, ensure_ascii=False, sort_keys=True)
+            existing_digest = hashlib.sha256(existing_json.encode("utf-8", "ignore")).hexdigest()
+        except Exception:
+            existing_digest = ""
+
+    if existing_digest == new_digest:
+        return False
+
+    _write_json(path, normalised_payload)
     if max_bytes > 0:
         _trim_cache(path.parents[2], max_bytes)
+    return True
 
 
 def update_after_progress(

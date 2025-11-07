@@ -3394,9 +3394,19 @@ if binder_enabled:
         binder_status=binder_status,
         prompt_snapshot=final_prompt_text,
     )
-    binder_write(binder_path_obj, binder_payload, max_bytes=binder_max_bytes)
     binder_written_path = str(binder_path_obj)
-    emit_progress(f"Binder updated → {binder_written_path}")
+    binder_changed = True
+    try:
+        binder_changed = bool(binder_write(binder_path_obj, binder_payload, max_bytes=binder_max_bytes))
+    except TypeError:
+        # Backwards compatibility for environments where write_binder
+        # still returns None.
+        binder_write(binder_path_obj, binder_payload, max_bytes=binder_max_bytes)
+        binder_changed = True
+    if binder_changed:
+        emit_progress(f"Binder updated → {binder_written_path}")
+    else:
+        emit_progress(f"Binder unchanged; using cache → {binder_written_path}")
 elif binder_path:
     binder_written_path = str(binder_path)
 

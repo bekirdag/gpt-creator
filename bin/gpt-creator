@@ -8108,6 +8108,7 @@ cmd_work_on_tasks() {
     context_auto_shrink_threshold=1000000
   fi
   info "Work run directory → ${run_dir}"
+  ln -sfn "${run_dir}" "$(dirname "${run_dir}")/latest" 2>/dev/null || true
 
   local resume_flag=1
   [[ $resume -eq 1 ]] || resume_flag=0
@@ -8693,7 +8694,16 @@ print(error)'
     info "  Preparing prompts and context…"
     local story_failed=0
     local story_task_consumed=0
+    local single_task_fallback="${TASK_FALLBACK:-}"
+    single_task_fallback="${single_task_fallback,,}"
     for (( task_index = next_task_int; task_index < total_tasks_int; task_index++ )); do
+      if (( single_task_mode )) && [[ -n "$single_task_fallback" ]]; then
+        local current_task_fallback
+        printf -v current_task_fallback "%s:%d" "${slug,,}" $((task_index + 1))
+        if [[ "${current_task_fallback,,}" != "$single_task_fallback" ]]; then
+          continue
+        fi
+      fi
       gc_clear_active_task
       if ! gc_check_idle_timeout; then
         break
@@ -8755,6 +8765,11 @@ print(error)'
           if [[ -n "$task_id_lower" && "$task_id_lower" == "$task_filter_normalized" ]]; then
             matches_filter=1
           elif [[ "$fallback_key" == "$task_filter_normalized" ]]; then
+            matches_filter=1
+          fi
+        fi
+        if (( matches_filter == 0 )) && [[ -n "$single_task_fallback" ]]; then
+          if [[ "${fallback_key,,}" == "$single_task_fallback" ]]; then
             matches_filter=1
           fi
         fi

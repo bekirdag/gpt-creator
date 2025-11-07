@@ -321,11 +321,13 @@ def compute_order(db_path: Path, project_root: Path) -> int:
     edges.extend(_load_dependencies_from_binder(binder_root, tasks_by_key))
 
     adjacency: Dict[str, Set[str]] = defaultdict(set)
+    missing_dependency_edges = 0
 
     for blocker, target in edges:
         if blocker == target:
             continue
         if blocker not in tasks_by_key or target not in tasks_by_key:
+            missing_dependency_edges += 1
             continue
         adjacency[blocker].add(target)
 
@@ -335,10 +337,29 @@ def compute_order(db_path: Path, project_root: Path) -> int:
         if invalid:
             adjacency[source].difference_update(invalid)
 
+    if missing_dependency_edges:
+        print(
+            f"[order] Info: dropped {missing_dependency_edges} dependency edge(s) referencing missing tasks.",
+            file=sys.stderr,
+        )
+
     indegree: Dict[str, int] = {key: 0 for key in nodes}
     for outs in adjacency.values():
         for dest in outs:
             indegree[dest] = indegree.get(dest, 0) + 1
+
+    def _pretty_label(row: sqlite3.Row) -> str:
+        task_label = _normalize(row["task_id"])
+        if task_label:
+            return task_label
+        story_slug = _normalize(row["story_slug"])
+        try:
+            position_val = int(row["position"])
+        except (TypeError, ValueError):
+            position_val = 0
+        if story_slug:
+            return f"{story_slug}:{position_val + 1}"
+        return f"id#{row['id']}"
 
     def _parse_priority(value) -> int:
         try:
@@ -485,14 +506,41 @@ def compute_order(db_path: Path, project_root: Path) -> int:
     cur.execute("UPDATE tasks SET global_order = 0 WHERE global_order <> 0")
     cur.execute("UPDATE tasks SET global_order_updated_at = ?", (now,))
 
-    for index, key in enumerate(order, start=1):
+    assigned_row_ids: Set[int] = set()
+    current_index = 0
+    for key in order:
         row = tasks_by_key.get(key)
         if not row:
             continue
+        current_index += 1
+        assigned_row_ids.add(row["id"])
         cur.execute(
             "UPDATE tasks SET global_order = ?, global_order_updated_at = ? WHERE id = ?",
-            (index, now, row["id"]),
+            (current_index, now, row["id"]),
         )
+
+    leftovers: List[sqlite3.Row] = []
+    for row in rows:
+        if _is_terminal(row["status"]):
+            continue
+        if row["id"] in assigned_row_ids:
+            continue
+        leftovers.append(row)
+
+    if leftovers:
+        leftovers.sort(key=lambda r: (_pretty_label(r), r["id"]))
+        sample = ", ".join(_pretty_label(r) for r in leftovers[:10])
+        print(
+            f"[order] Warning: {len(leftovers)} task(s) were missing from DAG ordering; assigned fallback positions; examples: {sample}",
+            file=sys.stderr,
+        )
+        for row in leftovers:
+            current_index += 1
+            assigned_row_ids.add(row["id"])
+            cur.execute(
+                "UPDATE tasks SET global_order = ?, global_order_updated_at = ? WHERE id = ?",
+                (current_index, now, row["id"]),
+            )
 
     cur.execute(
         """
@@ -512,7 +560,7 @@ def compute_order(db_path: Path, project_root: Path) -> int:
 
     conn.commit()
     conn.close()
-    return len(order)
+    return current_index
 
 
 def main() -> int:

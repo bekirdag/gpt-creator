@@ -6382,6 +6382,7 @@ cmd_backlog() {
 
 cmd_order_tasks() {
   local root="" force=0
+  local skip_refine_preflight=1
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project|--root|-p)
@@ -6390,6 +6391,14 @@ cmd_order_tasks() {
         ;;
       --force)
         force=1
+        shift
+        ;;
+      --no-refine-preflight)
+        skip_refine_preflight=1
+        shift
+        ;;
+      --refine|--refine-preflight)
+        skip_refine_preflight=0
         shift
         ;;
       -h|--help)
@@ -6409,27 +6418,38 @@ EOF
   ensure_ctx "$root"
   local tasks_db="${PLAN_DIR}/tasks/tasks.db"
   [[ -f "$tasks_db" ]] || die "Tasks database not found at ${tasks_db}. Run 'gpt-creator create-tasks' first."
+  if [[ "${GC_REFINE_PREFLIGHT:-0}" == "1" ]]; then
+    skip_refine_preflight=0
+  fi
+  if [[ "${GC_SKIP_REFINE_PREFLIGHT:-0}" == "1" ]]; then
+    skip_refine_preflight=1
+  fi
 
-  local python_bin="${PYTHON_BIN:-python3}"
-  local refine_init_helper refine_summary_helper summary total_tasks=0 refined_tasks=0 pending_tasks=0 _t _s
-  if command -v "$python_bin" >/dev/null 2>&1; then
-    if refine_init_helper="$(gc_clone_python_tool "refine_tasks_init_db.py" "${PROJECT_ROOT:-$PWD}")"; then
-      "$python_bin" "$refine_init_helper" "$tasks_db" >/dev/null 2>&1 || true
-    fi
-    if refine_summary_helper="$(gc_clone_python_tool "refine_tasks_summary.py" "${PROJECT_ROOT:-$PWD}")"; then
-      summary="$("$python_bin" "$refine_summary_helper" "$tasks_db")" || summary=""
-    else
-      summary=""
-    fi
-    read -r total_tasks refined_tasks pending_tasks _t _s <<<"${summary:-0 0 0 0 0}"
-    total_tasks=${total_tasks:-0}
-    pending_tasks=${pending_tasks:-0}
-    if [[ "$pending_tasks" =~ ^[0-9]+$ ]] && (( pending_tasks > 0 )); then
-      info "order-tasks: ${pending_tasks} task(s) missing refinement → running 'refine-tasks --force' first."
-      if ! cmd_refine_tasks --project "${PROJECT_ROOT:-$PWD}" --force; then
-        warn "order-tasks: refine step failed; proceeding with existing metadata."
+  if (( ! skip_refine_preflight )); then
+    local python_bin="${PYTHON_BIN:-python3}"
+    local refine_init_helper refine_summary_helper summary total_tasks=0 refined_tasks=0 pending_tasks=0 _t _s
+    if command -v "$python_bin" >/dev/null 2>&1; then
+      if refine_init_helper="$(gc_clone_python_tool "refine_tasks_init_db.py" "${PROJECT_ROOT:-$PWD}")"; then
+        "$python_bin" "$refine_init_helper" "$tasks_db" >/dev/null 2>&1 || true
       fi
+      if refine_summary_helper="$(gc_clone_python_tool "refine_tasks_summary.py" "${PROJECT_ROOT:-$PWD}")"; then
+        summary="$($python_bin "$refine_summary_helper" "$tasks_db")" || summary=""
+      else
+        summary=""
+      fi
+      read -r total_tasks refined_tasks pending_tasks _t _s <<<"${summary:-0 0 0 0 0}"
+      total_tasks=${total_tasks:-0}
+      pending_tasks=${pending_tasks:-0}
+      if [[ "$pending_tasks" =~ ^[0-9]+$ ]] && (( pending_tasks > 0 )); then
+        info "order-tasks: ${pending_tasks} task(s) missing refinement → running 'refine-tasks --force' first."
+        if ! cmd_refine_tasks --project "${PROJECT_ROOT:-$PWD}" --force; then
+          warn "order-tasks: refine step failed; proceeding with existing metadata."
+        fi
+      fi
+    else
+      warn "Python runtime '${python_bin}' not available; skipping refine preflight."
     fi
+  fi
   else
     warn "Python runtime '${python_bin}' not available; skipping refine preflight."
   fi

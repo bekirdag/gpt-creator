@@ -6450,9 +6450,6 @@ EOF
       warn "Python runtime '${python_bin}' not available; skipping refine preflight."
     fi
   fi
-  else
-    warn "Python runtime '${python_bin}' not available; skipping refine preflight."
-  fi
 
   local populate_helper
   populate_helper="$(gc_clone_python_tool "populate_task_dependencies.py" "${PROJECT_ROOT:-$PWD}")" || return 1

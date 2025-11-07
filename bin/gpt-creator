@@ -6408,6 +6408,23 @@ EOF
   local tasks_db="${PLAN_DIR}/tasks/tasks.db"
   [[ -f "$tasks_db" ]] || die "Tasks database not found at ${tasks_db}. Run 'gpt-creator create-tasks' first."
 
+  local python_bin="${PYTHON_BIN:-python3}"
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    die "Python runtime '${python_bin}' not available; cannot summarise task metadata."
+  fi
+  local refine_init_helper refine_summary_helper summary total_tasks=0 refined_tasks=0 pending_tasks=0 _t _s
+  refine_init_helper="$(gc_clone_python_tool "refine_tasks_init_db.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  "$python_bin" "$refine_init_helper" "$tasks_db" >/dev/null 2>&1 || true
+  refine_summary_helper="$(gc_clone_python_tool "refine_tasks_summary.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  summary="$("$python_bin" "$refine_summary_helper" "$tasks_db")" || summary=""
+  read -r total_tasks refined_tasks pending_tasks _t _s <<<"${summary:-0 0 0 0 0}"
+  total_tasks=${total_tasks:-0}
+  pending_tasks=${pending_tasks:-0}
+  if [[ "$pending_tasks" =~ ^[0-9]+$ ]] && (( pending_tasks > 0 )); then
+    info "order-tasks: ${pending_tasks} task(s) missing refinement → running 'refine-tasks --force' first."
+    cmd_refine_tasks --project "${PROJECT_ROOT:-$PWD}" --force
+  fi
+
   local populate_helper
   populate_helper="$(gc_clone_python_tool "populate_task_dependencies.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   local -a populate_args=("$populate_helper" "$tasks_db")

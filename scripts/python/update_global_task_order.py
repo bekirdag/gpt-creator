@@ -13,7 +13,7 @@ import sqlite3
 import sys
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Set
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Set
 
 TERMINAL_STATUSES = {
     "complete",
@@ -114,6 +114,75 @@ def _ensure_task_dependencies_table(cur: sqlite3.Cursor) -> None:
             ON task_dependencies (blocker_id)
         """
     )
+
+
+def _sccs(adjacency: Dict[str, Set[str]], nodes: List[str]) -> List[List[str]]:
+    """Return strongly connected components using Tarjan's algorithm."""
+    index = 0
+    stack: List[str] = []
+    on_stack: Set[str] = set()
+    idx: Dict[str, int] = {}
+    low: Dict[str, int] = {}
+    result: List[List[str]] = []
+
+    sys.setrecursionlimit(max(10000, len(nodes) * 2))
+
+    def visit(v: str) -> None:
+        nonlocal index
+        idx[v] = index
+        low[v] = index
+        index += 1
+        stack.append(v)
+        on_stack.add(v)
+        for w in adjacency.get(v, ()):
+            if w not in idx:
+                visit(w)
+                low[v] = min(low[v], low[w])
+            elif w in on_stack:
+                low[v] = min(low[v], idx[w])
+        if low[v] == idx[v]:
+            comp: List[str] = []
+            while True:
+                w = stack.pop()
+                on_stack.discard(w)
+                comp.append(w)
+                if w == v:
+                    break
+            result.append(comp)
+
+    for v in nodes:
+        if v not in idx:
+            visit(v)
+    return result
+
+
+def _break_cycles_with_lowest_first(
+    adjacency: Dict[str, Set[str]],
+    indegree: Dict[str, int],
+    task_meta: Dict[str, Dict[str, Any]],
+    nodes: List[str],
+) -> None:
+    """Within each SCC create a deterministic forward chain."""
+    scc_list = _sccs(adjacency, nodes)
+    for comp in scc_list:
+        is_cycle = len(comp) > 1 or any(member in adjacency.get(member, ()) for member in comp)
+        if not is_cycle:
+            continue
+        ordered = sorted(comp, key=lambda k: (task_meta.get(k, {}).get("display_sort") or k))
+        positions = {name: idx for idx, name in enumerate(ordered)}
+        for u in list(comp):
+            for v in list(adjacency.get(u, ())):
+                if v == u:
+                    adjacency[u].discard(v)
+                elif v in positions and positions[u] > positions[v]:
+                    if v in adjacency[u]:
+                        adjacency[u].discard(v)
+                        indegree[v] = max(0, indegree.get(v, 0) - 1)
+        for i in range(len(ordered) - 1):
+            u, v = ordered[i], ordered[i + 1]
+            if v not in adjacency[u]:
+                adjacency[u].add(v)
+                indegree[v] = indegree.get(v, 0) + 1
 
 
 def _ensure_task_metadata_columns(cur: sqlite3.Cursor) -> None:
@@ -344,8 +413,15 @@ def compute_order(db_path: Path, project_root: Path) -> int:
         heapq.heappush(heap, (priority_tuple, counter, key))
         counter += 1
 
+    _break_cycles_with_lowest_first(
+        adjacency=adjacency,
+        indegree=indegree,
+        task_meta=task_meta,
+        nodes=nodes,
+    )
+
     for key in nodes:
-        if indegree[key] == 0:
+        if indegree.get(key, 0) == 0:
             push_ready(key)
 
     order: List[str] = []
@@ -378,15 +454,9 @@ def compute_order(db_path: Path, project_root: Path) -> int:
     if cycle_nodes:
         sample = ", ".join(task_meta[key]["display_id"] for key in cycle_nodes[:10])
         print(
-            f"[order] Warning: detected potential dependency cycle involving {len(cycle_nodes)} task(s); examples: {sample}",
+            f"[order] Warning: residual cycles after rewiring involving {len(cycle_nodes)} task(s); examples: {sample}",
             file=sys.stderr,
         )
-        # Append cycle participants in deterministic order (earliest id first).
-        for key in sorted(cycle_nodes, key=lambda k: task_meta[k]["display_sort"]):
-            if key in processed:
-                continue
-            order.append(key)
-            processed.add(key)
 
     now = dt.datetime.utcnow().isoformat() + "Z"
 

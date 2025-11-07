@@ -6461,8 +6461,10 @@ EOF
   fi
   python3 "${populate_args[@]}"
 
-  local order_helper
-  order_helper="$(gc_clone_python_tool "update_global_task_order.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local order_helper=""
+  if ! order_helper="$(gc_clone_python_tool "update_global_task_order.py" "${PROJECT_ROOT:-$PWD}")"; then
+    return 1
+  fi
   python3 "$order_helper" "$tasks_db" --project-root "${PROJECT_ROOT:-$PWD}"
   local order_marker_dir
   order_marker_dir="$(cd "$(dirname "$tasks_db")" && pwd -P)"
@@ -7680,8 +7682,10 @@ cmd_work_on_tasks() {
   local work_plan_tasks_db="${PLAN_DIR}/tasks/tasks.db"
   [[ -f "$work_plan_tasks_db" ]] || die "Tasks database not found at ${work_plan_tasks_db}. Run 'gpt-creator create-tasks' first."
 
-  local order_helper
-  order_helper="$(gc_clone_python_tool "update_global_task_order.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local order_helper=""
+  if ! order_helper="$(gc_clone_python_tool "update_global_task_order.py" "${PROJECT_ROOT:-$PWD}")"; then
+    return 1
+  fi
   if ! python3 "$order_helper" "$work_plan_tasks_db" --project-root "${PROJECT_ROOT:-$PWD}" --ensure >/dev/null 2>&1; then
     warn "work-on-tasks: unable to verify global task order; continuing with existing queue."
   fi

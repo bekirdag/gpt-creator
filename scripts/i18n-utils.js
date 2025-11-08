@@ -16,6 +16,10 @@ function readDirSafe(dirPath) {
   }
 }
 
+function isVisibleDirectory(entry) {
+  return entry.isDirectory() && !entry.name.startsWith('.');
+}
+
 function normaliseNewlines(text) {
   return (text || '').replace(/\r\n/g, '\n');
 }
@@ -36,7 +40,7 @@ function listJsonFiles(baseDir) {
     for (const entry of entries) {
       const relName = prefix ? path.join(prefix, entry.name) : entry.name;
       const absPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
+      if (isVisibleDirectory(entry)) {
         stack.push({ dir: absPath, prefix: relName });
       } else if (entry.isFile() && entry.name.endsWith('.json')) {
         results.push(relName);
@@ -120,7 +124,7 @@ function serialiseLocale(value) {
 function discoverLocaleContexts(projectRoot, baseLocale = 'en') {
   const contexts = [];
   const appsRoot = path.join(projectRoot, 'apps');
-  const appEntries = readDirSafe(appsRoot).filter((entry) => entry.isDirectory());
+  const appEntries = readDirSafe(appsRoot).filter((entry) => isVisibleDirectory(entry));
   for (const appEntry of appEntries) {
     const localesRoot = path.join(appsRoot, appEntry.name, 'src', 'locales');
     if (!fs.existsSync(localesRoot)) {
@@ -132,7 +136,7 @@ function discoverLocaleContexts(projectRoot, baseLocale = 'en') {
     }
     const targetLocales = new Set();
     for (const entry of readDirSafe(localesRoot)) {
-      if (entry.isDirectory() && entry.name !== baseLocale) {
+      if (isVisibleDirectory(entry) && entry.name !== baseLocale) {
         targetLocales.add(entry.name);
       }
     }

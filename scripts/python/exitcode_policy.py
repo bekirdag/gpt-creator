@@ -40,6 +40,20 @@ def main():
             print(0)
             return 0
 
+    if status == 0:
+        blocked_patterns = [
+            (r'^\s*blocked-dependency\([^)]+\)', 6),
+            (r'^\s*blocked-merge-conflict\b', 3),
+            (r'^\s*blocked-dirty-tree\b', 2),
+            (r'^\s*blocked-schema-drift\b', 4),
+            (r'^\s*blocked-schema-guard-error\b', 4),
+            (r'^\s*blocked-i18n-guard-error\b', 6),
+        ]
+        for pat, mapped_status in blocked_patterns:
+            if re.search(pat, text, re.MULTILINE):
+                print(mapped_status)
+                return 0
+
     # Else: leave status unchanged
     print(status)
     return 0

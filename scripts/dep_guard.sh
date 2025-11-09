@@ -22,6 +22,8 @@ STATE_DIR="$WORK_LOCK_DIR/state"
 mkdir -p "$CACHE" "$STATE_DIR"
 
 MOCK_FLAG="$STATE_DIR/mock-deps.flag"
+WARN_SKIP_FLAG="$STATE_DIR/warn-mock-skip.flag"
+WARN_PERM_FLAG="$STATE_DIR/warn-node-perms.flag"
 
 : "${PNPM_IGNORE_NODE_VERSION:=1}"
 : "${NPM_CONFIG_ENGINE_STRICT:=false}"
@@ -133,10 +135,16 @@ fi
 
 if [ "$INSTALL_SKIP" -eq 1 ]; then
   if [ "$PREVIOUS_MOCK" -eq 1 ]; then
-    warn "Skipping dependency install; previous mock-mode flag detected at ${MOCK_FLAG}. Delete it or set GC_DEPS_RESET_MOCK=1 to retry."
+    if [ ! -f "$WARN_SKIP_FLAG" ]; then
+      warn "Skipping dependency install; previous mock-mode flag detected at ${MOCK_FLAG}. Delete it or set GC_DEPS_RESET_MOCK=1 to retry."
+      printf '1\n' >"$WARN_SKIP_FLAG" 2>/dev/null || true
+    fi
   fi
   if [ "$NODE_INSTALL_BLOCKED" -eq 1 ]; then
-    warn "Skipping pnpm install because ${NODE_INSTALL_REASON}; fix permissions (e.g. chown -R ${USER:-$LOGNAME} node_modules) or reinstall dependencies manually."
+    if [ ! -f "$WARN_PERM_FLAG" ]; then
+      warn "Skipping pnpm install because ${NODE_INSTALL_REASON}; fix permissions (e.g. chown -R ${USER:-$LOGNAME} node_modules) or reinstall dependencies manually."
+      printf '1\n' >"$WARN_PERM_FLAG" 2>/dev/null || true
+    fi
   fi
   GC_MOCK_DEPS=1
   export GC_DEPS_AUTO_INSTALL_DISABLED=1

@@ -30,6 +30,141 @@ function ensureDirSync(dirPath) {
   }
 }
 
+function stripBom(text) {
+  if (!text) {
+    return '';
+  }
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function sanitiseJsonInput(text) {
+  if (typeof text !== 'string') {
+    return '';
+  }
+  const normalised = normaliseNewlines(stripBom(text)).replace(/\u0000/g, '');
+  return normalised;
+}
+
+function stripJsonComments(text) {
+  if (!text) {
+    return '';
+  }
+  let result = '';
+  let inString = false;
+  let escapeNext = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let idx = 0; idx < text.length; idx++) {
+    const char = text[idx];
+    const nextChar = text[idx + 1];
+
+    if (inString) {
+      result += char;
+      if (escapeNext) {
+        escapeNext = false;
+      } else if (char === '\\') {
+        escapeNext = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (inLineComment) {
+      if (char === '\n') {
+        inLineComment = false;
+        result += '\n';
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (char === '*' && nextChar === '/') {
+        inBlockComment = false;
+        idx += 1;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+
+    if (char === '/' && nextChar === '/') {
+      inLineComment = true;
+      idx += 1;
+      continue;
+    }
+
+    if (char === '/' && nextChar === '*') {
+      inBlockComment = true;
+      idx += 1;
+      continue;
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
+function removeTrailingCommas(text) {
+  if (!text) {
+    return '';
+  }
+  let result = '';
+  let inString = false;
+  let escapeNext = false;
+
+  for (let idx = 0; idx < text.length; idx++) {
+    const char = text[idx];
+
+    if (inString) {
+      result += char;
+      if (escapeNext) {
+        escapeNext = false;
+      } else if (char === '\\') {
+        escapeNext = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+
+    if (char === ',') {
+      let lookahead = idx + 1;
+      let shouldSkip = false;
+      while (lookahead < text.length) {
+        const lookChar = text[lookahead];
+        if (lookChar === ' ' || lookChar === '\t' || lookChar === '\n' || lookChar === '\r') {
+          lookahead += 1;
+          continue;
+        }
+        if (lookChar === '}' || lookChar === ']') {
+          shouldSkip = true;
+        }
+        break;
+      }
+      if (shouldSkip) {
+        continue;
+      }
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
 function listJsonFiles(baseDir) {
   const results = [];
   const stack = [{ dir: baseDir, prefix: '' }];
@@ -60,7 +195,7 @@ function loadLocaleFile(filePath, options = {}) {
   }
   try {
     const raw = fs.readFileSync(filePath, 'utf8');
-    const data = JSON.parse(raw);
+    const data = JSON.parse(sanitiseJsonInput(raw));
     return { exists: true, data, raw, error: null };
   } catch (error) {
     let raw = '';
@@ -79,19 +214,19 @@ function loadLocaleFile(filePath, options = {}) {
   }
 }
 
-function extractBalancedJsonObject(text) {
+function extractBalancedJsonValue(text) {
   if (!text) {
     return null;
   }
-  const start = text.indexOf('{');
-  if (start === -1) {
-    return null;
-  }
-  let depth = 0;
+
+  const stack = [];
+  let start = -1;
   let inString = false;
   let escapeNext = false;
-  for (let idx = start; idx < text.length; idx++) {
+
+  for (let idx = 0; idx < text.length; idx++) {
     const char = text[idx];
+
     if (inString) {
       if (escapeNext) {
         escapeNext = false;
@@ -106,46 +241,85 @@ function extractBalancedJsonObject(text) {
       }
       continue;
     }
+
     if (char === '"') {
       inString = true;
       continue;
     }
-    if (char === '{') {
-      depth += 1;
+
+    if (char === '{' || char === '[') {
+      if (start === -1) {
+        start = idx;
+      }
+      stack.push(char === '{' ? '}' : ']');
       continue;
     }
-    if (char === '}') {
-      depth -= 1;
-      if (depth === 0) {
+
+    if (char === '}' || char === ']') {
+      if (stack.length === 0) {
+        return null;
+      }
+      const expected = stack.pop();
+      if ((char === '}' && expected !== '}') || (char === ']' && expected !== ']')) {
+        return null;
+      }
+      if (stack.length === 0) {
         return text.slice(start, idx + 1);
       }
       continue;
     }
   }
+
   return null;
 }
 
 function attemptRepairLocaleFile(filePath, raw) {
-  const candidate = extractBalancedJsonObject(raw);
-  if (!candidate) {
-    return null;
+  const candidates = [];
+  const seen = new Set();
+  const enqueue = (value) => {
+    if (typeof value !== 'string') {
+      return;
+    }
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      return;
+    }
+    seen.add(trimmed);
+    candidates.push(trimmed);
+  };
+
+  const sanitised = sanitiseJsonInput(raw);
+  enqueue(sanitised);
+  enqueue(extractBalancedJsonValue(sanitised));
+
+  const commentFree = stripJsonComments(sanitised);
+  enqueue(commentFree);
+  enqueue(extractBalancedJsonValue(commentFree));
+
+  for (const candidate of candidates) {
+    const withoutTrailing = removeTrailingCommas(candidate).trim();
+    if (!withoutTrailing) {
+      continue;
+    }
+    try {
+      const data = JSON.parse(withoutTrailing);
+      const serialised = serialiseLocale(data);
+      fs.writeFileSync(filePath, serialised, 'utf8');
+      const relativePath = path.relative(process.cwd(), filePath);
+      console.warn(`[i18n-autoheal] Repaired invalid JSON in ${relativePath || filePath}`);
+      return {
+        exists: true,
+        data,
+        raw: serialised,
+        error: null,
+        repaired: true,
+      };
+    } catch {
+      continue;
+    }
   }
-  try {
-    const data = JSON.parse(candidate);
-    const serialised = serialiseLocale(data);
-    fs.writeFileSync(filePath, serialised, 'utf8');
-    const relativePath = path.relative(process.cwd(), filePath);
-    console.warn(`[i18n-autoheal] Repaired invalid JSON in ${relativePath || filePath}`);
-    return {
-      exists: true,
-      data,
-      raw: serialised,
-      error: null,
-      repaired: true,
-    };
-  } catch {
-    return null;
-  }
+
+  return null;
 }
 
 function flattenLocaleTree(value, prefix = '') {

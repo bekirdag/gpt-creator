@@ -719,6 +719,9 @@ def main():
             if any(token in lowered for token in ('action:', 'result:', 'command', 'next:', 'plan:', 'test:')):
                 return True
             stripped = text.strip()
+            stripped_lower = stripped.lower()
+            if re.match(r'^(plan|focus|commands|notes)\b', stripped_lower):
+                return True
             if not stripped:
                 return False
             if stripped[0] in {'-', '*', '•'}:

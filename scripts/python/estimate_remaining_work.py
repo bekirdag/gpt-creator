@@ -42,6 +42,7 @@ ANSI_RESET = "\033[0m"
 AUX_HEADER_COLOR = "1;38;5;111"
 PRIMARY_HEADER_COLOR = "1;38;5;214"
 TITLE_COLOR = "1;38;5;39"
+ANSI_RE = re.compile(r"\x1B\[[0-9;]*m")
 
 
 def color_enabled_from_env(env_value: str, default: bool) -> bool:
@@ -57,6 +58,10 @@ def color_text(style: str, text: str) -> str:
     return f"\033[{style}m{text}{ANSI_RESET}"
 
 
+def strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", text)
+
+
 def gradient_color(pct: float) -> int:
     pct = max(0.0, min(100.0, pct))
     if pct <= 50.0:
@@ -70,8 +75,30 @@ def gradient_bar(pct: float, width: int = 28) -> str:
     filled = max(0, min(width, filled))
     empty = width - filled
     color_code = gradient_color(pct)
-    filled_block = color_text(f"38;5;{color_code}", "█" * filled)
-    return f"[{filled_block}{'─' * empty}] {color_text(f'38;5;{color_code}', f'{pct:5.1f}%')}"
+    if filled:
+        filled_block = color_text(f"38;5;{color_code}", "█" * filled)
+    else:
+        filled_block = ""
+    percentage = color_text(f"38;5;{color_code}", f"{pct:5.1f}%")
+    return f"[{filled_block}{'─' * empty}] {percentage}"
+
+
+def boxed_header_lines(title: str, *, colorized: bool, min_width: int = 50) -> tuple[str, str, str]:
+    visible_title = title.strip()
+    content_plain = f"  {visible_title}"
+    inner_width = max(min_width, len(strip_ansi(content_plain)) + 2)
+    top = "╭" + "─" * inner_width + "╮"
+    bottom = "╰" + "─" * inner_width + "╯"
+    if len(strip_ansi(content_plain)) > inner_width:
+        content_plain = content_plain[:inner_width]
+    padding = inner_width - len(strip_ansi(content_plain))
+    line = f"│{content_plain}{' ' * padding}│"
+    if colorized:
+        top = color_text(PRIMARY_HEADER_COLOR, top)
+        bottom = color_text(PRIMARY_HEADER_COLOR, bottom)
+        colored_title = color_text(TITLE_COLOR, visible_title)
+        line = line.replace(visible_title, colored_title, 1)
+    return top, line, bottom
 
 
 def estimate_cache_dir(project_root: Path) -> Path:
@@ -933,6 +960,11 @@ def estimate(
         else:
             eta_stalled_reason = meta_stall_reason
 
+    if eta_stalled_reason and "throughput" in eta_stalled_reason.lower() and effective_rate >= warn_floor:
+        eta_stalled_reason = None
+    if eta_warning_reason and "throughput" in eta_warning_reason.lower() and effective_rate >= warn_floor:
+        eta_warning_reason = None
+
     total_minutes = (
         math.ceil((total_points / effective_rate) * 60)
         if total_points > 0 and eta_stalled_reason is None and effective_rate > 0
@@ -1147,13 +1179,11 @@ def estimate(
 
 
 def render_color_estimate(ctx: Dict[str, Any]) -> None:
-    header_box = color_text(PRIMARY_HEADER_COLOR, "╭────────────────────────────────────────────╮")
-    footer_box = color_text(PRIMARY_HEADER_COLOR, "╰────────────────────────────────────────────╯")
-    title = color_text(TITLE_COLOR, "GPT-Creator :: Project Estimate Summary")
     print()
-    print(header_box)
-    print(f"│   {title}            │")
-    print(footer_box)
+    top, body, bottom = boxed_header_lines("GPT-Creator :: Project Estimate Summary", colorized=True)
+    print(top)
+    print(body)
+    print(bottom)
     print()
 
     summary_header = color_text(AUX_HEADER_COLOR, "📊 Remaining Work Summary")

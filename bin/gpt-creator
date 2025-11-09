@@ -57,6 +57,14 @@ GC_INVOCATION=""
 
 GC_LAST_CRASH_LOG=""
 GC_MAIN_PID="$$"
+if [[ -z "${GC_PARENT_PID:-}" ]]; then
+  GC_PARENT_PID="$GC_MAIN_PID"
+fi
+export GC_PARENT_PID
+GC_LAST_ERROR_CLASS="NONE"
+GC_LAST_ERROR_REASON=""
+GC_RETRY_ATTEMPTS=0
+GC_LAST_TIMEOUT_SECONDS=0
 
 if [[ -n "${GC_REPORTS_ON:-}" && "${GC_REPORTS_ON}" != "0" ]]; then
   GC_REPORTS_ON=1
@@ -1900,6 +1908,7 @@ gc_capture_error_context() {
   (( status == 0 )) && return
   GC_LAST_ERROR_STATUS="$status"
   GC_LAST_ERROR_CMD="$command"
+  gc_classify_error "$status" "$command"
 }
 
 gc_logs_dir() {
@@ -2481,10 +2490,20 @@ gc_exit_handler() {
   if (( status != 0 )); then
     if [[ -n "${GC_ACTIVE_TASK_REPORT:-}" ]]; then
       local last_cmd="${GC_LAST_ERROR_CMD:-}"
-      local failure_reason="Unexpected error; inspect crash log."
-      if [[ -n "$last_cmd" ]]; then
-        failure_reason="Command '${last_cmd}' exited with status ${status}."
+      local err_class="${GC_LAST_ERROR_CLASS:-UNCLASSIFIED}"
+      local failure_reason="${GC_LAST_ERROR_REASON:-}"
+      if [[ -z "$failure_reason" ]]; then
+        if [[ -n "$last_cmd" ]]; then
+          failure_reason="Command '${last_cmd}' exited with status ${status}."
+        else
+          failure_reason="Unexpected error; inspect crash log."
+        fi
+      else
+        if [[ "$err_class" != "UNCLASSIFIED" && "$err_class" != "NONE" ]]; then
+          failure_reason="${failure_reason} (class: ${err_class})"
+        fi
       fi
+      gc_flush_logs_hooks || true
       gc_finalize_active_task "ERR" "$failure_reason"
     fi
     if [[ -z "${GC_LAST_ERROR_STATUS:-}" || "${GC_LAST_ERROR_STATUS}" -eq 0 ]]; then
@@ -3521,6 +3540,8 @@ gc_finalize_active_task() {
     banner_lines+=("TERMINAL STATE: ${signal}")
   fi
   gc_render_task_banner --header-bottom "END OF THE TASK WORK" "${banner_lines[@]}"
+  # Interrupted/error finalization
+  gc_finalize_and_report "interrupted" "$reason"
 
   gc_clear_active_task
 }
@@ -10701,6 +10722,26 @@ print(flag("notes_contains_already_satisfied"))'
       if ((${#task_notes[@]} > 0)); then
         notes_payload="$(printf '%s\n' "${task_notes[@]}")"
       fi
+      local task_notes_display="${task_outcome_reason:-}"
+      if [[ -z "$task_notes_display" && ((${#task_notes[@]} > 0)) ]]; then
+        local -a task_notes_sanitized=()
+        for note in "${task_notes[@]}"; do
+          local sanitized="${note//$'\r'/ }"
+          sanitized="${sanitized//$'\n'/ }"
+          sanitized="${sanitized//$'\t'/ }"
+          while [[ "$sanitized" == *"  "* ]]; do
+            sanitized="${sanitized//  / }"
+          done
+          sanitized="${sanitized#"${sanitized%%[![:space:]]*}"}"
+          sanitized="${sanitized%"${sanitized##*[![:space:]]}"}"
+          [[ -n "$sanitized" ]] || continue
+          task_notes_sanitized+=("$sanitized")
+        done
+        if ((${#task_notes_sanitized[@]} > 0)); then
+          local IFS='; '
+          task_notes_display="${task_notes_sanitized[*]}"
+        fi
+      fi
       local written_payload=""
       if ((${#task_written_paths[@]} > 0)); then
         written_payload="$(printf '%s\n' "${task_written_paths[@]}")"
@@ -10838,6 +10879,9 @@ print(flag("notes_contains_already_satisfied"))'
         task_status_display="${task_status_display//_/ }"
         task_status_display="$(printf '%s' "$task_status_display" | tr '[:lower:]' '[:upper:]')"
       fi
+      if [[ -z "$task_notes_display" ]]; then
+        task_notes_display="$task_status_display"
+      fi
 
       printf '\n'
       local -a banner_lines=(
@@ -10854,6 +10898,8 @@ print(flag("notes_contains_already_satisfied"))'
         banner_lines+=("FAILURE CLASS: ${task_failure_class}")
       fi
       gc_render_task_banner --header-bottom "END OF THE TASK WORK" "${banner_lines[@]}"
+      # Write JSON & run end scripts
+      gc_finalize_and_report "${task_result_status:-success}" "${task_notes_display:-}"
 
       (( ++processed_total ))
       (( ++iteration_processed ))
@@ -12047,8 +12093,721 @@ usage() {
   )
 }
 
+# --- Error classes & retry policy -------------------------------------------
+# Basic status heuristics
+gc_is_transient_status() {
+  local code="${1:-0}"
+  case "$code" in
+    0) return 1 ;;
+    124|137|143) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+gc_is_transient_message() {
+  local msg
+  msg="$(cat | tr -d '\r' || true)"
+  [[ "$msg" =~ (rate[- ]?limit|429|5[0-9]{2}|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ETIMEOUT|socket\ hang\ up|TLS\ handshake\ timeout|temporary\ failure) ]]
+}
+
+gc_classify_error() {
+  local status="${1:-0}"
+  local cmd="${2:-}"
+  local class="PERMANENT"
+  local reason=""
+  if gc_is_transient_status "$status"; then
+    class="TRANSIENT"
+    reason="Exit code ${status} considered transient."
+  fi
+  if [[ "$cmd" =~ (curl|wget|http|fetch|git[[:space:]]+(fetch|push)|pnpm|npm|node) ]]; then
+    class="TRANSIENT"
+    reason="Network/IO command '${cmd}' failed with ${status}."
+  fi
+  GC_LAST_ERROR_CLASS="$class"
+  GC_LAST_ERROR_REASON="${reason:-Command '${cmd}' exited with status ${status}.}"
+  if [[ -n "$GC_LAST_ERROR_REASON" ]]; then
+    gc_error_summary_add "$GC_LAST_ERROR_REASON"
+  fi
+}
+
+gc_msleep() {
+  local ms="${1:-0}"
+  local seconds="0.05"
+  if command -v awk >/dev/null 2>&1; then
+    seconds="$(awk -v ms="$ms" 'BEGIN { printf "%.3f", (ms/1000.0) }' 2>/dev/null || echo "0.05")"
+  fi
+  sleep "$seconds"
+}
+
+gc_backoff_sleep() {
+  local attempt="${1:-1}"
+  local base_ms="${GC_RETRY_BASE_MS:-500}"
+  local max_ms="${GC_RETRY_MAX_MS:-8000}"
+  local jitter_ms="${GC_RETRY_JITTER_MS:-250}"
+  local pow=$(( 1 << (attempt - 1) ))
+  local wait=$(( base_ms * pow ))
+  (( wait > max_ms )) && wait="$max_ms"
+  local jitter=$(( RANDOM % (jitter_ms + 1) ))
+  gc_msleep "$(( wait + jitter ))"
+}
+
+gc__timeout_bin() {
+  if command -v timeout >/dev/null 2>&1; then
+    echo timeout
+    return 0
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    echo gtimeout
+    return 0
+  fi
+  echo ""
+}
+
+gc_run_with_timeout() {
+  local seconds="${1:-}"
+  shift || true
+  if [[ "${1:-}" == "--" ]]; then
+    shift || true
+  fi
+  local timeout_bin
+  timeout_bin="$(gc__timeout_bin)"
+  if [[ -n "$timeout_bin" && -n "$seconds" && "$seconds" != "0" ]]; then
+    "$timeout_bin" -k 5s "${seconds}s" "$@"
+  else
+    "$@"
+  fi
+}
+
+gc_with_retries() {
+  local max="${1:-3}"
+  shift || true
+  local timeout_sec="${GC_STEP_TIMEOUT_SEC:-}"
+  while (($#)); do
+    case "$1" in
+      --timeout|--timeout-sec)
+        timeout_sec="${2:-}"
+        shift 2 || true
+        ;;
+      --)
+        shift || true
+        break
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  if [[ "${1:-}" == "--" ]]; then
+    shift || true
+  fi
+  if (($# == 0)); then
+    printf 'gc_with_retries: command required\n' >&2
+    return 1
+  fi
+  local attempt=1 status=0 tmp=""
+  : "${GC_RETRY_ATTEMPTS:=0}"
+  while :; do
+    tmp="$(mktemp "${TMPDIR:-/tmp}/gc.try.XXXXXX" 2>/dev/null || mktemp)"
+    if [[ -n "$timeout_sec" && "$timeout_sec" != "0" ]]; then
+      {
+        gc_run_with_timeout "$timeout_sec" -- "$@" 2>"$tmp"
+        status=$?
+      } || true
+      if (( status == 124 )); then
+        GC_LAST_TIMEOUT_SECONDS="$timeout_sec"
+        GC_LAST_ERROR_REASON="Timed out after ${timeout_sec}s (attempt ${attempt}/${max})."
+        GC_LAST_ERROR_CLASS="TRANSIENT"
+        gc_error_summary_add "$GC_LAST_ERROR_REASON for: $*"
+      fi
+    else
+      {
+        "$@" 2>"$tmp"
+        status=$?
+      } || true
+    fi
+    if (( status == 0 )); then
+      rm -f "$tmp"
+      GC_RETRY_ATTEMPTS="$attempt"
+      GC_LAST_TIMEOUT_SECONDS=0
+      return 0
+    fi
+    if gc_is_transient_status "$status" || gc_is_transient_message <"$tmp"; then
+      if (( attempt < max )); then
+        gc_backoff_sleep "$attempt"
+        (( attempt++ ))
+        rm -f "$tmp"
+        continue
+      fi
+    fi
+    GC_RETRY_ATTEMPTS="$attempt"
+    GC_LAST_ERROR_STATUS="$status"
+    GC_LAST_ERROR_CMD="$*"
+    gc_classify_error "$status" "$*"
+    if (( status == 124 )) && [[ -n "${GC_LAST_TIMEOUT_SECONDS:-}" ]]; then
+      GC_LAST_ERROR_REASON="Timed out after ${GC_LAST_TIMEOUT_SECONDS}s (attempts exhausted: ${attempt}/${max})."
+      GC_LAST_ERROR_CLASS="TRANSIENT"
+      gc_error_summary_add "$GC_LAST_ERROR_REASON for: $*"
+    fi
+    cat "$tmp" >&2 || true
+    rm -f "$tmp"
+    return "$status"
+  done
+}
+
+: "${GC_WRAP_CURL:=1}"
+gc_curl() {
+  command curl \
+    --retry "${GC_HTTP_RETRY_MAX:-5}" \
+    --retry-delay 0 \
+    --retry-all-errors \
+    --retry-connrefused \
+    --retry-max-time "${GC_HTTP_RETRY_MAX_TIME:-60}" \
+    "$@"
+}
+if [[ "${GC_WRAP_CURL}" == "1" ]] && command -v curl >/dev/null 2>&1; then
+  curl() {
+    gc_curl "$@"
+  }
+fi
+# ---------------------------------------------------------------------------
+
+# --- Log/stream flush hooks --------------------------------------------------
+gc_flush_logs_hooks() {
+  if [[ -n "${GC_LOG_FLUSH_CMD:-}" ]]; then
+    eval "${GC_LOG_FLUSH_CMD}" || true
+  fi
+  local root="${PROJECT_ROOT:-$PWD}"
+  if [[ -x "${root}/scripts/gc-flush-logs.sh" ]]; then
+    "${root}/scripts/gc-flush-logs.sh" || true
+  fi
+  if command -v node >/dev/null 2>&1 && [[ -f "${root}/scripts/gc-flush-logs.js" ]]; then
+    node "${root}/scripts/gc-flush-logs.js" || true
+  fi
+  if command -v python3 >/dev/null 2>&1 && [[ -f "${root}/scripts/gc-flush-logs.py" ]]; then
+    python3 "${root}/scripts/gc-flush-logs.py" || true
+  fi
+}
+# ---------------------------------------------------------------------------
+
+# --- Project root detection & absolute paths --------------------------------
+gc_repo_root_from_git() {
+  git rev-parse --show-toplevel 2>/dev/null || true
+}
+
+gc_search_up_for_markers() {
+  local dir="${PWD}"
+  while [[ -n "$dir" && "$dir" != "/" ]]; do
+    for marker in .gpt-creator .git package.json pnpm-workspace.yaml pyproject.toml requirements.txt setup.cfg poetry.lock Cargo.toml; do
+      if [[ -e "${dir}/${marker}" ]]; then
+        printf '%s\n' "$dir"
+        return 0
+      fi
+    done
+    dir="${dir%/*}"
+  done
+  printf '%s\n' "$PWD"
+}
+
+gc_detect_project_root() {
+  local configured="${GC_PROJECT_ROOT:-}"
+  if [[ -n "$configured" && -d "$configured" ]]; then
+    (cd "$configured" >/dev/null 2>&1 && pwd -P) && return 0
+  fi
+  local git_root
+  git_root="$(gc_repo_root_from_git)"
+  if [[ -n "$git_root" && -d "$git_root" ]]; then
+    (cd "$git_root" >/dev/null 2>&1 && pwd -P) && return 0
+  fi
+  gc_search_up_for_markers
+}
+
+gc_abs_from_project() {
+  local rel_path="${1:-}"
+  local base="${PROJECT_ROOT:-$(gc_detect_project_root)}"
+  if [[ -z "$rel_path" ]]; then
+    printf '%s\n' "$base"
+    return 0
+  fi
+  if [[ "$rel_path" == /* ]]; then
+    (cd "$(dirname "$rel_path")" >/dev/null 2>&1 && printf '%s/%s\n' "$(pwd -P)" "$(basename "$rel_path")") && return 0
+    printf '%s\n' "$rel_path"
+    return 0
+  fi
+  (
+    cd "$base" >/dev/null 2>&1 || exit 0
+    cd "$(dirname "$rel_path")" >/dev/null 2>&1 || exit 0
+    printf '%s/%s\n' "$(pwd -P)" "$(basename "$rel_path")"
+  )
+}
+
+gc_from_root() {
+  local rel="${1:-}"
+  local base="${PROJECT_ROOT:-$(gc_detect_project_root)}"
+  if [[ -z "$rel" ]]; then
+    printf '%s\n' "$base"
+    return 0
+  fi
+  if [[ "$rel" == /* ]]; then
+    printf '%s\n' "$rel"
+    return 0
+  fi
+  rel="${rel#./}"
+  printf '%s/%s\n' "${base%/}" "$rel"
+}
+
+gc_rel_from_root() {
+  local path="${1:-}"
+  local base="${PROJECT_ROOT:-$(gc_detect_project_root)}"
+  local prefix="${base%/}/"
+  if [[ "$path" == "$prefix"* ]]; then
+    printf '%s\n' "${path#$prefix}"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+gc_guess_interpreter() {
+  local script="${1:?script path required}"
+  local first_line
+  if first_line="$(head -n 1 -- "$script" 2>/dev/null || true)"; then
+    if [[ "$first_line" == '#!'* ]]; then
+      local shebang="${first_line#\#!}"
+      shebang="${shebang#"${shebang%%[![:space:]]*}"}"
+      shebang="${shebang%"${shebang##*[![:space:]]}"}"
+      local exe="${shebang%%[[:space:]]*}"
+      local rest="${shebang#"$exe"}"
+      if [[ "${exe##*/}" == "env" && -n "$rest" ]]; then
+        exe="${rest#"${rest%%[![:space:]]*}"}"
+        exe="${exe%%[[:space:]]*}"
+      fi
+      if [[ -x "$exe" ]]; then
+        printf '%s\n' "$exe"
+        return 0
+      fi
+      if command -v "$exe" >/dev/null 2>&1; then
+        printf '%s\n' "$exe"
+        return 0
+      fi
+    fi
+  fi
+  case "$script" in
+    *.bash|*.sh)
+      if command -v bash >/dev/null 2>&1; then
+        echo bash
+      else
+        echo sh
+      fi
+      return 0
+      ;;
+    *.zsh)
+      command -v zsh >/dev/null 2>&1 && echo zsh && return 0
+      ;;
+    *.ksh)
+      command -v ksh >/dev/null 2>&1 && echo ksh && return 0
+      ;;
+    *.py)
+      if command -v python3 >/dev/null 2>&1; then
+        echo python3
+        return 0
+      elif command -v python >/dev/null 2>&1; then
+        echo python
+        return 0
+      fi
+      ;;
+    *.js|*.cjs|*.mjs)
+      command -v node >/dev/null 2>&1 && echo node && return 0
+      ;;
+  esac
+  if command -v bash >/dev/null 2>&1; then
+    echo bash
+  else
+    echo sh
+  fi
+}
+
+gc_load_required_vars() {
+  local -a required=()
+  if [[ -n "${GC_REQUIRED_VARS:-}" ]]; then
+    read -r -a required <<<"${GC_REQUIRED_VARS}"
+  fi
+  local req_file
+  req_file="$(gc_from_root ".gpt-creator/required.env")"
+  if [[ -f "$req_file" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line%%#*}"
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [[ -n "$line" ]] || continue
+      required+=("$line")
+    done <"$req_file"
+  fi
+  printf '%s\n' "${required[@]}"
+}
+
+gc_preflight_config() {
+  local -a required_vars=()
+  if ! mapfile -t required_vars < <(gc_load_required_vars); then
+    required_vars=()
+  fi
+  (( ${#required_vars[@]} )) || return 0
+  local -a missing=()
+  local -a empty=()
+  local var value trimmed
+  for var in "${required_vars[@]}"; do
+    [[ -n "$var" ]] || continue
+    if [[ -z "${!var+x}" ]]; then
+      missing+=("$var")
+      continue
+    fi
+    value="${!var}"
+    trimmed="${value#"${value%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    if [[ -z "$trimmed" ]]; then
+      empty+=("$var")
+    fi
+  done
+  if (( ${#missing[@]} || ${#empty[@]} )); then
+    local reason="ConfigurationError"
+    if (( ${#missing[@]} )); then
+      reason+=" missing:${missing[*]}"
+    fi
+    if (( ${#empty[@]} )); then
+      reason+=" empty:${empty[*]}"
+    fi
+    GC_LAST_ERROR_CLASS="PERMANENT"
+    GC_LAST_ERROR_REASON="$reason"
+    GC_LAST_ERROR_STATUS=78
+    gc_flush_logs_hooks || true
+    gc_finalize_and_report "failure" "$reason"
+    exit 78
+  fi
+}
+
+# --- Error summary aggregator & redaction -----------------------------------
+declare -ag GC_ERROR_SUMMARY_ARR=()
+
+gc_redact() {
+  local s="$*"
+  s="${s//sk-[A-Za-z0-9_-]*/sk-REDACTED}"
+  local k v
+  while IFS='=' read -r k v; do
+    if [[ "$k" =~ (KEY|TOKEN|SECRET|PASSWORD|AUTH|ACCESS|PRIVATE) ]] && [[ -n "${!k:-}" ]]; then
+      s="${s//"${!k}"/"[REDACTED:${k}]"}"
+    fi
+  done < <(env)
+  printf '%s' "$s" | sed -E 's/[A-Fa-f0-9]{32,}/[REDACTED]/g; s/[A-Za-z0-9_\-]{24,}/[REDACTED]/g'
+}
+
+gc_error_summary_add() {
+  local msg
+  msg="$(gc_redact "$*")"
+  [[ -n "$msg" ]] && GC_ERROR_SUMMARY_ARR+=("$msg")
+}
+
+gc_error_summary_json() {
+  printf '['
+  local first=1 entry sanitized
+  for entry in "${GC_ERROR_SUMMARY_ARR[@]}"; do
+    sanitized="$(gc_redact "$entry")"
+    if [[ $first -eq 0 ]]; then
+      printf ','
+    fi
+    first=0
+    if declare -F gc_json_escape >/dev/null 2>&1; then
+      printf '"%s"' "$(gc_json_escape "$sanitized")"
+    else
+      printf '"%s"' "$sanitized"
+    fi
+  done
+  printf ']'
+}
+
+# --- Doctor (self-check) ----------------------------------------------------
+cmd_doctor() {
+  local fail=0
+  PROJECT_ROOT="${PROJECT_ROOT:-$(gc_detect_project_root)}"
+  echo "gpt-creator doctor"
+  echo "project root: ${PROJECT_ROOT}"
+  for c in git curl bash; do
+    if ! command -v "$c" >/dev/null 2>&1; then
+      echo "missing: $c"
+      fail=1
+    else
+      echo "$c: $(command -v "$c")"
+    fi
+  done
+  command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1 || echo "note: timeout utility not found; per-step timeouts will fall back to best-effort."
+  if command -v node >/dev/null 2>&1; then
+    echo "node: $(node -v)"
+  else
+    echo "node: not found (ok if unused)"
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    echo "python3: $(python3 -V)"
+  else
+    echo "python3: not found (ok if unused)"
+  fi
+  echo "end-of-task.d search:"
+  while IFS= read -r dir; do
+    if [[ -d "$dir" ]]; then
+      echo "  $dir"
+      find "$dir" -maxdepth 1 -type f ! -name '.*' -printf '    %f\n' 2>/dev/null || true
+    else
+      echo "  (absent) $dir"
+    fi
+  done < <(gc_end_scripts_dirs)
+  mkdir -p "${PROJECT_ROOT}/.gpt-creator/reports" || { echo "reports dir not writable"; fail=1; }
+  mkdir -p "${PROJECT_ROOT}/.gpt-creator/locks/finalize" || { echo "locks dir not writable"; fail=1; }
+  if declare -F gc_load_required_vars >/dev/null 2>&1; then
+    echo "required vars:"
+    local -a req_vars=()
+    if ! mapfile -t req_vars < <(gc_load_required_vars); then
+      req_vars=()
+    fi
+    if ((${#req_vars[@]} == 0)); then
+      echo "  (none declared)"
+    else
+      local var
+      for var in "${req_vars[@]}"; do
+        if [[ -z "${!var+x}" || -z "${!var//[[:space:]]/}" ]]; then
+          echo "  MISSING: $var"
+          fail=1
+        else
+          echo "  OK: $var=$(gc_redact "${!var}")"
+        fi
+      done
+    fi
+  fi
+  if [[ $fail -eq 0 ]]; then
+    echo "doctor: OK"
+  else
+    echo "doctor: issues found"
+    return 1
+  fi
+}
+# ---------------------------------------------------------------------------
+
+# --- Finalization lock helpers (atomic, workspace-agnostic) -----------------
+gc__slug() {
+  local s="${1:-}"
+  s="${s//[^A-Za-z0-9._-]/_}"
+  printf '%s' "$s"
+}
+
+gc_finalize_lock_key() {
+  local story="${GC_ACTIVE_STORY_SLUG:-${slug:-story}}"
+  local num="${GC_ACTIVE_TASK_NUMBER:-${task_index:-unknown}}"
+  local run="${GC_ACTIVE_RUN_STAMP:-manual}"
+  gc__slug "${story}-${num}-${run}"
+}
+
+gc_finalize_lock_path() {
+  local base
+  base="$(gc_from_root ".gpt-creator/locks/finalize")"
+  mkdir -p "$base" 2>/dev/null || true
+  printf '%s/%s.lockdir' "$base" "$(gc_finalize_lock_key)"
+}
+
+gc_try_acquire_finalize_lock() {
+  local lockdir
+  lockdir="$(gc_finalize_lock_path)"
+  if mkdir "$lockdir" 2>/dev/null; then
+    GC_FINALIZE_LOCK_DIR="$lockdir"
+    return 0
+  fi
+  return 1
+}
+
+gc_mark_finalize_done() {
+  local lockdir="${GC_FINALIZE_LOCK_DIR:-$(gc_finalize_lock_path)}"
+  : >"${lockdir}/.done" 2>/dev/null || true
+}
+# ---------------------------------------------------------------------------
+
+# --- Child error bridge (Node/Python -> Bash finalizer) ---------------------
+gc_child_unhandled_bridge() {
+  if [[ "${GC_FINALIZE_AND_REPORT_DONE:-0}" == "1" ]]; then
+    return 0
+  fi
+  local reason="${1:-Child process reported an unhandled exception.}"
+  GC_LAST_ERROR_CLASS="${GC_LAST_ERROR_CLASS:-PERMANENT}"
+  GC_LAST_ERROR_REASON="${GC_LAST_ERROR_REASON:-$reason}"
+  GC_LAST_ERROR_STATUS="${GC_LAST_ERROR_STATUS:-1}"
+  gc_flush_logs_hooks || true
+  gc_finalize_active_task "ERR" "$reason"
+}
+# ---------------------------------------------------------------------------
+
+if [[ -z "${PROJECT_ROOT:-}" ]]; then
+  PROJECT_ROOT="$(gc_detect_project_root)"
+fi
+export PROJECT_ROOT
+
+# --- Finalization & reporting (workspace-agnostic) ---------------------------
+gc_json_escape() {
+  local s="${1-}"
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+gc_end_scripts_dirs() {
+  local -a dirs=()
+  dirs+=("$(gc_from_root "scripts/end-of-task.d")")
+  local cli_root="${CLI_ROOT%/}"
+  dirs+=("${cli_root}/scripts/end-of-task.d")
+  printf '%s\n' "${dirs[@]}"
+}
+
+gc_run_end_scripts() {
+  local json_path="${1:?json payload path required}"
+  local status="${2:-}" reason="${3:-}"
+  local ran_any=0
+  local dir
+  local project_root; project_root="$(gc_from_root "")"
+  local cli_root="${CLI_ROOT%/}"
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    local run_dir="$project_root"
+    if [[ "$dir" == "${cli_root}/scripts/end-of-task.d" ]]; then
+      run_dir="$cli_root"
+    fi
+    while IFS= read -r script_path; do
+      [[ -f "$script_path" ]] || continue
+      local interpreter
+      interpreter="$(gc_guess_interpreter "$script_path")" || interpreter=""
+      [[ -n "$interpreter" ]] || continue
+      local rel_path="$script_path"
+      if [[ "$script_path" == "$run_dir/"* ]]; then
+        rel_path="${script_path#$run_dir/}"
+      fi
+      (
+        cd "$run_dir" >/dev/null 2>&1 || exit 0
+        if ! GC_TASK_FINAL_STATUS="$status" \
+          GC_TASK_FINAL_REASON="$reason" \
+          GC_TASK_FINAL_JSON="$json_path" \
+          "$interpreter" "$rel_path"
+        then
+          gc_error_summary_add "end-script failed: $(basename "$rel_path")"
+        fi
+      )
+      ran_any=1
+    done < <(find "$dir" -maxdepth 1 -type f ! -name '.*' 2>/dev/null | sort)
+  done < <(gc_end_scripts_dirs)
+
+  local finalize_script
+  finalize_script="$(gc_from_root "scripts/auto_finalize_task.sh")"
+  if [[ -f "$finalize_script" ]]; then
+    local interpreter
+    interpreter="$(gc_guess_interpreter "$finalize_script")" || interpreter=""
+    if [[ -n "$interpreter" ]]; then
+      local rel_finalize="$(gc_rel_from_root "$finalize_script")"
+      (
+        cd "$(gc_from_root "")" >/dev/null 2>&1 || exit 0
+        if ! GC_TASK_FINAL_STATUS="$status" \
+          GC_TASK_FINAL_REASON="$reason" \
+          GC_TASK_FINAL_JSON="$json_path" \
+          "$interpreter" "$rel_finalize"
+        then
+          gc_error_summary_add "end-script failed: $(basename "$rel_finalize")"
+        fi
+      )
+      ran_any=1
+    fi
+  fi
+  return $ran_any
+}
+
+gc_finalize_and_report() {
+  if [[ "${GC_FINALIZE_AND_REPORT_DONE:-0}" == "1" ]]; then
+    return 0
+  fi
+  if ! gc_try_acquire_finalize_lock; then
+    GC_FINALIZE_AND_REPORT_DONE=1
+    echo "[finalize] already completed for this task-run; skipping." >&2
+    return 0
+  fi
+  GC_FINALIZE_AND_REPORT_DONE=1
+
+  local status="${1:-}" reason="${2:-}"
+  local now_utc
+  now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+  local task_id="${GC_ACTIVE_TASK_ID:-${task_id:-}}"
+  local task_number="${GC_ACTIVE_TASK_NUMBER:-${task_number:-${task_index:-}}}"
+  local story_slug="${GC_ACTIVE_TASK_SLUG:-${slug:-}}"
+  local prompt_path="${GC_ACTIVE_TASK_PROMPT:-${prompt_path:-}}"
+  local output_path="${GC_ACTIVE_TASK_OUTPUT:-${output_path:-}}"
+  local run_stamp="${GC_ACTIVE_RUN_STAMP:-manual}"
+  local tokens_used="${GC_LAST_TOKENS_USED:-${task_tokens_total:-0}}"
+  local prompt_estimate="${GC_LAST_PROMPT_ESTIMATE:-${task_prompt_estimate:-0}}"
+  local failure_class="${GC_LAST_ERROR_CLASS:-NONE}"
+  local retry_attempts="${GC_RETRY_ATTEMPTS:-0}"
+  local timeout_record="${GC_LAST_TIMEOUT_SECONDS:-0}"
+
+  if [[ -z "$status" ]]; then
+    if [[ -n "${GC_LAST_ERROR_STATUS:-}" && "${GC_LAST_ERROR_STATUS}" != "0" ]]; then
+      status="failure"
+    else
+      status="success"
+    fi
+  fi
+
+  local reason_redacted
+  reason_redacted="$(gc_redact "$reason")"
+
+  local project_root="${PROJECT_ROOT:-}"
+  if [[ -z "$project_root" ]]; then
+    project_root="$(gc_detect_project_root)"
+  fi
+  local reports_dir="${project_root}/.gpt-creator/reports"
+  mkdir -p "$reports_dir"
+  local key="${story_slug:-story}-${task_number:-unknown}"
+  key="${key//[\/ ]/_}"
+  local json_path="${reports_dir}/${key}-${run_stamp}.final.json"
+
+  {
+    printf '{'
+    printf '"task_id":"%s",'         "$(gc_json_escape "$task_id")"
+    printf '"task_number":"%s",'     "$(gc_json_escape "$task_number")"
+    printf '"story_slug":"%s",'      "$(gc_json_escape "$story_slug")"
+    printf '"status":"%s",'          "$(gc_json_escape "$status")"
+    printf '"reason":"%s",'          "$(gc_json_escape "$reason_redacted")"
+    printf '"timestamp":"%s",'       "$(gc_json_escape "$now_utc")"
+    printf '"run_stamp":"%s",'       "$(gc_json_escape "$run_stamp")"
+    printf '"prompt_path":"%s",'     "$(gc_json_escape "$prompt_path")"
+    printf '"output_path":"%s",'     "$(gc_json_escape "$output_path")"
+    printf '"tokens_used":%s,'       "${tokens_used:-0}"
+    printf '"prompt_estimate":%s,'   "${prompt_estimate:-0}"
+    printf '"failure_class":"%s",'   "$(gc_json_escape "$failure_class")"
+    printf '"attempts":%s,'          "${retry_attempts:-0}"
+    printf '"timeout_sec":%s'        "${timeout_record:-0}"
+    printf '}\n'
+  } >"$json_path"
+
+  gc_flush_logs_hooks || true
+  if declare -F gc_reports_flush >/dev/null 2>&1; then
+    gc_reports_flush || true
+  fi
+  sync || true
+  sleep 0.05 || true
+
+  gc_run_end_scripts "$json_path" "$status" "$reason_redacted" || true
+  gc_mark_finalize_done
+
+  export GC_LAST_FINAL_JSON="$json_path"
+  echo "[finalize] Wrote ${json_path}" >&2
+  GC_LAST_ERROR_CLASS="NONE"
+  GC_LAST_ERROR_REASON=""
+  GC_RETRY_ATTEMPTS=0
+  GC_LAST_TIMEOUT_SECONDS=0
+  GC_ERROR_SUMMARY_ARR=()
+}
+# --- end finalization --------------------------------------------------------
+
 main() {
   local cmd="${1:-help}"; shift || true
+  gc_preflight_config
   local shell_bin="${BASH:-bash}"
   case "$cmd" in
     help|-h|--help) usage ;;
@@ -12076,6 +12835,7 @@ main() {
     estimate)       cmd_estimate "$@" ;;
     tokens)         cmd_tokens "$@" ;;
     reports)        cmd_reports "$@" ;;
+    doctor)         cmd_doctor "$@" ;;
     task-convert)   cmd_task_convert "$@" ;;
     show-file)      cmd_show_file "$@" ;;
     sweep-artifacts)  cmd_sweep_artifacts "$@" ;;
@@ -12138,6 +12898,31 @@ export CI TZ NODE_ENV
 : "${YARN_IGNORE_NODE:=1}"
 export PNPM_IGNORE_NODE_VERSION NPM_CONFIG_ENGINE_STRICT YARN_IGNORE_NODE
 
+GC_RUNTIME_HOOKS_DIR="${CLI_ROOT}/scripts/runtime-hooks"
+GC_NODE_TRAP_MODULE="${GC_RUNTIME_HOOKS_DIR}/node-global-trap.cjs"
+if [[ -d "$GC_RUNTIME_HOOKS_DIR" ]]; then
+  case ":${PYTHONPATH:-}:" in
+    *":${GC_RUNTIME_HOOKS_DIR}:"*)
+      ;;
+    *)
+      export PYTHONPATH="${GC_RUNTIME_HOOKS_DIR}${PYTHONPATH:+:$PYTHONPATH}"
+      ;;
+  esac
+  if [[ -f "$GC_NODE_TRAP_MODULE" ]]; then
+    if [[ "${NODE_OPTIONS:-}" != *"--unhandled-rejections=strict"* ]]; then
+      NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--unhandled-rejections=strict"
+    fi
+    case " ${NODE_OPTIONS:-} " in
+      *"${GC_NODE_TRAP_MODULE}"*)
+        ;;
+      *)
+        NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--require ${GC_NODE_TRAP_MODULE}"
+        ;;
+    esac
+    export NODE_OPTIONS
+  fi
+fi
+
 TS_PRELOAD="${GC_RUNTIME_DIR}/ts-preload.cjs"
 if [[ -f "$TS_PRELOAD" ]]; then
   case " ${NODE_OPTIONS:-} " in
@@ -12164,6 +12949,7 @@ if gc_reports_enabled; then
   trap 'gc_reports_activity_trap "$BASH_COMMAND"' DEBUG
 fi
 
+trap 'gc_child_unhandled_bridge "Unhandled error from child process"' USR1
 trap 'gc_interrupt_handler INT' INT
 trap 'gc_interrupt_handler TERM' TERM
 trap 'gc_interrupt_handler TSTP' TSTP

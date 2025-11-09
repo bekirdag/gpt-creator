@@ -27,10 +27,12 @@ def load_progress_overrides(connection: sqlite3.Connection) -> dict[str, str]:
         status = (raw_status or "").strip().lower().replace("_", "-")
         if not status:
             continue
-        task_id = (row["task_id"] or "").strip()
+        raw_task_id = row["task_id"]
+        task_id = str(raw_task_id).strip() if raw_task_id is not None else ""
         if task_id:
             mapping[task_id] = status
-        slug = (row["story_slug"] or "").strip()
+        raw_slug = row["story_slug"]
+        slug = str(raw_slug).strip() if raw_slug is not None else ""
         position = row["task_position"]
         if slug and position is not None:
             mapping[f"{slug}:{int(position)}"] = status

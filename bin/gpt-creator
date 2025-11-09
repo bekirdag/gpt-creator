@@ -2479,6 +2479,14 @@ gc_write_crash_log() {
 gc_exit_handler() {
   local status="${1:-0}"
   if (( status != 0 )); then
+    if [[ -n "${GC_ACTIVE_TASK_REPORT:-}" ]]; then
+      local last_cmd="${GC_LAST_ERROR_CMD:-}"
+      local failure_reason="Unexpected error; inspect crash log."
+      if [[ -n "$last_cmd" ]]; then
+        failure_reason="Command '${last_cmd}' exited with status ${status}."
+      fi
+      gc_finalize_active_task "ERR" "$failure_reason"
+    fi
     if [[ -z "${GC_LAST_ERROR_STATUS:-}" || "${GC_LAST_ERROR_STATUS}" -eq 0 ]]; then
       GC_LAST_ERROR_STATUS="$status"
     fi
@@ -3376,6 +3384,7 @@ gc_clear_active_task() {
   unset GC_ACTIVE_TASK_ARCHIVE
   unset GC_ACTIVE_TASK_PROMPT
   unset GC_ACTIVE_TASK_OUTPUT
+  unset GC_ACTIVE_TASK_FINALIZED
 }
 
 gc_finalize_active_task() {
@@ -3383,6 +3392,11 @@ gc_finalize_active_task() {
   local reason="${2:-Interrupted}"
   local report_path="${GC_ACTIVE_TASK_REPORT:-}"
   [[ -n "$report_path" ]] || return 0
+
+  if [[ "${GC_ACTIVE_TASK_FINALIZED:-0}" == "1" ]]; then
+    return 0
+  fi
+  GC_ACTIVE_TASK_FINALIZED=1
 
   local archive_path="${GC_ACTIVE_TASK_ARCHIVE:-}"
   local prompt_path="${GC_ACTIVE_TASK_PROMPT:-}"
@@ -3426,7 +3440,11 @@ gc_finalize_active_task() {
     printf 'prompt_path: %s\n' "${prompt_entry:-"(none)"}"
     printf 'output_path: %s\n' "${output_entry:-"(none)"}"
     printf 'notes:\n'
-    printf '  - %s by signal %s; rerun work-on-tasks to resume.\n' "$reason" "$signal"
+    if [[ -n "$signal" ]]; then
+      printf '  - %s (signal %s); rerun work-on-tasks to resume.\n' "$reason" "$signal"
+    else
+      printf '  - %s; rerun work-on-tasks to resume.\n' "$reason"
+    fi
   } >"$report_path"
 
   if [[ -n "$archive_path" ]]; then
@@ -3486,6 +3504,23 @@ gc_finalize_active_task() {
       "interrupted"
     gc_update_task_state "$tasks_db" "$slug" "$task_index" "on-hold" "$run_stamp"
   fi
+
+  local banner_id="$task_id"
+  if [[ -z "$banner_id" ]]; then
+    banner_id="${slug:-story}-${task_number}"
+  fi
+  local detail="${reason//[$'\r\n']/ }"
+  while [[ "$detail" == *"  "* ]]; do
+    detail="${detail//  / }"
+  done
+  local -a banner_lines=("END TASK ID" "${banner_id}" "STATUS: INTERRUPTED")
+  if [[ -n "$detail" ]]; then
+    banner_lines+=("DETAIL: ${detail}")
+  fi
+  if [[ -n "$signal" ]]; then
+    banner_lines+=("TERMINAL STATE: ${signal}")
+  fi
+  gc_render_task_banner --header-bottom "END OF THE TASK WORK" "${banner_lines[@]}"
 
   gc_clear_active_task
 }
@@ -9102,6 +9137,7 @@ print(error)'
       export GC_ACTIVE_TASK_DB="$tasks_db"
       export GC_ACTIVE_TASK_SLUG="$slug"
       export GC_ACTIVE_TASK_INDEX="$task_index"
+      export GC_ACTIVE_TASK_FINALIZED=0
       export GC_ACTIVE_RUN_STAMP="$run_stamp"
       export GC_ACTIVE_TASK_NUMBER="$task_number"
       export GC_ACTIVE_TASK_ID="$task_id"

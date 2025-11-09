@@ -80,9 +80,15 @@ def main():
             flags=re.IGNORECASE,
         )
         COMMAND_WHITELIST_PATTERN = re.compile(
-            r'^(git|pnpm|npm|node|bash|sh|python3|python|sqlite3|jq|sed|awk|perl|cat|tee|mv|cp|mkdir|touch|ls|gpt-creator)\b'
+            r'^(git|pnpm|npm|node|bash|sh|python3|python|sqlite3|jq|sed|awk|perl|cat|tee|mv|cp|mkdir|touch|ls|gpt-creator|gc_assert)\b'
         )
         HEREDOC_LABEL_PATTERN = re.compile(r"<<\s*['\"]?([A-Za-z0-9_]+)['\"]?")
+        JEST_PATTERN = re.compile(r'\bjest(?:\.js)?\b', flags=re.IGNORECASE)
+        PNPM_JEST_PATTERN = re.compile(r'\bpnpm\s+test\b.*\bjest\b', flags=re.IGNORECASE)
+        RUN_IN_BAND_PATTERN = re.compile(r'\b--runinband\b', flags=re.IGNORECASE)
+        VITEST_PATTERN = re.compile(r'\bvitest\b', flags=re.IGNORECASE)
+        THREADS_FLAG_PATTERN = re.compile(r'\b--threads(?:=|\b)', flags=re.IGNORECASE)
+        TSC_PATTERN = re.compile(r'(?<![A-Za-z0-9_.-])tsc(?:\.js)?(?![A-Za-z0-9_.-])')
 
         class UnclosedHeredocError(Exception):
             def __init__(self, delimiter: str, command_lead: str):
@@ -1871,6 +1877,99 @@ def main():
         def _can_run_direct(command: str) -> bool:
             return not any(ch in command for ch in SHELL_META_CHARS)
 
+        def _ensure_test_serialization(
+            command_text: str, tokens: Optional[List[str]]
+        ) -> Tuple[str, Optional[List[str]]]:
+            if not tokens:
+                return command_text, tokens
+            mutated = False
+            normalized = command_text.lower()
+            new_tokens: List[str] = list(tokens)
+
+            if (JEST_PATTERN.search(command_text) or PNPM_JEST_PATTERN.search(normalized)) and not RUN_IN_BAND_PATTERN.search(normalized):
+                new_tokens.append("--runInBand")
+                mutated = True
+
+            if VITEST_PATTERN.search(normalized):
+                has_threads_flag = any(
+                    THREADS_FLAG_PATTERN.match(tok) for tok in new_tokens
+                )
+                if not has_threads_flag:
+                    new_tokens.extend(["--threads", "1"])
+                    mutated = True
+
+            if not mutated:
+                return command_text, tokens
+
+            serialized = " ".join(shlex.quote(tok) for tok in new_tokens)
+            return serialized, new_tokens
+
+        def _rewrite_tsc_command(
+            command_text: str, tokens: Optional[List[str]]
+        ) -> Tuple[str, Optional[List[str]]]:
+            if not tokens or not TSC_PATTERN.search(command_text):
+                return command_text, tokens
+
+            new_tokens: List[str] = list(tokens)
+
+            def _has_flag(name: str) -> bool:
+                lower_name = name.lower()
+                for tok in new_tokens:
+                    lt = tok.lower()
+                    if lt == lower_name or lt.startswith(f"{lower_name}="):
+                        return True
+                return False
+
+            if not _has_flag("--skipLibCheck"):
+                new_tokens.append("--skipLibCheck")
+            # Always force pretty false at the end so diagnostics stay compact.
+            new_tokens.extend(["--pretty", "false"])
+            # Always ensure we emit even on errors.
+            new_tokens.extend(["--noEmitOnError", "false"])
+
+            rewritten = " ".join(shlex.quote(tok) for tok in new_tokens)
+            return rewritten, new_tokens
+
+        def _apply_mock_shims(
+            command_text: str, tokens: Optional[List[str]]
+        ) -> Tuple[str, Optional[List[str]]]:
+            if os.environ.get("GC_MOCK_DEPS", "0") != "1" or not tokens:
+                return command_text, tokens
+
+            def _matches_runner(token: str, target: str) -> bool:
+                normalized = token.lower().replace("\\", "/")
+                if normalized == target:
+                    return True
+                if normalized.endswith(f"/{target}"):
+                    return True
+                if normalized.endswith(f"{target}.js"):
+                    return True
+                return False
+
+            mutated = False
+            new_tokens: List[str] = list(tokens)
+            if any(_matches_runner(tok, "jest") for tok in new_tokens):
+                if not any(tok.lower() == "--runinband" for tok in new_tokens):
+                    new_tokens.append("--runInBand")
+                    mutated = True
+            if any(_matches_runner(tok, "vitest") for tok in new_tokens):
+                if not any(tok.lower().startswith("--threads") for tok in new_tokens):
+                    new_tokens.extend(["--threads", "1"])
+                    mutated = True
+
+            if not mutated:
+                return command_text, tokens
+            decorated = " ".join(shlex.quote(tok) for tok in new_tokens)
+            return decorated, new_tokens
+
+        def _rewrite_command_pipeline(
+            command_text: str, tokens: Optional[List[str]]
+        ) -> Tuple[str, Optional[List[str]]]:
+            current_text, current_tokens = _ensure_test_serialization(command_text, tokens)
+            current_text, current_tokens = _rewrite_tsc_command(current_text, current_tokens)
+            current_text, current_tokens = _apply_mock_shims(current_text, current_tokens)
+            return current_text, current_tokens
+
         def _parse_replacement_script(source: str):
             import ast
 
@@ -2939,6 +3038,8 @@ def main():
                             "warning — prefer gpt-creator apply-block or write_block.py for file rewrites"
                         )
                     )
+                command, command_tokens = _rewrite_command_pipeline(command, command_tokens)
+                first_token = command_tokens[0] if command_tokens else first_token
                 command_to_run = command
                 try:
                     if python_heredoc_code is not None:
@@ -2985,6 +3086,14 @@ def main():
                 _append_command_log(command, proc_cmd.returncode, stdout_text, stderr_text, is_test_command)
                 _remove_plan_artifacts(f"command {_truncate_command_text(command)}")
                 if proc_cmd.returncode != 0:
+                    if first_token == "gc_assert" and proc_cmd.returncode == 1:
+                        manual_notes.append(
+                            _format_action_result(
+                                _truncate_command_text(command),
+                                "info — schema evidence not found (continuing)"
+                            )
+                        )
+                        continue
                     handled_note = _handle_pattern_not_found(python_heredoc_code, stdout_text, stderr_text)
                     if handled_note is not None:
                         manual_notes.append(

@@ -1,0 +1,458 @@
+{
+  "tables": [
+    {
+      "name": "class_types",
+      "file": "assets/templates/db/seed_default.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "instructors",
+      "file": "assets/templates/db/seed_default.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "pages",
+      "file": "assets/templates/db/seed_default.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation",
+      "file": "config/bootstrap_docs_catalog.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation_changes",
+      "file": "config/bootstrap_docs_catalog.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation_summaries",
+      "file": "docs/document-catalog-schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation_sections",
+      "file": "docs/document-catalog-schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation_excerpts",
+      "file": "docs/document-catalog-schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation_index_state",
+      "file": "docs/document-catalog-schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "users",
+      "file": "examples/sample-project/sql/schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "instructors",
+      "file": "examples/sample-project/sql/schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "programs",
+      "file": "examples/sample-project/sql/schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "program_instructors",
+      "file": "examples/sample-project/sql/schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "metadata",
+      "file": "scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "epics",
+      "file": "scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "stories",
+      "file": "scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "tasks",
+      "file": "scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_progress",
+      "file": "scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "doc_observations",
+      "file": "scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_dependencies",
+      "file": "scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_dependencies",
+      "file": "scripts/python/populate_task_dependencies.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_id_map",
+      "file": "scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "progress_migration_journal",
+      "file": "scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "progress_migration_audit",
+      "file": "scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "progress_migration_snapshots",
+      "file": "scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_progress",
+      "file": "scripts/python/record_task_progress.py",
+      "kind": "sql"
+    },
+    {
+      "name": "doc_observations",
+      "file": "scripts/python/record_task_progress.py",
+      "kind": "sql"
+    },
+    {
+      "name": "documents",
+      "file": "scripts/python/scan_project.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_dependencies",
+      "file": "scripts/python/update_global_task_order.py",
+      "kind": "sql"
+    },
+    {
+      "name": "metadata",
+      "file": "scripts/python/update_global_task_order.py",
+      "kind": "sql"
+    },
+    {
+      "name": "metadata",
+      "file": "scripts/python/update_throughput_metrics.py",
+      "kind": "sql"
+    },
+    {
+      "name": "metric_samples",
+      "file": "scripts/python/update_throughput_metrics.py",
+      "kind": "sql"
+    },
+    {
+      "name": "metadata",
+      "file": "src/lib/create-jira-tasks/to_sqlite.py",
+      "kind": "sql"
+    },
+    {
+      "name": "epics",
+      "file": "src/lib/create-jira-tasks/to_sqlite.py",
+      "kind": "sql"
+    },
+    {
+      "name": "stories",
+      "file": "src/lib/create-jira-tasks/to_sqlite.py",
+      "kind": "sql"
+    },
+    {
+      "name": "tasks",
+      "file": "src/lib/create-jira-tasks/to_sqlite.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_progress",
+      "file": "src/lib/create-jira-tasks/to_sqlite.py",
+      "kind": "sql"
+    },
+    {
+      "name": "metadata",
+      "file": "src/lib/create-jira-tasks/upsert_story_into_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "epics",
+      "file": "src/lib/create-jira-tasks/upsert_story_into_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "stories",
+      "file": "src/lib/create-jira-tasks/upsert_story_into_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "tasks",
+      "file": "src/lib/create-jira-tasks/upsert_story_into_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_progress",
+      "file": "src/lib/create-jira-tasks/upsert_story_into_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "vectors",
+      "file": "src/lib/doc_indexer.py",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation",
+      "file": "src/lib/doc_registry.py",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation_changes",
+      "file": "src/lib/doc_registry.py",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation_sections",
+      "file": "src/lib/doc_registry.py",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation_excerpts",
+      "file": "src/lib/doc_registry.py",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation_summaries",
+      "file": "src/lib/doc_registry.py",
+      "kind": "sql"
+    },
+    {
+      "name": "documentation_index_state",
+      "file": "src/lib/doc_registry.py",
+      "kind": "sql"
+    },
+    {
+      "name": "tasks",
+      "file": "test/python/test_progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "stories",
+      "file": "test/python/test_progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_progress",
+      "file": "test/python/test_progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "stories",
+      "file": "test/python/test_prompt_budget.py",
+      "kind": "sql"
+    },
+    {
+      "name": "tasks",
+      "file": "test/python/test_prompt_budget.py",
+      "kind": "sql"
+    }
+  ],
+  "indexes": [
+    {
+      "name": "documentation_doc_id_idx",
+      "on": "documentation",
+      "file": "config/bootstrap_docs_catalog.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documentation_sections_doc",
+      "on": "documentation_sections",
+      "file": "docs/document-catalog-schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documentation_sections_parent",
+      "on": "documentation_sections",
+      "file": "docs/document-catalog-schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documentation_excerpts_doc",
+      "on": "documentation_excerpts",
+      "file": "docs/document-catalog-schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documentation_excerpts_section",
+      "on": "documentation_excerpts",
+      "file": "docs/document-catalog-schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documentation_index_state_surface",
+      "on": "documentation_index_state",
+      "file": "docs/document-catalog-schema.sql",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_unique",
+      "on": "task_dependencies",
+      "file": "scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_task",
+      "on": "task_dependencies",
+      "file": "scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_blocker",
+      "on": "task_dependencies",
+      "file": "scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_tasks_uid",
+      "on": "tasks",
+      "file": "scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_unique",
+      "on": "task_dependencies",
+      "file": "scripts/python/populate_task_dependencies.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_task",
+      "on": "task_dependencies",
+      "file": "scripts/python/populate_task_dependencies.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_blocker",
+      "on": "task_dependencies",
+      "file": "scripts/python/populate_task_dependencies.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_tasks_uid",
+      "on": "tasks",
+      "file": "scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_progress_migration_audit_plan",
+      "on": "progress_migration_audit",
+      "file": "scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documents_sha",
+      "on": "documents",
+      "file": "scripts/python/scan_project.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documents_kind",
+      "on": "documents",
+      "file": "scripts/python/scan_project.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_unique",
+      "on": "task_dependencies",
+      "file": "scripts/python/update_global_task_order.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_task",
+      "on": "task_dependencies",
+      "file": "scripts/python/update_global_task_order.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_blocker",
+      "on": "task_dependencies",
+      "file": "scripts/python/update_global_task_order.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_metric_samples_task",
+      "on": "metric_samples",
+      "file": "scripts/python/update_throughput_metrics.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_metric_samples_time",
+      "on": "metric_samples",
+      "file": "scripts/python/update_throughput_metrics.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_vectors_doc",
+      "on": "vectors",
+      "file": "src/lib/doc_indexer.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documentation_sections_doc",
+      "on": "documentation_sections",
+      "file": "src/lib/doc_registry.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documentation_sections_parent",
+      "on": "documentation_sections",
+      "file": "src/lib/doc_registry.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documentation_excerpts_doc",
+      "on": "documentation_excerpts",
+      "file": "src/lib/doc_registry.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documentation_excerpts_section",
+      "on": "documentation_excerpts",
+      "file": "src/lib/doc_registry.py",
+      "kind": "sql"
+    }
+  ],
+  "models": [],
+  "sources": [
+    "assets/templates/db/seed_default.sql",
+    "config/bootstrap_docs_catalog.sql",
+    "docs/document-catalog-schema.sql",
+    "examples/sample-project/sql/schema.sql",
+    "scripts/python/build_tasks_db.py",
+    "scripts/python/populate_task_dependencies.py",
+    "scripts/python/progress_migration.py",
+    "scripts/python/record_task_progress.py",
+    "scripts/python/scan_project.py",
+    "scripts/python/update_global_task_order.py",
+    "scripts/python/update_throughput_metrics.py",
+    "src/lib/create-jira-tasks/to_sqlite.py",
+    "src/lib/create-jira-tasks/upsert_story_into_db.py",
+    "src/lib/doc_indexer.py",
+    "src/lib/doc_registry.py",
+    "test/python/test_progress_migration.py",
+    "test/python/test_prompt_budget.py"
+  ]
+}

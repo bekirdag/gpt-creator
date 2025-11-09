@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+kind="${1:-}"
+name="${2:-}"
+
+if [[ -z "$kind" || -z "$name" ]]; then
+  echo "Usage: gc_assert <table|index> <name>" >&2
+  exit 2
+fi
+
+cli_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+schema_script="${cli_root}/scripts/schema_evidence.js"
+workspace="${GC_WORKSPACE_DIR:-$PWD}"
+index_path="${GC_SCHEMA_EVIDENCE_PATH:-${workspace}/.gpt-creator/index/schema-evidence.json}"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "gc_assert: Node.js is required to run schema assertions" >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "$index_path")"
+
+if [[ ! -f "$index_path" ]]; then
+  node "$schema_script" build --out "$index_path" >/dev/null 2>&1 || true
+fi
+
+exec node "$schema_script" query "$kind" "$name" --out "$index_path"

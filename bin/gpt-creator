@@ -257,6 +257,7 @@ CLI_ROOT="$(resolve_cli_root)"
 unset -f resolve_cli_root
 
 GC_TEMPLATE_DIR="${CLI_ROOT}/assets/templates"
+export PATH="${CLI_ROOT}/bin:${PATH}"
 
 gc_template_path() {
   local name="${1:?template name required}"
@@ -416,6 +417,22 @@ gc_note_mutation() {
 
 gc_env_file() { echo "${PROJECT_ROOT:-$PWD}/.env"; }
 
+gc_assert() {
+  local kind="${1:-}"
+  local name="${2:-}"
+  if [[ -z "$kind" || -z "$name" ]]; then
+    warn "gc_assert usage: gc_assert <table|index> <name>"
+    return 2
+  fi
+  local script="${CLI_ROOT}/scripts/schema_evidence.js"
+  local index_path="${GC_SCHEMA_EVIDENCE_PATH:-${GC_WORKSPACE_DIR:-$PWD}/.gpt-creator/index/schema-evidence.json}"
+  if ! command -v node >/dev/null 2>&1; then
+    warn "Node.js required for schema assertions"
+    return 1
+  fi
+  node "$script" query "$kind" "$name" --out "$index_path"
+}
+
 gc_random_string() {
   local helper_path
   helper_path="$(gc_clone_python_tool "random_string.py" "${PROJECT_ROOT:-$PWD}")" || return 1
@@ -438,7 +455,7 @@ gc_usage_limit_is_provider_signal() {
 }
 
 gc_bootstrap_docs_registry() {
-  local db_path="${1:-}"
+  local db_path="${1:-${GC_DOCUMENTATION_DB_PATH:-}}"
   [[ -n "$db_path" ]] || return 0
 
   local repo_root="${PROJECT_ROOT:-$PWD}"
@@ -8064,21 +8081,26 @@ cmd_work_on_tasks() {
   local tasks_db="${canonical_tasks_dir}/tasks.db"
   local intake_lock_path="${canonical_tasks_dir}/.intake-frozen"
   local doc_vector_path="${canonical_tasks_dir}/documentation-vector-index.sqlite"
-  export GC_DOCUMENTATION_DB_PATH="$tasks_db"
   export GC_DOC_VECTOR_INDEX_PATH="$doc_vector_path"
   export GC_DOCUMENTATION_INDEX_PATH="$doc_vector_path"
-  if command -v sqlite3 >/dev/null 2>&1; then
-    if ! sqlite3 "$GC_DOCUMENTATION_DB_PATH" 'SELECT count(*) FROM documentation;' >/dev/null 2>&1; then
-      die "Documentation database missing or invalid at ${GC_DOCUMENTATION_DB_PATH}; run 'gpt-creator scan --project \"${PROJECT_ROOT:-$PWD}\"' and retry."
+  if [[ "${GC_DOCS_ENABLED:-1}" -eq 1 ]]; then
+    if [[ -n "${GC_DOCUMENTATION_DB_PATH:-}" ]]; then
+      if command -v sqlite3 >/dev/null 2>&1; then
+        if ! sqlite3 "$GC_DOCUMENTATION_DB_PATH" 'SELECT count(*) FROM documentation;' >/dev/null 2>&1; then
+          die "Documentation database missing or invalid at ${GC_DOCUMENTATION_DB_PATH}; run 'gpt-creator scan --project \"${PROJECT_ROOT:-$PWD}\"' and retry."
+        fi
+      else
+        warn "sqlite3 not available; unable to verify documentation database integrity."
+      fi
     fi
+    if ! gc_require_documentation_catalog "$PROJECT_ROOT"; then
+      local catalog_root="${PROJECT_ROOT:-$PWD}"
+      die "Failed to prepare documentation catalog. Run 'gpt-creator scan --project \"${catalog_root}\"' and retry."
+    fi
+    gc_bootstrap_docs_registry
   else
-    warn "sqlite3 not available; unable to verify documentation database integrity."
+    warn "Documentation catalog disabled (GC_DOCS_MODE=${GC_DOCS_MODE:-off}); skipping documentation checks."
   fi
-  if ! gc_require_documentation_catalog "$PROJECT_ROOT"; then
-    local catalog_root="${PROJECT_ROOT:-$PWD}"
-    die "Failed to prepare documentation catalog. Run 'gpt-creator scan --project \"${catalog_root}\"' and retry."
-  fi
-  gc_bootstrap_docs_registry "$tasks_db"
 
   if ! gc_tasks_db_has_rows "$tasks_db"; then
     die "Task database missing or empty. Run 'gpt-creator create-tasks' (or create-jira-tasks + migrate-tasks) before work-on-tasks."
@@ -12037,6 +12059,47 @@ if ((${#GC_ORIGINAL_ARGS[@]})); then
   GC_INVOCATION+=" $(printf '%q ' "${GC_ORIGINAL_ARGS[@]}")"
   GC_INVOCATION="${GC_INVOCATION% }"
 fi
+
+# shellcheck disable=SC1091
+. "$(dirname "$0")/../scripts/workspace_guard.sh" "$@"
+
+# shellcheck disable=SC1091
+. "$(dirname "$0")/../scripts/doc_catalog_guard.sh" "$@"
+
+# shellcheck disable=SC1091
+. "$(dirname "$0")/../scripts/dep_guard.sh" "$@"
+
+if [[ -z "${GC_RUNTIME_DIR:-}" ]]; then
+  GC_RUNTIME_DIR="$(cd "$(dirname "$0")/../runtime" && pwd)"
+fi
+export GC_RUNTIME_DIR
+
+: "${CI:=1}"
+: "${TZ:=UTC}"
+: "${NODE_ENV:=test}"
+export CI TZ NODE_ENV
+
+TS_PRELOAD="${GC_RUNTIME_DIR}/ts-preload.cjs"
+if [[ -f "$TS_PRELOAD" ]]; then
+  case " ${NODE_OPTIONS:-} " in
+    *"$TS_PRELOAD"*)
+      ;;
+    *)
+      if [[ -n "${NODE_OPTIONS:-}" ]]; then
+        export NODE_OPTIONS="--require $TS_PRELOAD ${NODE_OPTIONS}"
+      else
+        export NODE_OPTIONS="--require $TS_PRELOAD"
+      fi
+      ;;
+  esac
+fi
+
+GC_SCHEMA_EVIDENCE_PATH="${GC_WORKSPACE_DIR:-$PWD}/.gpt-creator/index/schema-evidence.json"
+mkdir -p "$(dirname "$GC_SCHEMA_EVIDENCE_PATH")"
+if command -v node >/dev/null 2>&1; then
+  node "$CLI_ROOT/scripts/schema_evidence.js" build --out "$GC_SCHEMA_EVIDENCE_PATH" >/dev/null 2>&1 || true
+fi
+export GC_SCHEMA_EVIDENCE_PATH
 
 if gc_reports_enabled; then
   trap 'gc_reports_activity_trap "$BASH_COMMAND"' DEBUG

@@ -21,6 +21,9 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Backlog browser**: `backlog` prints non-interactive terminal summaries so you can list epics, enumerate stories, inspect children, dump task details, or preview the next DAG-prioritised tasks straight from the SQLite backlog.
 - **Backlog ETA**: `estimate` aggregates remaining story points in `.gpt-creator/staging/plan/tasks/tasks.db` and translates them into a formatted duration using the throughput observed during `work-on-tasks` runs (defaults to a 10-task window at 15 story points per hour until telemetry is captured). Use `--recent-tasks COUNT|all` to widen the sample window and `--project` to point at another workspace when needed.
 - **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
+- **Safety preflights**: Every CLI entry now runs through workspace/doc catalog/dependency guards so stale or unsafe paths are rejected, lockfiles are rebuilt automatically, and missing dependencies fall back to mock mode instead of crashing active runs.
+- **Schema evidence index**: A stack-neutral inspector builds an index of tables/indexes across SQL, Prisma, Knex, Rails, TypeORM, and Django sources. Commands such as `gc_assert table publish_jobs` use this cache so schema checks become tolerant hints rather than brittle `rg` probes.
+- **Runtime overlays**: A Jest/Vitest decorator enforces single-process execution, injects a transpile-only TypeScript preloader, shims heavy native modules (@prisma/client, sharp, multer, prom-client, etc.), and remaps missing `dist/` imports to `src/lib/build/out`, keeping tests runnable even when installs or builds fail.
 
 ---
 

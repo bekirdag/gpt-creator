@@ -52,7 +52,8 @@ function listJsonFiles(baseDir) {
   return results;
 }
 
-function loadLocaleFile(filePath) {
+function loadLocaleFile(filePath, options = {}) {
+  const { autoRepair = true } = options;
   const exists = fs.existsSync(filePath);
   if (!exists) {
     return { exists: false, data: {}, raw: '', error: null };
@@ -68,7 +69,82 @@ function loadLocaleFile(filePath) {
     } catch {
       raw = '';
     }
+    if (autoRepair) {
+      const repaired = attemptRepairLocaleFile(filePath, raw);
+      if (repaired) {
+        return repaired;
+      }
+    }
     return { exists: true, data: {}, raw, error };
+  }
+}
+
+function extractBalancedJsonObject(text) {
+  if (!text) {
+    return null;
+  }
+  const start = text.indexOf('{');
+  if (start === -1) {
+    return null;
+  }
+  let depth = 0;
+  let inString = false;
+  let escapeNext = false;
+  for (let idx = start; idx < text.length; idx++) {
+    const char = text[idx];
+    if (inString) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (char === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '{') {
+      depth += 1;
+      continue;
+    }
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, idx + 1);
+      }
+      continue;
+    }
+  }
+  return null;
+}
+
+function attemptRepairLocaleFile(filePath, raw) {
+  const candidate = extractBalancedJsonObject(raw);
+  if (!candidate) {
+    return null;
+  }
+  try {
+    const data = JSON.parse(candidate);
+    const serialised = serialiseLocale(data);
+    fs.writeFileSync(filePath, serialised, 'utf8');
+    const relativePath = path.relative(process.cwd(), filePath);
+    console.warn(`[i18n-autoheal] Repaired invalid JSON in ${relativePath || filePath}`);
+    return {
+      exists: true,
+      data,
+      raw: serialised,
+      error: null,
+      repaired: true,
+    };
+  } catch {
+    return null;
   }
 }
 

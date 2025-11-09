@@ -3,6 +3,10 @@
 
 set -eu
 
+warn() {
+  printf >&2 "gpt-creator: %s\n" "$*"
+}
+
 MODE="${GC_DEPS_MODE:-auto}"
 WORK="${GC_WORKSPACE_DIR:-$PWD}"
 [ -d "$WORK" ] || WORK="$PWD"
@@ -16,6 +20,13 @@ WORK_LOCK_DIR="$WORK/.gpt-creator"
 CACHE="$WORK_LOCK_DIR/cache"
 STATE_DIR="$WORK_LOCK_DIR/state"
 mkdir -p "$CACHE" "$STATE_DIR"
+
+MOCK_FLAG="$STATE_DIR/mock-deps.flag"
+
+: "${PNPM_IGNORE_NODE_VERSION:=1}"
+: "${NPM_CONFIG_ENGINE_STRICT:=false}"
+: "${YARN_IGNORE_NODE:=1}"
+export PNPM_IGNORE_NODE_VERSION NPM_CONFIG_ENGINE_STRICT YARN_IGNORE_NODE
 
 cd "$WORK" || exit 1
 
@@ -84,16 +95,64 @@ do_python_install() {
   fi
 }
 
-GC_MOCK_DEPS=0
-if ! do_node_install; then
-  GC_MOCK_DEPS=1
+GC_MOCK_DEPS="${GC_MOCK_DEPS:-0}"
+
+if [ "${GC_DEPS_RESET_MOCK:-0}" = "1" ] && [ -f "$MOCK_FLAG" ]; then
+  rm -f "$MOCK_FLAG" 2>/dev/null || true
 fi
+
+PREVIOUS_MOCK=0
+if [ -f "$MOCK_FLAG" ]; then
+  if [ "$(cat "$MOCK_FLAG" 2>/dev/null || echo 0)" = "1" ]; then
+    PREVIOUS_MOCK=1
+    GC_MOCK_DEPS=1
+  fi
+fi
+
+NODE_DIR="$WORK/node_modules"
+NODE_STATE_FILE="${NODE_DIR}/.modules.yaml"
+NODE_INSTALL_BLOCKED=0
+NODE_INSTALL_REASON=""
+if [ -d "$NODE_DIR" ]; then
+  if [ ! -w "$NODE_DIR" ]; then
+    NODE_INSTALL_BLOCKED=1
+    NODE_INSTALL_REASON="node_modules is not writable (likely owned by another user)"
+  elif [ -e "$NODE_STATE_FILE" ] && [ ! -w "$NODE_STATE_FILE" ]; then
+    NODE_INSTALL_BLOCKED=1
+    NODE_INSTALL_REASON="node_modules/.modules.yaml is not writable"
+  fi
+fi
+
+INSTALL_SKIP=0
+if [ "$PREVIOUS_MOCK" -eq 1 ]; then
+  INSTALL_SKIP=1
+fi
+if [ "$NODE_INSTALL_BLOCKED" -eq 1 ]; then
+  INSTALL_SKIP=1
+fi
+
+if [ "$INSTALL_SKIP" -eq 1 ]; then
+  if [ "$PREVIOUS_MOCK" -eq 1 ]; then
+    warn "Skipping dependency install; previous mock-mode flag detected at ${MOCK_FLAG}. Delete it or set GC_DEPS_RESET_MOCK=1 to retry."
+  fi
+  if [ "$NODE_INSTALL_BLOCKED" -eq 1 ]; then
+    warn "Skipping pnpm install because ${NODE_INSTALL_REASON}; fix permissions (e.g. chown -R ${USER:-$LOGNAME} node_modules) or reinstall dependencies manually."
+  fi
+  GC_MOCK_DEPS=1
+  export GC_DEPS_AUTO_INSTALL_DISABLED=1
+else
+  if ! do_node_install; then
+    GC_MOCK_DEPS=1
+  fi
+fi
+
 if ! do_python_install; then
   GC_MOCK_DEPS=1
 fi
+
 export GC_MOCK_DEPS
 
-printf '%s\n' "$GC_MOCK_DEPS" > "$STATE_DIR/mock-deps.flag" 2>/dev/null || true
+printf '%s\n' "$GC_MOCK_DEPS" > "$MOCK_FLAG" 2>/dev/null || true
 
 if [ "$GC_MOCK_DEPS" = "1" ]; then
   RUNTIME_DIR="$WORK_LOCK_DIR/runtime"

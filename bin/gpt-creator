@@ -6157,6 +6157,10 @@ ensure_node_runtime() {
 }
 
 ensure_node_dependencies() {
+  if [[ "${GC_DEPS_AUTO_INSTALL_DISABLED:-0}" == "1" ]]; then
+    warn "Skipping dependency bootstrap (auto install disabled by dependency guard)."
+    return
+  fi
   local root_dir="${1:-$PROJECT_ROOT}"
   local sentinel="${PLAN_DIR}/.deps-installed"
 

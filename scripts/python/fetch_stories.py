@@ -151,6 +151,42 @@ def print_color_totals():
     print()
 
 
+def render_color_table(headers, rows, header_style="1;90") -> None:
+    if not rows:
+        return
+    stripped_headers = [strip_ansi(h) for h in headers]
+    widths = [len(text) for text in stripped_headers]
+    for row in rows:
+        for idx, cell in enumerate(row):
+            value = strip_ansi(cell)
+            if len(value) > widths[idx]:
+                widths[idx] = len(value)
+
+    def build_border(left: str, middle: str, right: str) -> str:
+        segments = [("─" * (w + 2)) for w in widths]
+        return left + middle.join(segments) + right
+
+    top = build_border("┌", "┬", "┐")
+    sep = build_border("├", "┼", "┤")
+    bottom = build_border("└", "┴", "┘")
+
+    def format_row(values) -> str:
+        cells = []
+        for idx, cell in enumerate(values):
+            pad = widths[idx] - len(strip_ansi(cell))
+            cells.append(f" {cell}{' ' * pad} ")
+        return "│" + "│".join(cells) + "│"
+
+    header_cells = [color_text(header_style, h) for h in headers]
+    print(top)
+    print(format_row(header_cells))
+    print(sep)
+    for row in rows:
+        print(format_row(row))
+    print(bottom)
+
+
+
 
 
 def _load_status_overrides() -> set[str]:
@@ -670,10 +706,8 @@ def render_epics_color(epic_entries):
     print()
     print(color_text(SECTION_COLOR, "📋 Epic Progress Overview"))
     print("──────────────────────────────────────────────────────────────")
-    header_style = "1;90"
-    print(color_text(header_style, f"{'EPIC':<8} {'TITLE':<40} {'STORIES':<20} {'TASKS':<24} {'PROGRESS':<9}"))
-    print(color_text(header_style, f"{'──────':<8} {'────────────────────────────────────────':<40} {'────────':<20} {'────────────────────────':<24} {'────────':<9}"))
     high = medium = low = 0
+    table_rows: list[list[str]] = []
     for entry in epic_entries:
         counts = entry.get("counts") or empty_counts()
         epic = entry.get("epic") or {}
@@ -694,9 +728,9 @@ def render_epics_color(epic_entries):
             low += 1
         progress_str = color_text(progress_color(progress_pct), f"{progress_pct:5.1f}%")
         slug_display = color_text("1;36", slug if slug != "-" else epic_id)
-        print(
-            f"{slug_display:<8} {title_value:<40} {stories_desc:<20} {tasks_desc:<24} {progress_str:<9}"
-        )
+        table_rows.append([slug_display, title_value, stories_desc, tasks_desc, progress_str])
+    if table_rows:
+        render_color_table(["EPIC", "TITLE", "STORIES", "TASKS", "PROGRESS"], table_rows)
     if epic_entries:
         print()
         print(color_text(SECTION_COLOR, "📈 Overall Trend"))
@@ -745,9 +779,7 @@ def render_story_children_color(epic_entry, stories_for_epic, label):
     print(bottom)
     print(color_text(SECTION_COLOR, "📘 Story Breakdown"))
     print("──────────────────────────────────────────────────────────────")
-    header_style = "1;90"
-    print(color_text(header_style, f"{'Story Slug':<14} {'Title':<60} {'Status':<13} {'Epic':<8} {'Tasks':<30} {'Progress':<8}"))
-    print(color_text(header_style, f"{'────────────':<14} {'──────────────────────────────────────────────':<60} {'───────────':<13} {'──────':<8} {'──────────────────────────────':<30} {'────────':<8}"))
+    table_rows: list[list[str]] = []
     for story in sorted(stories_for_epic, key=lambda s: (s.get("sequence") or 0, (s.get("story_title") or "").lower())):
         slug = (story.get("story_slug") or story.get("story_id") or "-").strip()
         title_value = (story.get("story_title") or "Story").strip()
@@ -761,9 +793,16 @@ def render_story_children_color(epic_entry, stories_for_epic, label):
         status_colored = color_text(status_color(status), status)
         tasks_text = tasks_desc
         progress_colored = color_text(progress_color(progress), f"{progress:5.1f}%")
-        print(
-            f"{color_text('1;37', slug):<14} {title_value:<60} {status_colored:<13} {epic_title:<8} {tasks_text:<30} {progress_colored:<8}"
-        )
+        table_rows.append([
+            color_text("1;37", slug),
+            title_value,
+            status_colored,
+            epic_title,
+            tasks_text,
+            progress_colored,
+        ])
+    if table_rows:
+        render_color_table(["Story", "Title", "Status", "Epic", "Tasks", "Progress"], table_rows)
     print()
     print_color_totals()
 def truncate(text, width=60):
@@ -818,9 +857,7 @@ def render_task_children_color(story, tasks):
     print(bottom)
     print(color_text(SECTION_COLOR, "🧩 Task Breakdown"))
     print("──────────────────────────────────────────────────────────────")
-    header_style = "1;90"
-    print(color_text(header_style, f"{'#':<4} {'Order':<6} {'Task ID':<12} {'Title':<65} {'Status':<10} {'SP':<4}"))
-    print(color_text(header_style, f"{'─':<4} {'─────':<6} {'────────────':<12} {'───────────────────────────────────────────────────────────────':<65} {'───────':<10} {'────':<4}"))
+    rows: list[list[str]] = []
     for task in tasks:
         position = task.get("position")
         index = str((position if position is not None else 0) + 1)
@@ -837,9 +874,16 @@ def render_task_children_color(story, tasks):
         status_value = (task.get("status") or "pending").strip().lower().replace("_", "-")
         sp_value = str(task.get("story_points") or "-")
         status_colored = color_text(status_color(status_value), status_value)
-        print(
-            f"{color_text('1;36', index):<4} {order_display:<6} {task_id:<12} {title_value:<65} {status_colored:<10} {sp_value:<4}"
-        )
+        rows.append([
+            color_text("1;36", index),
+            order_display,
+            task_id,
+            title_value,
+            status_colored,
+            sp_value,
+        ])
+    if rows:
+        render_color_table(["#", "Order", "Task ID", "Title", "Status", "SP"], rows)
     print()
     print_color_totals()
 def compute_story_metrics(total, complete, in_progress, pending, status_field):

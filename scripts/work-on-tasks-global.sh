@@ -119,11 +119,15 @@ for entry in "${queue[@]}"; do
   printf '▶ %s :: %s (order #%s)\n' "${local_story:-<no-story>}" "$local_token" "$order"
   ran_any=1
 
-  GC_TASK_ORDER=list \
-  STORY_FILTER="${local_story}" \
-  TASK_FILTER="${local_token,,}" \
-  TASK_FALLBACK="${fallback_token}" \
-  bash "${SCRIPT_DIR}/work-on-tasks-retry.sh" --story "${local_story}" --task "$local_token" "${extra_args[@]}" || true
+  if ! GC_TASK_ORDER=list \
+        STORY_FILTER="${local_story}" \
+        TASK_FILTER="${local_token,,}" \
+        TASK_FALLBACK="${fallback_token}" \
+        bash "${SCRIPT_DIR}/work-on-tasks-retry.sh" --story "${local_story}" --task "$local_token" "${extra_args[@]}"; then
+    status=$?
+    printf '[work-on-tasks-global] Aborting queue after %s/%s (exit %s).\n' "${local_story:-<no-story>}" "$local_token" "$status" >&2
+    exit "$status"
+  fi
 done
 
 if (( ran_any == 0 )); then

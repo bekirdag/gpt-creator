@@ -1962,11 +1962,42 @@ def main():
             decorated = " ".join(shlex.quote(tok) for tok in new_tokens)
             return decorated, new_tokens
 
+        def _normalize_rg_command(
+            command_text: str, tokens: Optional[List[str]]
+        ) -> Tuple[str, Optional[List[str]]]:
+            if not tokens or not tokens:
+                return command_text, tokens
+            if tokens[0] != "rg":
+                return command_text, tokens
+            if "--" in tokens:
+                return command_text, tokens
+            idx = 1
+            while idx < len(tokens) and tokens[idx].startswith("-"):
+                idx += 1
+            if idx >= len(tokens):
+                return command_text, tokens
+            pattern_index = idx
+            normalized = tokens[:pattern_index + 1]
+            changed = False
+            idx += 1
+            while idx < len(tokens):
+                tok = tokens[idx]
+                if tok.startswith("-"):
+                    changed = True
+                else:
+                    normalized.append(tok)
+                idx += 1
+            if not changed:
+                return command_text, tokens
+            rewritten_command = " ".join(shlex.quote(tok) for tok in normalized)
+            return rewritten_command, normalized
+
         def _rewrite_command_pipeline(
             command_text: str, tokens: Optional[List[str]]
         ) -> Tuple[str, Optional[List[str]]]:
             current_text, current_tokens = _ensure_test_serialization(command_text, tokens)
             current_text, current_tokens = _rewrite_tsc_command(current_text, current_tokens)
+            current_text, current_tokens = _normalize_rg_command(current_text, current_tokens)
             current_text, current_tokens = _apply_mock_shims(current_text, current_tokens)
             return current_text, current_tokens
 

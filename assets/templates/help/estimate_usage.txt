@@ -5,6 +5,7 @@ Usage: gpt-creator estimate [--project PATH]
                             [--no-cache]
                             [--reindex]
                             [--warn-threshold SPH]
+                            [--color|--no-color]
 
 Estimate how long it will take to finish the remaining tasks based on story points (default 15 SP/hour; refined by work-on-tasks throughput).
 
@@ -15,3 +16,5 @@ Options:
   --no-cache                Bypass the estimate cache and recompute all metrics immediately.
   --reindex                 Purge any cached estimate data before computing the report.
   --warn-threshold SPH      Override the throughput warning threshold in story points per hour (defaults to the config value).
+  --color                   Force colorized output even when stdout is not a TTY.
+  --no-color                Disable colorized output entirely.

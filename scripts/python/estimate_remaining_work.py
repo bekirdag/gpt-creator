@@ -38,6 +38,41 @@ DEFAULT_CONTAMINATION_THRESHOLD = 0.2
 RECENT_SAMPLE_LIMIT = 10
 STATUS_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 
+ANSI_RESET = "\033[0m"
+AUX_HEADER_COLOR = "1;38;5;111"
+PRIMARY_HEADER_COLOR = "1;38;5;214"
+TITLE_COLOR = "1;38;5;39"
+
+
+def color_enabled_from_env(env_value: str, default: bool) -> bool:
+    mode = env_value.strip().lower()
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    return default
+
+
+def color_text(style: str, text: str) -> str:
+    return f"\033[{style}m{text}{ANSI_RESET}"
+
+
+def gradient_color(pct: float) -> int:
+    pct = max(0.0, min(100.0, pct))
+    if pct <= 50.0:
+        return int(196 + (pct / 50.0) * (220 - 196))
+    return int(220 - ((pct - 50.0) / 50.0) * (220 - 46))
+
+
+def gradient_bar(pct: float, width: int = 28) -> str:
+    pct = max(0.0, min(100.0, pct))
+    filled = int(round((pct / 100.0) * width))
+    filled = max(0, min(width, filled))
+    empty = width - filled
+    color_code = gradient_color(pct)
+    filled_block = color_text(f"38;5;{color_code}", "█" * filled)
+    return f"[{filled_block}{'─' * empty}] {color_text(f'38;5;{color_code}', f'{pct:5.1f}%')}"
+
 
 def estimate_cache_dir(project_root: Path) -> Path:
     return project_root / ".gpt-creator" / "cache" / "estimate"
@@ -51,8 +86,14 @@ def purge_estimate_cache(cache_path: Path) -> None:
         pass
 
 
-def cache_key_for(db_path: Path, recent_label: str, scope: str, warn_floor: float | None) -> str:
-    payload = f"{db_path.resolve()}|{recent_label}|{scope}|{warn_floor or 'auto'}"
+def cache_key_for(
+    db_path: Path,
+    recent_label: str,
+    scope: str,
+    warn_floor: float | None,
+    color_variant: str,
+) -> str:
+    payload = f"{db_path.resolve()}|{recent_label}|{scope}|{warn_floor or 'auto'}|{color_variant}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
@@ -620,6 +661,7 @@ def estimate(
     warn_threshold: Optional[float] = None,
     apply_detections: bool = False,
     project_root_override: Optional[Path] = None,
+    colorize_output: bool = False,
 ) -> int:
     project_root = project_root_override or infer_project_root(db_path)
     scope_normalized = (scope or "project").strip().lower()
@@ -945,7 +987,8 @@ def estimate(
         summary_rows.append(
             ("Estimated completion", f"{estimate_str} @{fmt_float(effective_rate)} SP/hour")
         )
-    print_section("Remaining Work Summary", summary_rows)
+    if not colorize_output:
+        print_section("Remaining Work Summary", summary_rows)
 
     throughput_rows: list[tuple[str, str]] = []
     if rate_samples > 0 and effective_rate > 0:
@@ -999,7 +1042,8 @@ def estimate(
         throughput_rows.append(
             ("Window contamination", f"{contamination_ratio * 100:.0f}%")
         )
-    print_section("Throughput", throughput_rows)
+    if not colorize_output:
+        print_section("Throughput", throughput_rows)
 
     token_rows: list[tuple[str, str]] = []
     if tokens_total > 0 and token_samples > 0:
@@ -1051,11 +1095,154 @@ def estimate(
                 "Token usage data unavailable; run work-on-tasks to capture token telemetry.",
             )
         )
-    print_section("Token Telemetry", token_rows)
+    if not colorize_output:
+        print_section("Token Telemetry", token_rows)
+
+    avg_tokens_per_point = (tokens_total / covered_points) if covered_points > 0 else 0.0
+    estimated_tokens_hour = (
+        avg_tokens_per_point * effective_rate if avg_tokens_per_point > 0 and effective_rate > 0 else 0.0
+    )
+    projected_remaining_tokens = (
+        avg_tokens_per_point * total_points if avg_tokens_per_point > 0 and total_points > 0 else 0.0
+    )
+
+    if colorize_output:
+        context = {
+            "completed_canonical": canonical_completed_count,
+            "completed_effective": effective_completed_tasks,
+            "completed_story_points": completed_points,
+            "detections_pending": remaining_detections,
+            "detections_applied": applied_detections,
+            "in_progress_canonical": canonical_in_progress,
+            "pending_canonical": canonical_pending,
+            "remaining_canonical": canonical_remaining,
+            "remaining_effective": remaining_tasks,
+            "total_tasks": total_tasks_count,
+            "remaining_story_points": total_points,
+            "estimate_display": (
+                f"Stalled ({eta_stalled_reason})" if eta_stalled_reason else f"{estimate_str} @{fmt_float(effective_rate)} SP/hour"
+            ),
+            "eta_stalled_reason": eta_stalled_reason,
+            "eta_warning_reason": eta_warning_reason,
+            "effective_rate": effective_rate,
+            "using_recent_velocity": using_recent_velocity,
+            "recent_sample_count": recent_sample_count,
+            "rate_samples": rate_samples,
+            "recent_window_total": recent_window_total,
+            "window_out_of_scope": window_out_of_scope,
+            "contamination_ratio": contamination_ratio,
+            "blocked_ratio": blocked_ratio,
+            "blocked_dominant": blocked_dominant,
+            "token_samples": token_samples,
+            "tokens_total": tokens_total,
+            "avg_tokens_per_point": avg_tokens_per_point,
+            "estimated_tokens_hour": estimated_tokens_hour,
+            "projected_remaining_tokens": projected_remaining_tokens,
+            "default_rate": DEFAULT_RATE,
+        }
+        render_color_estimate(context)
+        return 0
 
     return 0
 
 
+def render_color_estimate(ctx: Dict[str, Any]) -> None:
+    header_box = color_text(PRIMARY_HEADER_COLOR, "╭────────────────────────────────────────────╮")
+    footer_box = color_text(PRIMARY_HEADER_COLOR, "╰────────────────────────────────────────────╯")
+    title = color_text(TITLE_COLOR, "GPT-Creator :: Project Estimate Summary")
+    print()
+    print(header_box)
+    print(f"│   {title}            │")
+    print(footer_box)
+    print()
+
+    summary_header = color_text(AUX_HEADER_COLOR, "📊 Remaining Work Summary")
+    print(summary_header)
+    print("────────────────────────────────────────────")
+    fmt = fmt_number
+    green = lambda text: color_text("1;32", text)
+    cyan = lambda text: color_text("1;36", text)
+    yellow = lambda text: color_text("1;33", text)
+    white = lambda text: color_text("1;37", text)
+    magenta = lambda text: color_text("1;35", text)
+    red = lambda text: color_text("1;31", text)
+
+    print(f"• Completed tasks (canonical):       {green(fmt(ctx['completed_canonical']))}")
+    print(f"• Completed tasks (effective):       {green(fmt(ctx['completed_effective']))}")
+    print(f"• Completed story points:            {green(fmt(ctx['completed_story_points']))}")
+    if ctx.get("detections_pending"):
+        print(f"• Detections pending apply:          {yellow(fmt(ctx['detections_pending']))}")
+    if ctx.get("detections_applied"):
+        print(f"• Detections applied:                {cyan(fmt(ctx['detections_applied']))}")
+    print(f"• In-progress (canonical):           {cyan(fmt(ctx['in_progress_canonical']))}")
+    print(f"• Pending (canonical):               {white(fmt(ctx['pending_canonical']))}")
+    print(f"• Remaining (canonical):             {white(fmt(ctx['remaining_canonical']))}")
+    print(f"• Remaining tasks (effective):       {white(fmt(ctx['remaining_effective']))}")
+    print(f"• Total tasks:                       {white(fmt(ctx['total_tasks']))}")
+    print(f"• Remaining story points:            {red(fmt(ctx['remaining_story_points']))}")
+    print(f"• Estimated completion:              ⏱️  {magenta(ctx['estimate_display'])}")
+    print()
+
+    throughput_header = color_text(AUX_HEADER_COLOR, "⚙️ Throughput")
+    print(throughput_header)
+    print("────────────────────────────────────────────")
+    rate_display = fmt_float(ctx["effective_rate"])
+    if ctx["using_recent_velocity"]:
+        basis_text = cyan(f"Last {ctx['recent_sample_count']} task(s)")
+        rate_text = green(f"{rate_display} SP/h")
+        print(f"• Basis: {basis_text}")
+        print(f"• Effective throughput: {rate_text} (recent window)")
+    else:
+        basis = "run" if ctx["rate_samples"] == 1 else "runs"
+        basis_text = cyan(f"Measured from {ctx['rate_samples']} {basis}")
+        rate_text = green(f"{rate_display} SP/h")
+        print(f"• Basis: {basis_text}")
+        print(f"• Effective throughput (EWMA): {rate_text}")
+
+    window_total = ctx.get("recent_window_total", 0)
+    if window_total:
+        project_count = ctx.get("recent_sample_count", 0)
+        out_of_scope = ctx.get("window_out_of_scope", 0)
+        print(f"• Window: {white(f'{window_total} tasks')} (project {project_count} | out-of-scope {out_of_scope})")
+
+    if ctx.get("eta_stalled_reason"):
+        status_line = red(f"⛔  Stalled ({ctx['eta_stalled_reason']})")
+    elif ctx.get("eta_warning_reason"):
+        status_line = yellow(f"⚠️  Warning ({ctx['eta_warning_reason']})")
+    else:
+        status_line = green("OK")
+    print(f"• Run status: {status_line}")
+
+    contamination_ratio = ctx.get("contamination_ratio", 0.0) * 100
+    if contamination_ratio > 0:
+        print(f"• Window contamination: {yellow(f'{contamination_ratio:.0f}%')}")
+    blocked_ratio = ctx.get("blocked_ratio", 0.0) * 100
+    if blocked_ratio > 0:
+        suffix = f" ({ctx['blocked_dominant']})" if ctx.get("blocked_dominant") else ""
+        print(f"• Blocked signal: {yellow(f'{blocked_ratio:.0f}% of recent runs{suffix}')}")
+    print()
+
+    tokens_header = color_text(AUX_HEADER_COLOR, "🔢 Token Telemetry")
+    print(tokens_header)
+    print("────────────────────────────────────────────")
+    if ctx.get("tokens_total") and ctx.get("token_samples"):
+        print(f"• Observed tokens:            {cyan(fmt_tokens(ctx['tokens_total']))} across {ctx['token_samples']} task(s)")
+        if ctx.get("avg_tokens_per_point"):
+            avg_tokens_display = f"{fmt_number(ctx['avg_tokens_per_point'])} tokens/SP"
+            print(f"• Avg tokens / SP:            {white(avg_tokens_display)}")
+        if ctx.get("estimated_tokens_hour"):
+            burn = fmt_tokens(ctx["estimated_tokens_hour"])
+            rate_str = fmt_float(ctx["effective_rate"])
+            print(
+                f"• Est. token burn:            {red(burn)} tokens/h @{green(rate_str + ' SP/h')}"
+            )
+        if ctx.get("projected_remaining_tokens"):
+            print(
+                f"• Projected remaining tokens: {magenta(fmt_tokens(ctx['projected_remaining_tokens']))} for {fmt(ctx['remaining_story_points'])} SP"
+            )
+    else:
+        print("• Status: Token usage data unavailable; run work-on-tasks to capture token telemetry.")
+    print()
 def parse_recent_tasks_arg(raw: str) -> Optional[int]:
     text = str(raw or "").strip().lower()
     if text in {"", "default"}:
@@ -1107,12 +1294,25 @@ def main(argv: Optional[list[str]] = None) -> None:
         default=None,
         help="Override the throughput warning threshold in story points per hour.",
     )
+    parser.add_argument(
+        "--color",
+        action="store_true",
+        help="Force colorized output even when stdout is not a TTY.",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable colorized output.",
+    )
     args = parser.parse_args(argv)
 
     db_path = Path(args.db_path)
     if not db_path.exists():
         raise SystemExit(f"Tasks database not found: {db_path}")
     recent_limit = parse_recent_tasks_arg(args.recent_tasks)
+    if args.color and args.no_color:
+        raise SystemExit("--color and --no-color cannot be used together.")
+    color_enabled = args.color or (not args.no_color and sys.stdout.isatty())
     project_root = infer_project_root(db_path)
     cache_dir_path = estimate_cache_dir(project_root)
     if args.reindex:
@@ -1126,7 +1326,10 @@ def main(argv: Optional[list[str]] = None) -> None:
         db_mtime = 0.0
     runs_mtime = compute_runs_mtime(project_root)
     use_cache = not args.no_cache and not args.apply_detections
-    cache_file = cache_dir_path / f"{cache_key_for(db_path, recent_label, args.scope, args.warn_threshold)}.json"
+    color_variant = "color" if color_enabled else "plain"
+    cache_file = cache_dir_path / (
+        f"{cache_key_for(db_path, recent_label, args.scope, args.warn_threshold, color_variant)}.json"
+    )
 
     if use_cache:
         cached_output = load_cached_output(cache_file, db_mtime=db_mtime, runs_mtime=runs_mtime)
@@ -1143,6 +1346,7 @@ def main(argv: Optional[list[str]] = None) -> None:
             warn_threshold=args.warn_threshold,
             apply_detections=args.apply_detections,
             project_root_override=project_root,
+            colorize_output=color_enabled,
         )
     output_text = buffer.getvalue()
     sys.stdout.write(output_text)

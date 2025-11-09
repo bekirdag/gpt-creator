@@ -1,3 +1,4 @@
+import os
 import re
 import sqlite3
 import subprocess
@@ -69,6 +70,40 @@ PROJECT_ROOT = infer_project_root(db_path)
 STATUS_OVERRIDE_DIR = PROJECT_ROOT / ".gpt-creator" / "logs" / "status-overrides"
 _RECENT_SUBJECTS = None
 
+COLOR_MODE = os.environ.get("GC_COLOR_OUTPUT", "auto").strip().lower()
+COLOR_ENABLED = COLOR_MODE == "always" or (COLOR_MODE not in {"never", "always"} and sys.stdout.isatty())
+ANSI_RESET = "\033[0m"
+PRIMARY_HEADER_COLOR = "1;38;5;214"
+TITLE_COLOR = "1;38;5;39"
+SECTION_COLOR = "1;38;5;111"
+
+
+def color_text(style: str, text: str) -> str:
+    if not COLOR_ENABLED:
+        return text
+    return f"\033[{style}m{text}{ANSI_RESET}"
+
+
+def gradient_color(pct: float) -> int:
+    pct = max(0.0, min(100.0, pct))
+    if pct <= 50.0:
+        return int(196 + (pct / 50.0) * (220 - 196))
+    return int(220 - ((pct - 50.0) / 50.0) * (220 - 46))
+
+
+def gradient_bar(pct: float, width: int = 28) -> str:
+    pct = max(0.0, min(100.0, pct))
+    filled = int(round((pct / 100.0) * width))
+    filled = max(0, min(width, filled))
+    empty = width - filled
+    color_code = gradient_color(pct)
+    bar = "█" * filled
+    if COLOR_ENABLED and bar:
+        bar = color_text(f"38;5;{color_code}", bar)
+    return f"[{bar}{'─' * empty}] {color_text(f'38;5;{color_code}', f'{pct:5.1f}%')}"
+
+
+
 
 def _load_status_overrides() -> set[str]:
     tasks: set[str] = set()
@@ -133,6 +168,25 @@ DONE_PREFIXES = (
 def normalise_status(value: str) -> str:
     text = (value or "").strip().lower()
     return text.replace("_", "-")
+
+
+def status_color(value: str) -> str:
+    status_norm = normalise_status(value)
+    if status_norm.startswith("complete"):
+        return "1;32"
+    if status_norm.startswith("in-progress"):
+        return "1;33"
+    if status_norm.startswith("pending"):
+        return "1;37"
+    return "1;36"
+
+
+def progress_color(pct: float) -> str:
+    if pct >= 70.0:
+        return "1;32"
+    if pct >= 30.0:
+        return "1;33"
+    return "1;31"
 
 
 def status_is_completed(value: str) -> bool:
@@ -483,6 +537,9 @@ def print_epics_table():
     if not entries:
         print("No epics found in the backlog.")
         return
+    if COLOR_ENABLED:
+        render_epics_color(entries)
+        return
     headers = ["Epic ID", "Slug", "Title", "Stories", "Tasks", "Progress"]
     rows = []
     for entry in entries:
@@ -527,10 +584,89 @@ def print_epics_table():
         ])
     print_table(headers, rows)
 
+
+def describe_story_counts(counts: dict) -> str:
+    stories_desc = f"{counts['stories']}"
+    story_bits = []
+    if counts.get("stories_complete"):
+        story_bits.append(f"{counts['stories_complete']} complete")
+    if counts.get("stories_in_progress"):
+        story_bits.append(f"{counts['stories_in_progress']} in-progress")
+    if counts.get("stories_pending"):
+        story_bits.append(f"{counts['stories_pending']} pending")
+    if story_bits:
+        stories_desc += f" ({', '.join(story_bits)})"
+    return stories_desc
+
+
+def describe_task_counts(counts: dict) -> str:
+    tasks_desc = f"{counts['tasks']}"
+    task_bits = []
+    if counts.get("tasks_complete"):
+        task_bits.append(f"{counts['tasks_complete']}✓")
+    if counts.get("tasks_in_progress"):
+        task_bits.append(f"{counts['tasks_in_progress']} in-progress")
+    if counts.get("tasks_pending"):
+        task_bits.append(f"{counts['tasks_pending']} pending")
+    if task_bits:
+        tasks_desc += f" ({', '.join(task_bits)})"
+    return tasks_desc
+
+
+def render_epics_color(epic_entries):
+    project_label = PROJECT_ROOT.expanduser()
+    header_box = color_text(PRIMARY_HEADER_COLOR, "╭──────────────────────────────────────────────────────────────╮")
+    footer_box = color_text(PRIMARY_HEADER_COLOR, "╰──────────────────────────────────────────────────────────────╯")
+    title = color_text(TITLE_COLOR, f"GPT-Creator :: Backlog Summary ({project_label})")
+    print(header_box)
+    print(f"│  {title:<60}│")
+    print(footer_box)
+    print()
+    print(color_text(SECTION_COLOR, "📋 Epic Progress Overview"))
+    print("──────────────────────────────────────────────────────────────")
+    header_style = "1;90"
+    print(color_text(header_style, f"{'EPIC':<8} {'TITLE':<40} {'STORIES':<20} {'TASKS':<24} {'PROGRESS':<9}"))
+    print(color_text(header_style, f"{'──────':<8} {'────────────────────────────────────────':<40} {'────────':<20} {'────────────────────────':<24} {'────────':<9}"))
+    high = medium = low = 0
+    for entry in epic_entries:
+        counts = entry.get("counts") or empty_counts()
+        epic = entry.get("epic") or {}
+        epic_id = (epic.get("epic_id") or epic.get("epic_key") or "-").strip() or "-"
+        slug = (epic.get("slug") or "-").strip() or "-"
+        title_value = entry.get("label") or epic.get("title") or "Epic"
+        stories_desc = describe_story_counts(counts)
+        tasks_desc = describe_task_counts(counts)
+        total_tasks = counts.get("tasks") or 0
+        progress_pct = (counts.get("tasks_complete", 0) / total_tasks * 100.0) if total_tasks else 0.0
+        if progress_pct >= 70.0:
+            high += 1
+        elif progress_pct >= 30.0:
+            medium += 1
+        elif progress_pct > 0:
+            low += 1
+        else:
+            low += 1
+        progress_str = color_text(progress_color(progress_pct), f"{progress_pct:5.1f}%")
+        slug_display = color_text("1;36", slug if slug != "-" else epic_id)
+        print(
+            f"{slug_display:<8} {title_value:<40} {stories_desc:<20} {tasks_desc:<24} {progress_str:<9}"
+        )
+    if epic_entries:
+        print()
+        print(color_text(SECTION_COLOR, "📈 Overall Trend"))
+        print("──────────────────────────────────────────────")
+        print(f"• {color_text('1;32', str(high))} epics at ≥70% completion")
+        print(f"• {color_text('1;33', str(medium))} epics between 30-69%")
+        pending = max(len(epic_entries) - high - medium, 0)
+        print(f"• {color_text('1;31', str(pending))} epics below 30% or pending")
+    print()
 def print_story_children(entry, identifier):
     stories_for_epic = entry.get("stories") or []
     if not stories_for_epic:
         print(f"No stories found for epic '{identifier}'.")
+        return
+    if COLOR_ENABLED:
+        render_story_children_color(entry, stories_for_epic, identifier)
         return
     headers = ["Story Slug", "Title", "Status", "Epic", "Tasks", "Progress"]
     rows = []
@@ -554,6 +690,36 @@ def print_story_children(entry, identifier):
         ])
     print_table(headers, rows)
 
+
+def render_story_children_color(epic_entry, stories_for_epic, identifier):
+    header_box = color_text(PRIMARY_HEADER_COLOR, "╭──────────────────────────────────────────────────────────────╮")
+    footer_box = color_text(PRIMARY_HEADER_COLOR, "╰──────────────────────────────────────────────────────────────╯")
+    title = color_text(TITLE_COLOR, f"Stories for Epic: {identifier}")
+    print(header_box)
+    print(f"│  {title:<60}│")
+    print(footer_box)
+    print(color_text(SECTION_COLOR, "📘 Story Breakdown"))
+    print("──────────────────────────────────────────────────────────────")
+    header_style = "1;90"
+    print(color_text(header_style, f"{'Story Slug':<14} {'Title':<60} {'Status':<13} {'Epic':<8} {'Tasks':<30} {'Progress':<8}"))
+    print(color_text(header_style, f"{'────────────':<14} {'──────────────────────────────────────────────':<60} {'───────────':<13} {'──────':<8} {'──────────────────────────────':<30} {'────────':<8}"))
+    for story in sorted(stories_for_epic, key=lambda s: (s.get("sequence") or 0, (s.get("story_title") or "").lower())):
+        slug = (story.get("story_slug") or story.get("story_id") or "-").strip()
+        title_value = (story.get("story_title") or "Story").strip()
+        epic_title = (story.get("epic_title") or epic_entry.get("label") or identifier).strip()
+        counts = task_counts.get(story.get("story_slug"), {})
+        total = counts.get("total", story.get("total_tasks") or 0) or 0
+        complete = counts.get("completed", story.get("completed_tasks") or 0) or 0
+        in_progress = counts.get("in_progress", 0) or 0
+        pending = max(total - complete - in_progress, 0)
+        status, progress, tasks_desc = compute_story_metrics(total, complete, in_progress, pending, story.get("status"))
+        status_colored = color_text(status_color(status), status)
+        tasks_text = tasks_desc
+        progress_colored = color_text(progress_color(progress), f"{progress:5.1f}%")
+        print(
+            f"{color_text('1;37', slug):<14} {title_value:<60} {status_colored:<13} {epic_title:<8} {tasks_text:<30} {progress_colored:<8}"
+        )
+    print()
 def truncate(text, width=60):
     text = (text or "").strip()
     if not text:
@@ -567,6 +733,9 @@ def print_task_children(story):
     tasks = fetch_tasks_for_story(slug)
     if not tasks:
         print(f"No tasks found for story '{slug or story.get('story_id') or story.get('story_title')}'.")
+        return
+    if COLOR_ENABLED:
+        render_task_children_color(story, tasks)
         return
     headers = ["#", "Order", "Task ID", "Title", "Status", "Story Points"]
     rows = []
@@ -594,6 +763,57 @@ def print_task_children(story):
         rows.append([index, order_display, task_id, title, status, story_points])
     print_table(headers, rows)
 
+
+def render_task_children_color(story, tasks):
+    identifier = story.get("story_slug") or story.get("story_id") or story.get("story_title") or "Story"
+    header_box = color_text(PRIMARY_HEADER_COLOR, "╭──────────────────────────────────────────────────────────────╮")
+    footer_box = color_text(PRIMARY_HEADER_COLOR, "╰──────────────────────────────────────────────────────────────╯")
+    title = color_text(TITLE_COLOR, f"Tasks for Story: {identifier}")
+    print(header_box)
+    print(f"│  {title:<60}│")
+    print(footer_box)
+    print(color_text(SECTION_COLOR, "🧩 Task Breakdown"))
+    print("──────────────────────────────────────────────────────────────")
+    header_style = "1;90"
+    print(color_text(header_style, f"{'#':<4} {'Order':<6} {'Task ID':<12} {'Title':<65} {'Status':<10} {'SP':<4}"))
+    print(color_text(header_style, f"{'─':<4} {'─────':<6} {'────────────':<12} {'───────────────────────────────────────────────────────────────':<65} {'───────':<10} {'────':<4}"))
+    for task in tasks:
+        position = task.get("position")
+        index = str((position if position is not None else 0) + 1)
+        order_source = task.get("story_display_order")
+        if order_source is None:
+            order_source = task.get("global_order")
+        try:
+            order_int = int(order_source)
+        except (TypeError, ValueError):
+            order_int = 0
+        order_display = str(order_int) if order_int > 0 else "-"
+        task_id = (task.get("task_id") or "-").strip()
+        title_value = truncate(task.get("title"), width=65)
+        status_value = (task.get("status") or "pending").strip().lower().replace("_", "-")
+        sp_value = str(task.get("story_points") or "-")
+        status_colored = color_text(status_color(status_value), status_value)
+        print(
+            f"{color_text('1;36', index):<4} {order_display:<6} {task_id:<12} {title_value:<65} {status_colored:<10} {sp_value:<4}"
+        )
+    if TASK_TOTALS:
+        print()
+        print(color_text(SECTION_COLOR, "📊 Backlog Totals"))
+        print("──────────────────────────────────────────────")
+        totals = TASK_TOTALS
+        print(
+            "• Completed: "
+            f"{color_text('1;32', str(totals.get('canonical_completed', 0)))}"
+            " | In-progress: "
+            f"{color_text('1;33', str(totals.get('canonical_in_progress', 0)))}"
+            " | Pending: "
+            f"{color_text('1;37', str(totals.get('canonical_pending', 0)))}"
+            " | Remaining: "
+            f"{color_text('1;37', str(totals.get('canonical_in_progress', 0) + totals.get('canonical_pending', 0)))}"
+            " | Total: "
+            f"{color_text('1;36', str(totals.get('total', 0)))}"
+        )
+        print()
 def compute_story_metrics(total, complete, in_progress, pending, status_field):
     status_field = normalise_status(status_field or "pending")
     if total > 0:
@@ -786,6 +1006,9 @@ def print_global_order_queue(limit: int) -> None:
     print_table(headers, table_rows)
 
 def print_progress():
+    if COLOR_ENABLED:
+        render_progress_color()
+        return
     totals = TASK_TOTALS or {}
     total = totals.get("total", 0)
     canonical_completed = totals.get("canonical_completed", 0)
@@ -811,6 +1034,41 @@ def print_progress():
     print(f"[{bar}]")
 
 
+def render_progress_color():
+    totals = TASK_TOTALS or {}
+    total = totals.get("total", 0)
+    canonical_completed = totals.get("canonical_completed", 0)
+    effective_completed = totals.get("effective_completed", canonical_completed)
+    effective_in_progress = totals.get("effective_in_progress", 0)
+    effective_pending = totals.get("effective_pending", 0)
+    detection_pending = totals.get("detections_pending", 0)
+    canonical_remaining = totals.get("canonical_in_progress", 0) + totals.get("canonical_pending", 0)
+    percent = (effective_completed / total * 100) if total else 0.0
+    header_box = color_text(PRIMARY_HEADER_COLOR, "╭──────────────────────────────────────────────────────────────╮")
+    footer_box = color_text(PRIMARY_HEADER_COLOR, "╰──────────────────────────────────────────────────────────────╯")
+    title = color_text(TITLE_COLOR, f"Overall Backlog Progress ({PROJECT_ROOT})")
+    print(header_box)
+    print(f"│  {title:<60}│")
+    print(footer_box)
+    print(color_text(SECTION_COLOR, "📊 Backlog Summary"))
+    print("──────────────────────────────────────────────────────────────")
+    print(f"• Completed tasks (canonical):   {color_text('1;32', f'{canonical_completed:,}')}")
+    print(
+        f"• Completed tasks (effective):   {color_text('1;32', f'{effective_completed:,}')} "
+        f"({color_text('1;32', f'{percent:0.1f}%')})"
+    )
+    if detection_pending:
+        print(f"• Detections pending apply:     {color_text('1;33', f'{detection_pending:,}')}")
+    print(f"• In-progress (effective):       {color_text('1;33', f'{effective_in_progress:,}')}")
+    print(f"• Pending (effective):           {color_text('1;37', f'{effective_pending:,}')}")
+    print(f"• Remaining (canonical):         {color_text('1;37', f'{canonical_remaining:,}')}")
+    print(f"• Total tasks:                   {color_text('1;36', f'{total:,}')}")
+    print()
+    print(color_text(SECTION_COLOR, "📈 Visual Progress"))
+    print("──────────────────────────────────────────────────────────────")
+    print(f"{gradient_bar(percent, 30)}  {color_text('1;32', 'Complete')}")
+    print()
+
 def print_totals_summary():
     totals = TASK_TOTALS or {}
     total = totals.get("total", 0)
@@ -818,12 +1076,21 @@ def print_totals_summary():
     canonical_in_progress = totals.get("canonical_in_progress", 0)
     canonical_pending = totals.get("canonical_pending", 0)
     canonical_remaining = canonical_in_progress + canonical_pending
-    print("Backlog totals (canonical)")
-    print(f"Completed: {canonical_completed:,}")
-    print(f"In-progress: {canonical_in_progress:,}")
-    print(f"Pending: {canonical_pending:,}")
-    print(f"Remaining: {canonical_remaining:,}")
-    print(f"Total tasks: {total:,}")
+    if COLOR_ENABLED:
+        print(color_text(SECTION_COLOR, "📊 Backlog totals (canonical)"))
+        print("──────────────────────────────────────────────")
+        print(f"Completed: {color_text('1;32', f'{canonical_completed:,}')}")
+        print(f"In-progress: {color_text('1;33', f'{canonical_in_progress:,}')}")
+        print(f"Pending: {color_text('1;37', f'{canonical_pending:,}')}")
+        print(f"Remaining: {color_text('1;37', f'{canonical_remaining:,}')}")
+        print(f"Total tasks: {color_text('1;36', f'{total:,}')}")
+    else:
+        print("Backlog totals (canonical)")
+        print(f"Completed: {canonical_completed:,}")
+        print(f"In-progress: {canonical_in_progress:,}")
+        print(f"Pending: {canonical_pending:,}")
+        print(f"Remaining: {canonical_remaining:,}")
+        print(f"Total tasks: {total:,}")
 
 try:
     printed = False

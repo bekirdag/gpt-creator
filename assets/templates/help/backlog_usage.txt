@@ -4,6 +4,7 @@ Usage: gpt-creator backlog [--project PATH|--root PATH]
                            [--progress]
                            [--task-details ID]
                            [--dag-limit N]
+                           [--color|--no-color]
 
 Inspect the backlog stored in .gpt-creator/staging/plan/tasks/tasks.db without an interactive prompt.
 
@@ -12,5 +13,7 @@ Inspect the backlog stored in .gpt-creator/staging/plan/tasks/tasks.db without a
   --progress               Print an overall progress bar summarising task completion.
   --task-details ID        Show a detailed view for the matching task ID (case-insensitive).
   --dag-limit N            Show the next N tasks ordered by DAG priority (defaults to 20 when omitted).
+  --color                  Force colorized terminal output (default: auto when stdout is a TTY).
+  --no-color               Disable colorized output entirely.
 
 Pass any combination of the flags above; each requested view is printed sequentially.

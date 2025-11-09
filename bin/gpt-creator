@@ -6405,7 +6405,7 @@ cmd_create_tasks() {
 }
 
 cmd_backlog() {
-  local root="" type_arg="" item_children="" show_progress=0 task_details="" dag_limit=""
+  local root="" type_arg="" item_children="" show_progress=0 task_details="" dag_limit="" color_flag=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project|--root)
@@ -6432,6 +6432,20 @@ cmd_backlog() {
         dag_limit="$2"
         shift 2
         ;;
+      --color)
+        if [[ "$color_flag" == "never" ]]; then
+          die "--color and --no-color are mutually exclusive"
+        fi
+        color_flag="always"
+        shift
+        ;;
+      --no-color)
+        if [[ "$color_flag" == "always" ]]; then
+          die "--color and --no-color are mutually exclusive"
+        fi
+        color_flag="never"
+        shift
+        ;;
       -h|--help)
         gc_render_template "help/backlog_usage.txt"
         return 0
@@ -6454,7 +6468,11 @@ cmd_backlog() {
 
   local backlog_helper
   backlog_helper="$(gc_clone_python_tool "fetch_stories.py" "${PROJECT_ROOT:-$PWD}")" || die "Failed to prepare backlog helper script"
-  python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
+  if [[ -n "$color_flag" ]]; then
+    GC_COLOR_OUTPUT="$color_flag" python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
+  else
+    python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
+  fi
 }
 
 cmd_order_tasks() {
@@ -11306,7 +11324,7 @@ cmd_binder() {
 
 cmd_estimate() {
   local root="" recent_tasks="" scope="project" warn_threshold=""
-  local apply_detections=0 no_cache=0 reindex=0
+  local apply_detections=0 no_cache=0 reindex=0 color_flag=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project)
@@ -11339,6 +11357,20 @@ cmd_estimate() {
       --warn-threshold)
         warn_threshold="$2"
         shift 2
+        ;;
+      --color)
+        if [[ "$color_flag" == "never" ]]; then
+          die "--color and --no-color are mutually exclusive"
+        fi
+        color_flag="always"
+        shift
+        ;;
+      --no-color)
+        if [[ "$color_flag" == "always" ]]; then
+          die "--color and --no-color are mutually exclusive"
+        fi
+        color_flag="never"
+        shift
         ;;
       -h|--help)
         gc_render_template "help/estimate_usage.txt"
@@ -11376,6 +11408,11 @@ cmd_estimate() {
   fi
   if [[ -n "$warn_threshold" ]]; then
     helper_args+=(--warn-threshold "$warn_threshold")
+  fi
+  if [[ "$color_flag" == "always" ]]; then
+    helper_args+=(--color)
+  elif [[ "$color_flag" == "never" ]]; then
+    helper_args+=(--no-color)
   fi
   python3 "${helper_args[@]}"
 }

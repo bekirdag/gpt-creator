@@ -12060,17 +12060,21 @@ if ((${#GC_ORIGINAL_ARGS[@]})); then
   GC_INVOCATION="${GC_INVOCATION% }"
 fi
 
-# shellcheck disable=SC1091
-. "$(dirname "$0")/../scripts/workspace_guard.sh" "$@"
+WORKSPACE_GUARD_PATH="${CLI_ROOT}/scripts/workspace_guard.sh"
+DOC_CATALOG_GUARD_PATH="${CLI_ROOT}/scripts/doc_catalog_guard.sh"
+DEP_GUARD_PATH="${CLI_ROOT}/scripts/dep_guard.sh"
 
 # shellcheck disable=SC1091
-. "$(dirname "$0")/../scripts/doc_catalog_guard.sh" "$@"
+. "$WORKSPACE_GUARD_PATH" "$@"
 
 # shellcheck disable=SC1091
-. "$(dirname "$0")/../scripts/dep_guard.sh" "$@"
+. "$DOC_CATALOG_GUARD_PATH" "$@"
+
+# shellcheck disable=SC1091
+. "$DEP_GUARD_PATH" "$@"
 
 if [[ -z "${GC_RUNTIME_DIR:-}" ]]; then
-  GC_RUNTIME_DIR="$(cd "$(dirname "$0")/../runtime" && pwd)"
+  GC_RUNTIME_DIR="${CLI_ROOT}/runtime"
 fi
 export GC_RUNTIME_DIR
 

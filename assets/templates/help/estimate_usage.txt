@@ -1,6 +1,17 @@
-Usage: gpt-creator estimate [--project PATH] [--recent-tasks COUNT|all]
+Usage: gpt-creator estimate [--project PATH]
+                            [--recent-tasks COUNT|all]
+                            [--scope project|all]
+                            [--apply-detections]
+                            [--no-cache]
+                            [--reindex]
+                            [--warn-threshold SPH]
 
 Estimate how long it will take to finish the remaining tasks based on story points (default 15 SP/hour; refined by work-on-tasks throughput).
 
 Options:
   --recent-tasks COUNT|all  Use COUNT recent tasks when computing throughput (default: 10). Pass `all` to use the full history.
+  --scope project|all       Limit throughput samples to the current project (default) or include all recorded samples.
+  --apply-detections        Apply detected run-log completions back to the canonical backlog before reporting.
+  --no-cache                Bypass the estimate cache and recompute all metrics immediately.
+  --reindex                 Purge any cached estimate data before computing the report.
+  --warn-threshold SPH      Override the throughput warning threshold in story points per hour (defaults to the config value).

@@ -4,9 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
+import io
+import json
 import math
 import re
+import shutil
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -31,6 +37,79 @@ IN_PROGRESS_PREFIXES = (
 DEFAULT_CONTAMINATION_THRESHOLD = 0.2
 RECENT_SAMPLE_LIMIT = 10
 STATUS_TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def estimate_cache_dir(project_root: Path) -> Path:
+    return project_root / ".gpt-creator" / "cache" / "estimate"
+
+
+def purge_estimate_cache(cache_path: Path) -> None:
+    try:
+        if cache_path.exists():
+            shutil.rmtree(cache_path)
+    except OSError:
+        pass
+
+
+def cache_key_for(db_path: Path, recent_label: str, scope: str, warn_floor: float | None) -> str:
+    payload = f"{db_path.resolve()}|{recent_label}|{scope}|{warn_floor or 'auto'}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def compute_runs_mtime(project_root: Path) -> float:
+    runs_dir = project_root / ".gpt-creator" / "staging" / "plan" / "work" / "runs"
+    latest = 0.0
+    try:
+        entries = list(runs_dir.iterdir())
+    except OSError:
+        entries = []
+    for entry in entries:
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if mtime > latest:
+            latest = mtime
+    return latest
+
+
+def load_cached_output(cache_file: Path, *, db_mtime: float, runs_mtime: float, version: int = 1) -> Optional[str]:
+    try:
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if data.get("version") != version:
+        return None
+    if abs(float(data.get("db_mtime", 0.0)) - db_mtime) > 1e-6:
+        return None
+    if abs(float(data.get("runs_mtime", 0.0)) - runs_mtime) > 1e-6:
+        return None
+    return str(data.get("output") or "")
+
+
+def save_cached_output(
+    cache_file: Path,
+    *,
+    output: str,
+    db_mtime: float,
+    runs_mtime: float,
+    version: int = 1,
+) -> None:
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(
+            json.dumps(
+                {
+                    "version": version,
+                    "db_mtime": db_mtime,
+                    "runs_mtime": runs_mtime,
+                    "output": output,
+                }
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 def resolve_sample_limit(limit: Optional[int]) -> Optional[int]:
@@ -251,19 +330,29 @@ def column_exists(cursor: sqlite3.Cursor, table: str, column: str) -> bool:
 
 
 def fetch_recent_productive_samples(
-    cursor: sqlite3.Cursor, limit: Optional[int] = RECENT_SAMPLE_LIMIT
-) -> list[sqlite3.Row]:
+    cursor: sqlite3.Cursor,
+    limit: Optional[int] = RECENT_SAMPLE_LIMIT,
+    *,
+    scope: str = "project",
+    project_root: Optional[Path] = None,
+) -> tuple[list[sqlite3.Row], list[sqlite3.Row]]:
     if not table_exists(cursor, "metric_samples"):
-        return []
+        return [], []
     resolved_limit = resolve_sample_limit(limit)
-    sql = """
-        SELECT task_key,
-               story_slug,
-               task_position,
-               sp_delivered,
-               duration_seconds,
-               tokens_total,
-               occurred_at
+    include_project_root = column_exists(cursor, "metric_samples", "project_root")
+    select_fields = [
+        "task_key",
+        "story_slug",
+        "task_position",
+        "sp_delivered",
+        "duration_seconds",
+        "tokens_total",
+        "occurred_at",
+    ]
+    if include_project_root:
+        select_fields.append("project_root")
+    sql = f"""
+        SELECT {', '.join(select_fields)}
           FROM metric_samples
          WHERE sp_delivered IS NOT NULL
            AND sp_delivered > 0
@@ -275,11 +364,26 @@ def fetch_recent_productive_samples(
         else:
             rows = cursor.execute(f"{sql} LIMIT ?", (int(resolved_limit),)).fetchall()
     except sqlite3.DatabaseError:
-        return []
-    return list(rows)
+        return [], []
+    all_rows = list(rows)
+    if scope != "project" or project_root is None:
+        return all_rows, all_rows
+    target_root = str(project_root.resolve())
+    scoped_rows: list[sqlite3.Row] = []
+    for row in all_rows:
+        if "project_root" not in row.keys():
+            scoped_rows.append(row)
+            continue
+        row_root = (row["project_root"] or "").strip()
+        if not row_root:
+            scoped_rows.append(row)
+            continue
+        if row_root == target_root:
+            scoped_rows.append(row)
+    return scoped_rows, all_rows
 
 
-def fetch_progress_status_map(cur: sqlite3.Cursor) -> Dict[str, str]:
+def fetch_progress_status_map(cur: sqlite3.Cursor) -> Dict[str, Dict[str, Any]]:
     if not table_exists(cur, "task_progress"):
         return {}
     columns = {
@@ -293,9 +397,15 @@ def fetch_progress_status_map(cur: sqlite3.Cursor) -> Dict[str, str]:
         fields.append("story_slug")
     if "task_position" in columns:
         fields.append("task_position")
+    if "run_stamp" in columns:
+        fields.append("run_stamp")
+    if "occurred_at" in columns:
+        fields.append("occurred_at")
+    if "updated_at" in columns:
+        fields.append("updated_at")
 
     sql = f"SELECT {', '.join(fields)} FROM task_progress ORDER BY id"
-    overrides: Dict[str, str] = {}
+    overrides: Dict[str, Dict[str, Any]] = {}
     try:
         rows = cur.execute(sql).fetchall()
     except sqlite3.DatabaseError:
@@ -310,14 +420,20 @@ def fetch_progress_status_map(cur: sqlite3.Cursor) -> Dict[str, str]:
         status_norm = coerce_status(status_candidate)
         if not status_norm:
             continue
+        metadata = {
+            "status": status_norm,
+            "run_stamp": row["run_stamp"] if "run_stamp" in row.keys() else "",
+            "occurred_at": row["occurred_at"] if "occurred_at" in row.keys() else "",
+            "updated_at": row["updated_at"] if "updated_at" in row.keys() else "",
+        }
         task_id_value = row["task_id"]
         if task_id_value is not None:
-            overrides[str(task_id_value)] = status_norm
+            overrides[str(task_id_value)] = metadata
         if "story_slug" in row.keys() and "task_position" in row.keys():
             slug = row["story_slug"]
             position = row["task_position"]
             if slug and position is not None:
-                overrides[f"{slug}:{int(position)}"] = status_norm
+                overrides[f"{slug}:{int(position)}"] = metadata
     return overrides
 
 
@@ -353,16 +469,45 @@ def fetch_progress_story_points_map(cur: sqlite3.Cursor) -> Dict[str, float]:
 SKIP_PROGRESS_OVERRIDES = {"verified", "noop-accepted"}
 
 
+def apply_detected_statuses(db_path: Path, detections: list[Dict[str, Any]]) -> int:
+    if not detections:
+        return 0
+    try:
+        from update_task_state import update_task_state as _update_task_state
+    except Exception:
+        return 0
+
+    applied = 0
+    for entry in detections:
+        story_slug = entry.get("story_slug")
+        position = entry.get("position")
+        if not story_slug or position is None:
+            continue
+        try:
+            _update_task_state(
+                db_path,
+                str(story_slug),
+                str(position),
+                "complete",
+                entry.get("run_stamp") or "detected",
+                timestamp_override=entry.get("occurred_at") or entry.get("updated_at"),
+            )
+            applied += 1
+        except Exception:
+            continue
+    return applied
+
+
 def determine_effective_status(
     base_status: str,
     task_row: sqlite3.Row,
-    progress_overrides: Dict[str, str],
+    progress_overrides: Dict[str, Dict[str, Any]],
     has_task_progress_state: bool,
     *,
     include_last_apply_status: bool = False,
     include_last_verify_status: bool = False,
-) -> tuple[str, list[str], list[str]]:
-    candidate_keys = []
+) -> tuple[str, list[str], list[str], str, Optional[str]]:
+    candidate_keys: list[str] = []
     if "id" in task_row.keys():
         candidate_keys.append(str(task_row["id"]))
     if "task_id" in task_row.keys():
@@ -375,35 +520,42 @@ def determine_effective_status(
         if slug and position is not None:
             candidate_keys.append(f"{slug}:{int(position)}")
 
-    candidates: list[tuple[str, str]] = []
+    candidates: list[tuple[str, str, Optional[str]]] = []
     for key in candidate_keys:
         override = progress_overrides.get(key)
-        if override:
-            candidates.append((override, "override"))
+        status_value = None
+        if isinstance(override, dict):
+            status_value = override.get("status")
+        elif override:
+            status_value = override
+        if status_value:
+            candidates.append((status_value, "override", key))
 
     progress_value = ""
     if has_task_progress_state and "progress_state" in task_row.keys():
         raw_progress = task_row["progress_state"] or ""
         if raw_progress and str(raw_progress).strip():
             progress_value = raw_progress
-            candidates.append((raw_progress, "progress_state"))
+            candidates.append((raw_progress, "progress_state", None))
 
-    candidates.append((base_status, "base"))
+    candidates.append((base_status, "base", None))
 
     if include_last_apply_status and "last_apply_status" in task_row.keys():
         apply_status = task_row["last_apply_status"]
         if apply_status and str(apply_status).strip():
-            candidates.append((apply_status, "last_apply_status"))
+            candidates.append((apply_status, "last_apply_status", None))
 
     if include_last_verify_status and "last_verify_status" in task_row.keys():
         verify_status = task_row["last_verify_status"]
         if verify_status and str(verify_status).strip():
-            candidates.append((verify_status, "last_verify_status"))
+            candidates.append((verify_status, "last_verify_status", None))
 
     base_normalized = coerce_status(base_status, "pending") or "pending"
     effective_status = base_normalized
+    effective_origin = "base"
+    effective_source_key: Optional[str] = None
 
-    for value, origin in candidates:
+    for value, origin, origin_key in candidates:
         candidate_normalized = coerce_status(value, "")
         if not candidate_normalized:
             continue
@@ -411,11 +563,13 @@ def determine_effective_status(
             if candidate_normalized in SKIP_PROGRESS_OVERRIDES:
                 continue
         effective_status = candidate_normalized
+        effective_origin = origin
+        effective_source_key = origin_key
         break
 
     normalized_candidates: list[str] = []
     seen: set[str] = set()
-    for value, _ in candidates:
+    for value, _, _ in candidates:
         candidate_normalized = coerce_status(value, "")
         if candidate_normalized and candidate_normalized not in seen:
             normalized_candidates.append(candidate_normalized)
@@ -423,7 +577,7 @@ def determine_effective_status(
     if base_normalized not in seen:
         normalized_candidates.append(base_normalized)
 
-    return effective_status, normalized_candidates, candidate_keys
+    return effective_status, normalized_candidates, candidate_keys, effective_origin, effective_source_key
 
 
 def fmt_float(value: float) -> str:
@@ -458,8 +612,19 @@ def print_section(title: str, rows: list[tuple[str, str]]) -> None:
     print()
 
 
-def estimate(db_path: Path, recent_task_limit: Optional[int] = RECENT_SAMPLE_LIMIT) -> int:
-    project_root = infer_project_root(db_path)
+def estimate(
+    db_path: Path,
+    recent_task_limit: Optional[int] = RECENT_SAMPLE_LIMIT,
+    *,
+    scope: str = "project",
+    warn_threshold: Optional[float] = None,
+    apply_detections: bool = False,
+    project_root_override: Optional[Path] = None,
+) -> int:
+    project_root = project_root_override or infer_project_root(db_path)
+    scope_normalized = (scope or "project").strip().lower()
+    if scope_normalized not in {"project", "all"}:
+        scope_normalized = "project"
     eta_cfg = load_eta_config(project_root)
 
     conn = sqlite3.connect(str(db_path))
@@ -477,6 +642,17 @@ def estimate(db_path: Path, recent_task_limit: Optional[int] = RECENT_SAMPLE_LIM
     blocked_dominant = rate_meta.get("blocked_dominant", "")
     blocked_threshold = eta_cfg.get("blocked_threshold", 0.6)
     eta_floor = eta_cfg.get("min_throughput_floor", 2.0)
+    warn_floor = eta_floor
+    if warn_threshold is not None:
+        try:
+            warn_floor = max(0.0, float(warn_threshold))
+        except (TypeError, ValueError):
+            warn_floor = eta_floor
+    meta_stalled = bool(rate_meta.get("stalled"))
+    meta_stall_reason = str(rate_meta.get("stall_reason") or "").strip()
+    meta_frozen = bool(rate_meta.get("frozen"))
+    contamination_ratio = float(rate_meta.get("contamination_ratio", 0.0))
+    contamination_threshold = float(rate_meta.get("contamination_threshold", DEFAULT_CONTAMINATION_THRESHOLD))
     task_columns = {str(info[1] or "").strip().lower() for info in cur.execute("PRAGMA table_info(tasks)")}
     select_fields = ["id", "story_slug", "position", "story_points", "status", "task_id"]
     include_progress_state = "progress_state" in task_columns
@@ -501,21 +677,40 @@ def estimate(db_path: Path, recent_task_limit: Optional[int] = RECENT_SAMPLE_LIM
     progress_story_points = fetch_progress_story_points_map(cur)
     remaining_tasks = 0
     total_tasks_count = 0
-    completed_tasks_count = 0
+    effective_completed_tasks = 0
     total_points = 0.0
     completed_points = 0.0
     completed_tasks_missing_points = 0
     task_info: Dict[str, Dict[str, float | str]] = {}
+    canonical_completed_count = 0
+    canonical_in_progress = 0
+    canonical_pending = 0
+    pending_detection_map: Dict[str, Dict[str, Any]] = {}
 
     for row in rows:
         total_tasks_count += 1
         base_status = row["status"] or ""
+        canonical_status_norm = coerce_status(base_status, "")
+        canonical_done = is_done_status(canonical_status_norm)
+        if canonical_done:
+            canonical_completed_count += 1
+        elif status_is_in_progress(canonical_status_norm):
+            canonical_in_progress += 1
+        else:
+            canonical_pending += 1
+
         points = parse_points(row["story_points"])
         if points <= 0 and include_last_story_points and "last_story_points" in row.keys():
             fallback_last = parse_points(row["last_story_points"])
             if fallback_last > 0:
                 points = fallback_last
-        effective_status, candidate_statuses, candidate_keys = determine_effective_status(
+        (
+            effective_status,
+            candidate_statuses,
+            candidate_keys,
+            effective_origin,
+            effective_source_key,
+        ) = determine_effective_status(
             base_status,
             row,
             progress_overrides,
@@ -556,17 +751,50 @@ def estimate(db_path: Path, recent_task_limit: Optional[int] = RECENT_SAMPLE_LIM
         if task_id_value:
             task_info[task_id_value] = {"points": points, "status": resolved_status}
         if is_done:
-            completed_tasks_count += 1
+            effective_completed_tasks += 1
             completed_points += points
             if points <= 0:
                 completed_tasks_missing_points += 1
+            if not canonical_done and effective_origin == "override":
+                detection_key = task_id_value or (
+                    f"{story_slug}:{position}" if story_slug and position is not None else task_key_primary
+                )
+                if detection_key not in pending_detection_map:
+                    override_candidate = progress_overrides.get(effective_source_key or detection_key)
+                    override_meta = override_candidate if isinstance(override_candidate, dict) else {}
+                    pending_detection_map[detection_key] = {
+                        "task_key": detection_key,
+                        "task_id": task_id_value,
+                        "story_slug": story_slug,
+                        "position": int(position) if position is not None else None,
+                        "run_stamp": override_meta.get("run_stamp"),
+                        "occurred_at": override_meta.get("occurred_at"),
+                        "updated_at": override_meta.get("updated_at"),
+                    }
             continue
         remaining_tasks += 1
         total_points += points
 
+    pending_detections = list(pending_detection_map.values())
+    detection_pending_count = len(pending_detections)
+
     recent_window_descriptor = describe_recent_window(recent_task_limit)
-    recent_samples = fetch_recent_productive_samples(cur, recent_task_limit)
+    scoped_recent_samples, total_recent_samples = fetch_recent_productive_samples(
+        cur,
+        recent_task_limit,
+        scope=scope_normalized,
+        project_root=project_root,
+    )
+    recent_samples = scoped_recent_samples
     recent_sample_count = len(recent_samples)
+    recent_window_total = len(total_recent_samples)
+    window_out_of_scope = max(recent_window_total - recent_sample_count, 0)
+    computed_contamination_ratio = (
+        (window_out_of_scope / recent_window_total) if recent_window_total > 0 else 0.0
+    )
+    if scope_normalized == "project" and recent_window_total > 0:
+        contamination_ratio = computed_contamination_ratio
+
     tokens_total = 0.0
     token_samples = 0
     covered_points = 0.0
@@ -638,13 +866,9 @@ def estimate(db_path: Path, recent_task_limit: Optional[int] = RECENT_SAMPLE_LIM
     if ewma_rate <= 0:
         ewma_rate = rate
 
+    effective_rate = ewma_rate if ewma_rate > 0 else rate
     eta_stalled_reason: Optional[str] = None
     eta_warning_reason: Optional[str] = None
-    meta_stalled = bool(rate_meta.get("stalled"))
-    meta_stall_reason = str(rate_meta.get("stall_reason") or "").strip()
-    meta_frozen = bool(rate_meta.get("frozen"))
-    contamination_ratio = float(rate_meta.get("contamination_ratio", 0.0))
-    contamination_threshold = float(rate_meta.get("contamination_threshold", DEFAULT_CONTAMINATION_THRESHOLD))
 
     if meta_stalled:
         reason = meta_stall_reason or "stalled"
@@ -654,8 +878,8 @@ def estimate(db_path: Path, recent_task_limit: Optional[int] = RECENT_SAMPLE_LIM
             eta_stalled_reason = reason
     elif contamination_ratio >= contamination_threshold and rate_samples > 0:
         eta_stalled_reason = f"contamination {contamination_ratio * 100:.0f}%"
-    elif ewma_rate > 0 and rate_samples > 0 and ewma_rate < eta_floor:
-        eta_warning_reason = f"throughput below floor ({eta_floor:.1f} SP/h)"
+    elif effective_rate > 0 and rate_samples > 0 and effective_rate < warn_floor:
+        eta_warning_reason = f"throughput below floor ({warn_floor:.1f} SP/h)"
     elif blocked_ratio >= blocked_threshold and rate_samples >= stalled_samples:
         reason = f"blocked {blocked_ratio * 100:.0f}% of recent tasks"
         if blocked_dominant:
@@ -667,8 +891,11 @@ def estimate(db_path: Path, recent_task_limit: Optional[int] = RECENT_SAMPLE_LIM
         else:
             eta_stalled_reason = meta_stall_reason
 
-    effective_rate = ewma_rate if ewma_rate > 0 else rate
-    total_minutes = math.ceil((total_points / effective_rate) * 60) if total_points > 0 and eta_stalled_reason is None else 0
+    total_minutes = (
+        math.ceil((total_points / effective_rate) * 60)
+        if total_points > 0 and eta_stalled_reason is None and effective_rate > 0
+        else 0
+    )
     days, rem_minutes = divmod(total_minutes, 1440)
     hours, minutes = divmod(rem_minutes, 60)
 
@@ -681,19 +908,35 @@ def estimate(db_path: Path, recent_task_limit: Optional[int] = RECENT_SAMPLE_LIM
         parts.append(f"{minutes}m")
     estimate_str = " ".join(parts)
 
+    applied_detections = 0
+    if apply_detections and pending_detections:
+        applied_detections = apply_detected_statuses(db_path, pending_detections)
+
+    canonical_remaining = canonical_in_progress + canonical_pending
+
     summary_rows = [
-        ("Completed tasks (detected)", f"{completed_tasks_count:,}"),
+        ("Completed tasks (canonical)", f"{canonical_completed_count:,}"),
+        ("Completed tasks (effective)", f"{effective_completed_tasks:,}"),
         ("Completed story points", fmt_number(completed_points)),
     ]
+    remaining_detections = max(detection_pending_count - applied_detections, 0)
+    if detection_pending_count > 0:
+        summary_rows.append(("Detections pending apply", f"{remaining_detections:,}"))
+    if applied_detections > 0:
+        summary_rows.append(("Detections applied", f"{applied_detections:,}"))
+
     if completed_tasks_missing_points > 0:
         summary_rows.append(
             ("Completed tasks without points", f"{completed_tasks_missing_points:,}")
         )
     summary_rows.extend(
         [
-        ("Remaining tasks", f"{remaining_tasks:,}"),
-        ("Total tasks", f"{total_tasks_count:,}"),
-        ("Remaining story points", fmt_number(total_points)),
+            ("In-progress (canonical)", f"{canonical_in_progress:,}"),
+            ("Pending (canonical)", f"{canonical_pending:,}"),
+            ("Remaining (canonical)", f"{canonical_remaining:,}"),
+            ("Remaining tasks (effective)", f"{remaining_tasks:,}"),
+            ("Total tasks", f"{total_tasks_count:,}"),
+            ("Remaining story points", fmt_number(total_points)),
         ]
     )
     if eta_stalled_reason is not None:
@@ -735,6 +978,13 @@ def estimate(db_path: Path, recent_task_limit: Optional[int] = RECENT_SAMPLE_LIM
         )
         throughput_rows.append(
             ("Effective throughput", f"{fmt_float(effective_rate)} SP/hour")
+        )
+    if recent_window_total > 0:
+        throughput_rows.append(
+            (
+                "Throughput window",
+                f"{recent_window_total} tasks (project {recent_sample_count}, out-of-scope {window_out_of_scope})",
+            )
         )
     if eta_stalled_reason is not None:
         throughput_rows.append(("Run status", f"Stalled ({eta_stalled_reason})"))
@@ -830,13 +1080,77 @@ def main(argv: Optional[list[str]] = None) -> None:
         default=str(RECENT_SAMPLE_LIMIT),
         help="Number of recent tasks to use for throughput metrics (use 'all' for entire history).",
     )
+    parser.add_argument(
+        "--scope",
+        choices=("project", "all"),
+        default="project",
+        help="Limit throughput window to the current project (default) or include all recorded samples.",
+    )
+    parser.add_argument(
+        "--apply-detections",
+        action="store_true",
+        help="Apply detected completions from run logs to the canonical backlog before reporting.",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass the estimate cache and recompute metrics from scratch.",
+    )
+    parser.add_argument(
+        "--reindex",
+        action="store_true",
+        help="Purge cached estimate data before computing the report.",
+    )
+    parser.add_argument(
+        "--warn-threshold",
+        type=float,
+        default=None,
+        help="Override the throughput warning threshold in story points per hour.",
+    )
     args = parser.parse_args(argv)
 
     db_path = Path(args.db_path)
     if not db_path.exists():
         raise SystemExit(f"Tasks database not found: {db_path}")
     recent_limit = parse_recent_tasks_arg(args.recent_tasks)
-    raise SystemExit(estimate(db_path, recent_limit))
+    project_root = infer_project_root(db_path)
+    cache_dir_path = estimate_cache_dir(project_root)
+    if args.reindex:
+        purge_estimate_cache(cache_dir_path)
+
+    recent_label = "all" if recent_limit is None else str(recent_limit)
+    db_mtime = 0.0
+    try:
+        db_mtime = db_path.stat().st_mtime
+    except OSError:
+        db_mtime = 0.0
+    runs_mtime = compute_runs_mtime(project_root)
+    use_cache = not args.no_cache and not args.apply_detections
+    cache_file = cache_dir_path / f"{cache_key_for(db_path, recent_label, args.scope, args.warn_threshold)}.json"
+
+    if use_cache:
+        cached_output = load_cached_output(cache_file, db_mtime=db_mtime, runs_mtime=runs_mtime)
+        if cached_output:
+            sys.stdout.write(cached_output)
+            return
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        exit_code = estimate(
+            db_path,
+            recent_limit,
+            scope=args.scope,
+            warn_threshold=args.warn_threshold,
+            apply_detections=args.apply_detections,
+            project_root_override=project_root,
+        )
+    output_text = buffer.getvalue()
+    sys.stdout.write(output_text)
+
+    if exit_code == 0 and use_cache:
+        save_cached_output(cache_file, output=output_text, db_mtime=db_mtime, runs_mtime=runs_mtime)
+
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

@@ -10,8 +10,49 @@ while len(args) < 6:
     args.append("")
 db_path, type_arg, item_children, progress_flag, task_details, dag_limit = args[:6]
 
+def load_progress_overrides(connection: sqlite3.Connection) -> dict[str, str]:
+    try:
+        connection.execute("SELECT 1 FROM task_progress LIMIT 1")
+    except sqlite3.DatabaseError:
+        return {}
+    mapping: dict[str, str] = {}
+    try:
+        rows = connection.execute(
+            "SELECT task_id, story_slug, task_position, status FROM task_progress ORDER BY id"
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return mapping
+    for row in rows:
+        raw_status = row["status"]
+        status = (raw_status or "").strip().lower().replace("_", "-")
+        if not status:
+            continue
+        task_id = (row["task_id"] or "").strip()
+        if task_id:
+            mapping[task_id] = status
+        slug = (row["story_slug"] or "").strip()
+        position = row["task_position"]
+        if slug and position is not None:
+            mapping[f"{slug}:{int(position)}"] = status
+    return mapping
+
+
+def resolve_status_with_overrides(base_status: str, slug: str, position: int, task_id: str) -> str:
+    status = normalise_status(base_status)
+    for key in (task_id, f"{slug}:{position}"):
+        if not key:
+            continue
+        override = PROGRESS_OVERRIDES.get(key)
+        if override:
+            status = normalise_status(override)
+            break
+    return status or "pending"
+
+
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
+PROGRESS_OVERRIDES: dict[str, str] = {}
+PROGRESS_OVERRIDES = load_progress_overrides(conn)
 
 
 def infer_project_root(db_file: str) -> Path:
@@ -60,6 +101,7 @@ def _recent_commit_subjects() -> list[str]:
 
 
 STATUS_OVERRIDE_TASKS = _load_status_overrides()
+TASK_TOTALS: dict[str, int] = {}
 
 
 def _task_column_exists(column: str) -> bool:
@@ -134,6 +176,7 @@ def status_is_in_progress(value: str) -> bool:
     return False
 
 
+
 def pluralize(value, singular, plural=None):
     try:
         count = int(value or 0)
@@ -156,16 +199,6 @@ def empty_counts():
     }
 
 
-def count_remaining_tasks(cur: sqlite3.Connection) -> int:
-    remaining = 0
-    for row in cur.execute("SELECT status, task_id FROM tasks"):
-        status = row["status"] if isinstance(row, sqlite3.Row) else row[0]
-        task_id = row["task_id"] if isinstance(row, sqlite3.Row) else row[1] if len(row) > 1 else ""
-        status = apply_status_override(task_id, status)
-        if not status_is_completed(status):
-            remaining += 1
-    return remaining
-
 def fetch_stories():
     query = """
         SELECT story_slug, story_id, story_title, epic_key, epic_title,
@@ -185,16 +218,51 @@ def fetch_epics():
 
 def fetch_task_counts():
     counts = {}
-    for row in conn.execute("SELECT story_slug, status, task_id FROM tasks"):
+    totals = {
+        "total": 0,
+        "canonical_completed": 0,
+        "canonical_in_progress": 0,
+        "canonical_pending": 0,
+        "effective_completed": 0,
+        "effective_in_progress": 0,
+        "effective_pending": 0,
+        "detections_pending": 0,
+    }
+    query = "SELECT story_slug, status, task_id, position FROM tasks"
+    for row in conn.execute(query):
         slug = (row["story_slug"] or "").strip()
+        task_id = (row["task_id"] or "").strip()
+        try:
+            position = int(row["position"])
+        except (TypeError, ValueError):
+            position = 0
+        totals["total"] += 1
+        base_status = apply_status_override(task_id, row["status"])
+        canonical_status = normalise_status(base_status)
+        if status_is_completed(canonical_status):
+            totals["canonical_completed"] += 1
+        elif status_is_in_progress(canonical_status):
+            totals["canonical_in_progress"] += 1
+        else:
+            totals["canonical_pending"] += 1
+
+        resolved_status = resolve_status_with_overrides(base_status, slug, position, task_id)
+        if status_is_completed(resolved_status):
+            totals["effective_completed"] += 1
+        elif status_is_in_progress(resolved_status):
+            totals["effective_in_progress"] += 1
+        else:
+            totals["effective_pending"] += 1
+        if status_is_completed(resolved_status) and not status_is_completed(canonical_status):
+            totals["detections_pending"] += 1
+
         entry = counts.setdefault(slug, {"total": 0, "completed": 0, "in_progress": 0})
         entry["total"] += 1
-        status = apply_status_override(row["task_id"], row["status"])
-        if status_is_completed(status):
+        if status_is_completed(resolved_status):
             entry["completed"] += 1
-        elif status_is_in_progress(status):
+        elif status_is_in_progress(resolved_status):
             entry["in_progress"] += 1
-    return counts
+    return counts, totals
 
 def fetch_tasks_for_story(slug):
     story_points_expr = "story_points"
@@ -385,7 +453,7 @@ def print_table(headers, rows):
 
 stories = fetch_stories()
 epics = fetch_epics()
-task_counts = fetch_task_counts()
+task_counts, TASK_TOTALS = fetch_task_counts()
 summary = summarise_epics(stories, task_counts)
 entries = build_epic_entries(epics, stories, summary)
 
@@ -716,26 +784,44 @@ def print_global_order_queue(limit: int) -> None:
     print_table(headers, table_rows)
 
 def print_progress():
-    total = 0
-    complete = 0
-    in_progress = 0
-    for row in conn.execute("SELECT status FROM tasks"):
-        status = row["status"]
-        total += 1
-        if status_is_completed(status):
-            complete += 1
-        elif status_is_in_progress(status):
-            in_progress += 1
-    pending = max(total - complete - in_progress, 0)
-    percent = (complete / total * 100) if total else 0.0
+    totals = TASK_TOTALS or {}
+    total = totals.get("total", 0)
+    canonical_completed = totals.get("canonical_completed", 0)
+    effective_completed = totals.get("effective_completed", canonical_completed)
+    effective_in_progress = totals.get("effective_in_progress", 0)
+    effective_pending = totals.get("effective_pending", 0)
+    detection_pending = totals.get("detections_pending", 0)
+    canonical_remaining = totals.get("canonical_in_progress", 0) + totals.get("canonical_pending", 0)
+    percent = (effective_completed / total * 100) if total else 0.0
     bar_length = 30
     filled_units = int(round((percent / 100) * bar_length))
     filled_units = min(bar_length, max(0, filled_units))
     bar = "#" * filled_units + "-" * (bar_length - filled_units)
     print("Overall backlog progress")
-    print(f"Tasks complete: {complete}/{total} ({percent:0.1f}%)")
-    print(f"In-progress: {in_progress}, Pending: {pending}")
+    print(f"Completed tasks (canonical): {canonical_completed:,}")
+    print(f"Completed tasks (effective): {effective_completed:,} ({percent:0.1f}%)")
+    if detection_pending:
+        print(f"Detections pending apply: {detection_pending:,}")
+    print(f"In-progress (effective): {effective_in_progress:,}")
+    print(f"Pending (effective): {effective_pending:,}")
+    print(f"Remaining (canonical): {canonical_remaining:,}")
+    print(f"Total tasks: {total:,}")
     print(f"[{bar}]")
+
+
+def print_totals_summary():
+    totals = TASK_TOTALS or {}
+    total = totals.get("total", 0)
+    canonical_completed = totals.get("canonical_completed", 0)
+    canonical_in_progress = totals.get("canonical_in_progress", 0)
+    canonical_pending = totals.get("canonical_pending", 0)
+    canonical_remaining = canonical_in_progress + canonical_pending
+    print("Backlog totals (canonical)")
+    print(f"Completed: {canonical_completed:,}")
+    print(f"In-progress: {canonical_in_progress:,}")
+    print(f"Pending: {canonical_pending:,}")
+    print(f"Remaining: {canonical_remaining:,}")
+    print(f"Total tasks: {total:,}")
 
 try:
     printed = False
@@ -777,10 +863,9 @@ try:
         print_global_order_queue(limit_val)
         printed = True
 finally:
-    canonical_remaining = count_remaining_tasks(conn)
     if 'printed' in locals() and printed:
         print()
-    print(f"Remaining tasks (canonical): {canonical_remaining}")
+    print_totals_summary()
     conn.close()
 def print_global_order_queue(limit: int) -> None:
     query = """

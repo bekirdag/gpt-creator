@@ -2,6 +2,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 LOCKABLE_STATUSES = {
     "complete",
@@ -27,10 +28,12 @@ def update_task_state(
     position: str,
     status: str,
     run_stamp: str,
+    *,
+    timestamp_override: Optional[str] = None,
 ) -> None:
     position_int = int(position)
     run_stamp = run_stamp or "manual"
-    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    timestamp = timestamp_override or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -110,8 +113,16 @@ def main() -> int:
     position = sys.argv[3]
     status = sys.argv[4]
     run_stamp = sys.argv[5]
+    timestamp_override = sys.argv[6] if len(sys.argv) > 6 else ""
 
-    update_task_state(db_path, story_slug, position, status, run_stamp)
+    update_task_state(
+        db_path,
+        story_slug,
+        position,
+        status,
+        run_stamp,
+        timestamp_override=timestamp_override or None,
+    )
     return 0
 
 

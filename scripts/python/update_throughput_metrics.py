@@ -261,6 +261,7 @@ def ensure_metric_tables(cur: sqlite3.Cursor) -> None:
           base_branch TEXT,
           merged INTEGER,
           is_parent INTEGER,
+          project_root TEXT,
           created_at REAL NOT NULL DEFAULT (strftime('%s','now')),
           updated_at REAL NOT NULL DEFAULT (strftime('%s','now'))
         )
@@ -277,6 +278,7 @@ def ensure_metric_tables(cur: sqlite3.Cursor) -> None:
         ("base_branch", "TEXT"),
         ("merged", "INTEGER"),
         ("is_parent", "INTEGER"),
+        ("project_root", "TEXT"),
     ):
         ensure_column(cur, "metric_samples", column, definition)
 
@@ -503,6 +505,7 @@ def capture_sample(
     position: str,
     config: Dict[str, Any],
     exclude_patterns: Sequence[str],
+    project_root: Path,
 ) -> bool:
     if not story_slug or not position:
         return False
@@ -599,6 +602,7 @@ def capture_sample(
         base_branch,
         merged_flag,
         is_parent_flag,
+        str(project_root),
     )
 
     if existing:
@@ -624,6 +628,7 @@ def capture_sample(
                    base_branch = ?,
                    merged = ?,
                    is_parent = ?,
+                   project_root = ?,
                    updated_at = ?
              WHERE id = ?
             """,
@@ -652,8 +657,9 @@ def capture_sample(
               migration_epoch,
               base_branch,
               merged,
-              is_parent
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              is_parent,
+              project_root
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (task_key,) + params,
         )
@@ -969,7 +975,7 @@ def main() -> int:
 
     updated = False
     if action == "task-complete":
-        updated = capture_sample(cur, story_slug, position, config, config["exclude_patterns"])
+        updated = capture_sample(cur, story_slug, position, config, config["exclude_patterns"], project_root)
 
     if action in {"task-complete", "checkpoint", "flush"}:
         prune_samples(cur, now_ts, config["retention_seconds"])

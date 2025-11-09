@@ -11305,7 +11305,8 @@ cmd_binder() {
 }
 
 cmd_estimate() {
-  local root="" recent_tasks=""
+  local root="" recent_tasks="" scope="project" warn_threshold=""
+  local apply_detections=0 no_cache=0 reindex=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project)
@@ -11317,6 +11318,26 @@ cmd_estimate() {
           die "--recent-tasks requires a value (positive integer or 'all')"
         fi
         recent_tasks="$2"
+        shift 2
+        ;;
+      --scope)
+        scope="$2"
+        shift 2
+        ;;
+      --apply-detections)
+        apply_detections=1
+        shift
+        ;;
+      --no-cache)
+        no_cache=1
+        shift
+        ;;
+      --reindex)
+        reindex=1
+        shift
+        ;;
+      --warn-threshold)
+        warn_threshold="$2"
         shift 2
         ;;
       -h|--help)
@@ -11337,11 +11358,26 @@ cmd_estimate() {
 
   local helper_path
   helper_path="$(gc_clone_python_tool "estimate_remaining_work.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local -a helper_args=("$helper_path" "$tasks_db")
   if [[ -n "$recent_tasks" ]]; then
-    python3 "$helper_path" "$tasks_db" --recent-tasks "$recent_tasks"
-  else
-    python3 "$helper_path" "$tasks_db"
+    helper_args+=(--recent-tasks "$recent_tasks")
   fi
+  if [[ -n "$scope" ]]; then
+    helper_args+=(--scope "$scope")
+  fi
+  if (( apply_detections )); then
+    helper_args+=(--apply-detections)
+  fi
+  if (( no_cache )); then
+    helper_args+=(--no-cache)
+  fi
+  if (( reindex )); then
+    helper_args+=(--reindex)
+  fi
+  if [[ -n "$warn_threshold" ]]; then
+    helper_args+=(--warn-threshold "$warn_threshold")
+  fi
+  python3 "${helper_args[@]}"
 }
 
 

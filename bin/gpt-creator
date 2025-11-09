@@ -8087,21 +8087,31 @@ cmd_work_on_tasks() {
   local doc_vector_path="${canonical_tasks_dir}/documentation-vector-index.sqlite"
   export GC_DOC_VECTOR_INDEX_PATH="$doc_vector_path"
   export GC_DOCUMENTATION_INDEX_PATH="$doc_vector_path"
+  local doc_mode="${GC_DOCS_MODE:-lazy}"
+  local workspace_stub="${PROJECT_ROOT:-$PWD}/.gpt-creator/docs/catalog.db"
+  local using_stub=0
+  if [[ -n "${GC_DOCUMENTATION_DB_PATH:-}" && "$GC_DOCUMENTATION_DB_PATH" == "$workspace_stub" ]]; then
+    using_stub=1
+  fi
+
   if [[ "${GC_DOCS_ENABLED:-1}" -eq 1 ]]; then
-    if [[ -n "${GC_DOCUMENTATION_DB_PATH:-}" ]]; then
-      if command -v sqlite3 >/dev/null 2>&1; then
-        if ! sqlite3 "$GC_DOCUMENTATION_DB_PATH" 'SELECT count(*) FROM documentation;' >/dev/null 2>&1; then
-          die "Documentation database missing or invalid at ${GC_DOCUMENTATION_DB_PATH}; run 'gpt-creator scan --project \"${PROJECT_ROOT:-$PWD}\"' and retry."
+    if (( using_stub )); then
+      warn "Documentation catalog running in workspace stub mode (${GC_DOCUMENTATION_DB_PATH}); limited doc queries only."
+    else
+      if [[ "${doc_mode,,}" == "strict" ]]; then
+        if ! gc_require_documentation_catalog "$PROJECT_ROOT"; then
+          local catalog_root="${PROJECT_ROOT:-$PWD}"
+          die "Failed to prepare documentation catalog. Run 'gpt-creator scan --project \"${catalog_root}\"' and retry."
         fi
+        gc_bootstrap_docs_registry
       else
-        warn "sqlite3 not available; unable to verify documentation database integrity."
+        if ! gc_require_documentation_catalog "$PROJECT_ROOT"; then
+          warn "Documentation catalog not ready; continuing in lazy mode without strict enforcement."
+        else
+          gc_bootstrap_docs_registry
+        fi
       fi
     fi
-    if ! gc_require_documentation_catalog "$PROJECT_ROOT"; then
-      local catalog_root="${PROJECT_ROOT:-$PWD}"
-      die "Failed to prepare documentation catalog. Run 'gpt-creator scan --project \"${catalog_root}\"' and retry."
-    fi
-    gc_bootstrap_docs_registry
   else
     warn "Documentation catalog disabled (GC_DOCS_MODE=${GC_DOCS_MODE:-off}); skipping documentation checks."
   fi

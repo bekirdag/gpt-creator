@@ -41,6 +41,8 @@ def reset_task_progress(db_path: Path) -> None:
                last_commands_json = NULL,
                last_progress_at = NULL,
                last_progress_run = NULL,
+               last_history_summary_path = NULL,
+               last_history_meta_path = NULL,
                updated_at = ?
         """,
         (timestamp,),

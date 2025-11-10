@@ -405,6 +405,8 @@ def update_after_progress(
     log_path: Optional[str] = None,
     prompt_path: Optional[str] = None,
     output_path: Optional[str] = None,
+    history_summary_path: Optional[str] = None,
+    history_meta_path: Optional[str] = None,
 ) -> None:
     if not task_id:
         return
@@ -442,6 +444,10 @@ def update_after_progress(
         evidence["last_prompt_path"] = prompt_path
     if output_path:
         evidence["last_output_path"] = output_path
+    if history_summary_path:
+        evidence["last_summary_path"] = history_summary_path
+    if history_meta_path:
+        evidence["last_summary_meta_path"] = history_meta_path
 
     binder["last_status"] = status
     binder["last_run_stamp"] = run_stamp

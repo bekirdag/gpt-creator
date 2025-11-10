@@ -1303,7 +1303,8 @@ task_rows = cur.execute(
     'tags_text, story_points, dependencies_text, assignee_text, document_reference, idempotency, rate_limits, rbac, '
     'messaging_workflows, performance_targets, observability, acceptance_text, endpoints, sample_create_request, '
     'sample_create_response, user_story_ref_id, epic_ref_id, status, last_progress_at, last_progress_run, '
-    'last_log_path, last_output_path, last_prompt_path, last_notes_json, last_commands_json, last_apply_status, '
+    'last_log_path, last_output_path, last_prompt_path, last_history_summary_path, last_history_meta_path, '
+    'last_notes_json, last_commands_json, last_apply_status, '
     'last_changes_applied, last_tokens_total, last_duration_seconds, locked_by_migration, migration_epoch, '
     'reopened_by_migration, last_verified_commit, status_reason '
     'FROM tasks WHERE story_slug = ? ORDER BY position ASC',
@@ -1869,6 +1870,8 @@ last_apply_status = clean(task['last_apply_status'])
 last_log_path = clean(task['last_log_path'])
 last_output_path = clean(task['last_output_path'])
 last_prompt_path = clean(task['last_prompt_path'])
+last_history_summary_path = clean(task['last_history_summary_path'])
+last_history_meta_path = clean(task['last_history_meta_path'])
 last_changes_applied = parse_int_field(task['last_changes_applied']) or 0
 last_tokens_total = parse_int_field(task['last_tokens_total'])
 last_duration_seconds = parse_int_field(task['last_duration_seconds'])
@@ -2174,12 +2177,18 @@ if binder_hit:
     log_hint = (evidence_data.get("last_log_path") or "").strip()
     prompt_hint = (evidence_data.get("last_prompt_path") or "").strip()
     output_hint = (evidence_data.get("last_output_path") or "").strip()
+    summary_hint = (evidence_data.get("last_summary_path") or "").strip()
+    summary_meta_hint = (evidence_data.get("last_summary_meta_path") or "").strip()
     if log_hint:
         artifact_notes.append(f"Task log: {log_hint}")
     if prompt_hint:
         artifact_notes.append(f"Prompt snapshot: {prompt_hint}")
     if output_hint:
         artifact_notes.append(f"Agent output: {output_hint}")
+    if summary_hint:
+        artifact_notes.append(f"Plan/Focus summary: {summary_hint}")
+    if summary_meta_hint:
+        artifact_notes.append(f"Plan/Focus metadata: {summary_meta_hint}")
     if artifact_notes:
         binder_summary_lines.append("")
         binder_summary_lines.append("### Previous Run Artifacts")
@@ -2227,6 +2236,8 @@ has_previous_attempt = any([
     last_apply_status,
     last_log_path,
     last_output_path,
+    last_history_summary_path,
+    last_history_meta_path,
     last_notes,
     last_commands,
 ])
@@ -2300,6 +2311,29 @@ if has_previous_attempt:
         for cmd in last_commands[:3]:
             lines.append(f"  - {clamp_text(cmd, 160)}")
 
+    summary_excerpt_lines: list[str] = []
+    summary_display = ""
+    if last_history_summary_path:
+        resolved_summary = resolve_history_path(last_history_summary_path)
+        if isinstance(resolved_summary, Path) and resolved_summary.exists():
+            summary_display = render_relative(resolved_summary)
+            summary_excerpt_lines = build_log_excerpt(resolved_summary, max_lines=32, max_chars=200)
+        else:
+            summary_display = last_history_summary_path
+    if summary_display:
+        lines.append(f"- Plan/Focus summary: {summary_display}")
+        lines.append("  Review this snapshot before editing to understand the prior plan, focus, commands, and notes.")
+        if summary_excerpt_lines:
+            lines.append("```markdown")
+            lines.extend(summary_excerpt_lines)
+            lines.append("```")
+    if last_history_meta_path:
+        meta_resolved = resolve_history_path(last_history_meta_path)
+        if isinstance(meta_resolved, Path) and meta_resolved.exists():
+            lines.append(f"- Plan/Focus metadata: {render_relative(meta_resolved)}")
+        else:
+            lines.append(f"- Plan/Focus metadata: {last_history_meta_path}")
+
     log_excerpt_lines: list[str] = []
     log_display = ""
     if last_log_path:
@@ -2329,6 +2363,9 @@ if has_previous_attempt:
             lines.append(f"- Prompt: {render_relative(prompt_path_resolved)}")
         else:
             lines.append(f"- Prompt: {last_prompt_path}")
+
+    lines.append("This task ran before; review the summary/log references above to understand the earlier attempt and why it remains incomplete.")
+    lines.append("- Action: Before editing, open the Plan/Focus summary and latest run log above to understand why the previous attempt did not complete.")
 
 def _split_items(raw: str):
     if not raw:

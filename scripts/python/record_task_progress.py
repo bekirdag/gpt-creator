@@ -117,6 +117,8 @@ def record_task_progress(
     attempt_signature: str,
     changes_count: str,
     outcome_reason: str,
+    history_summary_path: str = "",
+    history_meta_path: str = "",
 ) -> None:
     position_int = int(position)
     attempts_int = parse_int(attempts) or 0
@@ -131,6 +133,8 @@ def record_task_progress(
     log_path = (log_path or "").strip() or None
     prompt_path = (prompt_path or "").strip() or None
     output_path = (output_path or "").strip() or None
+    history_summary_path = (history_summary_path or "").strip() or None
+    history_meta_path = (history_meta_path or "").strip() or None
     apply_status = (apply_status or "").strip() or None
     notes_text = notes_text or ""
     written_text = written_text or ""
@@ -150,6 +154,10 @@ def record_task_progress(
 
     if log_path and log_path.strip():
         notes_text = _append_reference_note(notes_text, f"Progress log archived at {log_path.strip()}")
+    if history_summary_path:
+        notes_text = _append_reference_note(notes_text, f"Plan/Focus summary archived at {history_summary_path}")
+    if history_meta_path:
+        notes_text = _append_reference_note(notes_text, f"Plan/Focus metadata archived at {history_meta_path}")
 
     notes_json = as_json(notes_text)
     written_json = as_json(written_text)
@@ -293,6 +301,8 @@ def record_task_progress(
         ("attempt_signature", "TEXT"),
         ("changes_count", "INTEGER"),
         ("outcome_reason", "TEXT"),
+        ("history_summary_path", "TEXT"),
+        ("history_meta_path", "TEXT"),
     ):
         ensure_column(cur, "task_progress", column, definition)
 
@@ -346,6 +356,8 @@ def record_task_progress(
         ("last_outcome_reason", "TEXT"),
         ("progress_state", "TEXT"),
         ("progress_state_updated_at", "TEXT"),
+        ("last_history_summary_path", "TEXT"),
+        ("last_history_meta_path", "TEXT"),
     ):
         ensure_column(cur, "tasks", column, definition)
 
@@ -443,6 +455,8 @@ def record_task_progress(
         attempt_signature_value,
         changes_count_int,
         outcome_reason_value,
+        history_summary_path,
+        history_meta_path,
     )
 
     cur.execute(
@@ -457,10 +471,11 @@ def record_task_progress(
           created_at, updated_at, verify_status, verify_summary, verify_report,
           verify_details, meta_plan_flag, meta_focus_flag, meta_no_changes_flag,
           meta_already_flag, commit_sha, commit_status, push_status, push_remote,
-          push_branch, push_error, attempt_signature, changes_count, outcome_reason
+          push_branch, push_error, attempt_signature, changes_count, outcome_reason,
+          history_summary_path, history_meta_path
         )
         VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         """,
         progress_row,
@@ -514,6 +529,8 @@ def record_task_progress(
     set_field("last_attempt_signature", attempt_signature_value)
     set_field("last_changes_count", changes_count_int)
     set_field("last_outcome_reason", outcome_reason_value)
+    set_field("last_history_summary_path", history_summary_path)
+    set_field("last_history_meta_path", history_meta_path)
     if progress_state_value:
         set_field("progress_state", progress_state_value)
         set_field("progress_state_updated_at", timestamp)
@@ -568,6 +585,8 @@ def record_task_progress(
                 log_path=log_hint or None,
                 prompt_path=prompt_hint or None,
                 output_path=output_hint or None,
+                history_summary_path=history_summary_path,
+                history_meta_path=history_meta_path,
             )
 
     if observation_hash and tokens_int > 0:
@@ -646,6 +665,8 @@ def main() -> int:
     attempt_signature = sys.argv[42]
     changes_count = sys.argv[43]
     outcome_reason = sys.argv[44]
+    history_summary_path = sys.argv[45] if len(sys.argv) > 45 else ""
+    history_meta_path = sys.argv[46] if len(sys.argv) > 46 else ""
 
     record_task_progress(
         db_path=db_path,
@@ -692,6 +713,8 @@ def main() -> int:
         attempt_signature=attempt_signature,
         changes_count=changes_count,
         outcome_reason=outcome_reason,
+        history_summary_path=history_summary_path,
+        history_meta_path=history_meta_path,
     )
     return 0
 

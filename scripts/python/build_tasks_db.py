@@ -297,6 +297,8 @@ def main() -> int:
     ensure_column("task_progress", "tokens_prompt_estimate", "INTEGER")
     ensure_column("task_progress", "llm_prompt_tokens", "INTEGER")
     ensure_column("task_progress", "llm_completion_tokens", "INTEGER")
+    ensure_column("task_progress", "history_summary_path", "TEXT")
+    ensure_column("task_progress", "history_meta_path", "TEXT")
 
     ensure_column("stories", "completed_tasks", "INTEGER")
     ensure_column("stories", "total_tasks", "INTEGER")
@@ -349,6 +351,8 @@ def main() -> int:
     ensure_column("tasks", "last_commands_json", "TEXT")
     ensure_column("tasks", "last_progress_at", "TEXT")
     ensure_column("tasks", "last_progress_run", "TEXT")
+    ensure_column("tasks", "last_history_summary_path", "TEXT")
+    ensure_column("tasks", "last_history_meta_path", "TEXT")
     ensure_column("tasks", "status_reason", "TEXT")
     ensure_column("tasks", "evidence_ptr", "TEXT")
     ensure_column("tasks", "doc_refs", "TEXT")

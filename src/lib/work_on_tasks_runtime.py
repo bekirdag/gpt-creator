@@ -334,6 +334,7 @@ def main():
             'redirection': 'redirection/process substitution',
             'placeholder-ellipsis': 'incomplete command placeholder',
             'quote-mismatch': 'command quote mismatch',
+            'repeat-failure': 'repeated command failure',
         }
         REDIRECTION_PATTERN = re.compile(r'(?<!\\)(?:>>|>\||\$\(|<\()')
         SHELL_META_CHARS = set('|&;()<>*$`\\\n')
@@ -486,21 +487,52 @@ def main():
                     tokens = shlex.split(command)
                 except ValueError:
                     return command
-                if not tokens or tokens[0] != 'rg' or '--' in tokens:
+                if not tokens or tokens[0] != 'rg':
                     return command
+
+                def _consume_value(it):
+                    try:
+                        return next(it)
+                    except StopIteration:
+                        return None
+
                 options: List[str] = []
                 pattern: Optional[str] = None
                 paths: List[str] = []
-                for token in tokens[1:]:
+                pending: List[str] = []
+                iterator = iter(tokens[1:])
+                for token in iterator:
+                    if token == '--':
+                        pending.extend(iterator)
+                        break
                     if pattern is None and token.startswith('-'):
                         options.append(token)
+                        if token in RG_OPTIONS_EXPECT_VALUE:
+                            value = _consume_value(iterator)
+                            if value is not None:
+                                options.append(value)
                         continue
                     if pattern is None:
                         pattern = token
                         continue
-                    paths.append(token)
+                    pending.append(token)
                 if pattern is None:
                     return command
+
+                pending_iter = iter(pending)
+                for token in pending_iter:
+                    if token == '--':
+                        paths.extend(list(pending_iter))
+                        break
+                    if token.startswith('-') and token != '-':
+                        options.append(token)
+                        if token in RG_OPTIONS_EXPECT_VALUE:
+                            value = _consume_value(pending_iter)
+                            if value is not None:
+                                options.append(value)
+                        continue
+                    paths.append(token)
+
                 new_tokens: List[str] = ['rg']
                 new_tokens.extend(options)
                 new_tokens.append(pattern)
@@ -537,6 +569,13 @@ def main():
 
             normalized = _normalize_rg(normalized)
             return normalized
+
+        def _sanitize_command_escapes(command: str) -> str:
+            if '\\' not in command:
+                return command
+            repaired = command.replace('\\"', '"')
+            repaired = repaired.replace("\\'", "'")
+            return repaired
 
         def _is_valid_bash_wrapper(command: str) -> bool:
             stripped = command.strip()
@@ -747,7 +786,11 @@ def main():
             print("no-output", flush=True)
             sys.exit(0)
 
-        raw = output_path.read_text(encoding='utf-8').strip()
+        try:
+            raw_text_original = output_path.read_text(encoding='utf-8')
+        except UnicodeDecodeError:
+            raw_text_original = output_path.read_text(encoding='utf-8', errors='replace')
+        raw = raw_text_original.strip()
         if not raw:
             print("empty-output", flush=True)
             sys.exit(0)
@@ -1453,6 +1496,182 @@ def main():
                     "is_test": bool(is_test),
                 }
             )
+
+        def _atomic_write_history(path: Path, data: str) -> None:
+            tmp_file = None
+            tmp_name = ""
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            try:
+                tmp_file = tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    newline="\n",
+                    delete=False,
+                    dir=str(path.parent),
+                )
+                tmp_file.write(data)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+                tmp_name = tmp_file.name
+                tmp_file.close()
+                os.replace(tmp_name, path)
+            except Exception:
+                if tmp_file is not None:
+                    try:
+                        tmp_file.close()
+                    except Exception:
+                        pass
+                if tmp_name:
+                    try:
+                        os.unlink(tmp_name)
+                    except OSError:
+                        pass
+                raise
+
+        def _normalize_section_entries(entries: Sequence[object]) -> List[str]:
+            normalized: List[str] = []
+            for entry in entries or []:
+                if isinstance(entry, str):
+                    normalized.append(entry)
+                elif entry is None:
+                    continue
+                else:
+                    try:
+                        normalized.append(json.dumps(entry, ensure_ascii=False))
+                    except TypeError:
+                        normalized.append(str(entry))
+            return normalized
+
+        def _append_section_block(buffer: List[str], title: str, entries: Sequence[str]) -> None:
+            buffer.append(title)
+            if entries:
+                for item in entries:
+                    buffer.append(f"- {item.strip() if isinstance(item, str) else item}")
+            else:
+                buffer.append("- (none)")
+            buffer.append("")
+
+        def _persist_agent_sections(
+            plan_entries: Sequence[object],
+            focus_entries: Sequence[object],
+            command_entries: Sequence[object],
+            note_entries: Sequence[object],
+            raw_text: str,
+            canonical_status: str,
+        ) -> None:
+            output_hint = os.environ.get("GC_ACTIVE_TASK_OUTPUT", "").strip()
+            run_hint = (os.environ.get("RUN_DIR") or os.environ.get("GC_RUN_DIR") or "").strip()
+            base_dir: Optional[Path] = None
+            if output_hint:
+                try:
+                    output_obj = Path(output_hint)
+                    base_dir = output_obj.parent.parent
+                except Exception:
+                    base_dir = None
+            if base_dir is None and run_hint:
+                try:
+                    base_dir = Path(run_hint)
+                except Exception:
+                    base_dir = None
+            if base_dir is None:
+                return
+            try:
+                base_dir = base_dir.resolve()
+            except Exception:
+                pass
+            history_root = base_dir / "history"
+            task_number = (os.environ.get("GC_ACTIVE_TASK_NUMBER") or "").strip()
+            story_slug = (os.environ.get("GC_ACTIVE_TASK_SLUG") or "").strip()
+            task_id_env = os.environ.get("GC_ACTIVE_TASK_ID") or os.environ.get("GC_BUDGET_TASK_ID") or ""
+            task_id = task_id_env.strip()
+            run_stamp = (os.environ.get("GC_ACTIVE_RUN_STAMP") or "").strip()
+            attempt_counter = (os.environ.get("GC_RETRY_ATTEMPTS") or "").strip()
+            label_parts = []
+            if task_number:
+                label_parts.append(f"task-{task_number}")
+            if story_slug:
+                label_parts.append(story_slug)
+            if task_id:
+                label_parts.append(task_id)
+            label_source = "-".join(part for part in label_parts if part) or "task"
+            task_dir_name = _sanitize_for_path(label_source) or "task"
+            history_dir = history_root / task_dir_name
+            plan_list = _normalize_section_entries(plan_entries)
+            focus_list = _normalize_section_entries(focus_entries)
+            command_list = _normalize_section_entries(command_entries)
+            note_list = _normalize_section_entries(note_entries)
+            now = datetime.utcnow()
+            timestamp = now.strftime("%Y%m%dT%H%M%S")
+            suffix = f"{timestamp}{now.microsecond:06d}"
+            summary_path = history_dir / f"summary_{suffix}.md"
+            raw_path = history_dir / f"output_{suffix}.md"
+            meta_path = history_dir / f"summary_{suffix}.meta.txt"
+            summary_lines: List[str] = [
+                f"# Task Summary — {task_number or '(unknown)'}",
+                "",
+                f"- Story: {story_slug or '(unknown)'}",
+                f"- Task ID: {task_id or '(unknown)'}",
+                f"- Run: {run_stamp or '(unspecified)'}",
+                f"- Attempt: {attempt_counter or '1'}",
+                f"- Status: {canonical_status or 'UNKNOWN'}",
+                "",
+            ]
+            _append_section_block(summary_lines, "Plan", plan_list)
+            _append_section_block(summary_lines, "Focus", focus_list)
+            _append_section_block(summary_lines, "Commands", command_list)
+            _append_section_block(summary_lines, "Notes", note_list)
+            summary_text = "\n".join(summary_lines).rstrip() + "\n"
+            raw_body = raw_text if raw_text.endswith("\n") else raw_text + ("\n" if raw_text else "\n")
+            try:
+                history_dir.mkdir(parents=True, exist_ok=True)
+                _atomic_write_history(summary_path, summary_text)
+                _atomic_write_history(history_dir / "latest.summary.md", summary_text)
+                _atomic_write_history(raw_path, raw_body)
+                _atomic_write_history(history_dir / "latest.output.md", raw_body)
+                meta_lines = [
+                    f"recorded_at: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}",
+                    f"status: {canonical_status or 'UNKNOWN'}",
+                    f"task_id: {task_id or '(unknown)'}",
+                    f"task_number: {task_number or '(unknown)'}",
+                    f"story_slug: {story_slug or '(unknown)'}",
+                    f"run_stamp: {run_stamp or '(unspecified)'}",
+                    f"attempt: {attempt_counter or '1'}",
+                    f"summary_path: {_relativize_path(summary_path)}",
+                    f"raw_path: {_relativize_path(raw_path)}",
+                    "",
+                ]
+                def _append_plain_section(name: str, entries: Sequence[str]) -> None:
+                    meta_lines.append(f"{name}:")
+                    if entries:
+                        for item in entries:
+                            meta_lines.append(f"- {item}")
+                    else:
+                        meta_lines.append("- (none)")
+                    meta_lines.append("")
+                _append_plain_section("plan", plan_list)
+                _append_plain_section("focus", focus_list)
+                _append_plain_section("commands", command_list)
+                _append_plain_section("notes", note_list)
+                meta_text = "\n".join(meta_lines).rstrip() + "\n"
+                _atomic_write_history(meta_path, meta_text)
+                _atomic_write_history(history_dir / "latest.summary.txt", meta_text)
+                rel_summary = _relativize_path(summary_path)
+                manual_notes.append(
+                    _format_action_result(
+                        "run-history",
+                        f"note — cached plan/focus snapshot at {rel_summary}"
+                    )
+                )
+            except Exception as exc:
+                manual_notes.append(
+                    _format_action_result(
+                        "run-history",
+                        f"warning — unable to cache agent summary: {exc}"
+                    )
+                )
 
         def _normalize_acceptance_entry(text: str) -> str:
             cleaned = (text or "").strip()
@@ -2907,6 +3126,18 @@ def main():
             if len(examples) < MAX_BLOCKED_COMMAND_DETAILS and label not in examples:
                 examples.append(label)
 
+        def _summarize_command_failure(stdout_text: str, stderr_text: str, limit: int = 160) -> str:
+            snippet = stderr_text.strip() or stdout_text.strip()
+            if not snippet:
+                return ""
+            lines = [line.strip() for line in snippet.splitlines() if line.strip()]
+            if not lines:
+                return ""
+            summary = lines[0]
+            if len(summary) > limit:
+                summary = summary[: limit - 1] + "…"
+            return summary
+
         skip_command_processing = command_coalesce_error is not None
         if command_coalesce_error is not None:
             delimiter_label = command_coalesce_error.delimiter
@@ -2927,6 +3158,7 @@ def main():
                 if not isinstance(raw_cmd, str):
                     continue
                 trimmed = _normalize_command_wrapper(raw_cmd)
+                trimmed = _sanitize_command_escapes(trimmed)
                 if not trimmed:
                     continue
                 if not _is_valid_bash_wrapper(trimmed):
@@ -2955,12 +3187,14 @@ def main():
                 skip_command_processing = True
 
         command_failure_detected = False
+        failed_command_cache: Dict[str, Dict[str, object]] = {}
         if isinstance(command_entries, list) and command_entries and not skip_command_processing:
             baseline_status = _git_status_porcelain(project_root)
             for raw_cmd in command_entries:
                 if not isinstance(raw_cmd, str):
                     continue
                 command = _normalize_command_wrapper(raw_cmd)
+                command = _sanitize_command_escapes(command)
                 if not command:
                     continue
                 if not _is_valid_bash_wrapper(command):
@@ -2988,6 +3222,18 @@ def main():
                 sed_request: Optional[Tuple[int, int, str]] = None
                 if '...' in command or '…' in command:
                     _record_blocked_command('placeholder-ellipsis', command)
+                    continue
+                canonical_command = command.strip()
+                cached_failure = failed_command_cache.get(canonical_command)
+                if cached_failure:
+                    reason = cached_failure.get('summary') or f"exit {cached_failure.get('exit_code')}"
+                    manual_notes.append(
+                        _format_action_result(
+                            _truncate_command_text(command),
+                            f"blocked — command already failed earlier ({reason}); adjust it before retrying"
+                        )
+                    )
+                    _record_blocked_command('repeat-failure', command)
                     continue
                 if first_token in {"bash", "sh"} and len(command_tokens) >= 3 and command_tokens[1] in {"-lc", "-c"}:
                     script_text = command_tokens[2]
@@ -3126,6 +3372,11 @@ def main():
                 _append_command_log(command, proc_cmd.returncode, stdout_text, stderr_text, is_test_command)
                 _remove_plan_artifacts(f"command {_truncate_command_text(command)}")
                 if proc_cmd.returncode != 0:
+                    failure_summary = _summarize_command_failure(stdout_text, stderr_text)
+                    failed_command_cache[canonical_command] = {
+                        'exit_code': proc_cmd.returncode,
+                        'summary': failure_summary,
+                    }
                     if first_token == "gc_assert" and proc_cmd.returncode == 1:
                         manual_notes.append(
                             _format_action_result(
@@ -3405,12 +3656,6 @@ def main():
             if not auto_commit_ok:
                 command_failure_detected = True
 
-        for entry in manual_notes:
-            lowered_entry = entry.lower()
-            if any(token in lowered_entry for token in ("failed —", "blocked —", "warning —")):
-                _append_error_record(entry)
-
-        summary_notes = (payload.get('notes') or []) + manual_notes
         strict_validation = os.environ.get("WORK_ON_TASKS_STRICT_VALIDATION", "").strip().lower() in {"1", "true", "yes"}
         forced_canonical_status = None
         forced_legacy_status = None
@@ -3443,6 +3688,21 @@ def main():
                 if not isinstance(cmd, str):
                     continue
                 summary_commands.append(cmd.replace("\n", "\\n"))
+        _persist_agent_sections(
+            payload.get('plan') or [],
+            payload.get('focus') or [],
+            payload.get('commands') or [],
+            payload.get('notes') or [],
+            raw_text_original,
+            canonical_status,
+        )
+
+        for entry in manual_notes:
+            lowered_entry = entry.lower()
+            if any(token in lowered_entry for token in ("failed —", "blocked —", "warning —")):
+                _append_error_record(entry)
+
+        summary_notes = (payload.get('notes') or []) + manual_notes
         status_note = f"STATUS: {canonical_status}"
         if status_note not in summary_notes:
             summary_notes.append(status_note)

@@ -59,6 +59,8 @@ def _build_minimal_db(db_path: Path, story_slug: str, description: str) -> None:
             last_log_path TEXT,
             last_output_path TEXT,
             last_prompt_path TEXT,
+            last_history_summary_path TEXT,
+            last_history_meta_path TEXT,
             last_notes_json TEXT,
             last_commands_json TEXT,
             last_apply_status TEXT,
@@ -87,13 +89,14 @@ def _build_minimal_db(db_path: Path, story_slug: str, description: str) -> None:
             rbac, messaging_workflows, performance_targets, observability, acceptance_text, endpoints,
             sample_create_request, sample_create_response, user_story_ref_id, epic_ref_id, status,
             last_progress_at, last_progress_run, last_log_path, last_output_path, last_prompt_path,
+            last_history_summary_path, last_history_meta_path,
             last_notes_json, last_commands_json, last_apply_status, last_changes_applied, last_tokens_total,
             last_duration_seconds, story_slug, position
         )
         VALUES (
             ?, ?, ?, '[]', '[]', '[]', '[]', '', 1, '', '', '',
             '', '', '', '', '', '', '', '', '', '', '', '', 'pending',
-            '', '', '', '', '', '', '', '', 0, 0, 0, ?, 0
+            '', '', '', '', '', '', '', '', '', '', 0, 0, 0, ?, 0
         )
         """,
         ("TASK-1", "Investigate prompt budgets", description, story_slug),

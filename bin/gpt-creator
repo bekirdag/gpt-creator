@@ -3650,6 +3650,41 @@ gc_mark_task_abandoned_for_budget() {
   gc_update_task_state "$db_path" "$story_slug" "$position" "abandoned-for-budget" "$run_stamp"
 }
 
+gc_history_dir_name_for_task() {
+  local task_number="${1:-}"
+  local story_slug="${2:-}"
+  local task_id="${3:-}"
+  local label_parts=()
+  if [[ -n "$task_number" ]]; then
+    label_parts+=("task-${task_number}")
+  fi
+  if [[ -n "$story_slug" ]]; then
+    label_parts+=("$story_slug")
+  fi
+  if [[ -n "$task_id" ]]; then
+    label_parts+=("$task_id")
+  fi
+  local label=""
+  local part
+  for part in "${label_parts[@]}"; do
+    if [[ -z "$label" ]]; then
+      label="$part"
+    else
+      label+="-${part}"
+    fi
+  done
+  if [[ -z "$label" ]]; then
+    label="task"
+  fi
+  label="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')"
+  label="$(printf '%s' "$label" | sed -E 's/[^a-z0-9_.-]+/-/g')"
+  label="$(printf '%s' "$label" | sed -E 's/^[-_.]+//; s/[-_.]+$//')"
+  if [[ -z "$label" ]]; then
+    label="task"
+  fi
+  printf '%s\n' "$label"
+}
+
 gc_record_task_progress() {
   local db_path="${1:?tasks database path required}"
   local story_slug="${2:?story slug required}"
@@ -3695,6 +3730,8 @@ gc_record_task_progress() {
   local attempt_signature="${42:-}"
   local changes_count="${43:-0}"
   local outcome_reason="${44:-}"
+  local history_summary_path="${45:-}"
+  local history_meta_path="${46:-}"
   local helper_path
   helper_path="$(gc_clone_python_tool "record_task_progress.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   python3 "$helper_path" \
@@ -3741,7 +3778,9 @@ gc_record_task_progress() {
     "$push_error" \
     "$attempt_signature" \
     "$changes_count" \
-    "$outcome_reason"
+    "$outcome_reason" \
+    "$history_summary_path" \
+    "$history_meta_path"
 }
 
 gc_make_observation_hash() {
@@ -10747,6 +10786,37 @@ print(flag("notes_contains_already_satisfied"))'
         report_entry_display="(missing)"
       fi
 
+      local history_summary_path=""
+      local history_meta_path=""
+      local history_summary_entry=""
+      local history_meta_entry=""
+      if [[ -n "$story_run_dir" ]]; then
+        local history_root="${story_run_dir}/history"
+        local history_dir_name
+        history_dir_name="$(gc_history_dir_name_for_task "$task_number" "$slug" "$task_id")"
+        local history_dir="${history_root}/${history_dir_name}"
+        if [[ -f "${history_dir}/latest.summary.md" ]]; then
+          history_summary_path="${history_dir}/latest.summary.md"
+          history_summary_entry="$history_summary_path"
+        fi
+        if [[ -f "${history_dir}/latest.summary.txt" ]]; then
+          history_meta_path="${history_dir}/latest.summary.txt"
+          history_meta_entry="$history_meta_path"
+        fi
+      fi
+      if [[ -n "$history_summary_entry" && -n "$PROJECT_ROOT" && "$history_summary_entry" == "$project_prefix"* ]]; then
+        history_summary_entry="${history_summary_entry#$project_prefix}"
+      fi
+      if [[ -n "$history_meta_entry" && -n "$PROJECT_ROOT" && "$history_meta_entry" == "$project_prefix"* ]]; then
+        history_meta_entry="${history_meta_entry#$project_prefix}"
+      fi
+      if [[ -n "$history_summary_entry" && ! -f "$history_summary_path" ]]; then
+        history_summary_entry=""
+      fi
+      if [[ -n "$history_meta_entry" && ! -f "$history_meta_path" ]]; then
+        history_meta_entry=""
+      fi
+
       local task_changes_count="$task_last_change_operations"
       if [[ -z "$task_outcome_reason" ]]; then
         case "$task_result_status" in
@@ -10828,7 +10898,7 @@ print(flag("notes_contains_already_satisfied"))'
       (( task_stage_tokens_patch < 0 )) && task_stage_tokens_patch=0
       (( task_stage_tokens_verify < 0 )) && task_stage_tokens_verify=0
 
-      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$observation_hash" "$timestamp_utc" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_story_points" "$task_verify_status" "$task_verify_summary" "$task_verify_report" "$task_verify_details" "$task_meta_plan_flag" "$task_meta_focus_flag" "$task_meta_no_changes_flag" "$task_meta_already_flag" "${GC_LAST_AUTO_COMMIT_HASH:-}" "${GC_LAST_AUTO_COMMIT_STATUS:-}" "${GC_LAST_AUTO_PUSH_STATUS:-}" "${GC_LAST_AUTO_PUSH_REMOTE:-}" "${GC_LAST_AUTO_PUSH_BRANCH:-}" "${GC_LAST_AUTO_PUSH_ERROR:-}" "$task_attempt_signature" "$task_changes_count" "$task_outcome_reason"
+      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$observation_hash" "$timestamp_utc" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_story_points" "$task_verify_status" "$task_verify_summary" "$task_verify_report" "$task_verify_details" "$task_meta_plan_flag" "$task_meta_focus_flag" "$task_meta_no_changes_flag" "$task_meta_already_flag" "${GC_LAST_AUTO_COMMIT_HASH:-}" "${GC_LAST_AUTO_COMMIT_STATUS:-}" "${GC_LAST_AUTO_PUSH_STATUS:-}" "${GC_LAST_AUTO_PUSH_REMOTE:-}" "${GC_LAST_AUTO_PUSH_BRANCH:-}" "${GC_LAST_AUTO_PUSH_ERROR:-}" "$task_attempt_signature" "$task_changes_count" "$task_outcome_reason" "$history_summary_entry" "$history_meta_entry"
 
       gc_log_task_metrics "$run_stamp" "$slug" "$task_number" "$banner_task_id" "$task_result_status" "$task_story_points" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens"
 

@@ -4,6 +4,39 @@ set -Eeuo pipefail
 PROJECT_ROOT=""
 FORCE=0
 
+clone_python_tool() {
+  local script_name="${1:?python script name required}"
+  local root_param="${2:-}"
+  local root="${root_param:-${PROJECT_ROOT:-$PWD}}"
+  if command -v gc_clone_python_tool >/dev/null 2>&1; then
+    gc_clone_python_tool "$script_name" "$root"
+    return
+  fi
+  local cli_root="${CLI_ROOT:-}"
+  if [[ -z "$cli_root" ]]; then
+    cli_root="$(cd "$(dirname "$0")/.." && pwd -P)" || cli_root=""
+  fi
+  if [[ -z "$cli_root" ]]; then
+    echo "Unable to determine CLI root while preparing ${script_name}" >&2
+    return 1
+  fi
+  local source_path="${cli_root}/scripts/python/${script_name}"
+  if [[ ! -f "$source_path" ]]; then
+    echo "Python helper missing at ${source_path}" >&2
+    return 1
+  fi
+  local work_dir_name="${GC_WORK_DIR_NAME:-.gpt-creator}"
+  local target_dir="${root%/}/${work_dir_name}/shims/python"
+  local target_path="${target_dir}/${script_name}"
+  if [[ ! -d "$target_dir" ]]; then
+    mkdir -p "$target_dir" || return 1
+  fi
+  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
+    cp "$source_path" "$target_path" || return 1
+  fi
+  printf '%s\n' "$target_path"
+}
+
 usage() {
   cat <<'EOF'
 Usage: scripts/install_guard_cleanup.sh [--project PATH] [--force]
@@ -43,10 +76,9 @@ require_python() {
 }
 
 resolve_realpath() {
-  python3 - <<'PY' "$1"
-import os, sys
-print(os.path.realpath(sys.argv[1]))
-PY
+  local helper_path
+  helper_path="$(clone_python_tool "resolve_realpath.py" "$PROJECT_ROOT")" || exit 1
+  python3 "$helper_path" "$1"
 }
 
 if [[ -z "$PROJECT_ROOT" ]]; then

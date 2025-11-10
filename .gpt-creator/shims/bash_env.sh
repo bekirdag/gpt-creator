@@ -17,6 +17,25 @@ shopt -s expand_aliases
 
 mkdir -p "$GC_SCAN_CACHE_DIR" 2>/dev/null || true
 
+# Ensure documentation catalog lookups always have a concrete SQLite path.
+if [[ -z "${GC_DOCUMENTATION_DB_PATH:-}" ]]; then
+  __gc_resolve_workspace() {
+    if [[ -n "${GC_WORKSPACE_DIR:-}" ]]; then
+      printf "%s" "$GC_WORKSPACE_DIR"
+      return
+    fi
+    if command -v git >/dev/null 2>&1 && git rev-parse --show-toplevel >/dev/null 2>&1; then
+      git rev-parse --show-toplevel 2>/dev/null && return
+    fi
+    printf "%s" "$PWD"
+  }
+  WS_ROOT="$(__gc_resolve_workspace 2>/dev/null || printf "%s" "$PWD")"
+  export GC_DOCUMENTATION_DB_PATH="${WS_ROOT}/.gpt-creator/docs/catalog.db"
+  mkdir -p "${GC_DOCUMENTATION_DB_PATH%/*}" 2>/dev/null || true
+  unset WS_ROOT
+  unset -f __gc_resolve_workspace 2>/dev/null || true
+fi
+
 # --------------------------- Runtime path helpers -----------------------------
 __gc_prepend_path() {
   local dir="${1:-}"
@@ -96,6 +115,39 @@ __gc_atomic_write() { # atomic write: tmp + mv
   mv -f "$tmp" "$file"
 }
 
+# --------------------------- Scan guard helpers -------------------------------
+__gc_scan_guard_var() {
+  local tool="$1"
+  printf "GC_%s_SCAN_BLOCKED" "$(printf "%s" "$tool" | tr '[:lower:]' '[:upper:]')"
+}
+
+__gc_scan_guard_is_blocked() {
+  local tool="$1"
+  local var
+  var="$(__gc_scan_guard_var "$tool")"
+  if [[ "${GC_SCAN_GUARD_IGNORE:-0}" == "1" ]]; then
+    return 1
+  fi
+  eval "[[ \${$var:-0} == 1 ]]"
+}
+
+__gc_scan_guard_mark_blocked() {
+  local tool="$1" var
+  var="$(__gc_scan_guard_var "$tool")"
+  printf -v "$var" "%s" "1"
+  export "$var"
+}
+
+__gc_scan_guard_notice() {
+  local tool="$1"
+  local action="${2:-run}"
+  if [[ "$action" == "skip" ]]; then
+    printf >&2 "[gpt-creator] %s previously blocked by workspace guard; use python3 scripts/python/focus_text.py --pattern '<needle>' --paths '<dir>' instead of retrying (set GC_SCAN_GUARD_IGNORE=1 to bypass).\n" "$tool"
+  else
+    printf >&2 "[gpt-creator] %s blocked by workspace guard (exit 255). Use python3 scripts/python/focus_text.py --pattern '<needle>' --paths '<dir>' instead of rerunning, or set GC_SCAN_GUARD_IGNORE=1 to force retries.\n" "$tool"
+  fi
+}
+
 # --------------------------- De-dup execution core ----------------------------
 __gc_dedup_exec() {
   # Usage: __gc_dedup_exec <real-cmd> <args...>
@@ -139,9 +191,40 @@ __gc_dedup_exec() {
 # ------------------------------- Wrappers -------------------------------------
 # Wrap rg (ripgrep) if present
 if __gc_cmd_exists rg; then
-  __gc_rg() { __gc_dedup_exec rg "$@"; }
+  __gc_rg() {
+    if __gc_scan_guard_is_blocked "rg"; then
+      __gc_scan_guard_notice "rg" "skip"
+      return 64
+    fi
+    __gc_dedup_exec rg "$@"
+    local rc=$?
+    if [[ $rc -eq 255 ]]; then
+      __gc_scan_guard_mark_blocked "rg"
+      __gc_scan_guard_notice "rg"
+    fi
+    return $rc
+  }
   export -f __gc_rg
   alias rg='__gc_rg'
+fi
+
+# Wrap grep if present
+if __gc_cmd_exists grep; then
+  __gc_grep() {
+    if __gc_scan_guard_is_blocked "grep"; then
+      __gc_scan_guard_notice "grep" "skip"
+      return 64
+    fi
+    command grep "$@"
+    local rc=$?
+    if [[ $rc -eq 255 ]]; then
+      __gc_scan_guard_mark_blocked "grep"
+      __gc_scan_guard_notice "grep"
+    fi
+    return $rc
+  }
+  export -f __gc_grep
+  alias grep='__gc_grep'
 fi
 
 # Wrap find if present

@@ -60,32 +60,21 @@ bootstrap_min_catalog() {
   if ! command -v python3 >/dev/null 2>&1; then
     return 1
   fi
-  python3 - "$db" <<'PY' || return 1
-import os
-import sqlite3
-import sys
-import time
-
-db = sys.argv[1]
-os.makedirs(os.path.dirname(db), exist_ok=True)
-con = sqlite3.connect(db)
-cur = con.cursor()
-cur.executescript("""
-CREATE TABLE IF NOT EXISTS documents(
-  id TEXT PRIMARY KEY, slug TEXT, title TEXT, path TEXT, created_at TEXT
-);
-CREATE TABLE IF NOT EXISTS sections(
-  id TEXT PRIMARY KEY, doc_id TEXT, title TEXT, start_line INTEGER, end_line INTEGER
-);
-CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
-""")
-cur.execute(
-    "INSERT OR REPLACE INTO meta(k,v) VALUES('created_at', ?)",
-    (time.strftime("%Y-%m-%dT%H:%M:%SZ"),),
-)
-con.commit()
-con.close()
-PY
+  helper_path=""
+  if command -v gc_clone_python_tool >/dev/null 2>&1; then
+    helper_path="$(gc_clone_python_tool "bootstrap_min_catalog.py" "$WS")" || return 1
+  else
+    helper_root="${CLI_ROOT:-}"
+    if [ -z "$helper_root" ]; then
+      helper_root="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)" || helper_root=""
+    fi
+    helper_path="${helper_root}/scripts/python/bootstrap_min_catalog.py"
+    if [ ! -f "$helper_path" ]; then
+      printf >&2 "gpt-creator: bootstrap helper missing at '%s'\n" "$helper_path"
+      return 1
+    fi
+  fi
+  python3 "$helper_path" "$db"
 }
 
 DOCS_ENABLED=1

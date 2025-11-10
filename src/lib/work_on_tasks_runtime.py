@@ -6011,7 +6011,10 @@ def main():
             "- Push your work once committed (e.g., `git push origin <branch>`), and include that command under `Commands` as well.",
             "- Capture blockers or follow-ups in `Notes`.",
             "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",
-            "- Use the documentation catalog helpers (`python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" ...`) for SDS/PDR references instead of opening doc files directly.",
+            "- Use `python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" …` for SDS/PDR context instead of opening doc files directly.",
+            "- Need a repo overview? Run `python3 scripts/python/repo_outline.py --max-depth 1 --focus <path>` (see `assets/templates/help/repo_outline_usage.txt`).",
+            "- Searching for symbols? Run `python3 scripts/python/targeted_search.py --pattern <needle> --paths <dirs> [--ext .ts]` instead of repo-wide `rg`/`python os.walk` loops (`assets/templates/help/targeted_search_usage.txt`).",
+            "- Validating REST endpoints? Define a manifest and run `python3 scripts/python/rest_check_runner.py <manifest.yaml>` (`assets/templates/help/rest_check_runner_usage.txt`).",
             "- End the `Notes` section with `STATUS: completed`, `STATUS: needs-retry`, or `STATUS: failed` so automation can classify the run.",
         ]
         lines.extend(response_guidance)

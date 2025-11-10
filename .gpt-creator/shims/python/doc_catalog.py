@@ -227,8 +227,46 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def normalize_global_args(argv: list[str]) -> list[str]:
+    """Ensure global options (like --db) appear before subcommands."""
+    if not argv:
+        return []
+    cleaned: list[str] = []
+    db_arg: Optional[str] = None
+    db_value: Optional[str] = None
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--db":
+            if i + 1 < len(argv):
+                db_arg = "--db"
+                db_value = argv[i + 1]
+                i += 2
+                continue
+            # dangling --db without value; let argparse surface the error
+            cleaned.append(token)
+            i += 1
+            continue
+        if token.startswith("--db="):
+            db_arg = "--db="
+            db_value = token.split("=", 1)[1]
+            i += 1
+            continue
+        cleaned.append(token)
+        i += 1
+
+    if db_arg is None:
+        return cleaned
+    if db_arg == "--db":
+        return ["--db", db_value or ""] + cleaned
+    return [f"--db={db_value or ''}"] + cleaned
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = normalize_global_args(list(argv))
     args = parser.parse_args(argv)
     return args.func(args)
 

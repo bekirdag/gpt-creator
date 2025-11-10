@@ -26,6 +26,18 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Schema evidence index**: A stack-neutral inspector builds an index of tables/indexes across SQL, Prisma, Knex, Rails, TypeORM, and Django sources. Commands such as `gc_assert table publish_jobs` use this cache so schema checks become tolerant hints rather than brittle `rg` probes.
 - **Runtime overlays**: A Jest/Vitest decorator enforces single-process execution, injects a transpile-only TypeScript preloader, shims heavy native modules (@prisma/client, sharp, multer, prom-client, etc.), and remaps missing `dist/` imports to `src/lib/build/out`, keeping tests runnable even when installs or builds fail.
 
+## Token-Efficient Helper Scripts
+
+Codex agents should prefer the purpose-built helpers below instead of ad‑hoc `ls`, `sed`, or `python - <<'PY' os.walk(...)` loops. Each script ships with a short usage guide under `assets/templates/help/*.txt` to keep instructions cached locally.
+
+| Tool | When to use it | Usage doc |
+|------|----------------|-----------|
+| `python3 scripts/python/repo_outline.py` | Get a concise directory tree (with optional focus paths) instead of running dozens of `ls` commands. | `assets/templates/help/repo_outline_usage.txt` |
+| `python3 scripts/python/targeted_search.py` | Search for strings/regex within a bounded set of files (depth/extension limited) instead of walking the entire repo. Supports multiple patterns and optional context output. | `assets/templates/help/targeted_search_usage.txt` |
+| `python3 scripts/python/rest_check_runner.py` | Run declarative REST smoke tests defined in a YAML/TOML manifest (auth, payloads, predicates) instead of writing bespoke HTTP scripts each turn. | `assets/templates/help/rest_check_runner_usage.txt` |
+
+These helpers are mandatory during `work-on-tasks` sessions: mention them in your task notes, keep token-heavy scans capped, and extend the manifest/usage templates rather than cloning new tooling.
+
 ---
 
 ## Prerequisites

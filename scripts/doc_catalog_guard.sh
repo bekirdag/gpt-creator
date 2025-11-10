@@ -27,16 +27,24 @@ done
 # Workspace guard should set GC_WORKSPACE_DIR; fall back to PWD for safety.
 WS="${GC_WORKSPACE_DIR:-$PWD}"
 
-# Candidate precedence: CLI → env → workspace default.
+# Primary catalog lives in the staged tasks DB; fall back to the legacy stub if
+# the runtime file is missing. This keeps docs/SDS references consistent across
+# commands even before `work-on-tasks` refreshes the catalog explicitly.
+RUNTIME_DB="$WS/.gpt-creator/staging/plan/tasks/tasks.db"
+STUB_DB="$WS/.gpt-creator/docs/catalog.db"
+
+# Candidate precedence: CLI → env → runtime DB → stub file.
 CAND="${DOC_DB:-${GC_DOCUMENTATION_DB_PATH:-}}"
-[ -n "${CAND:-}" ] || CAND="$WS/.gpt-creator/docs/catalog.db"
+if [ -z "${CAND:-}" ]; then
+  if [ -f "$RUNTIME_DB" ]; then
+    CAND="$RUNTIME_DB"
+  else
+    CAND="$STUB_DB"
+  fi
+fi
 
-# Replace obviously wrong backlog DBs.
-case "$CAND" in
-  */tasks.db) CAND="$WS/.gpt-creator/docs/catalog.db" ;;
-esac
-
-mkdir -p "$WS/.gpt-creator/docs"
+mkdir -p "$(dirname "$STUB_DB")"
+mkdir -p "$(dirname "$RUNTIME_DB")"
 LOCK="$WS/.gpt-creator/docs/catalog.lock"
 
 is_sqlite_catalog() {
@@ -76,6 +84,15 @@ bootstrap_min_catalog() {
   fi
   python3 "$helper_path" "$db"
 }
+
+# If the stub is selected but the staged tasks DB already exists (and contains
+# the documentation tables), prefer the staged DB so downstream helpers point at
+# the authoritative catalog automatically.
+if [ "$CAND" = "$STUB_DB" ] && [ -f "$RUNTIME_DB" ]; then
+  if is_sqlite_catalog "$RUNTIME_DB"; then
+    CAND="$RUNTIME_DB"
+  fi
+fi
 
 DOCS_ENABLED=1
 if [ "$GC_DOCS_MODE" = "off" ]; then

@@ -6,6 +6,7 @@ import pathlib
 import re
 import sqlite3
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -75,6 +76,7 @@ DEFAULT_SOFT_LIMIT_RATIO = 1.0
 DEFAULT_MIN_OUTPUT_TOKENS = 1024
 MODEL_CONTEXTS: Dict[str, int] = {
     "gpt-5-codex": 1001024,
+    "gpt-5-codex-mini": 1001024,
     "gpt-5": 1001024,
     "gpt-4.1": 1001024,
     "gpt-4.1-coder": 1001024,
@@ -2840,10 +2842,10 @@ else:
         if remaining_hits > 0:
             doc_search_hits.extend(_run_ripgrep_search(project_root_path, search_terms, remaining_hits, seen_doc_ids))
 
-    if doc_search_hits:
-        doc_search_hits = _dedupe_doc_refs(doc_search_hits, DOC_SEARCH_MAX_RESULTS)
-        lines.append("")
-        lines.append("## Documentation Search Hits")
+if doc_search_hits:
+    doc_search_hits = _dedupe_doc_refs(doc_search_hits, DOC_SEARCH_MAX_RESULTS)
+    lines.append("")
+    lines.append("## Documentation Search Hits")
         emit_progress(f"Found {len(doc_search_hits)} documentation search hit(s)")
         for hit in doc_search_hits[:DOC_SEARCH_MAX_RESULTS]:
             doc_id = (hit.get("doc_id") or "").strip()
@@ -2870,11 +2872,29 @@ else:
             search_map[task_ref] = search_summary_payload
             doc_catalog_changed["value"] = True
 
+catalog_example_doc_id = ""
+for catalog_entry in doc_catalog_entries:
+    candidate_doc_id = (catalog_entry.get("doc_id") or "").strip()
+    if candidate_doc_id:
+        catalog_example_doc_id = candidate_doc_id
+        break
+if not catalog_example_doc_id:
+    for hit in doc_search_hits:
+        candidate_doc_id = (hit.get("doc_id") or "").strip()
+        if candidate_doc_id:
+            catalog_example_doc_id = candidate_doc_id
+            break
+
 if doc_catalog_entries:
     lines.append("")
     lines.append("## Documentation Catalog")
+    doc_id_token = "<ID>"
+    if catalog_example_doc_id:
+        doc_id_token = shlex.quote(catalog_example_doc_id)
     lines.append(
-        "Use the catalog below to pick a section, then run `python3 \"$GC_DOC_CATALOG_PY\" show --db \"$GC_DOCUMENTATION_DB_PATH\" --doc-id <ID>` for a narrow excerpt. Avoid reading the raw documentation files directly."
+        "Use the catalog below to pick a section, then run "
+        f"`python3 \"$GC_DOC_CATALOG_PY\" show --db \"$GC_DOCUMENTATION_DB_PATH\" --doc-id {doc_id_token}` for a narrow excerpt. "
+        "Avoid reading the raw documentation files directly."
     )
     emit_progress(f"Including {len(doc_catalog_entries[:DOC_CATALOG_MAX_ENTRIES])} documentation catalog entries")
     for entry in doc_catalog_entries[:DOC_CATALOG_MAX_ENTRIES]:

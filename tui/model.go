@@ -11431,7 +11431,7 @@ func resolveCodexModel() string {
 			return trimmed
 		}
 	}
-	return "gpt-5-codex"
+	return "gpt-5-codex-mini"
 }
 
 func formatElapsed(d time.Duration) string {

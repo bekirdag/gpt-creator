@@ -16,7 +16,7 @@ usage() {
 }
 
 PROJECT_PATH="$PWD"
-MODEL="${CODEX_MODEL:-gpt-5-codex}"
+MODEL="${CODEX_MODEL:-gpt-5-codex-mini}"
 DRY_RUN=0
 FORCE=0
 

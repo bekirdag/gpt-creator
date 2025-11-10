@@ -1206,8 +1206,8 @@ export APP_NAME VERSION
 
 # Defaults (override via env)
 CODEX_BIN="${CODEX_BIN:-codex}"
-CODEX_MODEL="${CODEX_MODEL:-gpt-5-codex}"
-CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-gpt-5-codex}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5-codex-mini}"
+CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-gpt-5-codex-mini}"
 
 # Stage-aware model selection (defaults fall back to CODEX_MODEL for compatibility)
 CODEX_MODEL_LOW="${CODEX_MODEL_LOW:-${CODEX_MODEL}}"
@@ -1215,9 +1215,9 @@ CODEX_MODEL_NON_CODE="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW}}"
 CODEX_MODEL_CODE="${CODEX_MODEL_CODE:-${CODEX_MODEL}}"
 
 # Reasoning effort defaults (non-code work drops to low effort unless overridden)
-CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-low}"
-CODEX_REASONING_EFFORT_NON_CODE="${CODEX_REASONING_EFFORT_NON_CODE:-low}"
-CODEX_REASONING_EFFORT_CODE="${CODEX_REASONING_EFFORT_CODE:-low}"
+CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-medium}"
+CODEX_REASONING_EFFORT_NON_CODE="${CODEX_REASONING_EFFORT_NON_CODE:-medium}"
+CODEX_REASONING_EFFORT_CODE="${CODEX_REASONING_EFFORT_CODE:-medium}"
 
 export CODEX_MODEL CODEX_MODEL_LOW CODEX_MODEL_NON_CODE CODEX_MODEL_CODE
 export CODEX_FALLBACK_MODEL CODEX_REASONING_EFFORT CODEX_REASONING_EFFORT_NON_CODE CODEX_REASONING_EFFORT_CODE
@@ -2535,7 +2535,7 @@ gc_budget_log_stage() {
   local run_id="${GC_BUDGET_RUN_ID:-manual}"
   local story_ref="${GC_BUDGET_STORY_ID:-}"
   local task_ref="${GC_BUDGET_TASK_ID:-}"
-  local model_name="${CODEX_MODEL:-gpt-5-codex}"
+  local model_name="${CODEX_MODEL:-gpt-5-codex-mini}"
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   local blocked_flag="${blocked_quota:-false}"

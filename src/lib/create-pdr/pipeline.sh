@@ -147,7 +147,7 @@ cpdr::extract_json() {
 
 cpdr::init() {
   CPDR_PROJECT_ROOT="${1:?project root required}"
-  local cpdr_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5-codex}}}"
+  local cpdr_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5-codex-mini}}}"
   CPDR_MODEL="${2:-$cpdr_default_model}"
   CPDR_DRY_RUN="${3:-0}"
   CPDR_FORCE="${4:-0}"

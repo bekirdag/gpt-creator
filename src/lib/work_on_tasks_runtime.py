@@ -60,6 +60,7 @@ def main():
         import os
         import re
         import shlex
+        import shlex
         import shutil
         import subprocess
         import tempfile
@@ -1237,12 +1238,57 @@ def main():
                 normalized['diff'] = text if text.endswith('\n') else text + '\n'
                 normalized.pop('diff_path', None)
             ctype = normalized.get('type')
-            if not ctype:
-                if normalized.get('diff'):
-                    normalized['type'] = 'patch'
-                elif 'content' in normalized:
-                    normalized['type'] = 'file'
-            changes.append(normalized)
+        if not ctype:
+            if normalized.get('diff'):
+                normalized['type'] = 'patch'
+            elif 'content' in normalized:
+                normalized['type'] = 'file'
+        changes.append(normalized)
+
+        def _ensure_dev_branch_exists() -> Tuple[bool, List[str]]:
+            notes: List[str] = []
+            if _local_branch_exists(dev_branch_name):
+                return True, notes
+            start_ref: Optional[str] = None
+            if _local_branch_exists(main_branch_name):
+                start_ref = main_branch_name
+            else:
+                fetch_main = _run_git_command(['fetch', 'origin', main_branch_name])
+                if fetch_main.returncode == 0:
+                    start_ref = f"origin/{main_branch_name}"
+            if start_ref is None:
+                head = _run_git_command(['rev-parse', '--verify', 'HEAD'])
+                if head.returncode == 0:
+                    start_ref = head.stdout.strip()
+            create_args = ['branch', dev_branch_name]
+            if start_ref:
+                create_args.append(start_ref)
+            create_proc = _run_git_command(create_args)
+            if create_proc.returncode != 0:
+                stderr_text = (create_proc.stderr or "").strip()
+                notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"blocked — unable to create dev branch {dev_branch_name}: {stderr_text or 'see stderr'}"
+                    )
+                )
+                return False, notes
+            push_proc = _run_git_command(['push', '-u', 'origin', dev_branch_name])
+            if push_proc.returncode == 0:
+                notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"info — created dev branch {dev_branch_name} from {start_ref or 'HEAD'} and pushed to origin"
+                    )
+                )
+            else:
+                notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"warning — dev branch {dev_branch_name} created locally but push failed; sync manually"
+                    )
+                )
+            return True, notes
 
         written = []
         patched = []
@@ -1271,6 +1317,42 @@ def main():
         initial_repository_branch = dev_branch_name if branch_management_enabled else _get_current_branch()
         forced_canonical_status: Optional[str] = None
         forced_legacy_status: Optional[str] = None
+
+        def _checkout_dev_branch() -> List[str]:
+            notes: List[str] = []
+            nonlocal branch_management_enabled
+            if not branch_management_enabled:
+                return notes
+            current_branch = _get_current_branch()
+            if current_branch == dev_branch_name:
+                update = _run_git_command(['pull', '--ff-only', 'origin', dev_branch_name])
+                if update.returncode == 0 and (update.stdout or update.stderr):
+                    notes.append(
+                        _format_action_result(
+                            "branch",
+                            f"info — updated dev branch {dev_branch_name} from origin"
+                        )
+                    )
+                return notes
+            checkout = _run_git_command(['checkout', dev_branch_name])
+            if checkout.returncode != 0:
+                stderr_text = (checkout.stderr or "").strip()
+                notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"blocked — unable to checkout dev branch {dev_branch_name}: {stderr_text or 'see stderr'}"
+                    )
+                )
+                branch_management_enabled = False
+                return notes
+            _run_git_command(['pull', '--ff-only', 'origin', dev_branch_name])
+            notes.append(
+                _format_action_result(
+                    "branch",
+                    f"info — switched to dev branch {dev_branch_name}"
+                )
+            )
+            return notes
 
         def _prepare_task_branch_if_needed() -> List[str]:
             notes: List[str] = []
@@ -1352,6 +1434,7 @@ def main():
             _update_task_branch_record(task_db_id, branch_name, base_branch)
             return notes
 
+        manual_notes.extend(_checkout_dev_branch())
         manual_notes.extend(_prepare_task_branch_if_needed())
 
         manual_notes.extend(_prepare_task_branch_if_needed())
@@ -2510,51 +2593,6 @@ def main():
                     branch_conn.commit()
             except sqlite3.Error:
                 pass
-
-        def _ensure_dev_branch_exists() -> Tuple[bool, List[str]]:
-            notes: List[str] = []
-            if _local_branch_exists(dev_branch_name):
-                return True, notes
-            start_ref: Optional[str] = None
-            if _local_branch_exists(main_branch_name):
-                start_ref = main_branch_name
-            else:
-                fetch_main = _run_git_command(['fetch', 'origin', main_branch_name])
-                if fetch_main.returncode == 0:
-                    start_ref = f"origin/{main_branch_name}"
-            if start_ref is None:
-                head = _run_git_command(['rev-parse', '--verify', 'HEAD'])
-                if head.returncode == 0:
-                    start_ref = head.stdout.strip()
-            create_args = ['branch', dev_branch_name]
-            if start_ref:
-                create_args.append(start_ref)
-            create_proc = _run_git_command(create_args)
-            if create_proc.returncode != 0:
-                stderr_text = (create_proc.stderr or "").strip()
-                notes.append(
-                    _format_action_result(
-                        "branch",
-                        f"blocked — unable to create dev branch {dev_branch_name}: {stderr_text or 'see stderr'}"
-                    )
-                )
-                return False, notes
-            push_proc = _run_git_command(['push', '-u', 'origin', dev_branch_name])
-            if push_proc.returncode == 0:
-                notes.append(
-                    _format_action_result(
-                        "branch",
-                        f"info — created dev branch {dev_branch_name} from {start_ref or 'HEAD'} and pushed to origin"
-                    )
-                )
-            else:
-                notes.append(
-                    _format_action_result(
-                        "branch",
-                        f"warning — dev branch {dev_branch_name} created locally but push failed; sync manually"
-                    )
-                )
-            return True, notes
 
         def _resolve_task_commit_ref() -> str:
             task_id = os.environ.get("GC_ACTIVE_TASK_ID") or os.environ.get("GC_BUDGET_TASK_ID")
@@ -3999,15 +4037,30 @@ def main():
 
         force_commit_env = os.environ.get("WORK_ON_TASKS_FORCE_COMMIT", "1")
         force_commit_policy = force_commit_env.strip().lower() not in {"0", "false", "no"}
-        if dirty_tree_blocked:
-            should_attempt_commit = False
-        else:
-            should_attempt_commit = actual_changes > 0 or preexisting_pending_changes or force_commit_policy
+        should_attempt_commit = (
+            force_commit_policy
+            and branch_management_enabled
+            and branch_ready
+            and not dirty_tree_blocked
+        )
         if should_attempt_commit:
             auto_commit_ok, auto_commit_notes = _auto_commit_and_push_if_needed(actual_changes)
             manual_notes.extend(auto_commit_notes)
             if not auto_commit_ok:
                 command_failure_detected = True
+        else:
+            reason = "commit skipped — "
+            if not force_commit_policy:
+                reason += "WORK_ON_TASKS_FORCE_COMMIT=0"
+            elif dirty_tree_blocked:
+                reason += "dirty tree detected before run"
+            elif not branch_management_enabled:
+                reason += "branch management disabled"
+            elif not branch_ready:
+                reason += "task branch unavailable"
+            else:
+                reason += "unknown condition"
+            manual_notes.append(_format_action_result("git commit", reason))
 
         strict_validation = os.environ.get("WORK_ON_TASKS_STRICT_VALIDATION", "").strip().lower() in {"1", "true", "yes"}
         if dirty_tree_blocked:
@@ -4036,9 +4089,10 @@ def main():
             canonical_status = forced_canonical_status
             legacy_status = forced_legacy_status or legacy_status
 
-        _merge_branch_into_base_if_complete(canonical_status)
-        if branch_merge_completed:
-            _restore_base_branch_after_run()
+        if canonical_status == 'COMPLETED':
+            _merge_branch_into_base_if_complete(canonical_status)
+            if branch_merge_completed:
+                _restore_base_branch_after_run()
         raw_commands_field = payload.get('commands') or []
         summary_commands: List[str] = []
         if isinstance(raw_commands_field, list):
@@ -6319,12 +6373,28 @@ def main():
                 search_map[task_ref] = search_summary_payload
                 doc_catalog_changed["value"] = True
 
+        example_doc_id = ""
+        for catalog_entry in doc_catalog_entries:
+            candidate_doc_id = (catalog_entry.get("doc_id") or "").strip()
+            if candidate_doc_id:
+                example_doc_id = candidate_doc_id
+                break
+        if not example_doc_id:
+            for hit in doc_search_hits:
+                candidate_doc_id = (hit.get("doc_id") or "").strip()
+                if candidate_doc_id:
+                    example_doc_id = candidate_doc_id
+                    break
+
         if doc_catalog_entries:
             lines.append("")
             lines.append("## Documentation Catalog")
+            doc_id_token = "<ID>"
+            if example_doc_id:
+                doc_id_token = shlex.quote(example_doc_id)
             lines.append(
                 "Use the catalog below to pick a section, then run "
-                "`python3 \"$GC_DOC_CATALOG_PY\" show --db \"$GC_DOCUMENTATION_DB_PATH\" --doc-id <ID>` for a narrow excerpt. "
+                f"`python3 \"$GC_DOC_CATALOG_PY\" show --db \"$GC_DOCUMENTATION_DB_PATH\" --doc-id {doc_id_token}` for a narrow excerpt. "
                 "Avoid reading the raw documentation files directly."
             )
             for entry in doc_catalog_entries[:6]:

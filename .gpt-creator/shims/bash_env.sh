@@ -305,10 +305,10 @@ if __gc_cmd_exists sed; then
   alias sed='__gc_sed'
 fi
 
-# Guard python3 stdin heredoc usage; prefer run_snippet.py
+# Optional guard for python3 stdin heredoc usage; default now allows direct execution.
 if __gc_cmd_exists python3; then
   __gc_python3() {
-    if [[ "${1:-}" == "-" && "${GC_ALLOW_PY_STDIN:-0}" != "1" ]]; then
+    if [[ "${1:-}" == "-" && "${GC_BLOCK_PY_STDIN:-0}" == "1" ]]; then
       printf >&2 "[gpt-creator] python3 stdin execution blocked. Write the snippet to a file and run 'python3 scripts/python/run_snippet.py /tmp/snippet.py' instead (see assets/templates/help/run_snippet_usage.txt).\n"
       return 65
     fi

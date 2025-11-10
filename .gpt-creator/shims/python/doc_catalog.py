@@ -31,9 +31,44 @@ ALLOWED_SUFFIXES = {
 @dataclass
 class Document:
     doc_id: str
-    path: Path
+    path: Optional[Path]
+    rel_path: Optional[Path] = None
     title: Optional[str] = None
     snippet: Optional[str] = None
+
+
+def _candidate_paths(doc: Document) -> Iterator[Path]:
+    seen: set[str] = set()
+    for raw in (doc.path, doc.rel_path):
+        if raw is None:
+            continue
+        base = raw if isinstance(raw, Path) else Path(str(raw))
+        options = [base]
+        if not base.is_absolute():
+            options.append(Path.cwd() / base)
+        for candidate in options:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield candidate
+
+
+def _resolve_existing_path(doc: Document) -> Optional[Path]:
+    for candidate in _candidate_paths(doc):
+        try:
+            if candidate.exists():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _display_path(doc: Document) -> str:
+    for candidate in (doc.rel_path, doc.path):
+        if candidate is not None:
+            return str(candidate)
+    return doc.doc_id
 
 
 def hash_id(text: str) -> str:
@@ -65,7 +100,7 @@ def load_from_fs(limit: Optional[int] = None) -> list[Document]:
     docs: list[Document] = []
     for path in iter_files(bases):
         rel = path.relative_to(cwd)
-        docs.append(Document(doc_id=hash_id(str(rel)), path=rel))
+        docs.append(Document(doc_id=hash_id(str(rel)), path=path, rel_path=rel))
         if limit and len(docs) >= limit:
             break
     return docs
@@ -76,16 +111,26 @@ def load_from_sqlite(db_path: Path, limit: Optional[int] = None) -> list[Documen
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        cursor = conn.execute(
-            "SELECT id, path, title, snippet FROM documents ORDER BY updated_at DESC"
-        )
+        cursor = conn.execute("SELECT *, rowid AS __rowid FROM documents ORDER BY __rowid DESC")
         for row in cursor:
+            row_dict = dict(row)
+            path_value = row_dict.get("path") or row_dict.get("relpath") or row_dict.get("rel_path")
+            rel_value = row_dict.get("relpath") or row_dict.get("rel_path")
+            snippet_value = (
+                row_dict.get("snippet")
+                or row_dict.get("preview")
+                or row_dict.get("abstract")
+            )
+            doc_identifier = row_dict.get("doc_id") or row_dict.get("id")
+            if not doc_identifier:
+                continue
             docs.append(
                 Document(
-                    doc_id=row["id"],
-                    path=Path(row["path"]),
-                    title=row["title"],
-                    snippet=row["snippet"],
+                    doc_id=str(doc_identifier),
+                    path=Path(path_value) if path_value else None,
+                    rel_path=Path(rel_value) if rel_value else None,
+                    title=row_dict.get("title"),
+                    snippet=snippet_value,
                 )
             )
             if limit and len(docs) >= limit:
@@ -93,6 +138,17 @@ def load_from_sqlite(db_path: Path, limit: Optional[int] = None) -> list[Documen
     finally:
         conn.close()
     return docs
+
+
+def safe_load_from_sqlite(
+    db_path: Optional[Path], limit: Optional[int] = None
+) -> Optional[list[Document]]:
+    if not have_sqlite_catalog(db_path):
+        return None
+    try:
+        return load_from_sqlite(db_path, limit)
+    except sqlite3.Error:
+        return None
 
 
 def have_sqlite_catalog(db_path: Optional[Path]) -> bool:
@@ -112,13 +168,12 @@ def resolve_db_path(args: argparse.Namespace) -> Optional[Path]:
 def cmd_list(args: argparse.Namespace) -> int:
     db_path = resolve_db_path(args)
     limit = args.limit
-    if have_sqlite_catalog(db_path):
-        docs = load_from_sqlite(db_path, limit)
-    else:
+    docs = safe_load_from_sqlite(db_path, limit)
+    if docs is None:
         docs = load_from_fs(limit)
     for doc in docs:
         title_part = f" — {doc.title}" if doc.title else ""
-        print(f"{doc.doc_id}\t{doc.path}{title_part}")
+        print(f"{doc.doc_id}\t{_display_path(doc)}{title_part}")
     return 0
 
 
@@ -130,19 +185,32 @@ def search_documents(
     docs: Iterable[Document], query: str, limit: Optional[int]
 ) -> Iterator[Document]:
     for doc in docs:
-        path = Path(doc.path)
+        resolved_path = _resolve_existing_path(doc)
+        text = ""
         try:
-            text = path.read_text(encoding="utf-8")
+            if resolved_path:
+                text = resolved_path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-        if not match_query(text, query):
+            text = resolved_path.read_text(encoding="utf-8", errors="ignore")  # type: ignore[arg-type]
+        except OSError:
+            text = ""
+        if not text:
+            fallback_parts = []
+            if doc.title:
+                fallback_parts.append(str(doc.title))
+            if doc.snippet:
+                fallback_parts.append(str(doc.snippet))
+            text = "\n".join(part for part in fallback_parts if part).strip()
+        if not text or not match_query(text, query):
             continue
-        doc.title = doc.title or text.splitlines()[0].strip() if text else ""
-        # generate a short snippet containing the first match
-        snippet = ""
-        for idx, line in enumerate(text.splitlines(), 1):
+        lines = text.splitlines()
+        if (not doc.title) and lines:
+            doc.title = lines[0].strip()
+        snippet = (doc.snippet or "").strip()
+        for idx, line in enumerate(lines, 1):
             if match_query(line, query):
-                snippet = f"L{idx}: {line.strip()}"
+                prefix = f"L{idx}: " if resolved_path else ""
+                snippet = f"{prefix}{line.strip()}"
                 break
         doc.snippet = snippet
         yield doc
@@ -156,14 +224,13 @@ def cmd_search(args: argparse.Namespace) -> int:
     db_path = resolve_db_path(args)
     limit = args.limit
     query = args.query
-    if have_sqlite_catalog(db_path):
-        base_docs = load_from_sqlite(db_path)
-    else:
+    base_docs = safe_load_from_sqlite(db_path)
+    if base_docs is None:
         base_docs = load_from_fs()
     matches = list(search_documents(base_docs, query, limit))
     for doc in matches:
         snippet = f" — {doc.snippet}" if doc.snippet else ""
-        print(f"{doc.doc_id}\t{doc.path}{snippet}")
+        print(f"{doc.doc_id}\t{_display_path(doc)}{snippet}")
     return 0 if matches else 1
 
 
@@ -172,19 +239,30 @@ def cmd_show(args: argparse.Namespace) -> int:
     doc_id = args.doc_id
     start = args.start or 1
     end = args.end
-    if have_sqlite_catalog(db_path):
-        docs = load_from_sqlite(db_path)
-    else:
+    docs = safe_load_from_sqlite(db_path)
+    if docs is None:
         docs = load_from_fs()
     target = None
     for doc in docs:
-        if doc.doc_id == doc_id or str(doc.path) == doc_id:
+        candidates = {doc.doc_id}
+        if doc.path:
+            candidates.add(str(doc.path))
+        if doc.rel_path:
+            candidates.add(str(doc.rel_path))
+        if doc_id in candidates:
             target = doc
             break
     if target is None:
         print(f"Document '{doc_id}' not found.", file=sys.stderr)
         return 2
-    path = Path(target.path)
+    path = _resolve_existing_path(target)
+    if not path:
+        print(
+            f"Document '{doc_id}' path '{_display_path(target)}' is unavailable locally. "
+            "Run 'gpt-creator scan' to refresh the catalog.",
+            file=sys.stderr,
+        )
+        return 3
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except UnicodeDecodeError:

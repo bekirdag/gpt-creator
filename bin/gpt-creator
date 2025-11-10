@@ -7902,12 +7902,12 @@ cmd_work_on_tasks() {
     while true; do
       if [[ -n "${PROJECT_ROOT:-}" ]]; then
         set +e
-        i18n_guard_output="$(cd "$PROJECT_ROOT" && "$i18n_guard_script")"
+        i18n_guard_output="$(cd "$PROJECT_ROOT" && "$i18n_guard_script" 2>&1)"
         i18n_guard_code=$?
         set -e
       else
         set +e
-        i18n_guard_output="$("$i18n_guard_script")"
+        i18n_guard_output="$("$i18n_guard_script" 2>&1)"
         i18n_guard_code=$?
         set -e
       fi
@@ -7940,6 +7940,9 @@ cmd_work_on_tasks() {
           ;;
         blocked-i18n-guard-error)
           warn "i18n preflight guard failed; inspect scripts/preflight_i18n_guard.sh output."
+          if [[ -n "$i18n_guard_output" ]]; then
+            printf '%s\n' "$i18n_guard_output" >&2
+          fi
           printf '%s\n' "$i18n_guard_outcome"
           return 6
           ;;

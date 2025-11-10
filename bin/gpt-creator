@@ -12985,6 +12985,17 @@ if [[ -z "${GC_RUNTIME_DIR:-}" ]]; then
 fi
 export GC_RUNTIME_DIR
 
+: "${GC_RESET_TTY_SIGNALS:=1}"
+if (( GC_RESET_TTY_SIGNALS )) && [[ -t 0 || -t 1 || -t 2 ]]; then
+  if [[ -t 0 ]]; then
+    stty isig </dev/stdin >/dev/null 2>&1 || true
+  elif [[ -t 1 ]]; then
+    stty isig </dev/stdout >/dev/null 2>&1 || true
+  elif [[ -t 2 ]]; then
+    stty isig </dev/stderr >/dev/null 2>&1 || true
+  fi
+fi
+
 : "${CI:=1}"
 : "${TZ:=UTC}"
 : "${NODE_ENV:=test}"

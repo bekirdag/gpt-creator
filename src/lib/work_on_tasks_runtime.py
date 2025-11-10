@@ -1337,6 +1337,21 @@ def main():
             checkout = _run_git_command(['checkout', dev_branch_name])
             if checkout.returncode != 0:
                 stderr_text = (checkout.stderr or "").strip()
+                lower_error = stderr_text.lower()
+                if "did not match any file" in lower_error:
+                    additional_ready, ensure_notes = _ensure_dev_branch_exists()
+                    notes.extend(ensure_notes)
+                    if additional_ready:
+                        checkout = _run_git_command(['checkout', dev_branch_name])
+                        if checkout.returncode == 0:
+                            notes.append(
+                                _format_action_result(
+                                    "branch",
+                                    f"info — created missing dev branch {dev_branch_name} and checked it out"
+                                )
+                            )
+                            return notes
+                        stderr_text = (checkout.stderr or "").strip()
                 notes.append(
                     _format_action_result(
                         "branch",

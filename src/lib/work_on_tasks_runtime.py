@@ -2373,6 +2373,7 @@ def main():
                 manual_notes.append(
                     _format_action_result(f"change[{index}]", "blocked — expected object payload")
                 )
+                command_failure_detected = True
                 continue
 
             raw_type = change.get('type')
@@ -2397,6 +2398,7 @@ def main():
                     manual_notes.append(
                         _format_action_result(f"change[{index}]", "blocked — patch diff missing or empty")
                     )
+                    command_failure_detected = True
                     continue
                 if not path:
                     inferred = extract_path_from_diff(diff_value or '')
@@ -2407,6 +2409,7 @@ def main():
                     manual_notes.append(
                         _format_action_result(f"change[{index}]", "blocked — path missing or empty")
                     )
+                    command_failure_detected = True
                     continue
                 change['type'] = 'patch'
             elif ctype == 'file':
@@ -2414,12 +2417,14 @@ def main():
                     manual_notes.append(
                         _format_action_result(f"change[{index}]", "blocked — path missing or empty")
                     )
+                    command_failure_detected = True
                     continue
                 content_value = change.get('content')
                 if not isinstance(content_value, str):
                     manual_notes.append(
                         _format_action_result(f"change[{index}]", "blocked — file content missing or not text")
                     )
+                    command_failure_detected = True
                     continue
                 change['type'] = 'file'
             else:
@@ -2427,6 +2432,7 @@ def main():
                 manual_notes.append(
                     _format_action_result(f"change[{index}]", f"blocked — unknown type '{descriptor}'")
                 )
+                command_failure_detected = True
                 continue
 
             if change['type'] == 'file':
@@ -3418,6 +3424,9 @@ def main():
             elif commands_missing:
                 forced_canonical_status = 'RETRYABLE'
                 forced_legacy_status = 'retryable'
+        elif command_failure_detected:
+            forced_canonical_status = 'RETRYABLE'
+            forced_legacy_status = 'retryable'
         if actual_changes > 0:
             legacy_status = 'ok'
             canonical_status = 'COMPLETED'

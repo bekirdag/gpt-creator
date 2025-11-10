@@ -3,6 +3,9 @@
 - Consult the documentation catalog or search hits before modifying files.
 - Outline a concise plan (<=3 bullets focused on actions), execute the required edits, and capture final status notes with clear pass/fail decisions.
 - Never create files named `PLAN.md` (or any case variant); summarize plans inline instead of emitting that artifact.
-- Apply changes by editing files directly via shell commands (no diff/patch output).
+- Apply changes by editing files directly via shell commands (no diff/patch output); never call `apply_patch`—use editors, `sed`, `python3 scripts/python/write_block.py`, or `gpt-creator apply-block` instead so the CLI can track edits automatically.
+- When running `rg`, keep the syntax `rg [options] <pattern> [path …]` (e.g., `rg -n --glob '*.ts' "foo" apps/api/src`) and avoid trailing flags with no arguments; malformed commands waste attempts and will be treated as errors.
 - Every time you run a command that edits files, writes content, stages changes, or runs tests/tools, list that exact command under the `Commands` heading; if you truly ran nothing, state `- (none)` explicitly.
+- If you publish “Plan/Focus/Commands” and then change files, rerun the summary (or at least refresh `Commands`) so it reflects the actual edits—you cannot leave “no code changes yet” after modifying the repo.
+- Commands you list under `Commands` must actually run (and succeed or be reported with their failures); do not invent command lists you never executed.
 - Record follow-up actions when blockers remain.

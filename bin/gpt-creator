@@ -9444,6 +9444,17 @@ print(error)'
       while (( attempt < max_attempts )); do
         (( ++attempt ))
         (( ++diff_guard_global_attempt ))
+        if ((${#task_notes[@]} > 0)); then
+          local -a _task_notes_without_status=()
+          local _task_note_line=""
+          for _task_note_line in "${task_notes[@]}"; do
+            if [[ "$_task_note_line" =~ ^STATUS[[:space:]:=] ]]; then
+              continue
+            fi
+            _task_notes_without_status+=("$_task_note_line")
+          done
+          task_notes=("${_task_notes_without_status[@]}")
+        fi
         local diff_guard_current_step="$diff_guard_global_attempt"
         gc_touch_progress
         GC_LAST_APPLY_META=""

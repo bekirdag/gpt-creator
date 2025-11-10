@@ -1236,6 +1236,28 @@ conn = sqlite3.connect(DB_PATH)
 conn.row_factory = sqlite3.Row
 cur = conn.cursor()
 
+
+def _ensure_column(cursor: sqlite3.Cursor, table: str, column: str, definition: str) -> None:
+    cursor.execute(f"PRAGMA table_info({table})")
+    if any(row["name"] == column for row in cursor.fetchall()):
+        return
+    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _ensure_optional_task_columns(cursor: sqlite3.Cursor) -> None:
+    for column, ddl in (
+        ("last_history_summary_path", "TEXT"),
+        ("last_history_meta_path", "TEXT"),
+    ):
+        try:
+            _ensure_column(cursor, "tasks", column, ddl)
+        except sqlite3.OperationalError:
+            # table might not exist yet (first-time init); safe to ignore
+            pass
+
+
+_ensure_optional_task_columns(cur)
+
 cwd_path = Path.cwd()
 project_root_path = cwd_path
 if PROJECT_ROOT:

@@ -1251,7 +1251,8 @@ def main():
         error_records: List[str] = []
         required_scripts: List[str] = []
         reports_base = project_root / ".gpt-creator" / "reports"
-        manual_notes.extend(_prepare_task_branch_if_needed())
+        dev_ready, dev_branch_notes = _ensure_dev_branch_exists()
+        manual_notes.extend(dev_branch_notes)
 
         def _env_flag(name: str, *, default: bool = False) -> bool:
             raw_value = os.environ.get(name)
@@ -1262,12 +1263,12 @@ def main():
                 return default
             return normalized in {"1", "true", "yes", "on"}
 
-        branch_management_enabled = _env_flag("WORK_ON_TASKS_BRANCH_MANAGEMENT", default=True)
+        branch_management_enabled = _env_flag("WORK_ON_TASKS_BRANCH_MANAGEMENT", default=True) and dev_ready
         branch_delete_on_complete = _env_flag("WORK_ON_TASKS_DELETE_BRANCH_ON_COMPLETE", default=True)
         branch_ready = False
         active_task_branch: Optional[str] = None
         base_task_branch: Optional[str] = None
-        initial_repository_branch = _get_current_branch()
+        initial_repository_branch = dev_branch_name if branch_management_enabled else _get_current_branch()
         forced_canonical_status: Optional[str] = None
         forced_legacy_status: Optional[str] = None
 
@@ -1277,8 +1278,7 @@ def main():
             if not branch_management_enabled:
                 return notes
             branch_name = existing_task_branch or _build_task_branch_name(task)
-            base_candidate = existing_task_branch_base or os.environ.get("WORK_ON_TASKS_BASE_BRANCH", "").strip()
-            base_branch = base_candidate or initial_repository_branch or "main"
+            base_branch = dev_branch_name
             current_branch = _get_current_branch()
             if not current_branch:
                 current_branch = base_branch
@@ -1319,6 +1319,13 @@ def main():
                         )
                     )
                 else:
+                    # new task branch based on dev branch
+                    checkout_base = _run_git_command(['checkout', base_branch])
+                    if checkout_base.returncode != 0:
+                        stderr_text = (checkout_base.stderr or "").strip()
+                        record_failure(f"unable to checkout dev branch {base_branch}: {stderr_text or 'see stderr'}")
+                        return notes
+                    _run_git_command(['pull', '--ff-only', 'origin', base_branch])
                     create = _run_git_command(['checkout', '-b', branch_name])
                     if create.returncode != 0:
                         stderr_text = (create.stderr or "").strip()
@@ -1327,7 +1334,7 @@ def main():
                     notes.append(
                         _format_action_result(
                             "branch",
-                            f"info — started new branch {branch_name} from {current_branch}"
+                            f"info — started new branch {branch_name} from {base_branch}"
                         )
                     )
             else:
@@ -1344,6 +1351,10 @@ def main():
             os.environ["GC_ACTIVE_TASK_BRANCH"] = branch_name
             _update_task_branch_record(task_db_id, branch_name, base_branch)
             return notes
+
+        manual_notes.extend(_prepare_task_branch_if_needed())
+
+        manual_notes.extend(_prepare_task_branch_if_needed())
 
         def _sanitize_for_path(value: str) -> str:
             token = (value or "").strip()
@@ -2453,6 +2464,9 @@ def main():
                 check=False,
             )
 
+        main_branch_name = os.environ.get("WORK_ON_TASKS_MAIN_BRANCH", "main").strip() or "main"
+        dev_branch_name = os.environ.get("WORK_ON_TASKS_DEV_BRANCH", "dev").strip() or "dev"
+
         def _get_current_branch() -> str:
             proc = _run_git_command(['rev-parse', '--abbrev-ref', 'HEAD'])
             if proc.returncode != 0:
@@ -2477,13 +2491,14 @@ def main():
             return token or "task"
 
         def _build_task_branch_name(task_row: sqlite3.Row) -> str:
-            slug_component = _sanitize_branch_component(STORY_SLUG or "story")
-            position_component = _sanitize_branch_component(f"{TASK_INDEX + 1:02d}")
-            task_identifier = task_row["task_id"] or f"{slug_component}-{position_component}"
-            identifier_component = _sanitize_branch_component(str(task_identifier))
-            branch_prefix = os.environ.get("WORK_ON_TASKS_BRANCH_PREFIX", "wip")
-            branch_prefix = _sanitize_branch_component(branch_prefix)
-            return f"{branch_prefix}/{slug_component}-{position_component}-{identifier_component}"
+            explicit_id = (os.environ.get("GC_ACTIVE_TASK_ID") or "").strip()
+            task_identifier = explicit_id or str(task_row["task_id"] or "").strip()
+            if not task_identifier:
+                task_identifier = (os.environ.get("GC_ACTIVE_TASK_SLUG") or STORY_SLUG or "task").strip()
+            identifier_component = _sanitize_branch_component(task_identifier)
+            if not identifier_component:
+                identifier_component = f"{_sanitize_branch_component(STORY_SLUG or 'task')}-{TASK_INDEX + 1}"
+            return identifier_component
 
         def _update_task_branch_record(task_row_id, branch: Optional[str], base_branch: Optional[str]) -> None:
             try:
@@ -2495,6 +2510,51 @@ def main():
                     branch_conn.commit()
             except sqlite3.Error:
                 pass
+
+        def _ensure_dev_branch_exists() -> Tuple[bool, List[str]]:
+            notes: List[str] = []
+            if _local_branch_exists(dev_branch_name):
+                return True, notes
+            start_ref: Optional[str] = None
+            if _local_branch_exists(main_branch_name):
+                start_ref = main_branch_name
+            else:
+                fetch_main = _run_git_command(['fetch', 'origin', main_branch_name])
+                if fetch_main.returncode == 0:
+                    start_ref = f"origin/{main_branch_name}"
+            if start_ref is None:
+                head = _run_git_command(['rev-parse', '--verify', 'HEAD'])
+                if head.returncode == 0:
+                    start_ref = head.stdout.strip()
+            create_args = ['branch', dev_branch_name]
+            if start_ref:
+                create_args.append(start_ref)
+            create_proc = _run_git_command(create_args)
+            if create_proc.returncode != 0:
+                stderr_text = (create_proc.stderr or "").strip()
+                notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"blocked — unable to create dev branch {dev_branch_name}: {stderr_text or 'see stderr'}"
+                    )
+                )
+                return False, notes
+            push_proc = _run_git_command(['push', '-u', 'origin', dev_branch_name])
+            if push_proc.returncode == 0:
+                notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"info — created dev branch {dev_branch_name} from {start_ref or 'HEAD'} and pushed to origin"
+                    )
+                )
+            else:
+                notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"warning — dev branch {dev_branch_name} created locally but push failed; sync manually"
+                    )
+                )
+            return True, notes
 
         def _resolve_task_commit_ref() -> str:
             task_id = os.environ.get("GC_ACTIVE_TASK_ID") or os.environ.get("GC_BUDGET_TASK_ID")
@@ -3977,7 +4037,7 @@ def main():
             legacy_status = forced_legacy_status or legacy_status
 
         _merge_branch_into_base_if_complete(canonical_status)
-        if branch_ready and not branch_merge_completed:
+        if branch_merge_completed:
             _restore_base_branch_after_run()
         raw_commands_field = payload.get('commands') or []
         summary_commands: List[str] = []

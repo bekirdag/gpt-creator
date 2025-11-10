@@ -8173,8 +8173,21 @@ cmd_work_on_tasks() {
 
   if [[ "${GC_DOCS_ENABLED:-1}" -eq 1 ]]; then
     if (( using_stub )); then
+      if gc_refresh_documentation_if_needed "${PROJECT_ROOT:-$PWD}"; then
+        local refreshed_db="${canonical_tasks_dir}/tasks.db"
+        if [[ -f "$refreshed_db" ]]; then
+          export GC_DOCUMENTATION_DB_PATH="$refreshed_db"
+          using_stub=0
+          info "Documentation catalog refreshed; using ${GC_DOCUMENTATION_DB_PATH}."
+        fi
+      fi
+    fi
+
+    if (( using_stub )); then
       warn "Documentation catalog running in workspace stub mode (${GC_DOCUMENTATION_DB_PATH}); limited doc queries only."
-    else
+    fi
+
+    if (( using_stub == 0 )); then
       if [[ "${doc_mode,,}" == "strict" ]]; then
         if ! gc_require_documentation_catalog "$PROJECT_ROOT"; then
           local catalog_root="${PROJECT_ROOT:-$PWD}"

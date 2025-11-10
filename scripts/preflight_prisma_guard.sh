@@ -87,6 +87,60 @@ is_missing_prisma_cmd() {
   return 1
 }
 
+read_env_var() {
+  local key="$1"
+  local file="$2"
+  if [[ ! -s "$file" ]]; then
+    printf ''
+    return 0
+  fi
+  while IFS='=' read -r env_key env_value; do
+    env_key="${env_key%% *}"
+    env_key="${env_key%%#*}"
+    env_key="${env_key// /}"
+    if [[ -n "$env_key" && "$env_key" == "$key" ]]; then
+      env_value="${env_value%$'\r'}"
+      env_value="${env_value#\"}"
+      env_value="${env_value%\"}"
+      printf '%s' "$env_value"
+      return 0
+    fi
+  done <"$file"
+  printf ''
+}
+
+derive_shadow_url() {
+  local url="$1"
+  local suffix="$2"
+  if [[ -z "$url" ]]; then
+    printf ''
+    return 0
+  fi
+  python3 - "$url" "$suffix" <<'PY'
+import sys
+from urllib.parse import urlparse, urlunparse
+
+if len(sys.argv) < 3:
+    sys.exit(0)
+
+raw = sys.argv[1].strip()
+suffix = sys.argv[2]
+if not raw:
+    sys.exit(0)
+
+parsed = urlparse(raw)
+if not parsed.path or parsed.path == "/":
+    sys.exit(0)
+
+head, _, tail = parsed.path.rpartition("/")
+if not tail:
+    sys.exit(0)
+new_tail = f"{tail}{suffix}"
+new_path = f"{head}/{new_tail}" if head else f"/{new_tail}"
+print(urlunparse(parsed._replace(path=new_path)))
+PY
+}
+
 mapfile -t schema_paths < <(
   find . \
     \( -path '*/node_modules/*' -o -path '*/.git/*' -o -path '*/.gpt-creator/*' -o -path '*/tmp/*' -o -path '*/vendor/*' \) -prune -o \
@@ -122,6 +176,27 @@ for schema_path in "${schema_paths[@]}"; do
     continue
   fi
   schema_ok=0
+  local shadow_url="${PRISMA_MIGRATE_SHADOW_DATABASE_URL:-}"
+  if [[ -z "$shadow_url" ]]; then
+    local env_file
+    for env_file in "$schema_dir/.env" "$schema_dir/../.env" "$schema_dir/../../.env" "$schema_dir/.env.local" "$schema_dir/../.env.local" "$schema_dir/../../.env.local"; do
+      env_file="$(cd "$schema_dir" && python3 - <<'PY'
+import os, sys
+path = sys.argv[1]
+print(os.path.abspath(path))
+PY
+"$env_file")"
+      db_url="$(read_env_var "DATABASE_URL" "$env_file")"
+      if [[ -n "$db_url" ]]; then
+        shadow_derived="$(derive_shadow_url "$db_url" "_shadow")"
+        if [[ -n "$shadow_derived" ]]; then
+          shadow_url="$shadow_derived"
+          break
+        fi
+      fi
+    done
+  fi
+  export PRISMA_MIGRATE_SHADOW_DATABASE_URL="$shadow_url"
   for runner_cmd in "${runner[@]}"; do
     if [[ -z "$runner_cmd" ]]; then
       continue

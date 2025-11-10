@@ -5994,6 +5994,12 @@ def main():
                 lines.append(f"- {command_label} — {summary}")
 
         lines.append("")
+        lines.append("## Helper Checklist (before exploring code or docs)")
+        lines.append("- Map the repo once via `python3 scripts/python/repo_outline.py --max-depth 1 --focus apps/api` instead of issuing repetitive `ls` commands.")
+        lines.append("- When you need to inspect code, run `python3 scripts/python/targeted_search.py --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.")
+        lines.append("- For SDS/PDR context or migrations, query the documentation catalog with `python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" ...` rather than opening entire doc files or grepping blindly.")
+
+        lines.append("")
         lines.append("## Instructions")
         response_guidance = [
             "### Response Format",

@@ -27,13 +27,11 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 set +e
-pushd "$PROJECT_ROOT" >/dev/null 2>&1 || {
-  printf 'blocked-i18n-guard-error\n'
-  exit 7
-}
-guard_output="$(node "$CHECK_SCRIPT" 2>&1)"
+guard_output="$(
+  cd "$PROJECT_ROOT" >/dev/null 2>&1 \
+    && node "$CHECK_SCRIPT" 2>&1
+)"
 guard_code=$?
-popd >/dev/null 2>&1 || true
 set -e
 
 case "$guard_code" in

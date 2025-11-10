@@ -54,6 +54,7 @@ temp/
 .cache/
 .gomodcache/
 .gocache/
+data/
 
 **/.gpt-creator/logs/
 **/.gpt-creator/tmp/

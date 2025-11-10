@@ -22,7 +22,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Backlog ETA**: `estimate` aggregates remaining story points in `.gpt-creator/staging/plan/tasks/tasks.db` and translates them into a formatted duration using the throughput observed during `work-on-tasks` runs (defaults to a 10-task window at 15 story points per hour until telemetry is captured). Use `--recent-tasks COUNT|all` to widen the sample window and `--project` to point at another workspace when needed.
 - **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
 - **Safety preflights**: Every CLI entry now runs through workspace/doc catalog/dependency guards so stale or unsafe paths are rejected, lockfiles are rebuilt automatically, and missing dependencies fall back to mock mode instead of crashing active runs.
-- **Guarded file writes**: `gpt-creator apply-block` (and the legacy `scripts/python/write_block.py`) are the only approved writers; Husky/CI guards reject heredocs, ellipses, and `curl | bash` pipelines so every change lands through an audited, atomic workflow.
+- **Guarded file writes**: `gpt-creator apply-block` (and the legacy `scripts/python/write_block.py`) are the only approved writers; Husky/CI guards reject heredocs, ellipses, and curl-to-shell pipelines so every change lands through an audited, atomic workflow.
 - **Schema evidence index**: A stack-neutral inspector builds an index of tables/indexes across SQL, Prisma, Knex, Rails, TypeORM, and Django sources. Commands such as `gc_assert table publish_jobs` use this cache so schema checks become tolerant hints rather than brittle `rg` probes.
 - **Runtime overlays**: A Jest/Vitest decorator enforces single-process execution, injects a transpile-only TypeScript preloader, shims heavy native modules (@prisma/client, sharp, multer, prom-client, etc.), and remaps missing `dist/` imports to `src/lib/build/out`, keeping tests runnable even when installs or builds fail.
 
@@ -172,9 +172,9 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
 
 ### Approved file writers (`gpt-creator apply-block`)
 
-All multi-line edits—manual or Codex-driven—must flow through an approved writer. Husky (`.husky/pre-commit`) and CI (`scripts/guards/no_heredoc.js`, invoked from `.github/workflows/ci.yml`) block heredocs, ellipses, and `curl | bash` pipes before they ever reach `git add`. Use one of:
+All multi-line edits—manual or Codex-driven—must flow through an approved writer. Husky (`.husky/pre-commit`) and CI (`scripts/guards/no_heredoc.js`, invoked from `.github/workflows/ci.yml`) block heredocs, ellipses, and curl-to-shell pipes before they ever reach `git add`. Use one of:
 
-- `gpt-creator apply-block …` (preferred): accepts block JSON from `--file <path>` arguments or stdin, validates allowed writers declared in `gpt-creator.config.json`, writes atomically, stages, optionally runs `pnpm -w fmt`, and commits with an `apply-block:` prefix.
+- `gpt-creator apply-block` (preferred): accepts block JSON from repeated `--file <path>` arguments or stdin, validates allowed writers declared in `gpt-creator.config.json`, writes atomically, stages, optionally runs `pnpm -w fmt`, and commits with an `apply-block:` prefix.
 - `scripts/python/write_block.py`: a lighter-weight helper for single overwrites/appends when you do not need staging/commit automation.
 
 A block JSON looks like this (note the explicit newline at the end of `content`):
@@ -206,7 +206,7 @@ Useful flags:
 - `--allow-dirty` → bypass the clean-tree check when you intentionally have local edits.
 - `--message "apply-block: custom summary"` → override the default commit message.
 
-When crafting prompts/instructions for Codex or other agents, explicitly require them to (1) emit the block JSON for each file and (2) run `gpt-creator apply-block …` instead of heredocs. The guardrails will reject non-compliant commands, so giving the model the sanctioned workflow up front avoids blocked/no-op runs.
+When crafting prompts/instructions for Codex or other agents, explicitly require them to (1) emit the block JSON for each file and (2) run `gpt-creator apply-block` instead of heredocs. The guardrails will reject non-compliant commands, so giving the model the sanctioned workflow up front avoids blocked/no-op runs.
 
 ### Backlog Browser
 
@@ -320,7 +320,7 @@ gpt-creator scan --project /path/to/project
 ```
 gpt-creator normalize --project /path/to/project
 ```
-- Copies highest-confidence artifacts into canonical locations under `.gpt-creator/staging/inputs/` (`pdr.md`, `sds.md`, `openapi.yaml`, `sql/…`, `page_samples/…`).
+- Copies highest-confidence artifacts into canonical locations under `.gpt-creator/staging/inputs/` (`pdr.md`, `sds.md`, `openapi.yaml`, directories like `sql/<artifact>` and `page_samples/<artifact>`).
 - Records provenance in `.gpt-creator/staging/plan/provenance.json`.
 
 ### 3. Plan
@@ -362,7 +362,7 @@ gpt-creator run up --project /path/to/project
 - Use `gpt-creator refresh-stack --project /path/to/project` when you want to tear everything down, rebuild containers, re-import the SQL dump, and apply seeds in one shot (handy after large migrations or corrupted volumes).
 
 ### 7. Testing
-`gpt-creator` does not orchestrate automated testing. Running `gpt-creator verify …` prints a notice and exits without executing checks so you can manage QA with your own tooling. The legacy scripts under `verify/` remain available for teams that choose to maintain separate validation flows.
+`gpt-creator` does not orchestrate automated testing. Running `gpt-creator verify <args>` prints a notice and exits without executing checks so you can manage QA with your own tooling. The legacy scripts under `verify/` remain available for teams that choose to maintain separate validation flows.
 
 ### Codex Token Usage
 ```

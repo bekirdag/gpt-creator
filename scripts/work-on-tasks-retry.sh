@@ -89,11 +89,28 @@ child_pid=0
 
 forward_signal() {
   local signal="$1"
+  trap - INT TERM
+
+  local exit_code=128
+  case "$signal" in
+    INT)  exit_code=130 ;;
+    TERM) exit_code=143 ;;
+  esac
+
   if (( child_pid > 0 )); then
-    echo "[warn] Received ${signal}; signalling gpt-creator (pid ${child_pid}) to wrap up active task..." >&2
-    kill -s "$signal" "$child_pid" 2>/dev/null || true
-    wait "$child_pid" || true
+    if kill -0 "$child_pid" 2>/dev/null; then
+      echo "[warn] Received ${signal}; signalling gpt-creator (pid ${child_pid}) to wrap up active task..." >&2
+      kill -s "$signal" "$child_pid" 2>/dev/null || true
+    else
+      echo "[warn] Received ${signal}; gpt-creator process ${child_pid} already exited." >&2
+    fi
+    wait "$child_pid" 2>/dev/null || true
+    child_pid=0
+  else
+    echo "[warn] Received ${signal}; no active gpt-creator process to signal." >&2
   fi
+
+  exit "$exit_code"
 }
 
 trap 'forward_signal INT' INT
@@ -103,11 +120,14 @@ run_once() {
   local log_file
   log_file="$(mktemp -t gc_work_XXXX.log)"
   local status=0
-  if "${SCRIPT_DIR}/run-and-filter.sh" --log "$log_file" -- "${base_args[@]}"; then
+  "${SCRIPT_DIR}/run-and-filter.sh" --log "$log_file" -- "${base_args[@]}" &
+  child_pid=$!
+  if wait "$child_pid"; then
     status=0
   else
     status=$?
   fi
+  child_pid=0
   mkdir -p "${ROOT_DIR}/.gpt-creator/logs"
   cp "$log_file" "${ROOT_DIR}/.gpt-creator/logs/last_run.log"
   python3 "${SCRIPT_DIR}/python/git_change_detector.py" >/dev/null 2>&1 || true

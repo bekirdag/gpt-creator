@@ -76,6 +76,7 @@ INSTALL_WARNINGS=()
 NODE_REQUIRED_MAJOR=20
 NODE_CURRENT_VERSION=""
 APT_UPDATED=0
+NVM_INSTALL_URL="${GC_NVM_INSTALL_URL:-https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh}"
 
 log_info() { echo "› $1"; }
 log_warn() { echo "⚠ $1" >&2; }
@@ -96,6 +97,109 @@ apt_get_install() {
   if as_root "/" apt-get install -y "$@"; then
     return 0
   fi
+  return 1
+}
+
+list_conflicting_node_packages() {
+  command -v dpkg >/dev/null 2>&1 || return 1
+
+  local conflicts=(libnode-dev npm)
+  local installed=()
+  local pkg
+
+  for pkg in "${conflicts[@]}"; do
+    if dpkg -s "$pkg" >/dev/null 2>&1; then
+      installed+=("$pkg")
+    fi
+  done
+
+  if (( ${#installed[@]} == 0 )); then
+    return 1
+  fi
+
+  printf '%s\n' "${installed[@]}"
+  return 0
+}
+
+nvm_dir_path() {
+  local dir="${NVM_DIR:-}"
+  if [[ -z "$dir" ]]; then
+    dir="${HOME}/.nvm"
+  fi
+  printf '%s' "$dir"
+}
+
+ensure_nvm() {
+  local dir
+  dir="$(nvm_dir_path)"
+  if [[ -s "$dir/nvm.sh" ]]; then
+    export NVM_DIR="$dir"
+    return 0
+  fi
+
+  if ! need_cmd curl; then
+    record_warning "curl is required to install nvm automatically. Install Node.js ${NODE_REQUIRED_MAJOR}+ manually (https://nodejs.org/)."
+    return 1
+  fi
+
+  local install_script
+  install_script="$(mktemp)" || {
+    record_warning "Failed to create temporary file for nvm installer."
+    return 1
+  }
+
+  log_info "nvm not found; installing from ${NVM_INSTALL_URL}…"
+  if ! curl -fsSL "$NVM_INSTALL_URL" -o "$install_script"; then
+    rm -f "$install_script"
+    record_warning "Unable to download nvm installer."
+    return 1
+  fi
+
+  if ! bash "$install_script"; then
+    rm -f "$install_script"
+    record_warning "nvm installer exited with an error."
+    return 1
+  fi
+  rm -f "$install_script"
+
+  if [[ -s "$dir/nvm.sh" ]]; then
+    export NVM_DIR="$dir"
+    return 0
+  fi
+
+  record_warning "nvm installation completed but ${dir}/nvm.sh was not found. Install Node.js ${NODE_REQUIRED_MAJOR}+ manually (https://nodejs.org/)."
+  return 1
+}
+
+load_nvm() {
+  local dir
+  dir="$(nvm_dir_path)"
+  if [[ -s "$dir/nvm.sh" ]]; then
+    export NVM_DIR="$dir"
+    # shellcheck disable=SC1090
+    source "$dir/nvm.sh"
+    return 0
+  fi
+  return 1
+}
+
+install_node_via_nvm() {
+  ensure_nvm || return 1
+  if ! load_nvm; then
+    record_warning "nvm installed but could not be loaded from $(nvm_dir_path)/nvm.sh."
+    return 1
+  fi
+
+  local target="${GC_NODE_VERSION:-${NODE_REQUIRED_MAJOR}}"
+  log_info "Installing Node.js ${target} via nvm…"
+  if nvm install "$target"; then
+    nvm alias default "$target" >/dev/null 2>&1 || true
+    nvm use "$target" >/dev/null 2>&1 || true
+    hash -r
+    return 0
+  fi
+
+  record_warning "Failed to install Node.js ${target} via nvm."
   return 1
 }
 
@@ -182,45 +286,56 @@ ensure_node() {
 
   log_info "Node.js ${NODE_REQUIRED_MAJOR}+ not found or outdated; attempting installation…"
   local installed=0
-  case "$INSTALL_MODE" in
-    macos)
-      if command -v brew >/dev/null 2>&1; then
-        if brew_install node@20; then
-          brew link --overwrite --force node@20 >/dev/null 2>&1 || true
-          installed=1
+  if install_node_via_nvm; then
+    installed=1
+  else
+    case "$INSTALL_MODE" in
+      macos)
+        if command -v brew >/dev/null 2>&1; then
+          if brew_install node@20; then
+            brew link --overwrite --force node@20 >/dev/null 2>&1 || true
+            installed=1
+          fi
+        else
+          record_warning "Homebrew not found; install Node.js ${NODE_REQUIRED_MAJOR}+ manually from https://nodejs.org/."
         fi
-      else
-        record_warning "Homebrew not found; install Node.js ${NODE_REQUIRED_MAJOR}+ manually from https://nodejs.org/."
-      fi
-      ;;
-    linux)
-      if command -v apt-get >/dev/null 2>&1; then
-        if command -v curl >/dev/null 2>&1; then
-          local nodesource_script
-          nodesource_script="$(mktemp)"
-          if curl -fsSL https://deb.nodesource.com/setup_20.x -o "$nodesource_script"; then
-            if as_root "/" bash "$nodesource_script"; then
-              if apt_get_install nodejs; then
+        ;;
+      linux)
+        if command -v apt-get >/dev/null 2>&1; then
+          local node_conflicts=""
+          node_conflicts="$(list_conflicting_node_packages 2>/dev/null || true)"
+          if [[ -n "$node_conflicts" ]]; then
+            node_conflicts="${node_conflicts//$'\n'/ }"
+            record_warning "System Node.js packages (${node_conflicts}) block automatic installation. Remove them manually (e.g. sudo apt remove ...) or install Node.js ${NODE_REQUIRED_MAJOR}+ via https://nodejs.org/."
+          else
+            if command -v curl >/dev/null 2>&1; then
+              local nodesource_script
+              nodesource_script="$(mktemp)"
+              if curl -fsSL https://deb.nodesource.com/setup_20.x -o "$nodesource_script"; then
+                if as_root "/" bash "$nodesource_script"; then
+                  if apt_get_install nodejs; then
+                    installed=1
+                  fi
+                fi
+              else
+                record_warning "Failed to download NodeSource setup script."
+              fi
+              rm -f "$nodesource_script"
+            fi
+            if (( installed == 0 )); then
+              if apt_get_install nodejs npm; then
                 installed=1
               fi
             fi
-          else
-            record_warning "Failed to download NodeSource setup script."
           fi
-          rm -f "$nodesource_script"
-        fi
-        if (( installed == 0 )); then
-          if apt_get_install nodejs npm; then
+        elif command -v dnf >/dev/null 2>&1; then
+          if dnf_install nodejs; then
             installed=1
           fi
         fi
-      elif command -v dnf >/dev/null 2>&1; then
-        if dnf_install nodejs; then
-          installed=1
-        fi
-      fi
-      ;;
-  esac
+        ;;
+    esac
+  fi
 
   if (( installed )); then
     hash -r

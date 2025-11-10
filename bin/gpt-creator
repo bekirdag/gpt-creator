@@ -463,7 +463,7 @@ gc_usage_limit_is_provider_signal() {
 }
 
 gc_bootstrap_docs_registry() {
-  local db_path="${1:-${GC_DOCUMENTATION_DB_PATH:-}}"
+  local db_path="${GC_DOCUMENTATION_DB_PATH:-}"
   [[ -n "$db_path" ]] || return 0
 
   local repo_root="${PROJECT_ROOT:-$PWD}"
@@ -10741,7 +10741,7 @@ print(flag("notes_contains_already_satisfied"))'
         notes_payload="$(printf '%s\n' "${task_notes[@]}")"
       fi
       local task_notes_display="${task_outcome_reason:-}"
-      if [[ -z "$task_notes_display" && ((${#task_notes[@]} > 0)) ]]; then
+      if [[ -z "$task_notes_display" ]] && ((${#task_notes[@]} > 0)); then
         local -a task_notes_sanitized=()
         for note in "${task_notes[@]}"; do
           local sanitized="${note//$'\r'/ }"
@@ -11766,6 +11766,17 @@ cmd_reports() {
   esac
 }
 
+cmd_apply_block() {
+  local helper="${CLI_ROOT}/bin/gpt-creator-apply-block.js"
+  if [[ ! -f "$helper" ]]; then
+    die "apply-block helper missing at ${helper}"
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    die "node is required to run gpt-creator apply-block"
+  fi
+  node "$helper" "$@"
+}
+
 cmd_create_project() {
   local template_request="auto"
   local path=""
@@ -12562,8 +12573,8 @@ declare -ag GC_ERROR_SUMMARY_ARR=()
 gc_redact() {
   local s="$*"
   s="${s//sk-[A-Za-z0-9_-]*/sk-REDACTED}"
-  local k v
-  while IFS='=' read -r k v; do
+  local k _
+  while IFS='=' read -r k _; do
     if [[ "$k" =~ (KEY|TOKEN|SECRET|PASSWORD|AUTH|ACCESS|PRIVATE) ]] && [[ -n "${!k:-}" ]]; then
       s="${s//"${!k}"/"[REDACTED:${k}]"}"
     fi
@@ -12774,7 +12785,8 @@ gc_run_end_scripts() {
     local interpreter
     interpreter="$(gc_guess_interpreter "$finalize_script")" || interpreter=""
     if [[ -n "$interpreter" ]]; then
-      local rel_finalize="$(gc_rel_from_root "$finalize_script")"
+      local rel_finalize
+      rel_finalize="$(gc_rel_from_root "$finalize_script")"
       (
         cd "$(gc_from_root "")" >/dev/null 2>&1 || exit 0
         if ! GC_TASK_FINAL_STATUS="$status" \
@@ -12889,6 +12901,7 @@ main() {
     bootstrap)      cmd_bootstrap "$@" ;;
     scan)           cmd_scan "$@" ;;
     normalize)      cmd_normalize "$@" ;;
+    apply-block)    cmd_apply_block "$@" ;;
     plan)           cmd_plan "$@" ;;
     generate)       cmd_generate "$@" ;;
     db)             cmd_db "$@" ;;
@@ -12947,13 +12960,13 @@ WORKSPACE_GUARD_PATH="${CLI_ROOT}/scripts/workspace_guard.sh"
 DOC_CATALOG_GUARD_PATH="${CLI_ROOT}/scripts/doc_catalog_guard.sh"
 DEP_GUARD_PATH="${CLI_ROOT}/scripts/dep_guard.sh"
 
-# shellcheck disable=SC1091
+# shellcheck source=scripts/workspace_guard.sh
 . "$WORKSPACE_GUARD_PATH" "$@"
 
-# shellcheck disable=SC1091
+# shellcheck source=scripts/doc_catalog_guard.sh
 . "$DOC_CATALOG_GUARD_PATH" "$@"
 
-# shellcheck disable=SC1091
+# shellcheck source=scripts/dep_guard.sh
 . "$DEP_GUARD_PATH" "$@"
 
 if [[ -z "${GC_RUNTIME_DIR:-}" ]]; then

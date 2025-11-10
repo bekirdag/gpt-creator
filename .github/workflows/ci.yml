@@ -87,3 +87,29 @@ jobs:
           else
             echo "No apps directory detected; skipping i18n-sync idempotence check."
           fi
+
+  apply-block-cli:
+    name: Apply Block CLI
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+      - name: Guard heredocs/ellipses
+        run: node scripts/guards/no_heredoc.js --all
+      - name: Lint (if present)
+        run: pnpm run lint --if-present
+      - name: Build (if present)
+        run: pnpm run build --if-present
+      - name: Vitest
+        run: pnpm vitest run --reporter=dot

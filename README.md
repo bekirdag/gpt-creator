@@ -22,6 +22,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Backlog ETA**: `estimate` aggregates remaining story points in `.gpt-creator/staging/plan/tasks/tasks.db` and translates them into a formatted duration using the throughput observed during `work-on-tasks` runs (defaults to a 10-task window at 15 story points per hour until telemetry is captured). Use `--recent-tasks COUNT|all` to widen the sample window and `--project` to point at another workspace when needed.
 - **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
 - **Safety preflights**: Every CLI entry now runs through workspace/doc catalog/dependency guards so stale or unsafe paths are rejected, lockfiles are rebuilt automatically, and missing dependencies fall back to mock mode instead of crashing active runs.
+- **Guarded file writes**: `gpt-creator apply-block` (and the legacy `scripts/python/write_block.py`) are the only approved writers; Husky/CI guards reject heredocs, ellipses, and `curl | bash` pipelines so every change lands through an audited, atomic workflow.
 - **Schema evidence index**: A stack-neutral inspector builds an index of tables/indexes across SQL, Prisma, Knex, Rails, TypeORM, and Django sources. Commands such as `gc_assert table publish_jobs` use this cache so schema checks become tolerant hints rather than brittle `rg` probes.
 - **Runtime overlays**: A Jest/Vitest decorator enforces single-process execution, injects a transpile-only TypeScript preloader, shims heavy native modules (@prisma/client, sharp, multer, prom-client, etc.), and remaps missing `dist/` imports to `src/lib/build/out`, keeping tests runnable even when installs or builds fail.
 
@@ -46,13 +47,14 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 
 ## Installation
 
-### Option 0 — One-liner install (curl)
+### Option 0 — Remote install helper (two steps)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bekirdag/gpt-creator/main/scripts/install-latest.sh | bash
+curl -fsSL https://raw.githubusercontent.com/bekirdag/gpt-creator/main/scripts/install-latest.sh -o /tmp/gpt-creator-install.sh
+bash /tmp/gpt-creator-install.sh -- --prefix /opt --force --skip-preflight
 ```
 
-Add extra flags after `--`, e.g. `... | bash -s -- --prefix /opt --force --skip-preflight`. The script clones the repository into a temporary directory, runs the standard installer (`scripts/install.sh --prefix /usr/local` by default), then removes the temporary files. Requires `git` and `mktemp` on your `PATH`.
+Download the helper script, inspect it if desired, then run it with any flags after `--`. The helper clones the repository into a temporary directory, runs the standard installer (`scripts/install.sh --prefix /usr/local` by default), then removes the temporary files. Requires `git` and `mktemp` on your `PATH`.
 
 ### Option 1 — System-wide install (macOS)
 
@@ -168,6 +170,44 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
   - `backlog` renders summaries directly to the terminal: run it with no extra flags (or `--type epics`) to list each epic with progress metrics, `--type stories` for an all-story table, `--item-children <slug>` to drill into an epic or story, `--task-details <id>` to print a single task, and `--progress` to draw an overall task progress bar. Task tables now show the stored DAG order, and `--dag-limit N` prints the next `N` globally prioritised tasks (default 20). Use `--project` (or legacy `--root`) to point at a different workspace.
   - The legacy `iterate` command is deprecated.
 
+### Approved file writers (`gpt-creator apply-block`)
+
+All multi-line edits—manual or Codex-driven—must flow through an approved writer. Husky (`.husky/pre-commit`) and CI (`scripts/guards/no_heredoc.js`, invoked from `.github/workflows/ci.yml`) block heredocs, ellipses, and `curl | bash` pipes before they ever reach `git add`. Use one of:
+
+- `gpt-creator apply-block …` (preferred): accepts block JSON from `--file <path>` arguments or stdin, validates allowed writers declared in `gpt-creator.config.json`, writes atomically, stages, optionally runs `pnpm -w fmt`, and commits with an `apply-block:` prefix.
+- `scripts/python/write_block.py`: a lighter-weight helper for single overwrites/appends when you do not need staging/commit automation.
+
+A block JSON looks like this (note the explicit newline at the end of `content`):
+
+```json
+{
+  "id": "admin-allow-instructor-audit",
+  "writer": "gpt-creator",
+  "mode": "overwrite",
+  "path": "apps/server/src/config/adminModules.ts",
+  "content": "export const ADMIN_MODULES = new Set<string>(['users','roles','instructor-audit'])\\n"
+}
+```
+
+Apply it (and optionally batch multiple files) with:
+
+```bash
+gpt-creator apply-block \
+  --file blocks/admin-allow.json \
+  --file blocks/instructor-audit-router.json \
+  --fmt \
+  --commit
+```
+
+Useful flags:
+
+- `--dry-run`, `--json` → validate blocks and print the action plan without touching the working tree.
+- `--no-commit` → leave staged changes for a later manual commit.
+- `--allow-dirty` → bypass the clean-tree check when you intentionally have local edits.
+- `--message "apply-block: custom summary"` → override the default commit message.
+
+When crafting prompts/instructions for Codex or other agents, explicitly require them to (1) emit the block JSON for each file and (2) run `gpt-creator apply-block …` instead of heredocs. The guardrails will reject non-compliant commands, so giving the model the sanctioned workflow up front avoids blocked/no-op runs.
+
 ### Backlog Browser
 
 `gpt-creator backlog` emits structured summaries straight to the console, backed by `.gpt-creator/staging/plan/tasks/tasks.db`. Task listings now surface the persisted DAG order so you can see both per-story positions and the global execution queue.
@@ -222,7 +262,7 @@ GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)
   Epic: API Platform [GC-01]
   Status: in-progress
   Estimate: 3d
-  ...
+  [output truncated for brevity]
   ```
 
 - `--progress` summarises global task progress with a percentage bar:
@@ -245,7 +285,7 @@ GC-02    gc-admin    Admin Console         8 stories (2 complete, 4 in-progress)
   12     user-onboard   GC-101     Implement signup API                        in-progress
   15     user-onboard   GC-102     Persist marketing opt-in                    pending
   18     reporting-api  GC-305     Expose GET /reports summary endpoint        pending
-  ...
+  [additional backlog rows truncated]
   ```
 
 - Run `gpt-creator create-tasks` or the `create-jira-tasks` + `migrate-tasks` pipeline first; the backlog commands require a populated tasks database. Use `--project` (or backward-compatible `--root`) to target an alternate workspace.
@@ -435,6 +475,7 @@ Use these when running ad-hoc experiments or tightening budgets in CI without ed
 ```
 gpt-creator estimate --project /path/to/project
 ```
+- Add `--recent-tasks COUNT|all` to widen the throughput sample window (defaults to the last 10 tasks). Example: `gpt-creator estimate --project /path/to/project --recent-tasks 25`.
 - Aggregates story points for every non-complete task in `.gpt-creator/staging/plan/tasks/tasks.db`.
 - Converts the remaining total into a formatted duration using the latest measured throughput from `work-on-tasks` (defaults to the last 10 tasks and falls back to 15 story points per hour, for example `1d 2h 30m`).
 - Defaults to the current directory; point `--project` at another workspace when estimating elsewhere.

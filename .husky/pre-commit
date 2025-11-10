@@ -1,8 +1,7 @@
-#!/usr/bin/env sh
-
-. "$(dirname -- "$0")/_/husky.sh"
-
 set -euo pipefail
+
+echo "[husky] blocking heredocs/ellipses"
+node scripts/guards/no_heredoc.js
 
 if [ -d apps ]; then
   echo "[husky] running i18n-check"

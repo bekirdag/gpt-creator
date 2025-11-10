@@ -4,7 +4,8 @@ Quick path:
 
 ```bash
 # 1) Install (see INSTALL.md for details)
-curl -fsSL https://example.com/gpt-creator/install.sh | bash
+curl -fsSL https://example.com/gpt-creator/install.sh -o /tmp/gpt-creator-install.sh
+bash /tmp/gpt-creator-install.sh
 
 # 2) Prepare your inputs (any names, any layout):
 #    - PDR / SDS / RFP (md/doc/txt)

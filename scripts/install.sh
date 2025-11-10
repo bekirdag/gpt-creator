@@ -196,11 +196,18 @@ ensure_node() {
     linux)
       if command -v apt-get >/dev/null 2>&1; then
         if command -v curl >/dev/null 2>&1; then
-          if as_root "/" bash -lc 'curl -fsSL https://deb.nodesource.com/setup_20.x | bash -'; then
-            if apt_get_install nodejs; then
-              installed=1
+          local nodesource_script
+          nodesource_script="$(mktemp)"
+          if curl -fsSL https://deb.nodesource.com/setup_20.x -o "$nodesource_script"; then
+            if as_root "/" bash "$nodesource_script"; then
+              if apt_get_install nodejs; then
+                installed=1
+              fi
             fi
+          else
+            record_warning "Failed to download NodeSource setup script."
           fi
+          rm -f "$nodesource_script"
         fi
         if (( installed == 0 )); then
           if apt_get_install nodejs npm; then

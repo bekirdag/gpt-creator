@@ -1,0 +1,7 @@
+{
+  "allowedWriters": ["gpt-creator", "scripts/python/write_block.py"],
+  "commitPrefix": "apply-block:",
+  "disallowEllipses": true,
+  "disallowHeredocs": true,
+  "binaryMaxBytes": 1048576
+}

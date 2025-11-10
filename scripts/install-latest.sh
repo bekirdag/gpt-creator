@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Remote installer for gpt-creator.
-# Supports curl | bash one-liners that clone the repo to a temp directory and re-run the standard installer.
+# Supports remote helpers that clone the repo to a temp directory and re-run the standard installer.
 
 set -Eeuo pipefail
 
@@ -32,9 +32,10 @@ usage() {
       "gpt-creator remote installer" \
       "" \
       "Usage:" \
-      "  curl -fsSL https://raw.githubusercontent.com/bekirdag/gpt-creator/main/scripts/install-latest.sh | bash -s --" \
+      "  curl -fsSL https://raw.githubusercontent.com/bekirdag/gpt-creator/main/scripts/install-latest.sh -o /tmp/gpt-creator-install.sh" \
+      "  bash /tmp/gpt-creator-install.sh -- --prefix /usr/local" \
       "" \
-      "Options (pass after -- when piping via curl):" \
+      "Options (pass after -- when invoking the script):" \
       "  --prefix PATH         Install prefix (default: /usr/local)" \
       "  --skip-preflight      Skip dependency checks" \
       "  --force               Overwrite existing symlink if present" \

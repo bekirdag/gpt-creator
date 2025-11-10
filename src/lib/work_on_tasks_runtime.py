@@ -6015,6 +6015,7 @@ def main():
             "- Need a repo overview? Run `python3 scripts/python/repo_outline.py --max-depth 1 --focus <path>` (see `assets/templates/help/repo_outline_usage.txt`).",
             "- Searching for symbols? Run `python3 scripts/python/targeted_search.py --pattern <needle> --paths <dirs> [--ext .ts]` instead of repo-wide `rg`/`python os.walk` loops (`assets/templates/help/targeted_search_usage.txt`).",
             "- Validating REST endpoints? Define a manifest and run `python3 scripts/python/rest_check_runner.py <manifest.yaml>` (`assets/templates/help/rest_check_runner_usage.txt`).",
+            "- Unsure about a file path? Run `python3 scripts/python/safe_show_file.py <path-or-name> --suggest` before `sed`/`cat` to avoid missing-file retries (`assets/templates/help/safe_show_file_usage.txt`).",
             "- End the `Notes` section with `STATUS: completed`, `STATUS: needs-retry`, or `STATUS: failed` so automation can classify the run.",
         ]
         lines.extend(response_guidance)

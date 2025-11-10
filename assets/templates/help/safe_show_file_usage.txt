@@ -1,0 +1,28 @@
+Usage:
+  python3 scripts/python/safe_show_file.py <path-or-name> [options]
+
+Purpose:
+  Preview files (and get suggestions) without wasting tokens on `sed` failures
+  when a path is wrong or has been moved.
+
+Key options:
+  --start N / --end N       Show a specific line range (defaults 1–160)
+  --context N               Show ±N lines around each match or around every line in the range
+  --match TEXT              Highlight lines containing TEXT (case-insensitive)
+  --suggest                 Only list candidate paths (no file output)
+  --max-suggestions N       Bound the number of suggestions (default 40)
+
+Examples:
+  # Show the first 120 lines of a known file
+  python3 scripts/python/safe_show_file.py apps/api/src/admin/instructors/admin-instructor-audit.service.ts --start 1 --end 120
+
+  # Unsure about the exact path? Just pass the filename and use suggestions
+  python3 scripts/python/safe_show_file.py admin-instructor-audit.service.ts --suggest
+
+  # Highlight occurrences of "status" with 2 lines of context
+  python3 scripts/python/safe_show_file.py admin-instructor-audit.service.ts --match status --context 2
+
+Tips:
+  • Always try this helper before `sed -n '…'` if you're not 100% sure of the path.
+  • Combine with `repo_outline.py` for quick directory maps and `targeted_search.py`
+    for string hunts; all three keep token usage predictable under work-on-tasks.

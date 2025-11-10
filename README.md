@@ -35,6 +35,7 @@ Codex agents should prefer the purpose-built helpers below instead of ad‑hoc `
 | `python3 scripts/python/repo_outline.py` | Get a concise directory tree (with optional focus paths) instead of running dozens of `ls` commands. | `assets/templates/help/repo_outline_usage.txt` |
 | `python3 scripts/python/targeted_search.py` | Search for strings/regex within a bounded set of files (depth/extension limited) instead of walking the entire repo. Supports multiple patterns and optional context output. | `assets/templates/help/targeted_search_usage.txt` |
 | `python3 scripts/python/rest_check_runner.py` | Run declarative REST smoke tests defined in a YAML/TOML manifest (auth, payloads, predicates) instead of writing bespoke HTTP scripts each turn. | `assets/templates/help/rest_check_runner_usage.txt` |
+| `python3 scripts/python/safe_show_file.py` | Preview file slices and get real path suggestions before running `sed`/`cat`, preventing token waste on missing files. | `assets/templates/help/safe_show_file_usage.txt` |
 
 These helpers are mandatory during `work-on-tasks` sessions: mention them in your task notes, keep token-heavy scans capped, and extend the manifest/usage templates rather than cloning new tooling.
 

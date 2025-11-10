@@ -7891,15 +7891,8 @@ cmd_work_on_tasks() {
     done
   fi
 
-  if [[ "${GC_ENABLE_PREFLIGHT_I18N:-0}" == "1" ]]; then
-    local i18n_guard_script="${CLI_ROOT}/scripts/preflight_i18n_guard.sh"
-    if [[ ! -x "$i18n_guard_script" ]]; then
-      i18n_guard_script=""
-    fi
-  else
-    i18n_guard_script=""
-  fi
-  if [[ -n "$i18n_guard_script" ]]; then
+  local i18n_guard_script="${CLI_ROOT}/scripts/preflight_i18n_guard.sh"
+  if [[ -x "$i18n_guard_script" ]]; then
     local i18n_guard_output="" i18n_guard_code=0 i18n_guard_outcome=""
     local i18n_guard_autofix_attempts=0
     local i18n_guard_autofix_limit="${GC_PREFLIGHT_I18N_AUTO_SYNC_LIMIT:-1}"

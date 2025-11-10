@@ -6,7 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 HELP_DIR="${REPO_DIR}/assets/templates/help"
 
-PREFIX="/usr/local"
+INSTALL_PREFIX="${PREFIX:-/usr/local}"
+unset PREFIX 2>/dev/null || true
 SKIP_PREFLIGHT=0
 FORCE=0
 
@@ -32,7 +33,7 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --prefix) PREFIX="${2:-/usr/local}"; shift 2 ;;
+    --prefix) INSTALL_PREFIX="${2:-/usr/local}"; shift 2 ;;
     --skip-preflight) SKIP_PREFLIGHT=1; shift ;;
     --force) FORCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -54,8 +55,8 @@ case "$OS_NAME" in
     ;;
 esac
 
-APP_DIR="$PREFIX/lib/gpt-creator"
-BIN_DIR="$PREFIX/bin"
+APP_DIR="$INSTALL_PREFIX/lib/gpt-creator"
+BIN_DIR="$INSTALL_PREFIX/bin"
 APP_BIN="$APP_DIR/bin/gpt-creator"
 LINK_PATH="$BIN_DIR/gpt-creator"
 
@@ -184,23 +185,38 @@ load_nvm() {
 }
 
 install_node_via_nvm() {
-  ensure_nvm || return 1
-  if ! load_nvm; then
+  local saved_prefix="" had_prefix=0
+  if [[ "${PREFIX+x}" == x ]]; then
+    saved_prefix="$PREFIX"
+    had_prefix=1
+    unset PREFIX
+  fi
+
+  local rc=0
+  if ! ensure_nvm; then
+    rc=1
+  elif ! load_nvm; then
     record_warning "nvm installed but could not be loaded from $(nvm_dir_path)/nvm.sh."
-    return 1
+    rc=1
+  else
+    local target="${GC_NODE_VERSION:-${NODE_REQUIRED_MAJOR}}"
+    log_info "Installing Node.js ${target} via nvm…"
+    if nvm install "$target"; then
+      nvm alias default "$target" >/dev/null 2>&1 || true
+      nvm use "$target" >/dev/null 2>&1 || true
+      hash -r
+    else
+      record_warning "Failed to install Node.js ${target} via nvm."
+      rc=1
+    fi
   fi
 
-  local target="${GC_NODE_VERSION:-${NODE_REQUIRED_MAJOR}}"
-  log_info "Installing Node.js ${target} via nvm…"
-  if nvm install "$target"; then
-    nvm alias default "$target" >/dev/null 2>&1 || true
-    nvm use "$target" >/dev/null 2>&1 || true
-    hash -r
-    return 0
+  if (( had_prefix )); then
+    PREFIX="$saved_prefix"
+    export PREFIX
   fi
 
-  record_warning "Failed to install Node.js ${target} via nvm."
-  return 1
+  return $rc
 }
 
 dnf_install() {
@@ -470,7 +486,7 @@ preflight() {
 
 install_files() {
   echo "› Installing files to $APP_DIR …"
-  as_root "$PREFIX" mkdir -p "$APP_DIR"
+  as_root "$INSTALL_PREFIX" mkdir -p "$APP_DIR"
   # Copy only what's needed (bin + templates + scripts + docs); falls back to repo if structure differs.
   local rsync_args=(
     -a
@@ -492,19 +508,19 @@ install_files() {
     --exclude '*'
   )
 
-  if ! as_root "$PREFIX" rsync "${rsync_args[@]}" "$REPO_DIR"/ "$APP_DIR"/; then
+  if ! as_root "$INSTALL_PREFIX" rsync "${rsync_args[@]}" "$REPO_DIR"/ "$APP_DIR"/; then
     echo "rsync minimal copy failed; copying full repo…"
-    as_root "$PREFIX" cp -R "$REPO_DIR"/. "$APP_DIR"/
+    as_root "$INSTALL_PREFIX" cp -R "$REPO_DIR"/. "$APP_DIR"/
   fi
 
   # Ensure shim binaries remain executable (fallback tools like rg live here)
   if [[ -d "$APP_DIR/.gpt-creator/shims/bin" ]]; then
-    as_root "$PREFIX" find "$APP_DIR/.gpt-creator/shims/bin" -type f -exec chmod +x {} \;
+    as_root "$INSTALL_PREFIX" find "$APP_DIR/.gpt-creator/shims/bin" -type f -exec chmod +x {} \;
   fi
 
   echo "› Installing CLI entrypoint to $APP_BIN"
-  as_root "$PREFIX" mkdir -p "$(dirname "$APP_BIN")"
-  as_root "$PREFIX" install -m 0755 "$REPO_DIR/bin/gpt-creator" "$APP_BIN"
+  as_root "$INSTALL_PREFIX" mkdir -p "$(dirname "$APP_BIN")"
+  as_root "$INSTALL_PREFIX" install -m 0755 "$REPO_DIR/bin/gpt-creator" "$APP_BIN"
 }
 
 ensure_runtime_permissions() {
@@ -529,14 +545,14 @@ ensure_runtime_permissions() {
 
 install_link() {
   echo "› Linking $LINK_PATH → $APP_BIN"
-  as_root "$PREFIX" mkdir -p "$BIN_DIR"
+  as_root "$INSTALL_PREFIX" mkdir -p "$BIN_DIR"
   if [[ -L "$LINK_PATH" || -e "$LINK_PATH" ]]; then
-    if [[ $FORCE -eq 1 ]]; then as_root "$PREFIX" rm -f "$LINK_PATH"; else
+    if [[ $FORCE -eq 1 ]]; then as_root "$INSTALL_PREFIX" rm -f "$LINK_PATH"; else
       echo "✖ $LINK_PATH exists. Re-run with --force to replace." >&2; exit 1; fi
   fi
-  as_root "$PREFIX" ln -s "$APP_BIN" "$LINK_PATH"
+  as_root "$INSTALL_PREFIX" ln -s "$APP_BIN" "$LINK_PATH"
   if [[ -f "$APP_DIR/.gpt-creator/shims/bin/rg" ]]; then
-    as_root "$PREFIX" ln -sf "$APP_DIR/.gpt-creator/shims/bin/rg" "$BIN_DIR/rg"
+    as_root "$INSTALL_PREFIX" ln -sf "$APP_DIR/.gpt-creator/shims/bin/rg" "$BIN_DIR/rg"
   fi
   if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then
     echo "⚠ $BIN_DIR is not on PATH. Add: export PATH=\"$BIN_DIR:\$PATH\"" >&2
@@ -550,12 +566,12 @@ install_completions() {
   if [[ "$INSTALL_MODE" == "macos" ]] && need_cmd brew; then
     zcomp="$(brew --prefix)/share/zsh/site-functions"
   else
-    zcomp="$PREFIX/share/zsh/site-functions"
+    zcomp="$INSTALL_PREFIX/share/zsh/site-functions"
   fi
-  as_root "$PREFIX" mkdir -p "$zcomp"
+  as_root "$INSTALL_PREFIX" mkdir -p "$zcomp"
   local zsh_src="${REPO_DIR}/completions/gpt-creator.zsh"
   if [[ -f "$zsh_src" ]]; then
-    as_root "$PREFIX" install -m 0644 "$zsh_src" "$zcomp/_gpt-creator"
+    as_root "$INSTALL_PREFIX" install -m 0644 "$zsh_src" "$zcomp/_gpt-creator"
   else
     echo "⚠ Missing zsh completion template at ${zsh_src}" >&2
   fi
@@ -564,16 +580,16 @@ install_completions() {
   local bdir
   case "$INSTALL_MODE" in
     macos)
-      bdir="$PREFIX/etc/bash_completion.d"
+      bdir="$INSTALL_PREFIX/etc/bash_completion.d"
       ;;
     linux)
-      bdir="$PREFIX/share/bash-completion/completions"
+      bdir="$INSTALL_PREFIX/share/bash-completion/completions"
       ;;
   esac
-  as_root "$PREFIX" mkdir -p "$bdir"
+  as_root "$INSTALL_PREFIX" mkdir -p "$bdir"
   local bash_src="${REPO_DIR}/completions/gpt-creator.bash"
   if [[ -f "$bash_src" ]]; then
-    as_root "$PREFIX" install -m 0644 "$bash_src" "$bdir/gpt-creator"
+    as_root "$INSTALL_PREFIX" install -m 0644 "$bash_src" "$bdir/gpt-creator"
   else
     echo "⚠ Missing bash completion template at ${bash_src}" >&2
   fi

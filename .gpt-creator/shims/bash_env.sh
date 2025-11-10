@@ -163,6 +163,24 @@ __gc_is_pathlike() {
   return 1
 }
 
+__gc_is_sed_script() {
+  local token="$1"
+  [[ -z "$token" ]] && return 1
+  case "$token" in
+    s/*|y/*|tr/*|/[!/]*/d|/[!/]*/p)
+      return 0
+      ;;
+  esac
+  [[ "$token" == *";"* ]] && return 0
+  [[ "$token" == *"{"* || "$token" == *"}"* ]] && return 0
+  [[ "$token" == *"("* || "$token" == *")"* ]] && return 0
+  [[ "$token" == *"="* && "$token" == *=*/* ]] && return 0
+  [[ "$token" == *"["* && "$token" == *"]"* ]] && return 0
+  [[ "$token" == *"$"* ]] && return 0
+  [[ "$token" == *"|"* ]] && return 0
+  return 1
+}
+
 # --------------------------- De-dup execution core ----------------------------
 __gc_dedup_exec() {
   # Usage: __gc_dedup_exec <real-cmd> <args...>
@@ -257,9 +275,22 @@ if __gc_cmd_exists sed; then
   __gc_sed() {
     if [[ "${GC_SAFE_SHOW_NO_HINT:-0}" != "1" ]]; then
       local args=("$@")
-      local idx last candidate
+      local idx candidate expect_expr=0
       for ((idx=${#args[@]}-1; idx>=0; idx--)); do
         candidate="${args[idx]}"
+        if (( expect_expr )); then
+          expect_expr=0
+          continue
+        fi
+        case "$candidate" in
+          -e|--expression|-f|--file)
+            expect_expr=1
+            continue
+            ;;
+        esac
+        if __gc_is_sed_script "$candidate"; then
+          continue
+        fi
         if __gc_is_pathlike "$candidate"; then
           if [[ ! -e "$candidate" ]]; then
             printf >&2 "[gpt-creator] sed target '%s' not found. Run 'python3 scripts/python/safe_show_file.py \"%s\" --suggest' to locate the correct file, then re-run with the resolved path.\n" "$candidate" "$candidate"
@@ -272,6 +303,19 @@ if __gc_cmd_exists sed; then
   }
   export -f __gc_sed
   alias sed='__gc_sed'
+fi
+
+# Guard python3 stdin heredoc usage; prefer run_snippet.py
+if __gc_cmd_exists python3; then
+  __gc_python3() {
+    if [[ "${1:-}" == "-" && "${GC_ALLOW_PY_STDIN:-0}" != "1" ]]; then
+      printf >&2 "[gpt-creator] python3 stdin execution blocked. Write the snippet to a file and run 'python3 scripts/python/run_snippet.py /tmp/snippet.py' instead (see assets/templates/help/run_snippet_usage.txt).\n"
+      return 65
+    fi
+    command python3 "$@"
+  }
+  export -f __gc_python3
+  alias python3='__gc_python3'
 fi
 
 # Wrap gpt-creator (only if installed)

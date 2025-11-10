@@ -179,12 +179,12 @@ for schema_path in "${schema_paths[@]}"; do
   shadow_url="${PRISMA_MIGRATE_SHADOW_DATABASE_URL:-}"
   if [[ -z "$shadow_url" ]]; then
     for env_file in "$schema_dir/.env" "$schema_dir/../.env" "$schema_dir/../../.env" "$schema_dir/.env.local" "$schema_dir/../.env.local" "$schema_dir/../../.env.local"; do
-      env_file="$(cd "$schema_dir" && python3 - <<'PY'
+      env_file="$(cd "$schema_dir" && python3 - "$env_file" <<'PY'
 import os, sys
 path = sys.argv[1]
 print(os.path.abspath(path))
 PY
-"$env_file")"
+)"
       db_url="$(read_env_var "DATABASE_URL" "$env_file")"
       if [[ -n "$db_url" ]]; then
         shadow_derived="$(derive_shadow_url "$db_url" "_shadow")"

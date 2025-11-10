@@ -358,6 +358,9 @@ def record_task_progress(
         ("progress_state_updated_at", "TEXT"),
         ("last_history_summary_path", "TEXT"),
         ("last_history_meta_path", "TEXT"),
+        ("work_branch", "TEXT"),
+        ("work_branch_base", "TEXT"),
+        ("work_branch_updated_at", "TEXT"),
     ):
         ensure_column(cur, "tasks", column, definition)
 
@@ -459,8 +462,9 @@ def record_task_progress(
         history_meta_path,
     )
 
+    placeholder_list = ", ".join("?" for _ in progress_row)
     cur.execute(
-        """
+        f"""
         INSERT INTO task_progress (
           task_id, story_slug, task_position, run_stamp, status, log_path,
           prompt_path, output_path, attempts, tokens_total, tokens_prompt_estimate,
@@ -474,9 +478,7 @@ def record_task_progress(
           push_branch, push_error, attempt_signature, changes_count, outcome_reason,
           history_summary_path, history_meta_path
         )
-        VALUES (
-          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        )
+        VALUES ({placeholder_list})
         """,
         progress_row,
     )

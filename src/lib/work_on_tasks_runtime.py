@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional
 
 LAST_PENDING_CHANGES: Dict[str, Tuple[str, ...]] = {}
 
@@ -680,7 +680,7 @@ def main():
                 return None
             first = lines[0].strip()
             pattern = (
-                r"python3\s+-\s+"
+                r"python3\s+(?:-\s+)?"
                 + re.escape(HEREDOC_TOKEN)
                 + r"(?P<quote>['\"]?)(?P<label>[A-Za-z0-9_]+)(?P=quote)"
             )
@@ -854,31 +854,60 @@ def main():
                 return None
             inferred_focus = []
             changes_from_blocks = []
+
+            def _infer_patch_path(block: str) -> Optional[str]:
+                candidate: Optional[str] = None
+                for line in block.splitlines():
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if stripped.startswith('*** '):
+                        header = stripped[4:].strip()
+                        if header.lower().startswith('update file:'):
+                            candidate = header.split(':', 1)[-1].strip() or candidate
+                            continue
+                        if header.lower().startswith('add file:'):
+                            candidate = header.split(':', 1)[-1].strip() or candidate
+                            continue
+                        if header.lower().startswith('delete file:'):
+                            candidate = header.split(':', 1)[-1].strip() or candidate
+                            continue
+                        if header.lower().startswith('move to:'):
+                            moved = header.split(':', 1)[-1].strip()
+                            if moved:
+                                candidate = moved
+                            continue
+                    if stripped.startswith('+++ b/'):
+                        candidate = stripped[6:].strip()
+                        if candidate == '/dev/null':
+                            candidate = None
+                        else:
+                            break
+                    elif stripped.startswith('diff --git '):
+                        parts = stripped.split()
+                        if len(parts) >= 4:
+                            proposed = parts[3][2:].strip()
+                            if proposed and proposed != '/dev/null':
+                                candidate = proposed
+                                break
+                return candidate
+
             for block in blocks:
                 block_text = block.strip("\n")
                 if not block_text:
                     continue
                 if not block_text.endswith('\n'):
                     block_text += '\n'
-                changes_from_blocks.append({
+                candidate = _infer_patch_path(block_text)
+                change_entry: Dict[str, Any] = {
                     'type': 'patch',
                     'diff': block_text,
-                })
-                candidate = None
-                for line in block_text.splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith('+++ b/'):
-                        candidate = stripped[6:].strip()
-                        if candidate and candidate != '/dev/null':
-                            break
-                    elif stripped.startswith('diff --git '):
-                        parts = stripped.split()
-                        if len(parts) >= 4:
-                            candidate = parts[3][2:].strip()
-                            if candidate and candidate != '/dev/null':
-                                break
+                }
+                if candidate:
+                    change_entry['path'] = candidate
                 if candidate and candidate not in inferred_focus:
                     inferred_focus.append(candidate)
+                changes_from_blocks.append(change_entry)
             if not changes_from_blocks:
                 return None
             focus_values = inferred_focus or ['(auto) apply_patch']
@@ -1222,6 +1251,100 @@ def main():
         error_records: List[str] = []
         required_scripts: List[str] = []
         reports_base = project_root / ".gpt-creator" / "reports"
+        manual_notes.extend(_prepare_task_branch_if_needed())
+
+        def _env_flag(name: str, *, default: bool = False) -> bool:
+            raw_value = os.environ.get(name)
+            if raw_value is None:
+                return default
+            normalized = raw_value.strip().lower()
+            if not normalized:
+                return default
+            return normalized in {"1", "true", "yes", "on"}
+
+        branch_management_enabled = _env_flag("WORK_ON_TASKS_BRANCH_MANAGEMENT", default=True)
+        branch_delete_on_complete = _env_flag("WORK_ON_TASKS_DELETE_BRANCH_ON_COMPLETE", default=True)
+        branch_ready = False
+        active_task_branch: Optional[str] = None
+        base_task_branch: Optional[str] = None
+        initial_repository_branch = _get_current_branch()
+        forced_canonical_status: Optional[str] = None
+        forced_legacy_status: Optional[str] = None
+
+        def _prepare_task_branch_if_needed() -> List[str]:
+            notes: List[str] = []
+            nonlocal branch_management_enabled, branch_ready, active_task_branch, base_task_branch
+            if not branch_management_enabled:
+                return notes
+            branch_name = existing_task_branch or _build_task_branch_name(task)
+            base_candidate = existing_task_branch_base or os.environ.get("WORK_ON_TASKS_BASE_BRANCH", "").strip()
+            base_branch = base_candidate or initial_repository_branch or "main"
+            current_branch = _get_current_branch()
+            if not current_branch:
+                current_branch = base_branch
+
+            def record_failure(message: str) -> None:
+                nonlocal branch_management_enabled, branch_ready
+                notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"blocked — {message}"
+                    )
+                )
+                branch_management_enabled = False
+                branch_ready = False
+
+            if current_branch != branch_name:
+                if _local_branch_exists(branch_name):
+                    checkout = _run_git_command(['checkout', branch_name])
+                    if checkout.returncode != 0:
+                        stderr_text = (checkout.stderr or "").strip()
+                        record_failure(f"unable to checkout existing branch {branch_name}: {stderr_text or 'see stderr'}")
+                        return notes
+                elif _remote_branch_exists(branch_name):
+                    fetch = _run_git_command(['fetch', 'origin', branch_name])
+                    if fetch.returncode != 0:
+                        stderr_text = (fetch.stderr or "").strip()
+                        record_failure(f"git fetch origin {branch_name} failed: {stderr_text or 'see stderr'}")
+                        return notes
+                    create = _run_git_command(['checkout', '-b', branch_name, f'origin/{branch_name}'])
+                    if create.returncode != 0:
+                        stderr_text = (create.stderr or "").strip()
+                        record_failure(f"unable to checkout remote branch {branch_name}: {stderr_text or 'see stderr'}")
+                        return notes
+                    notes.append(
+                        _format_action_result(
+                            "branch",
+                            f"info — resumed branch {branch_name} from origin/{branch_name}"
+                        )
+                    )
+                else:
+                    create = _run_git_command(['checkout', '-b', branch_name])
+                    if create.returncode != 0:
+                        stderr_text = (create.stderr or "").strip()
+                        record_failure(f"unable to create branch {branch_name}: {stderr_text or 'see stderr'}")
+                        return notes
+                    notes.append(
+                        _format_action_result(
+                            "branch",
+                            f"info — started new branch {branch_name} from {current_branch}"
+                        )
+                    )
+            else:
+                notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"info — continuing on branch {branch_name}"
+                    )
+                )
+
+            active_task_branch = branch_name
+            base_task_branch = base_branch
+            branch_ready = True
+            os.environ["GC_ACTIVE_TASK_BRANCH"] = branch_name
+            _update_task_branch_record(task_db_id, branch_name, base_branch)
+            return notes
+
         def _sanitize_for_path(value: str) -> str:
             token = (value or "").strip()
             if not token:
@@ -2041,14 +2164,20 @@ def main():
         def _run_python_heredoc(code: str) -> CompletedProcess:
             script_text = code if code.endswith('\n') else code + '\n'
             tmp_path = None
+            helper_path = project_root / "scripts" / "python" / "run_snippet.py"
             try:
                 tmp_file = tempfile.NamedTemporaryFile('w', suffix='.py', delete=False)
                 tmp_path = Path(tmp_file.name)
                 tmp_file.write(script_text)
                 tmp_file.flush()
                 tmp_file.close()
+                exec_args = ['python3']
+                if helper_path.exists():
+                    exec_args.extend([str(helper_path), str(tmp_path)])
+                else:
+                    exec_args.append(str(tmp_path))
                 proc = subprocess.run(
-                    ['python3', str(tmp_path)],
+                    exec_args,
                     capture_output=True,
                     text=True,
                     cwd=str(project_root),
@@ -2323,6 +2452,49 @@ def main():
                 cwd=str(project_root),
                 check=False,
             )
+
+        def _get_current_branch() -> str:
+            proc = _run_git_command(['rev-parse', '--abbrev-ref', 'HEAD'])
+            if proc.returncode != 0:
+                return ""
+            return (proc.stdout or "").strip()
+
+        def _branch_ref_exists(ref: str) -> bool:
+            probe = _run_git_command(['show-ref', '--verify', '--quiet', ref])
+            return probe.returncode == 0
+
+        def _local_branch_exists(branch: str) -> bool:
+            return _branch_ref_exists(f"refs/heads/{branch}")
+
+        def _remote_branch_exists(branch: str) -> bool:
+            probe = _run_git_command(['ls-remote', '--heads', 'origin', branch])
+            return probe.returncode == 0 and bool((probe.stdout or "").strip())
+
+        def _sanitize_branch_component(text: str) -> str:
+            token = (text or "").lower()
+            token = re.sub(r'[^a-z0-9]+', '-', token)
+            token = token.strip('-')
+            return token or "task"
+
+        def _build_task_branch_name(task_row: sqlite3.Row) -> str:
+            slug_component = _sanitize_branch_component(STORY_SLUG or "story")
+            position_component = _sanitize_branch_component(f"{TASK_INDEX + 1:02d}")
+            task_identifier = task_row["task_id"] or f"{slug_component}-{position_component}"
+            identifier_component = _sanitize_branch_component(str(task_identifier))
+            branch_prefix = os.environ.get("WORK_ON_TASKS_BRANCH_PREFIX", "wip")
+            branch_prefix = _sanitize_branch_component(branch_prefix)
+            return f"{branch_prefix}/{slug_component}-{position_component}-{identifier_component}"
+
+        def _update_task_branch_record(task_row_id, branch: Optional[str], base_branch: Optional[str]) -> None:
+            try:
+                with sqlite3.connect(DB_PATH) as branch_conn:
+                    branch_conn.execute(
+                        "UPDATE tasks SET work_branch = ?, work_branch_base = ?, work_branch_updated_at = CURRENT_TIMESTAMP WHERE task_id = ?",
+                        (branch, base_branch, task_row_id),
+                    )
+                    branch_conn.commit()
+            except sqlite3.Error:
+                pass
 
         def _resolve_task_commit_ref() -> str:
             task_id = os.environ.get("GC_ACTIVE_TASK_ID") or os.environ.get("GC_BUDGET_TASK_ID")
@@ -2981,35 +3153,6 @@ def main():
                 gitignore_path.write_text("\n".join(existing_lines) + "\n", encoding='utf-8')
             return changed
 
-        def _ensure_clean_tree(root: Path) -> None:
-            # Allow runs to proceed even with a dirty tree; the guard remains as a warning.
-            if os.environ.get("WORK_ON_TASKS_ALLOW_DIRTY", "1") == "1":
-                return
-            ignore_raw = os.environ.get("WORK_ON_TASKS_DIRTY_IGNORE", ".gpt-creator/**:.gitignore")
-            ignore_patterns = [pattern for pattern in (segment.strip() for segment in ignore_raw.split(":")) if pattern]
-            try:
-                proc = subprocess.run(
-                    ['git', 'status', '--porcelain'],
-                    capture_output=True,
-                    text=True,
-                    cwd=str(root),
-                    check=False,
-                )
-            except Exception:
-                return
-            dirty_entries: List[str] = []
-            for raw_line in proc.stdout.splitlines():
-                if not raw_line:
-                    continue
-                path_fragment = raw_line[3:].strip() if len(raw_line) >= 4 else raw_line.strip()
-                if ignore_patterns and any(fnmatch.fnmatch(path_fragment, pattern) for pattern in ignore_patterns):
-                    continue
-                dirty_entries.append(raw_line)
-            if dirty_entries:
-                warning = "warning: proceeding with dirty working tree; ensure final commit captures all changes"
-                print(warning, file=sys.stderr)
-                return
-
         def _git_diff_name_status(root: Path) -> Dict[str, str]:
             try:
                 proc = subprocess.run(
@@ -3060,8 +3203,6 @@ def main():
                     "note — ensured gpt-creator artifacts are ignored"
                 )
             )
-        # Runs commit whatever is pending; skip the historical dirty-tree guard unless callers opt in.
-        # _ensure_clean_tree(project_root)
         if gitignore_auto_added:
             gitignore_label = ".gitignore (auto)"
             if gitignore_label not in patched:
@@ -3076,12 +3217,27 @@ def main():
         command_untracked_before = _git_untracked_files(project_root)
         preexisting_pending_changes = False
         pending_changes_before: List[str] = []
+        dirty_tree_blocked = False
+        allow_dirty_tree = _env_flag("WORK_ON_TASKS_ALLOW_DIRTY", default=False)
+        dirty_ignore_raw = os.environ.get("WORK_ON_TASKS_DIRTY_IGNORE", ".gpt-creator/**:.gitignore")
+        dirty_ignore_patterns = [pattern for pattern in (segment.strip() for segment in dirty_ignore_raw.split(":")) if pattern]
+
+        def _should_ignore_dirty_entry(path_fragment: str) -> bool:
+            if not dirty_ignore_patterns:
+                return False
+            normalized_path = path_fragment.lstrip("./")
+            return any(fnmatch.fnmatch(normalized_path, pattern) for pattern in dirty_ignore_patterns)
+
         if command_diff_before:
             for path, status in sorted(command_diff_before.items()):
                 label = status.strip().upper() or "M"
+                if _should_ignore_dirty_entry(path):
+                    continue
                 pending_changes_before.append(f"{label} {path}")
         if command_untracked_before:
             for path in sorted(command_untracked_before):
+                if _should_ignore_dirty_entry(path):
+                    continue
                 pending_changes_before.append(f"?? {path}")
         cache_key = str(project_root_resolved)
         if pending_changes_before:
@@ -3091,15 +3247,30 @@ def main():
             summary = '; '.join(preview_items)
             if len(pending_changes_before) > 6:
                 summary += '; …'
-            warning_message = f"warning — working tree already dirty before commands; recap these files: {summary}"
-            if last_snapshot != snapshot:
+            if allow_dirty_tree:
+                warning_message = f"warning — working tree already dirty before commands; recap these files: {summary}"
+                if last_snapshot != snapshot:
+                    manual_notes.append(
+                        _format_action_result(
+                            "pending-changes",
+                            warning_message
+                        )
+                    )
+                if last_snapshot != snapshot:
+                    LAST_PENDING_CHANGES[cache_key] = snapshot
+            else:
+                dirty_tree_blocked = True
+                blocking_message = (
+                    "blocked — working tree is dirty before running task commands; clean or stash local edits, "
+                    "or set WORK_ON_TASKS_ALLOW_DIRTY=1 if you intentionally want to proceed. "
+                    f"Affected paths: {summary}"
+                )
                 manual_notes.append(
                     _format_action_result(
                         "pending-changes",
-                        warning_message
+                        blocking_message
                     )
                 )
-            if last_snapshot != snapshot:
                 LAST_PENDING_CHANGES[cache_key] = snapshot
         else:
             LAST_PENDING_CHANGES.pop(cache_key, None)
@@ -3139,6 +3310,9 @@ def main():
             return summary
 
         skip_command_processing = command_coalesce_error is not None
+        if dirty_tree_blocked:
+            skip_command_processing = True
+            command_entries = []
         if command_coalesce_error is not None:
             delimiter_label = command_coalesce_error.delimiter
             command_lead = (command_coalesce_error.command_lead or "").strip()
@@ -3187,6 +3361,118 @@ def main():
                 skip_command_processing = True
 
         command_failure_detected = False
+        branch_merge_completed = False
+
+        def _working_tree_clean() -> bool:
+            status = _run_git_command(['status', '--porcelain'])
+            return status.returncode == 0 and not (status.stdout or "").strip()
+
+        def _restore_base_branch_after_run() -> None:
+            if not branch_ready or not base_task_branch:
+                return
+            current_branch = _get_current_branch()
+            if current_branch == base_task_branch:
+                return
+            if not _working_tree_clean():
+                manual_notes.append(
+                    _format_action_result(
+                        "branch",
+                        "warning — cannot return to base branch due to pending changes; resolve before next run"
+                    )
+                )
+                return
+            checkout = _run_git_command(['checkout', base_task_branch])
+            if checkout.returncode == 0:
+                manual_notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"info — returned to base branch {base_task_branch}"
+                    )
+                )
+
+        def _merge_branch_into_base_if_complete(status: str) -> None:
+            nonlocal branch_merge_completed, command_failure_detected, forced_canonical_status, forced_legacy_status
+            if not branch_ready or not active_task_branch or not base_task_branch:
+                return
+            if active_task_branch == base_task_branch:
+                return
+            if status != 'COMPLETED':
+                return
+            if not _working_tree_clean():
+                manual_notes.append(
+                    _format_action_result(
+                        "branch",
+                        "warning — skipping merge to base due to pending changes; rerun after cleaning up"
+                    )
+                )
+                return
+            checkout = _run_git_command(['checkout', base_task_branch])
+            if checkout.returncode != 0:
+                stderr_text = (checkout.stderr or "").strip()
+                manual_notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"failed — unable to checkout base branch {base_task_branch}: {stderr_text or 'see stderr'}"
+                    )
+                )
+                command_failure_detected = True
+                forced_canonical_status = 'RETRYABLE'
+                forced_legacy_status = 'retryable'
+                return
+            merge_proc = _run_git_command(['merge', '--no-ff', '--no-edit', active_task_branch])
+            if merge_proc.returncode != 0:
+                _run_git_command(['merge', '--abort'])
+                stderr_text = (merge_proc.stderr or "").strip()
+                manual_notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"failed — merge of {active_task_branch} into {base_task_branch} encountered conflicts: {stderr_text or 'see stderr'}"
+                    )
+                )
+                command_failure_detected = True
+                forced_canonical_status = 'RETRYABLE'
+                forced_legacy_status = 'retryable'
+                return
+            push_base = _run_git_command(['push', 'origin', base_task_branch])
+            if push_base.returncode != 0:
+                stderr_text = (push_base.stderr or "").strip()
+                manual_notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"failed — merge committed but push of {base_task_branch} failed: {stderr_text or 'see stderr'}"
+                    )
+                )
+                command_failure_detected = True
+                forced_canonical_status = 'RETRYABLE'
+                forced_legacy_status = 'retryable'
+                return
+            branch_merge_completed = True
+            manual_notes.append(
+                _format_action_result(
+                    "branch",
+                    f"success — merged {active_task_branch} into {base_task_branch} and pushed"
+                )
+            )
+            _update_task_branch_record(task_db_id, None, None)
+            if branch_delete_on_complete:
+                delete_local = _run_git_command(['branch', '-D', active_task_branch])
+                if delete_local.returncode == 0:
+                    manual_notes.append(
+                        _format_action_result(
+                            "branch",
+                            f"note — deleted local branch {active_task_branch}"
+                        )
+                    )
+                delete_remote = _run_git_command(['push', 'origin', '--delete', active_task_branch])
+                if delete_remote.returncode == 0:
+                    manual_notes.append(
+                        _format_action_result(
+                            "branch",
+                            f"note — deleted remote branch {active_task_branch}"
+                        )
+                    )
+        if dirty_tree_blocked:
+            command_failure_detected = True
         failed_command_cache: Dict[str, Dict[str, object]] = {}
         if isinstance(command_entries, list) and command_entries and not skip_command_processing:
             baseline_status = _git_status_porcelain(project_root)
@@ -3326,6 +3612,8 @@ def main():
                     )
                 command, command_tokens = _rewrite_command_pipeline(command, command_tokens)
                 first_token = command_tokens[0] if command_tokens else first_token
+                if python_heredoc_code is None and first_token == "python3":
+                    python_heredoc_code = _extract_python_heredoc(command)
                 command_to_run = command
                 try:
                     if python_heredoc_code is not None:
@@ -3474,9 +3762,10 @@ def main():
                 manual_notes.append(
                     _format_action_result(
                         "post-command-delta",
-                        "warning — commands ran but produced no tracked changes; confirm if additional steps are required"
+                        "blocked — commands ran but produced no tracked changes; rerun only after confirming patches actually landed (check git status or inspect warnings above)."
                     )
                 )
+                command_failure_detected = True
 
         if executed_commands:
             payload['commands'] = executed_commands[:]
@@ -3573,49 +3862,50 @@ def main():
         commands_missing = False
         commands_drift_fatal = False
         allow_drift = os.environ.get("WORK_ON_TASKS_ALLOW_DRIFT", "1") == "1"
-        if executed_commands:
-            missing_logged = [cmd for cmd in commands_to_report if cmd not in executed_commands]
-            if missing_logged:
+        if not dirty_tree_blocked:
+            if executed_commands:
+                missing_logged = [cmd for cmd in commands_to_report if cmd not in executed_commands]
+                if missing_logged:
+                    commands_missing = True
+                    joined = '; '.join(_truncate_command_text(cmd) for cmd in missing_logged[:3])
+                    if len(missing_logged) > 3:
+                        joined += '; …'
+                    manual_notes.append(
+                        _format_action_result(
+                            "commands-log-mismatch",
+                            f"blocked — the following executed command(s) were not captured in the auto-generated log: {joined}"
+                        )
+                    )
+                    command_failure_detected = True
+                    if not allow_drift:
+                        commands_drift_fatal = True
+            elif original_command_report:
+                missing_logged = [cmd for cmd in commands_to_report if cmd not in original_command_report]
+                if missing_logged:
+                    commands_missing = True
+                    joined = '; '.join(_truncate_command_text(cmd) for cmd in missing_logged[:3])
+                    if len(missing_logged) > 3:
+                        joined += '; …'
+                    manual_notes.append(
+                        _format_action_result(
+                            "commands-log-mismatch",
+                            f"blocked — the following executed command(s) were not listed under `Commands`: {joined}"
+                        )
+                    )
+                    command_failure_detected = True
+                    if not allow_drift:
+                        commands_drift_fatal = True
+            elif commands_to_report or blocked_command_total or written or patched or change_bytes or command_failure_detected:
                 commands_missing = True
-                joined = '; '.join(_truncate_command_text(cmd) for cmd in missing_logged[:3])
-                if len(missing_logged) > 3:
-                    joined += '; …'
                 manual_notes.append(
                     _format_action_result(
-                        "commands-log-mismatch",
-                        f"blocked — the following executed command(s) were not captured in the auto-generated log: {joined}"
+                        "commands-log-missing",
+                        "blocked — repository shows edits or executed commands but none were reported under `Commands`; rerun and list each command that edited files, ran tools, or staged changes."
                     )
                 )
                 command_failure_detected = True
                 if not allow_drift:
                     commands_drift_fatal = True
-        elif original_command_report:
-            missing_logged = [cmd for cmd in commands_to_report if cmd not in original_command_report]
-            if missing_logged:
-                commands_missing = True
-                joined = '; '.join(_truncate_command_text(cmd) for cmd in missing_logged[:3])
-                if len(missing_logged) > 3:
-                    joined += '; …'
-                manual_notes.append(
-                    _format_action_result(
-                        "commands-log-mismatch",
-                        f"blocked — the following executed command(s) were not listed under `Commands`: {joined}"
-                    )
-                )
-                command_failure_detected = True
-                if not allow_drift:
-                    commands_drift_fatal = True
-        elif commands_to_report or blocked_command_total or written or patched or change_bytes or command_failure_detected:
-            commands_missing = True
-            manual_notes.append(
-                _format_action_result(
-                    "commands-log-missing",
-                    "blocked — repository shows edits or executed commands but none were reported under `Commands`; rerun and list each command that edited files, ran tools, or staged changes."
-                )
-            )
-            command_failure_detected = True
-            if not allow_drift:
-                commands_drift_fatal = True
 
         if invalid_regex_patterns:
             logged_patterns = []
@@ -3649,7 +3939,10 @@ def main():
 
         force_commit_env = os.environ.get("WORK_ON_TASKS_FORCE_COMMIT", "1")
         force_commit_policy = force_commit_env.strip().lower() not in {"0", "false", "no"}
-        should_attempt_commit = actual_changes > 0 or preexisting_pending_changes or force_commit_policy
+        if dirty_tree_blocked:
+            should_attempt_commit = False
+        else:
+            should_attempt_commit = actual_changes > 0 or preexisting_pending_changes or force_commit_policy
         if should_attempt_commit:
             auto_commit_ok, auto_commit_notes = _auto_commit_and_push_if_needed(actual_changes)
             manual_notes.extend(auto_commit_notes)
@@ -3657,9 +3950,10 @@ def main():
                 command_failure_detected = True
 
         strict_validation = os.environ.get("WORK_ON_TASKS_STRICT_VALIDATION", "").strip().lower() in {"1", "true", "yes"}
-        forced_canonical_status = None
-        forced_legacy_status = None
-        if strict_validation:
+        if dirty_tree_blocked:
+            forced_canonical_status = 'BLOCKED'
+            forced_legacy_status = 'blocked-dirty-tree'
+        elif strict_validation:
             if 'placeholder-ellipsis' in blocked_command_counts:
                 forced_canonical_status = 'RETRYABLE'
                 forced_legacy_status = 'retryable'
@@ -3681,6 +3975,10 @@ def main():
         if forced_canonical_status:
             canonical_status = forced_canonical_status
             legacy_status = forced_legacy_status or legacy_status
+
+        _merge_branch_into_base_if_complete(canonical_status)
+        if branch_ready and not branch_merge_completed:
+            _restore_base_branch_after_run()
         raw_commands_field = payload.get('commands') or []
         summary_commands: List[str] = []
         if isinstance(raw_commands_field, list):
@@ -4410,6 +4708,25 @@ def main():
 
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
+
+        def _ensure_task_branch_columns(connection: sqlite3.Connection) -> None:
+            try:
+                info_rows = connection.execute("PRAGMA table_info(tasks)").fetchall()
+            except sqlite3.Error:
+                return
+            existing = {row["name"] for row in info_rows}
+            for column, definition in (
+                ("work_branch", "TEXT"),
+                ("work_branch_base", "TEXT"),
+                ("work_branch_updated_at", "TEXT"),
+            ):
+                if column not in existing:
+                    try:
+                        connection.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
+                    except sqlite3.Error:
+                        pass
+
+        _ensure_task_branch_columns(conn)
         cur = conn.cursor()
 
         cwd_path = Path.cwd()
@@ -4476,7 +4793,7 @@ def main():
             'messaging_workflows, performance_targets, observability, acceptance_text, endpoints, sample_create_request, '
             'sample_create_response, user_story_ref_id, epic_ref_id, status, last_progress_at, last_progress_run, '
             'last_log_path, last_output_path, last_prompt_path, last_notes_json, last_commands_json, last_apply_status, '
-            'last_changes_applied, last_tokens_total, last_duration_seconds '
+            'last_changes_applied, last_tokens_total, last_duration_seconds, work_branch, work_branch_base '
             'FROM tasks WHERE story_slug = ? ORDER BY position ASC',
             (STORY_SLUG,)
         ).fetchall()
@@ -4486,6 +4803,9 @@ def main():
             raise SystemExit(2)
 
         task = task_rows[TASK_INDEX]
+        task_db_id = task["task_id"]
+        existing_task_branch = (task["work_branch"] or "").strip() if "work_branch" in task.keys() else ""
+        existing_task_branch_base = (task["work_branch_base"] or "").strip() if "work_branch_base" in task.keys() else ""
         documentation_db_path = os.getenv("GC_DOCUMENTATION_DB_PATH", "").strip()
         doc_catalog_env_raw = os.getenv("GC_DOC_CATALOG_PATH", "").strip()
         doc_catalog_helper = (

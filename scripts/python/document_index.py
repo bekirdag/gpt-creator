@@ -2846,31 +2846,31 @@ if doc_search_hits:
     doc_search_hits = _dedupe_doc_refs(doc_search_hits, DOC_SEARCH_MAX_RESULTS)
     lines.append("")
     lines.append("## Documentation Search Hits")
-        emit_progress(f"Found {len(doc_search_hits)} documentation search hit(s)")
-        for hit in doc_search_hits[:DOC_SEARCH_MAX_RESULTS]:
-            doc_id = (hit.get("doc_id") or "").strip()
-            if not doc_id:
-                continue
-            entry = documents_store.get(doc_id, {})
-            rel_path = entry.get("rel_path") or entry.get("path") or doc_id
-            method = hit.get("method", "fts")
-            snippet_text = _normalise_space(hit.get("snippet") or "")
-            lines.append(f"- {doc_id} [{method}] — {rel_path}")
-            if snippet_text:
-                lines.append(f"  Snippet: {snippet_text[:SEARCH_SNIPPET_MAX_CHARS]}")
-            search_summary_payload.append(
-                {
-                    "doc_id": doc_id,
-                    "method": method,
-                    "rel_path": rel_path,
-                    "snippet": snippet_text[:SEARCH_SNIPPET_MAX_CHARS],
-                }
-            )
-        task_ref = task_identifier or f"{STORY_SLUG}:{TASK_INDEX + 1}"
-        if task_ref:
-            search_map = doc_catalog_data.setdefault("search_hits", {})
-            search_map[task_ref] = search_summary_payload
-            doc_catalog_changed["value"] = True
+    emit_progress(f"Found {len(doc_search_hits)} documentation search hit(s)")
+    for hit in doc_search_hits[:DOC_SEARCH_MAX_RESULTS]:
+        doc_id = (hit.get("doc_id") or "").strip()
+        if not doc_id:
+            continue
+        entry = documents_store.get(doc_id, {})
+        rel_path = entry.get("rel_path") or entry.get("path") or doc_id
+        method = hit.get("method", "fts")
+        snippet_text = _normalise_space(hit.get("snippet") or "")
+        lines.append(f"- {doc_id} [{method}] — {rel_path}")
+        if snippet_text:
+            lines.append(f"  Snippet: {snippet_text[:SEARCH_SNIPPET_MAX_CHARS]}")
+        search_summary_payload.append(
+            {
+                "doc_id": doc_id,
+                "method": method,
+                "rel_path": rel_path,
+                "snippet": snippet_text[:SEARCH_SNIPPET_MAX_CHARS],
+            }
+        )
+    task_ref = task_identifier or f"{STORY_SLUG}:{TASK_INDEX + 1}"
+    if task_ref:
+        search_map = doc_catalog_data.setdefault("search_hits", {})
+        search_map[task_ref] = search_summary_payload
+        doc_catalog_changed["value"] = True
 
 catalog_example_doc_id = ""
 for catalog_entry in doc_catalog_entries:

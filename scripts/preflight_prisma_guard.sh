@@ -176,9 +176,8 @@ for schema_path in "${schema_paths[@]}"; do
     continue
   fi
   schema_ok=0
-  local shadow_url="${PRISMA_MIGRATE_SHADOW_DATABASE_URL:-}"
+  shadow_url="${PRISMA_MIGRATE_SHADOW_DATABASE_URL:-}"
   if [[ -z "$shadow_url" ]]; then
-    local env_file
     for env_file in "$schema_dir/.env" "$schema_dir/../.env" "$schema_dir/../../.env" "$schema_dir/.env.local" "$schema_dir/../.env.local" "$schema_dir/../../.env.local"; do
       env_file="$(cd "$schema_dir" && python3 - <<'PY'
 import os, sys

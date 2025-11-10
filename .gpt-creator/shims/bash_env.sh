@@ -148,6 +148,21 @@ __gc_scan_guard_notice() {
   fi
 }
 
+__gc_is_pathlike() {
+  local val="$1"
+  [[ -z "$val" ]] && return 1
+  [[ "$val" == "-" ]] && return 1
+  if [[ "$val" == */* ]]; then
+    return 0
+  fi
+  case "${val##*.}" in
+    ts|tsx|js|jsx|py|rb|go|rs|java|cs|php|sql|prisma|json|yaml|yml|md|txt|c|h|hpp|sh|bash|zsh|fish)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # --------------------------- De-dup execution core ----------------------------
 __gc_dedup_exec() {
   # Usage: __gc_dedup_exec <real-cmd> <args...>
@@ -198,6 +213,9 @@ if __gc_cmd_exists rg; then
     fi
     __gc_dedup_exec rg "$@"
     local rc=$?
+    if [[ $rc -eq 2 ]]; then
+      printf >&2 "[gpt-creator] rg usage error. If you intended to pass file paths, add '--' before them (e.g. 'rg -n pattern -- apps/...') or run 'python3 scripts/python/targeted_search.py --pattern <needle> --paths <dir>' for bounded searches.\n"
+    fi
     if [[ $rc -eq 255 ]]; then
       __gc_scan_guard_mark_blocked "rg"
       __gc_scan_guard_notice "rg"
@@ -232,6 +250,28 @@ if __gc_cmd_exists find; then
   __gc_find() { __gc_dedup_exec find "$@"; }
   export -f __gc_find
   alias find='__gc_find'
+fi
+
+# Guard sed path lookups to avoid repeated missing-file dumps.
+if __gc_cmd_exists sed; then
+  __gc_sed() {
+    if [[ "${GC_SAFE_SHOW_NO_HINT:-0}" != "1" ]]; then
+      local args=("$@")
+      local idx last candidate
+      for ((idx=${#args[@]}-1; idx>=0; idx--)); do
+        candidate="${args[idx]}"
+        if __gc_is_pathlike "$candidate"; then
+          if [[ ! -e "$candidate" ]]; then
+            printf >&2 "[gpt-creator] sed target '%s' not found. Run 'python3 scripts/python/safe_show_file.py \"%s\" --suggest' to locate the correct file, then re-run with the resolved path.\n" "$candidate" "$candidate"
+            return 66
+          fi
+        fi
+      done
+    fi
+    command sed "$@"
+  }
+  export -f __gc_sed
+  alias sed='__gc_sed'
 fi
 
 # Wrap gpt-creator (only if installed)

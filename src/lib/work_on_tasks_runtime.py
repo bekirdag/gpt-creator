@@ -1309,7 +1309,7 @@ def main():
                 return default
             return normalized in {"1", "true", "yes", "on"}
 
-        branch_management_enabled = _env_flag("WORK_ON_TASKS_BRANCH_MANAGEMENT", default=True) and dev_ready
+        branch_management_enabled = _env_flag("WORK_ON_TASKS_BRANCH_MANAGEMENT", default=True)
         branch_delete_on_complete = _env_flag("WORK_ON_TASKS_DELETE_BRANCH_ON_COMPLETE", default=True)
         branch_ready = False
         active_task_branch: Optional[str] = None

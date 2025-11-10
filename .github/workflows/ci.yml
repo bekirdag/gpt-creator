@@ -108,8 +108,8 @@ jobs:
       - name: Guard heredocs/ellipses
         run: node scripts/guards/no_heredoc.js --all
       - name: Lint (if present)
-        run: pnpm run lint --if-present
+        run: pnpm run --if-present lint
       - name: Build (if present)
-        run: pnpm run build --if-present
+        run: pnpm run --if-present build
       - name: Vitest
         run: pnpm vitest run --reporter=dot

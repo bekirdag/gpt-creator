@@ -78,6 +78,7 @@ TITLE_COLOR = "1;38;5;39"
 SECTION_COLOR = "1;38;5;111"
 ANSI_RE = re.compile(r"\x1B\[[0-9;]*m")
 COLOR_TOTALS_PRINTED = False
+EMIT_EPIC_TSV = os.environ.get("GC_RENDER_EPIC_TSV") == "1"
 
 
 def color_text(style: str, text: str) -> str:
@@ -617,59 +618,74 @@ for entry in entries:
         for alias in ("unassigned", "none", "no-epic", "noepic"):
             epic_lookup[alias] = entry
 
-def print_epics_table():
-    if not entries:
-        print("No epics found in the backlog.")
-        return
+def format_epic_row(entry):
+    counts = entry.get("counts") or empty_counts()
+    epic = entry.get("epic") or {}
+    epic_id = (epic.get("epic_id") or "").strip() or "-"
+    slug = (epic.get("slug") or "").strip() or "-"
+    title = entry["label"]
+    stories_desc = pluralize(counts["stories"], "story", "stories")
+    story_bits = []
+    if counts["stories_complete"]:
+        story_bits.append(f"{counts['stories_complete']} complete")
+    if counts["stories_in_progress"]:
+        story_bits.append(f"{counts['stories_in_progress']} in-progress")
+    if counts["stories_pending"]:
+        story_bits.append(f"{counts['stories_pending']} pending")
+    if story_bits:
+        stories_desc += f" ({', '.join(story_bits)})"
+
+    tasks_desc = pluralize(counts["tasks"], "task")
+    task_bits = []
+    if counts["tasks_complete"]:
+        task_bits.append(f"{counts['tasks_complete']} complete")
+    if counts["tasks_in_progress"]:
+        task_bits.append(f"{counts['tasks_in_progress']} in-progress")
+    if counts["tasks_pending"]:
+        task_bits.append(f"{counts['tasks_pending']} pending")
+    if task_bits:
+        tasks_desc += f" ({', '.join(task_bits)})"
+
+    total_tasks = counts["tasks"] or 0
+    progress = 0.0
+    if total_tasks:
+        progress = (counts["tasks_complete"] / total_tasks) * 100
+    return [
+        epic_id,
+        slug,
+        title,
+        stories_desc,
+        tasks_desc,
+        f"{progress:5.1f}%",
+    ]
+
+
+def emit_epic_tsv(rows):
     headers = ["Epic ID", "Title", "Stories", "Tasks", "Progress"]
-    lines = ["__GC_EPIC_TABLE__"]
+    lines = ["__GC_EPIC_TABLE__", "\t".join(headers)]
 
     def sanitize(value: str) -> str:
         return str(value).replace("\t", " ").strip()
 
-    lines.append("\t".join(headers))
-    for entry in entries:
-        counts = entry.get("counts") or empty_counts()
-        epic = entry.get("epic") or {}
-        epic_id = (epic.get("epic_id") or "").strip() or "-"
-        slug = (epic.get("slug") or "").strip() or "-"
-        title = entry["label"]
-        stories_desc = pluralize(counts["stories"], "story", "stories")
-        story_bits = []
-        if counts["stories_complete"]:
-            story_bits.append(f"{counts['stories_complete']} complete")
-        if counts["stories_in_progress"]:
-            story_bits.append(f"{counts['stories_in_progress']} in-progress")
-        if counts["stories_pending"]:
-            story_bits.append(f"{counts['stories_pending']} pending")
-        if story_bits:
-            stories_desc += f" ({', '.join(story_bits)})"
-
-        tasks_desc = pluralize(counts["tasks"], "task")
-        task_bits = []
-        if counts["tasks_complete"]:
-            task_bits.append(f"{counts['tasks_complete']} complete")
-        if counts["tasks_in_progress"]:
-            task_bits.append(f"{counts['tasks_in_progress']} in-progress")
-        if counts["tasks_pending"]:
-            task_bits.append(f"{counts['tasks_pending']} pending")
-        if task_bits:
-            tasks_desc += f" ({', '.join(task_bits)})"
-
-        total_tasks = counts["tasks"] or 0
-        progress = 0.0
-        if total_tasks:
-            progress = (counts["tasks_complete"] / total_tasks) * 100
-        row = [
-            epic_id,
-            title,
-            stories_desc,
-            tasks_desc,
-            f"{progress:5.1f}%",
-        ]
-        lines.append("\t".join(sanitize(cell) for cell in row))
+    for row in rows:
+        epic_id, _slug, title, stories_desc, tasks_desc, progress = row
+        lines.append(
+            "\t".join(sanitize(cell) for cell in (epic_id, title, stories_desc, tasks_desc, progress))
+        )
     lines.append("__GC_EPIC_TABLE_END__")
     print("\n".join(lines))
+
+
+def print_epics_table():
+    if not entries:
+        print("No epics found in the backlog.")
+        return
+    rows = [format_epic_row(entry) for entry in entries]
+    if not EMIT_EPIC_TSV:
+        headers = ["Epic ID", "Slug", "Title", "Stories", "Tasks", "Progress"]
+        print_table(headers, rows)
+        return
+    emit_epic_tsv(rows)
 
 
 def print_story_children(entry, header_label):

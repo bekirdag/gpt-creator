@@ -6923,11 +6923,11 @@ cmd_backlog() {
   backlog_helper="$(gc_clone_python_tool "fetch_stories.py" "${PROJECT_ROOT:-$PWD}")" || die "Failed to prepare backlog helper script"
   local output
   if [[ -n "$color_flag" ]]; then
-    if ! output="$(GC_COLOR_OUTPUT="$color_flag" python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}")"; then
+    if ! output="$(GC_RENDER_EPIC_TSV=1 GC_COLOR_OUTPUT="$color_flag" python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}")"; then
       return 1
     fi
   else
-    if ! output="$(python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}")"; then
+    if ! output="$(GC_RENDER_EPIC_TSV=1 python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}")"; then
       return 1
     fi
   fi

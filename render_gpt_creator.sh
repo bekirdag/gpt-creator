@@ -1006,16 +1006,16 @@ render_epic_overview() {
   if [[ -n "$data_rows" ]]; then
     while IFS=$'\t' read -r epic title stories tasks progress; do
       [[ -z "$epic" ]] && continue
-      ((total_epics++))
+      ((++total_epics))
       local pct
       pct="$(printf '%s' "$progress" | tr -cd '0-9.')"
       [[ -z "$pct" ]] && pct="0"
       if (( $(awk "BEGIN {print ($pct >= 70)}") )); then
-        ((high++))
+        ((++high))
       elif (( $(awk "BEGIN {print ($pct >= 30)}") )); then
-        ((mid++))
+        ((++mid))
       else
-        ((low++))
+        ((++low))
       fi
     done <<<"$data_rows"
   fi

@@ -4,6 +4,8 @@
 # Usage: gpt-creator <command> [args]
 
 set -Eeuo pipefail
+# git branching helper
+[ -f scripts/lib/git-branches.sh ] && . scripts/lib/git-branches.sh || true
 
 mkdir -p "${PWD}/.gpt-creator/shims" 2>/dev/null || true
 export BASH_ENV="${BASH_ENV:-$PWD/.gpt-creator/shims/bash_env.sh}"
@@ -1436,6 +1438,39 @@ gc_render_bar() {
   done
 }
 
+gc_renderer_path_if_enabled() {
+  if [[ "${GC_RENDER_GPT_CREATOR_DISABLE:-0}" == "1" ]]; then
+    return 1
+  fi
+  local candidate=""
+  if [[ -n "${GC_RENDER_GPT_CREATOR:-}" ]]; then
+    candidate="${GC_RENDER_GPT_CREATOR}"
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  if [[ -n "${CLI_ROOT:-}" ]]; then
+    candidate="${CLI_ROOT}/render_gpt_creator.sh"
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  if [[ -n "${PROJECT_ROOT:-}" ]]; then
+    candidate="${PROJECT_ROOT}/render_gpt_creator.sh"
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+gc_renderer_available() {
+  gc_renderer_path_if_enabled >/dev/null
+}
+
 gc_status_color_seq() {
   local status="${1:-}"
   status="${status,,}"
@@ -1465,6 +1500,38 @@ gc_render_task_start_panel() {
   local reasoning_line="${7:-}"
   local session_line="${8:-}"
   local step_line="${9:-}"
+
+  local renderer_path=""
+  if renderer_path="$(gc_renderer_path_if_enabled)"; then
+    local -a start_lines=()
+    start_lines+=("|-----------------------|")
+    start_lines+=("|     START TASK ID     |")
+    start_lines+=("|-----------------------|")
+    if [[ -n "$task_id" ]]; then
+      start_lines+=("|    ${task_id}    |")
+    else
+      start_lines+=("|        N/A         |")
+    fi
+    start_lines+=("|-----------------------|")
+    local alias_display="$alias_line"
+    if [[ -z "$alias_display" ]]; then
+      alias_display="Working on task ${task_id:-N/A}"
+    fi
+    start_lines+=("→ ${alias_display}")
+    if [[ -n "$summary_line" ]]; then
+      start_lines+=("  ${summary_line}")
+    fi
+    local step_token="${step_line:-patch}"
+    local reasoning_token="${reasoning_line:-auto}"
+    start_lines+=("meta (step=${step_token}) (model=${model_line:-N/A}) (reasoning=${reasoning_token})")
+    [[ -n "$model_line" ]] && start_lines+=("model: ${model_line}")
+    [[ -n "$provider_line" ]] && start_lines+=("provider: ${provider_line}")
+    [[ -n "$workdir_line" ]] && start_lines+=("workdir: ${workdir_line}")
+    [[ -n "$reasoning_line" ]] && start_lines+=("reasoning effort: ${reasoning_line}")
+    [[ -n "$session_line" ]] && start_lines+=("session id: ${session_line}")
+    printf '%s\n' "${start_lines[@]}" | "$renderer_path"
+    return
+  fi
 
   printf '\n%s╭────────────────────────────────────────────────────────────╮%s\n' "${gc_color_border:-}" "$c_reset"
   printf '│  %sSTART OF TASK%s                                           │\n' "${gc_color_title:-}" "$c_reset"
@@ -1524,6 +1591,48 @@ gc_render_task_end_panel() {
 
   local sp_pct
   sp_pct="$(gc_story_points_percent "$story_points_raw")"
+
+  local renderer_path=""
+  if renderer_path="$(gc_renderer_path_if_enabled)"; then
+    local -a end_lines=()
+    end_lines+=("|-----------------------|")
+    end_lines+=("|       END TASK ID     |")
+    end_lines+=("|-----------------------|")
+    if [[ -n "$task_id" ]]; then
+      end_lines+=("|    ${task_id}    |")
+    else
+      end_lines+=("|        N/A         |")
+    fi
+    end_lines+=("|-----------------------|")
+    end_lines+=("Status: ${status}")
+    end_lines+=("Terminal: ${terminal}")
+    end_lines+=("Time spent: ${time_spent}")
+    end_lines+=("Story points: ${story_points_display}")
+    end_lines+=("TOKENS USED: ${tokens_display}")
+    end_lines+=("EST. TOKENS (PROMPT): ${tokens_estimate_display}")
+    if [[ -n "$failure_class" && "$failure_class" != "NONE" ]]; then
+      end_lines+=("Failure: ${failure_class}")
+    fi
+    if [[ -n "$detail_line" ]]; then
+      end_lines+=("Detail: ${detail_line}")
+    fi
+    local notes_added=0
+    if [[ -n "$detail_line" || ( -n "$failure_class" && "$failure_class" != "NONE" ) ]]; then
+      end_lines+=("Notes")
+      if [[ -n "$detail_line" ]]; then
+        end_lines+=("- ${detail_line}")
+      fi
+      if [[ -n "$failure_class" && "$failure_class" != "NONE" ]]; then
+        end_lines+=("- Failure class: ${failure_class}")
+      fi
+      notes_added=1
+    fi
+    if (( notes_added )); then
+      end_lines+=("")
+    fi
+    printf '%s\n' "${end_lines[@]}" | "$renderer_path"
+    return
+  fi
 
   printf '\n%s╭────────────────────────────────────────────────────────────╮%s\n' "${gc_color_border:-}" "$c_reset"
   printf '│  %sEND OF TASK%s                                             │\n' "${gc_color_title:-}" "$c_reset"
@@ -6734,10 +6843,19 @@ cmd_backlog() {
 
   local backlog_helper
   backlog_helper="$(gc_clone_python_tool "fetch_stories.py" "${PROJECT_ROOT:-$PWD}")" || die "Failed to prepare backlog helper script"
-  if [[ -n "$color_flag" ]]; then
-    GC_COLOR_OUTPUT="$color_flag" python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
+  local renderer_path=""
+  if renderer_path="$(gc_renderer_path_if_enabled)"; then
+    if [[ -n "$color_flag" ]]; then
+      GC_COLOR_OUTPUT="$color_flag" python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}" | "$renderer_path"
+    else
+      python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}" | "$renderer_path"
+    fi
   else
-    python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
+    if [[ -n "$color_flag" ]]; then
+      GC_COLOR_OUTPUT="$color_flag" python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
+    else
+      python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
+    fi
   fi
 }
 
@@ -8673,6 +8791,7 @@ cmd_work_on_tasks() {
     context_auto_shrink_threshold=1000000
   fi
   info "Work run directory → ${run_dir}"
+  gc_git_branching_init
   ln -sfn "${run_dir}" "$(dirname "${run_dir}")/latest" 2>/dev/null || true
 
   local resume_flag=1
@@ -9400,6 +9519,7 @@ print(error)'
         "$task_codex_reasoning" \
         "$run_stamp" \
         "$task_codex_step"
+      gc_git_begin_task_branch "${CURRENT_TASK_ID:-${TASK_ID:-unknown}}"
       info "  → ${task_alias_line}"
       info "    ${task_summary_line}"
 
@@ -11757,7 +11877,12 @@ cmd_estimate() {
   elif [[ "$color_flag" == "never" ]]; then
     helper_args+=(--no-color)
   fi
-  python3 "${helper_args[@]}"
+  local renderer_path=""
+  if renderer_path="$(gc_renderer_path_if_enabled)"; then
+    python3 "${helper_args[@]}" | "$renderer_path"
+  else
+    python3 "${helper_args[@]}"
+  fi
 }
 
 
@@ -13180,6 +13305,9 @@ gc_finalize_and_report() {
       status="success"
     fi
   fi
+
+  # git integration
+  gc_git_finalize_task_branch "${CURRENT_TASK_ID:-${TASK_ID:-${task_id:-unknown}}}" "${status:-UNKNOWN}" "${FINAL_REASON_FILE:-}" || true
 
   local reason_redacted
   reason_redacted="$(gc_redact "$reason")"

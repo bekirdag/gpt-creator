@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Runtime helpers extracted from bin/gpt-creator."""
 
+from __future__ import annotations
+
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
@@ -1245,6 +1248,131 @@ def main():
                     normalized['type'] = 'file'
             changes.append(normalized)
 
+        payload_dict: Dict[str, object] = payload if isinstance(payload, dict) else {}
+
+        def _clean_str(value: object) -> str:
+            return value.strip() if isinstance(value, str) else ""
+
+        active_task_id = _clean_str(payload_dict.get('task_id')) or _clean_str(
+            os.environ.get("GC_ACTIVE_TASK_ID") or os.environ.get("GC_BUDGET_TASK_ID")
+        )
+        task_db_id = active_task_id
+        task_slug = _clean_str(payload_dict.get('story_slug')) or _clean_str(
+            os.environ.get("GC_ACTIVE_TASK_SLUG") or os.environ.get("GC_ACTIVE_STORY_SLUG")
+        )
+        task_number = _clean_str(payload_dict.get('task_number')) or _clean_str(
+            os.environ.get("GC_ACTIVE_TASK_NUMBER") or os.environ.get("GC_ACTIVE_TASK_INDEX")
+        )
+        existing_task_branch = _clean_str(payload_dict.get('work_branch')) or _clean_str(
+            os.environ.get("GC_ACTIVE_TASK_BRANCH")
+        )
+        existing_task_branch_base = _clean_str(payload_dict.get('work_branch_base')) or _clean_str(
+            os.environ.get("GC_ACTIVE_TASK_BRANCH_BASE")
+        )
+
+        def _resolve_tasks_db_path() -> Optional[Path]:
+            candidates: List[Path] = []
+            env_candidates = (
+                os.environ.get("GC_TASK_DB_PATH"),
+                os.environ.get("GC_TASKS_DB_PATH"),
+                os.environ.get("WORK_ON_TASKS_DB_PATH"),
+                os.environ.get("GC_BACKLOG_DB_PATH"),
+            )
+            for raw in env_candidates:
+                cleaned = _clean_str(raw)
+                if not cleaned:
+                    continue
+                candidate = Path(cleaned)
+                if not candidate.is_absolute():
+                    candidate = (project_root / cleaned).resolve()
+                candidates.append(candidate)
+            candidates.extend([
+                project_root / ".gpt-creator" / "staging" / "plan" / "tasks" / "tasks.db",
+                project_root / ".gpt-creator" / "tasks.db",
+            ])
+            for candidate in candidates:
+                try:
+                    if candidate.exists():
+                        return candidate
+                except Exception:
+                    continue
+            return None
+
+        tasks_db_path = _resolve_tasks_db_path()
+
+        def _run_git_command(args: Sequence[str]) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ['git'] + list(args),
+                capture_output=True,
+                text=True,
+                cwd=str(project_root),
+                check=False,
+            )
+
+        main_branch_name = os.environ.get("WORK_ON_TASKS_MAIN_BRANCH", "main").strip() or "main"
+        dev_branch_name = os.environ.get("WORK_ON_TASKS_DEV_BRANCH", "dev").strip() or "dev"
+
+        def _get_current_branch() -> str:
+            proc = _run_git_command(['rev-parse', '--abbrev-ref', 'HEAD'])
+            if proc.returncode != 0:
+                return ""
+            return (proc.stdout or "").strip()
+
+        def _branch_ref_exists(ref: str) -> bool:
+            probe = _run_git_command(['show-ref', '--verify', '--quiet', ref])
+            return probe.returncode == 0
+
+        def _local_branch_exists(branch: str) -> bool:
+            return _branch_ref_exists(f"refs/heads/{branch}")
+
+        def _remote_branch_exists(branch: str) -> bool:
+            probe = _run_git_command(['ls-remote', '--heads', 'origin', branch])
+            return probe.returncode == 0 and bool((probe.stdout or "").strip())
+
+        def _sanitize_branch_component(text: str) -> str:
+            token = _clean_str(text).lower()
+            token = re.sub(r'[^a-z0-9]+', '-', token)
+            token = token.strip('-')
+            return token or "task"
+
+        def _build_task_branch_name() -> str:
+            identifier_candidates = [
+                task_db_id,
+                task_slug,
+                task_number,
+            ]
+            for candidate in identifier_candidates:
+                component = _sanitize_branch_component(candidate)
+                if component:
+                    return component
+            fallback_slug = _sanitize_branch_component(task_slug or "task")
+            index_hint = _clean_str(os.environ.get("GC_ACTIVE_TASK_INDEX"))
+            if index_hint.isdigit():
+                try:
+                    ordinal = int(index_hint)
+                    return f"{fallback_slug}-{ordinal + 1}"
+                except ValueError:
+                    pass
+            return fallback_slug or "task"
+
+        def _update_task_branch_record(task_row_id: Optional[str], branch: Optional[str], base_branch: Optional[str]) -> None:
+            if not task_row_id or tasks_db_path is None:
+                return
+            try:
+                if not tasks_db_path.exists():
+                    return
+            except Exception:
+                return
+            try:
+                with sqlite3.connect(str(tasks_db_path)) as branch_conn:
+                    branch_conn.execute(
+                        "UPDATE tasks SET work_branch = ?, work_branch_base = ?, work_branch_updated_at = CURRENT_TIMESTAMP WHERE task_id = ?",
+                        (branch, base_branch, task_row_id),
+                    )
+                    branch_conn.commit()
+            except sqlite3.Error:
+                pass
+
         def _ensure_dev_branch_exists() -> Tuple[bool, List[str]]:
             notes: List[str] = []
             if _local_branch_exists(dev_branch_name):
@@ -1374,8 +1502,8 @@ def main():
             nonlocal branch_management_enabled, branch_ready, active_task_branch, base_task_branch
             if not branch_management_enabled:
                 return notes
-            branch_name = existing_task_branch or _build_task_branch_name(task)
-            base_branch = dev_branch_name
+            branch_name = existing_task_branch or _build_task_branch_name()
+            base_branch = existing_task_branch_base or dev_branch_name
             current_branch = _get_current_branch()
             if not current_branch:
                 current_branch = base_branch
@@ -1452,8 +1580,6 @@ def main():
         manual_notes.extend(_checkout_dev_branch())
         manual_notes.extend(_prepare_task_branch_if_needed())
 
-        manual_notes.extend(_prepare_task_branch_if_needed())
-
         def _sanitize_for_path(value: str) -> str:
             token = (value or "").strip()
             if not token:
@@ -1463,14 +1589,6 @@ def main():
             token = token.strip("-_.")
             return token or "task"
 
-        active_task_id = (
-            payload.get('task_id')
-            if isinstance(payload, dict) else None
-        )
-        if not active_task_id or not isinstance(active_task_id, str):
-            active_task_id = os.environ.get("GC_ACTIVE_TASK_ID") or os.environ.get("GC_BUDGET_TASK_ID")
-        task_slug = os.environ.get("GC_ACTIVE_TASK_SLUG") or os.environ.get("GC_ACTIVE_STORY_SLUG") or ""
-        task_number = os.environ.get("GC_ACTIVE_TASK_NUMBER") or os.environ.get("GC_ACTIVE_TASK_INDEX") or ""
         task_label_components = [
             active_task_id,
             task_slug,
@@ -2552,62 +2670,6 @@ def main():
             if "jest worker process" in combined and "exitcode=0" in combined:
                 return "skipped — Jest workers crashed immediately in this environment; rerun locally once the worker issue is resolved"
             return None
-
-        def _run_git_command(args: Sequence[str]) -> subprocess.CompletedProcess:
-            return subprocess.run(
-                ['git'] + list(args),
-                capture_output=True,
-                text=True,
-                cwd=str(project_root),
-                check=False,
-            )
-
-        main_branch_name = os.environ.get("WORK_ON_TASKS_MAIN_BRANCH", "main").strip() or "main"
-        dev_branch_name = os.environ.get("WORK_ON_TASKS_DEV_BRANCH", "dev").strip() or "dev"
-
-        def _get_current_branch() -> str:
-            proc = _run_git_command(['rev-parse', '--abbrev-ref', 'HEAD'])
-            if proc.returncode != 0:
-                return ""
-            return (proc.stdout or "").strip()
-
-        def _branch_ref_exists(ref: str) -> bool:
-            probe = _run_git_command(['show-ref', '--verify', '--quiet', ref])
-            return probe.returncode == 0
-
-        def _local_branch_exists(branch: str) -> bool:
-            return _branch_ref_exists(f"refs/heads/{branch}")
-
-        def _remote_branch_exists(branch: str) -> bool:
-            probe = _run_git_command(['ls-remote', '--heads', 'origin', branch])
-            return probe.returncode == 0 and bool((probe.stdout or "").strip())
-
-        def _sanitize_branch_component(text: str) -> str:
-            token = (text or "").lower()
-            token = re.sub(r'[^a-z0-9]+', '-', token)
-            token = token.strip('-')
-            return token or "task"
-
-        def _build_task_branch_name(task_row: sqlite3.Row) -> str:
-            explicit_id = (os.environ.get("GC_ACTIVE_TASK_ID") or "").strip()
-            task_identifier = explicit_id or str(task_row["task_id"] or "").strip()
-            if not task_identifier:
-                task_identifier = (os.environ.get("GC_ACTIVE_TASK_SLUG") or STORY_SLUG or "task").strip()
-            identifier_component = _sanitize_branch_component(task_identifier)
-            if not identifier_component:
-                identifier_component = f"{_sanitize_branch_component(STORY_SLUG or 'task')}-{TASK_INDEX + 1}"
-            return identifier_component
-
-        def _update_task_branch_record(task_row_id, branch: Optional[str], base_branch: Optional[str]) -> None:
-            try:
-                with sqlite3.connect(DB_PATH) as branch_conn:
-                    branch_conn.execute(
-                        "UPDATE tasks SET work_branch = ?, work_branch_base = ?, work_branch_updated_at = CURRENT_TIMESTAMP WHERE task_id = ?",
-                        (branch, base_branch, task_row_id),
-                    )
-                    branch_conn.commit()
-            except sqlite3.Error:
-                pass
 
         def _resolve_task_commit_ref() -> str:
             task_id = os.environ.get("GC_ACTIVE_TASK_ID") or os.environ.get("GC_BUDGET_TASK_ID")

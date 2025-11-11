@@ -66,6 +66,21 @@
       "kind": "sql"
     },
     {
+      "name": "documents",
+      "file": "scripts/python/bootstrap_min_catalog.py",
+      "kind": "sql"
+    },
+    {
+      "name": "sections",
+      "file": "scripts/python/bootstrap_min_catalog.py",
+      "kind": "sql"
+    },
+    {
+      "name": "meta",
+      "file": "scripts/python/bootstrap_min_catalog.py",
+      "kind": "sql"
+    },
+    {
       "name": "metadata",
       "file": "scripts/python/build_tasks_db.py",
       "kind": "sql"
@@ -243,6 +258,36 @@
     {
       "name": "documentation_index_state",
       "file": "src/lib/doc_registry.py",
+      "kind": "sql"
+    },
+    {
+      "name": "metadata",
+      "file": "test/python/test_estimate_and_backlog.py",
+      "kind": "sql"
+    },
+    {
+      "name": "tasks",
+      "file": "test/python/test_estimate_and_backlog.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_progress",
+      "file": "test/python/test_estimate_and_backlog.py",
+      "kind": "sql"
+    },
+    {
+      "name": "metric_samples",
+      "file": "test/python/test_estimate_and_backlog.py",
+      "kind": "sql"
+    },
+    {
+      "name": "epics",
+      "file": "test/python/test_estimate_and_backlog.py",
+      "kind": "sql"
+    },
+    {
+      "name": "stories",
+      "file": "test/python/test_estimate_and_backlog.py",
       "kind": "sql"
     },
     {
@@ -441,6 +486,7 @@
     "config/bootstrap_docs_catalog.sql",
     "docs/document-catalog-schema.sql",
     "examples/sample-project/sql/schema.sql",
+    "scripts/python/bootstrap_min_catalog.py",
     "scripts/python/build_tasks_db.py",
     "scripts/python/populate_task_dependencies.py",
     "scripts/python/progress_migration.py",
@@ -452,6 +498,7 @@
     "src/lib/create-jira-tasks/upsert_story_into_db.py",
     "src/lib/doc_indexer.py",
     "src/lib/doc_registry.py",
+    "test/python/test_estimate_and_backlog.py",
     "test/python/test_progress_migration.py",
     "test/python/test_prompt_budget.py"
   ]

@@ -1,0 +1,2 @@
+
+  --git-branching[=1|0]   enable per-task branching (default: 1)

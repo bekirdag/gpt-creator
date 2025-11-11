@@ -9522,7 +9522,10 @@ print(error)'
         "$task_codex_reasoning" \
         "$run_stamp" \
         "$task_codex_step"
-      gc_git_begin_task_branch "${CURRENT_TASK_ID:-${TASK_ID:-unknown}}"
+      local current_task_id="${task_id:-${banner_task_id:-${slug:-story}-${task_number}}}"
+      CURRENT_TASK_ID="$current_task_id"
+      export CURRENT_TASK_ID
+      gc_git_begin_task_branch "${CURRENT_TASK_ID}"
       info "  → ${task_alias_line}"
       info "    ${task_summary_line}"
 
@@ -13310,7 +13313,8 @@ gc_finalize_and_report() {
   fi
 
   # git integration
-  gc_git_finalize_task_branch "${CURRENT_TASK_ID:-${TASK_ID:-${task_id:-unknown}}}" "${status:-UNKNOWN}" "${FINAL_REASON_FILE:-}" || true
+  local finalize_task_id="${GC_ACTIVE_TASK_ID:-${CURRENT_TASK_ID:-${TASK_ID:-${task_id:-unknown}}}}"
+  gc_git_finalize_task_branch "$finalize_task_id" "${status:-UNKNOWN}" "${FINAL_REASON_FILE:-}" || true
 
   local reason_redacted
   reason_redacted="$(gc_redact "$reason")"

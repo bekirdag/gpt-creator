@@ -406,6 +406,64 @@ solid_progress_bar() {
   printf "\n"
 }
 
+collect_epic_rows() {
+  local rows="" payload
+  payload="$(awk '
+    BEGIN{flag=0}
+    /^__GC_EPIC_TABLE__$/ {flag=1; next}
+    /^__GC_EPIC_TABLE_END__$/ {flag=0; exit}
+    flag {print}
+  ' <<<"$INPUT")"
+  if [[ -n "$payload" ]]; then
+    rows="$(printf "%s\n" "$payload" | awk 'NR==1 {next} NF {print}')"
+    printf "%s\n" "$rows"
+    return 0
+  fi
+
+  local ascii_table
+  ascii_table="$(awk '
+    /^[[:space:]]*┌/ {capture=1}
+    capture {
+      print
+      if ($0 ~ /┘[[:space:]]*$/) exit
+    }
+  ' <<<"$INPUT")"
+  if [[ -n "$ascii_table" ]]; then
+    rows="$(printf "%s\n" "$ascii_table" | awk -F"│" '
+      function trim(s){ sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+      /^[[:space:]]*┌/ {next}
+      /^[[:space:]]*├/ {next}
+      /^[[:space:]]*└/ {exit}
+      /^[[:space:]]*│/ {
+        epic=trim($2); title=trim($3); stories=trim($4); tasks=trim($5); progress=trim($6);
+        if (epic == "" || epic == "EPIC") next
+        printf "%s\t%s\t%s\t%s\t%s\n", epic, title, stories, tasks, progress
+      }
+    ')"
+    printf "%s\n" "$rows"
+    return 0
+  fi
+
+  local table_block
+  table_block="$(awk '
+    BEGIN{flag=0}
+    /^Epic ID[[:space:]]/ {flag=1; next}
+    flag {
+      if ($0 ~ /^$/) { exit }
+      print
+    }
+  ' <<<"$INPUT")"
+  rows="$(printf "%s" "$table_block" | awk -F'  +' '
+    function trim(s){ sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    NF >= 6 {
+      epic=trim($1); title=trim($3); stories=trim($4); tasks=trim($5); prog=trim($6);
+      if (epic ~ /^-+$/) next
+      printf "%s\t%s\t%s\t%s\t%s\n", epic, title, stories, tasks, prog
+    }
+  ')"
+  printf "%s\n" "$rows"
+}
+
 print_epic_table_from_rows() {
   local table_rows="$1"
   [[ -z "$table_rows" ]] && return 0
@@ -939,60 +997,8 @@ render_epic_overview() {
   printf "\n%s📋 Epic Progress Overview%s\n" "$(lc 111)" "$(reset)"
   printf "──────────────────────────────────────────────────────────────\n"
 
-  local tsv_payload data_rows=""
-  tsv_payload="$(awk '
-    BEGIN{flag=0}
-    /^__GC_EPIC_TABLE__$/ {flag=1; next}
-    /^__GC_EPIC_TABLE_END__$/ {flag=0; exit}
-    flag {print}
-  ' <<<"$INPUT")"
-
-  if [[ -n "$tsv_payload" ]]; then
-    data_rows="$(printf "%s\n" "$tsv_payload" | awk 'NR>1 && NF {print}')"
-  fi
-
-  if [[ -z "$data_rows" ]]; then
-    local ascii_table
-    ascii_table="$(awk '
-      /^[[:space:]]*┌/ {capture=1}
-      capture {
-        print
-        if ($0 ~ /┘[[:space:]]*$/) exit
-      }
-    ' <<<"$INPUT")"
-
-    if [[ -n "$ascii_table" ]]; then
-      data_rows="$(printf "%s\n" "$ascii_table" | awk -F'│' '
-        function trim(s){ sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-        /^[[:space:]]*┌/ {next}
-        /^[[:space:]]*├/ {next}
-        /^[[:space:]]*└/ {exit}
-        /^[[:space:]]*│/ {
-          epic=trim($2); title=trim($3); stories=trim($4); tasks=trim($5); progress=trim($6);
-          if (epic == "" || epic == "EPIC") next
-          printf "%s\t%s\t%s\t%s\t%s\n", epic, title, stories, tasks, progress
-        }
-      ')"
-    else
-      local table_block
-      table_block="$(awk '
-        BEGIN{flag=0}
-        /^Epic ID[[:space:]]/ {flag=1; next}
-        flag {
-          if ($0 ~ /^$/) { exit }
-          print
-        }
-      ' <<<"$INPUT")"
-      data_rows="$(printf "%s" "$table_block" | awk -F'  +' '
-        function trim(s){ sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
-        NF >= 6 {
-          epic=trim($1); title=trim($3); stories=trim($4); tasks=trim($5); prog=trim($6);
-          if (epic ~ /^-+$/) next
-          printf "%s\t%s\t%s\t%s\t%s\n", epic, title, stories, tasks, prog
-        }
-      ')"
-    fi
-  fi
+  local data_rows
+  data_rows="$(collect_epic_rows)"
 
   print_epic_table_from_rows "$data_rows"
 

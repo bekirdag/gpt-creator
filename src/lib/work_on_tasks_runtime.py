@@ -1309,6 +1309,32 @@ def main():
                 check=False,
             )
 
+        def _push_branch_to_remote(branch: str, context: str) -> Tuple[bool, str]:
+            push_remote = os.environ.get("WORK_ON_TASKS_PUSH_REMOTE", "origin").strip() or "origin"
+            push_proc = _run_git_command(['push', '--set-upstream', push_remote, branch])
+            if push_proc.returncode == 0:
+                return True, _format_action_result(
+                    "branch",
+                    f"info — pushed {branch} to {push_remote} ({context})"
+                )
+            stderr_text = (push_proc.stderr or "").strip()
+            return False, _format_action_result(
+                "branch",
+                f"warning — push of {branch} to {push_remote} failed ({context}): {stderr_text or 'see stderr'}"
+            )
+
+        def _is_missing_remote_ref_error(stderr_text: str) -> bool:
+            lowered = (stderr_text or "").lower()
+            if not lowered:
+                return False
+            patterns = (
+                "couldn't find remote ref",
+                "remote ref does not exist",
+                "remote ref cannot be resolved",
+                "remote ref not found",
+            )
+            return any(pattern in lowered for pattern in patterns)
+
         main_branch_name = os.environ.get("WORK_ON_TASKS_MAIN_BRANCH", "main").strip() or "main"
         dev_branch_name = os.environ.get("WORK_ON_TASKS_DEV_BRANCH", "dev").strip() or "dev"
 
@@ -1519,6 +1545,28 @@ def main():
                 branch_management_enabled = False
                 branch_ready = False
 
+            def _create_branch_from_base(note_message: str) -> bool:
+                checkout_base = _run_git_command(['checkout', base_branch])
+                if checkout_base.returncode != 0:
+                    stderr_text = (checkout_base.stderr or "").strip()
+                    record_failure(f"{note_message}: unable to checkout base branch {base_branch}: {stderr_text or 'see stderr'}")
+                    return False
+                _run_git_command(['pull', '--ff-only', 'origin', base_branch])
+                create = _run_git_command(['checkout', '-b', branch_name])
+                if create.returncode != 0:
+                    stderr_text = (create.stderr or "").strip()
+                    record_failure(f"{note_message}: unable to create branch {branch_name}: {stderr_text or 'see stderr'}")
+                    return False
+                notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"info — {note_message}"
+                    )
+                )
+                _, push_note = _push_branch_to_remote(branch_name, note_message)
+                notes.append(push_note)
+                return True
+
             if current_branch != branch_name:
                 if _local_branch_exists(branch_name):
                     checkout = _run_git_command(['checkout', branch_name])
@@ -1526,42 +1574,34 @@ def main():
                         stderr_text = (checkout.stderr or "").strip()
                         record_failure(f"unable to checkout existing branch {branch_name}: {stderr_text or 'see stderr'}")
                         return notes
+                    if not _remote_branch_exists(branch_name):
+                        _, push_note = _push_branch_to_remote(branch_name, "upstream missing; syncing branch")
+                        notes.append(push_note)
                 elif _remote_branch_exists(branch_name):
                     fetch = _run_git_command(['fetch', 'origin', branch_name])
                     if fetch.returncode != 0:
                         stderr_text = (fetch.stderr or "").strip()
-                        record_failure(f"git fetch origin {branch_name} failed: {stderr_text or 'see stderr'}")
-                        return notes
-                    create = _run_git_command(['checkout', '-b', branch_name, f'origin/{branch_name}'])
-                    if create.returncode != 0:
-                        stderr_text = (create.stderr or "").strip()
-                        record_failure(f"unable to checkout remote branch {branch_name}: {stderr_text or 'see stderr'}")
-                        return notes
-                    notes.append(
-                        _format_action_result(
-                            "branch",
-                            f"info — resumed branch {branch_name} from origin/{branch_name}"
+                        if _is_missing_remote_ref_error(stderr_text):
+                            if not _create_branch_from_base(f"remote branch {branch_name} missing; created new branch from {base_branch}"):
+                                return notes
+                        else:
+                            record_failure(f"git fetch origin {branch_name} failed: {stderr_text or 'see stderr'}")
+                            return notes
+                    else:
+                        create = _run_git_command(['checkout', '-b', branch_name, f'origin/{branch_name}'])
+                        if create.returncode != 0:
+                            stderr_text = (create.stderr or "").strip()
+                            record_failure(f"unable to checkout remote branch {branch_name}: {stderr_text or 'see stderr'}")
+                            return notes
+                        notes.append(
+                            _format_action_result(
+                                "branch",
+                                f"info — resumed branch {branch_name} from origin/{branch_name}"
+                            )
                         )
-                    )
                 else:
-                    # new task branch based on dev branch
-                    checkout_base = _run_git_command(['checkout', base_branch])
-                    if checkout_base.returncode != 0:
-                        stderr_text = (checkout_base.stderr or "").strip()
-                        record_failure(f"unable to checkout dev branch {base_branch}: {stderr_text or 'see stderr'}")
+                    if not _create_branch_from_base(f"started new branch {branch_name} from {base_branch}"):
                         return notes
-                    _run_git_command(['pull', '--ff-only', 'origin', base_branch])
-                    create = _run_git_command(['checkout', '-b', branch_name])
-                    if create.returncode != 0:
-                        stderr_text = (create.stderr or "").strip()
-                        record_failure(f"unable to create branch {branch_name}: {stderr_text or 'see stderr'}")
-                        return notes
-                    notes.append(
-                        _format_action_result(
-                            "branch",
-                            f"info — started new branch {branch_name} from {base_branch}"
-                        )
-                    )
             else:
                 notes.append(
                     _format_action_result(
@@ -1569,6 +1609,9 @@ def main():
                         f"info — continuing on branch {branch_name}"
                     )
                 )
+                if not _remote_branch_exists(branch_name):
+                    _, push_note = _push_branch_to_remote(branch_name, "upstream missing; syncing branch")
+                    notes.append(push_note)
 
             active_task_branch = branch_name
             base_task_branch = base_branch
@@ -3369,6 +3412,121 @@ def main():
                 return set()
             return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
+        def _git_has_head(root: Path) -> bool:
+            try:
+                proc = subprocess.run(
+                    ['git', 'rev-parse', '--verify', 'HEAD'],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(root),
+                    check=False,
+                )
+            except Exception:
+                return False
+            return proc.returncode == 0
+
+        def _working_tree_clean(root: Path) -> bool:
+            try:
+                proc = subprocess.run(
+                    ['git', 'status', '--porcelain=v1', '--untracked-files=all'],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(root),
+                    check=False,
+                )
+            except Exception:
+                return False
+            if proc.returncode != 0:
+                return False
+            return proc.stdout.strip() == ""
+
+        def _auto_snapshot_dirty_tree(root: Path) -> Tuple[bool, str]:
+            timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            commit_message = f"chore(gpt-creator): auto snapshot before work-on-tasks {timestamp}"
+            snapshot_label = f"work-on-tasks auto snapshot {timestamp}"
+            env = os.environ.copy()
+            env.setdefault("GIT_AUTHOR_NAME", "gpt-creator automation")
+            env.setdefault("GIT_AUTHOR_EMAIL", "automation@gpt-creator")
+            env.setdefault("GIT_COMMITTER_NAME", "gpt-creator automation")
+            env.setdefault("GIT_COMMITTER_EMAIL", "automation@gpt-creator")
+
+            try:
+                stage_proc = subprocess.run(
+                    ['git', 'add', '--all'],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(root),
+                    check=False,
+                )
+            except Exception as exc:
+                return False, f"auto snapshot staging failed ({exc})"
+            if stage_proc.returncode != 0:
+                detail = stage_proc.stderr.strip() or stage_proc.stdout.strip() or f"exit {stage_proc.returncode}"
+                return False, f"unable to stage pending edits automatically ({detail})"
+
+            try:
+                diff_cached = subprocess.run(
+                    ['git', 'diff', '--cached', '--quiet'],
+                    cwd=str(root),
+                    check=False,
+                )
+            except Exception as exc:
+                return False, f"auto snapshot diff check failed ({exc})"
+
+            if diff_cached.returncode == 0:
+                if _working_tree_clean(root):
+                    return True, "working tree already clean after staging"
+            else:
+                try:
+                    commit_proc = subprocess.run(
+                        ['git', 'commit', '-m', commit_message],
+                        capture_output=True,
+                        text=True,
+                        cwd=str(root),
+                        env=env,
+                        check=False,
+                    )
+                except Exception as exc:
+                    commit_proc = None
+                    commit_error = f"{exc}"
+                else:
+                    commit_error = commit_proc.stderr.strip() if commit_proc else ""
+                if commit_proc and commit_proc.returncode == 0:
+                    rev_proc = subprocess.run(
+                        ['git', 'rev-parse', '--short', 'HEAD'],
+                        capture_output=True,
+                        text=True,
+                        cwd=str(root),
+                        check=False,
+                    )
+                    rev_label = ""
+                    if rev_proc.returncode == 0:
+                        rev_label = rev_proc.stdout.strip()
+                    detail = f"auto snapshot commit created ({commit_message})"
+                    if rev_label:
+                        detail += f" [{rev_label}]"
+                    return True, detail
+                # Commit failed; reset staged files before falling back to stash.
+                if _git_has_head(root):
+                    subprocess.run(['git', 'reset', '--mixed', 'HEAD'], cwd=str(root), check=False)
+                else:
+                    subprocess.run(['git', 'reset', '--mixed'], cwd=str(root), check=False)
+            # Stash fallback
+            try:
+                stash_proc = subprocess.run(
+                    ['git', 'stash', 'push', '--include-untracked', '--message', snapshot_label],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(root),
+                    check=False,
+                )
+            except Exception as exc:
+                return False, f"auto stash failed ({exc})"
+            if stash_proc.returncode == 0 and _working_tree_clean(root):
+                return True, f"auto stash created ({snapshot_label})"
+            detail = stash_proc.stderr.strip() or stash_proc.stdout.strip() or f"exit {stash_proc.returncode}"
+            return False, f"auto stash incomplete ({detail})"
+
         gitignore_auto_added = False
         if _ensure_gitignore_entries(project_root):
             gitignore_auto_added = True
@@ -3394,6 +3552,7 @@ def main():
         pending_changes_before: List[str] = []
         dirty_tree_blocked = False
         allow_dirty_tree = _env_flag("WORK_ON_TASKS_ALLOW_DIRTY", default=False)
+        dirty_autofix_enabled = _env_flag("WORK_ON_TASKS_DIRTY_AUTOFIX", default=True)
         dirty_ignore_raw = os.environ.get("WORK_ON_TASKS_DIRTY_IGNORE", ".gpt-creator/**:.gitignore")
         dirty_ignore_patterns = [pattern for pattern in (segment.strip() for segment in dirty_ignore_raw.split(":")) if pattern]
 
@@ -3403,17 +3562,41 @@ def main():
             normalized_path = path_fragment.lstrip("./")
             return any(fnmatch.fnmatch(normalized_path, pattern) for pattern in dirty_ignore_patterns)
 
-        if command_diff_before:
-            for path, status in sorted(command_diff_before.items()):
-                label = status.strip().upper() or "M"
-                if _should_ignore_dirty_entry(path):
-                    continue
-                pending_changes_before.append(f"{label} {path}")
-        if command_untracked_before:
-            for path in sorted(command_untracked_before):
-                if _should_ignore_dirty_entry(path):
-                    continue
-                pending_changes_before.append(f"?? {path}")
+        def _collect_pending_changes(diff_map: Dict[str, str], untracked: Set[str]) -> List[str]:
+            entries: List[str] = []
+            if diff_map:
+                for path, status in sorted(diff_map.items()):
+                    label = status.strip().upper() or "M"
+                    if _should_ignore_dirty_entry(path):
+                        continue
+                    entries.append(f"{label} {path}")
+            if untracked:
+                for path in sorted(untracked):
+                    if _should_ignore_dirty_entry(path):
+                        continue
+                    entries.append(f"?? {path}")
+            return entries
+
+        pending_changes_before = _collect_pending_changes(command_diff_before, command_untracked_before)
+        if pending_changes_before and not allow_dirty_tree and dirty_autofix_enabled:
+            autofix_ok, autofix_detail = _auto_snapshot_dirty_tree(project_root)
+            if autofix_ok:
+                manual_notes.append(
+                    _format_action_result(
+                        "dirty-tree-autofix",
+                        f"info — {autofix_detail}"
+                    )
+                )
+                command_diff_before = _git_diff_name_status(project_root)
+                command_untracked_before = _git_untracked_files(project_root)
+                pending_changes_before = _collect_pending_changes(command_diff_before, command_untracked_before)
+            else:
+                manual_notes.append(
+                    _format_action_result(
+                        "dirty-tree-autofix",
+                        f"warning — {autofix_detail}"
+                    )
+                )
         cache_key = str(project_root_resolved)
         if pending_changes_before:
             snapshot = tuple(pending_changes_before)
@@ -3644,10 +3827,22 @@ def main():
                         _format_action_result(
                             "branch",
                             f"note — deleted remote branch {active_task_branch}"
-                        )
                     )
+                )
         if dirty_tree_blocked:
             command_failure_detected = True
+
+        def _sync_active_branch_post_run(context: str) -> None:
+            nonlocal command_failure_detected
+            if not branch_management_enabled or not branch_ready or not active_task_branch:
+                return
+            if branch_merge_completed and branch_delete_on_complete:
+                return
+            push_ok, push_note = _push_branch_to_remote(active_task_branch, context)
+            manual_notes.append(push_note)
+            if not push_ok:
+                command_failure_detected = True
+
         failed_command_cache: Dict[str, Dict[str, object]] = {}
         if isinstance(command_entries, list) and command_entries and not skip_command_processing:
             baseline_status = _git_status_porcelain(project_root)
@@ -4120,6 +4315,7 @@ def main():
             and branch_ready
             and not dirty_tree_blocked
         )
+        auto_commit_ok = False
         if should_attempt_commit:
             auto_commit_ok, auto_commit_notes = _auto_commit_and_push_if_needed(actual_changes)
             manual_notes.extend(auto_commit_notes)
@@ -4138,6 +4334,9 @@ def main():
             else:
                 reason += "unknown condition"
             manual_notes.append(_format_action_result("git commit", reason))
+
+        if (not should_attempt_commit) or (should_attempt_commit and not auto_commit_ok):
+            _sync_active_branch_post_run("post-run sync")
 
         strict_validation = os.environ.get("WORK_ON_TASKS_STRICT_VALIDATION", "").strip().lower() in {"1", "true", "yes"}
         if dirty_tree_blocked:

@@ -498,6 +498,7 @@ install_files() {
     --include '/bin/' --include '/bin/*'
     --include '/render_gpt_creator.sh'
     --include '/templates/***'
+    --include '/assets/' --include '/assets/***'
     --include '/src/***'
     --include '/scripts/***'
     --include '/.gpt-creator/'

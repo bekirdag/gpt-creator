@@ -125,23 +125,51 @@ status_color_code() {
 }
 
 render_box_header() {
-  local text="$1"
-  local base="${2:-60}"
-  local border_color="${3:-$(c "1;38;5;214")}"
-  local title_color="${4:-$(c "1;38;5;39")}"
-  local inner="$base"
-  local text_len="${#text}"
-  local min_inner=$((text_len + 4))
-  if (( min_inner > inner )); then
-    inner="$min_inner"
+  local title="${1:-GPT-Creator}"
+  local max_width="${2:-60}"
+  local border_color="${3:-$(c "1;38;5;213")}"   # vibrant magenta
+  local title_color="${4:-$(c "1;38;5;51")}"     # electric cyan
+
+  local cols width inner pad left right trimmed tlen
+  cols="$(tput cols 2>/dev/null || echo 80)"
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=80
+  (( max_width <= 0 )) && max_width=60
+  width="$max_width"
+  if (( cols < width )); then width="$cols"; fi
+  if (( width < 40 )); then width=40; fi
+  inner=$(( width - 2 ))
+
+  trimmed="$title"
+  tlen=${#trimmed}
+  if (( tlen > inner )); then
+    trimmed="${trimmed:0:inner}"
+    tlen=${#trimmed}
   fi
-  local hyphens
-  printf -v hyphens '%*s' "$inner" ''
-  hyphens="${hyphens// /─}"
-  local pad=$((inner - 3))
-  printf "\n%s╭%s╮%s\n" "$border_color" "$hyphens" "$(reset)"
-  printf "│  %s%-*s%s │\n" "$title_color" "$pad" "$text" "$(reset)"
-  printf "%s╰%s╯%s\n" "$border_color" "$hyphens" "$(reset)"
+  pad=$(( inner - tlen ))
+  (( pad < 0 )) && pad=0
+  left=$(( pad / 2 ))
+  right=$(( pad - left ))
+
+  local tl="╭" tr="╮" bl="╰" br="╯"
+  local horiz left_pad right_pad
+  printf -v horiz '%*s' "$inner" ''
+  horiz="${horiz// /─}"
+  printf -v left_pad '%*s' "$left" ''
+  printf -v right_pad '%*s' "$right" ''
+
+  printf "\n%s%s" "$border_color" "$tl"
+  printf "%s" "$horiz"
+  printf "%s%s\n" "$tr" "$(reset)"
+
+  printf "%s│%s" "$border_color" "$(reset)"
+  printf "%s" "$left_pad"
+  printf "%s%s%s" "$title_color" "$trimmed" "$(reset)"
+  printf "%s" "$right_pad"
+  printf "%s│%s\n" "$border_color" "$(reset)"
+
+  printf "%s%s" "$border_color" "$bl"
+  printf "%s" "$horiz"
+  printf "%s%s\n" "$br" "$(reset)"
 }
 
 render_backlog_header() {
@@ -165,211 +193,244 @@ render_backlog_header() {
   printf "%s╰%s╯%s\n" "$border_color" "$hyphens" "$(reset)"
 }
 
+draw_table() {
+  local width_spec="${1:-}"
+  local type_spec="${2:-}"
+  local zebra="${3:-1}"
+  local border_color="${TABLE_BORDER_COLOR:-$(c "1;38;5;213")}"
+  local header_color="${TABLE_HEADER_COLOR:-$(c "1;38;5;45")}"
+  local header_weight="${TABLE_HEADER_WEIGHT:-$(c 1)}"
+  local row_even_color="${TABLE_ROW_EVEN_COLOR:-$(c "1;38;5;250")}"
+  local row_odd_color="${TABLE_ROW_ODD_COLOR:-$(c "1;38;5;254")}"
+  local percent_hi="${TABLE_PERCENT_HIGH:-$(c "1;32")}"
+  local percent_mid="${TABLE_PERCENT_MID:-$(c "1;38;5;214")}"
+  local percent_lo="${TABLE_PERCENT_LOW:-$(c "1;31")}"
+  local status_pending="${TABLE_STATUS_PENDING:-$(c "1;37")}"
+  local status_progress="${TABLE_STATUS_PROGRESS:-$(c "1;38;5;214")}"
+  local status_done="${TABLE_STATUS_DONE:-$(c "1;32")}"
+  local status_blocked="${TABLE_STATUS_BLOCKED:-$(c "1;31")}"
+  local reset_code
+  reset_code="$(reset)"
+
+  awk -v widths="$width_spec" -v types="$type_spec" -v zebra="$zebra" \
+      -v border="$border_color" -v header_color="$header_color" -v header_weight="$header_weight" \
+      -v reset="$reset_code" -v row_even="$row_even_color" -v row_odd="$row_odd_color" \
+      -v pct_hi="$percent_hi" -v pct_mid="$percent_mid" -v pct_lo="$percent_lo" \
+      -v status_pending="$status_pending" -v status_prog="$status_progress" \
+      -v status_done="$status_done" -v status_blocked="$status_blocked" \
+      -v TL="╭" -v TM="┬" -v TR="╮" -v ML="├" -v MM="┼" -v MR="┤" \
+      -v BL="╰" -v BM="┴" -v BR="╯" -v H="─" -v V="│" '
+  function trim(str,    t) {
+    t = str
+    sub(/^[[:space:]]+/, "", t)
+    sub(/[[:space:]]+$/, "", t)
+    return t
+  }
+  function fit(str, limit,    val, len) {
+    val = trim(str)
+    len = length(val)
+    if (len <= limit) { return val }
+    if (limit <= 1)   { return substr(val, 1, limit) }
+    return substr(val, 1, limit - 1) "…"
+  }
+  function repeat(ch, count,    out, idx) {
+    out = ""
+    for (idx = 0; idx < count; idx++) {
+      out = out ch
+    }
+    return out
+  }
+  function build_rule(left, mid, right,    line, col) {
+    line = left
+    for (col = 1; col <= col_count; col++) {
+      line = line repeat(H, col_width[col] + 2)
+      line = line (col < col_count ? mid : right)
+    }
+    return line
+  }
+  function percent_color(val,    clean) {
+    clean = val
+    gsub(/[^0-9.]/, "", clean)
+    if (clean == "") clean = 0
+    clean += 0.0
+    if (clean >= 70) return pct_hi
+    else if (clean >= 30) return pct_mid
+    return pct_lo
+  }
+  function status_color(val,    lower) {
+    lower = tolower(val)
+    if      (lower ~ /(complete|done|success)/) return status_done
+    else if (lower ~ /(in[- ]?progress|running|active)/) return status_prog
+    else if (lower ~ /(blocked|fail|error|retry|need|pending)/) return status_blocked
+    return status_pending
+  }
+  function cell_color(idx, val, row_idx,    type) {
+    if (row_idx == 0) return header_color header_weight
+    type = col_type[idx]
+    if (type == "percent") return percent_color(val)
+    if (type == "status")  return status_color(val)
+    if (zebra == 0) return row_even
+    return (row_idx % 2 ? row_odd : row_even)
+  }
+  function print_row(line, row_idx,    fields, count, col, cell, color, width) {
+    count = split(line, fields, FS)
+    printf "%s%s%s", border, V, reset
+    for (col = 1; col <= col_count; col++) {
+      width = col_width[col]
+      cell = (col <= count ? fields[col] : "")
+      cell = fit(cell, width)
+      color = cell_color(col, cell, row_idx)
+      printf "%s %-" width "s %s", color, cell, reset
+      printf "%s%s%s", border, V, reset
+    }
+    printf "\n"
+  }
+  BEGIN {
+    FS = "\t"
+    width_count = split(widths, width_vals, ",")
+    split(types, col_type, ",")
+    auto_width = (width_count == 0 || widths == "")
+    rows = 0
+    max_fields = 0
+  }
+  {
+    rows++
+    row_data[rows] = $0
+    if (NF > max_fields) max_fields = NF
+    for (i = 1; i <= NF; i++) {
+      val = trim($i)
+      len = length(val)
+      if (len > max_len[i]) max_len[i] = len
+    }
+  }
+  END {
+    if (rows == 0) exit
+    col_count = (auto_width ? max_fields : width_count)
+    if (col_count == 0) col_count = max_fields
+    if (col_count == 0) col_count = width_count
+    if (col_count == 0) {
+      col_count = 1
+      width_vals[1] = 20
+    }
+    for (i = 1; i <= col_count; i++) {
+      if (auto_width) {
+        width_vals[i] = (max_len[i] > 0 ? max_len[i] : 6)
+        if (width_vals[i] > 60) width_vals[i] = 60
+      } else {
+        width_vals[i] = trim(width_vals[i])
+        if (width_vals[i] == "" || width_vals[i] < 3) {
+          width_vals[i] = (max_len[i] > 0 ? max_len[i] : 6)
+        }
+      }
+      if (width_vals[i] < 3) width_vals[i] = 3
+      col_width[i] = int(width_vals[i])
+      if (col_type[i] == "") col_type[i] = "text"
+    }
+    top = build_rule(TL, TM, TR)
+    mid = build_rule(ML, MM, MR)
+    bot = build_rule(BL, BM, BR)
+    print border top reset
+    for (r = 1; r <= rows; r++) {
+      row_idx = (r == 1 ? 0 : r - 1)
+      print_row(row_data[r], row_idx)
+      if (r == 1) print border mid reset
+    }
+    print border bot reset
+  }' || true
+}
+
+solid_progress_bar() {
+  local pct="${1:-0}"
+  local width="${2:-40}"
+  local label="${3:-}"
+
+  [[ "$pct" =~ ^-?[0-9]+([.][0-9]+)?$ ]] || pct=0
+  [[ "$width" =~ ^[0-9]+$ ]] || width=40
+  (( width < 1 )) && width=1
+
+  local pct_val
+  pct_val="$(awk -v p="$pct" 'BEGIN{
+    if(p<0)p=0;
+    if(p>100)p=100;
+    printf "%.1f", p
+  }')"
+
+  local fill
+  fill="$(awk -v p="$pct_val" -v w="$width" 'BEGIN{
+    printf "%d", int((p/100.0)*w + 0.5)
+  }')"
+  [[ "$fill" =~ ^[0-9]+$ ]] || fill=0
+  (( fill > width )) && fill=$width
+  (( fill < 0 )) && fill=0
+  local empty=$(( width - fill ))
+
+  local reset="$(tput sgr0 2>/dev/null || printf '')"
+  local color_count="$(tput colors 2>/dev/null || printf 8)"
+  local bg_empty bg_fill
+  if (( color_count >= 256 )); then
+    bg_empty="$(tput setab 236 2>/dev/null || printf '')"
+  else
+    bg_empty="$(tput setab 7 2>/dev/null || printf '')"
+  fi
+
+  local band
+  band="$(awk -v p="$pct_val" 'BEGIN{
+    if (p >= 70)      print "high";
+    else if (p >=30)  print "mid";
+    else               print "low";
+  }')"
+  if (( color_count >= 256 )); then
+    case "$band" in
+      high) bg_fill="$(tput setab 2   2>/dev/null || printf '')" ;;
+      mid)  bg_fill="$(tput setab 208 2>/dev/null || printf '')" ;;
+      *)    bg_fill="$(tput setab 1   2>/dev/null || printf '')" ;;
+    esac
+  else
+    case "$band" in
+      high) bg_fill="$(tput setab 2 2>/dev/null || printf '')" ;;
+      mid)  bg_fill="$(tput setab 3 2>/dev/null || printf '')" ;;
+      *)    bg_fill="$(tput setab 1 2>/dev/null || printf '')" ;;
+    esac
+  fi
+
+  local seg_fill seg_empty
+  printf -v seg_fill "%*s" "$fill" ""
+  printf -v seg_empty "%*s" "$empty" ""
+
+  printf "%s[" "$(fg 244)"
+  printf "%s%s" "$bg_fill" "$seg_fill"
+  printf "%s%s" "$bg_empty" "$seg_empty"
+  printf "%s%s" "$reset" "$(fg 244)"
+  printf "]%s %5.1f%%" "$(reset)" "$pct_val"
+  [[ -n "$label" ]] && printf " %s" "$label"
+  printf "\n"
+}
+
 print_epic_table_from_rows() {
   local table_rows="$1"
   [[ -z "$table_rows" ]] && return 0
-  local headers=("EPIC" "TITLE" "STORIES" "TASKS" "PROGRESS")
-  local -a widths=()
-  local i
-  for i in "${!headers[@]}"; do
-    widths[i]=${#headers[i]}
-  done
-  while IFS=$'\t' read -r c1 c2 c3 c4 c5; do
-    [[ -z "$c1" ]] && continue
-    local cols=("$c1" "$c2" "$c3" "$c4" "$c5")
-    for i in "${!cols[@]}"; do
-      local len=${#cols[i]}
-      (( len > widths[i] )) && widths[i]=$len
-    done
-  done <<<"$table_rows"
-  for i in "${!widths[@]}"; do
-    widths[i]=$((widths[i] + 2))
-  done
-  local last=$(( ${#headers[@]} - 1 ))
-  printf "+"
-  for i in "${!widths[@]}"; do
-    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '-')"
-    if (( i == last )); then
-      printf "+\n"
-    else
-      printf "+"
-    fi
-  done
-  printf "|"
-  for i in "${!headers[@]}"; do
-    printf " %s%-*s%s |" "$(c "1;38;5;45")" "$((widths[i]-2))" "${headers[i]}" "$(reset)"
-  done
-  printf "\n"
-  printf "+"
-  for i in "${!widths[@]}"; do
-    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '-')"
-    if (( i == last )); then
-      printf "+\n"
-    else
-      printf "+"
-    fi
-  done
-  while IFS=$'\t' read -r c1 c2 c3 c4 c5; do
-    [[ -z "$c1" ]] && continue
-    local progress_clean
-    progress_clean="$(printf '%s' "$c5" | tr -cd '0-9.')"
-    [[ -z "$progress_clean" ]] && progress_clean="0"
-    local progress_color
-    progress_color="$(progress_color_code "$progress_clean")"
-    printf "| %-*s | %-*s | %-*s | %-*s | %s%-*s%s |\n" \
-      "$((widths[0]-2))" "$c1" \
-      "$((widths[1]-2))" "$c2" \
-      "$((widths[2]-2))" "$c3" \
-      "$((widths[3]-2))" "$c4" \
-      "$(c "$progress_color")" "$((widths[4]-2))" "$c5" "$(reset)"
-  done <<<"$table_rows"
-  printf "+"
-  for i in "${!widths[@]}"; do
-    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '-')"
-    if (( i == last )); then
-      printf "+\n"
-    else
-      printf "+"
-    fi
-  done
-  printf "\n"
+  local header_line=$'EPIC\tTITLE\tSTORIES\tTASKS\tPROGRESS'
+  local payload="${header_line}"$'\n'"${table_rows}"
+  [[ "$payload" != *$'\n' ]] && payload+=$'\n'
+  printf "%s" "$payload" | draw_table "10,55,20,20,10" "text,text,text,text,percent"
 }
 
 print_story_breakdown_table() {
   local rows="$1"
   [[ -z "$rows" ]] && return 0
-  local headers=("Story" "Title" "Status" "Epic" "Tasks" "Progress")
-  local -a widths=()
-  local i
-  for i in "${!headers[@]}"; do
-    widths[i]=${#headers[i]}
-  done
-  while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6; do
-    [[ -z "$c1" ]] && continue
-    local cols=("$c1" "$c2" "$c3" "$c4" "$c5" "$c6")
-    for i in "${!cols[@]}"; do
-      local len=${#cols[i]}
-      (( len > widths[i] )) && widths[i]=$len
-    done
-  done <<<"$rows"
-  for i in "${!widths[@]}"; do
-    widths[i]=$((widths[i] + 2))
-  done
-  local last=$(( ${#headers[@]} - 1 ))
-  printf "+"
-  for i in "${!widths[@]}"; do
-    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '-')"
-    if (( i == last )); then
-      printf "+\n"
-    else
-      printf "+"
-    fi
-  done
-  printf "|"
-  for i in "${!headers[@]}"; do
-    printf " %s%-*s%s |" "$(c "1;38;5;45")" "$((widths[i]-2))" "${headers[i]}" "$(reset)"
-  done
-  printf "\n"
-  printf "+"
-  for i in "${!widths[@]}"; do
-    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '-')"
-    if (( i == last )); then
-      printf "+\n"
-    else
-      printf "+"
-    fi
-  done
-  while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6; do
-    [[ -z "$c1" ]] && continue
-    local status_color progress_color
-    status_color="$(status_color_code "$c3")"
-    progress_color="$(progress_color_code "$c6")"
-    printf "| %-*s | %-*s | %s%-*s%s | %-*s | %-*s | %s%-*s%s |\n" \
-      "$((widths[0]-2))" "$c1" \
-      "$((widths[1]-2))" "$c2" \
-      "$(c "$status_color")" "$((widths[2]-2))" "$c3" "$(reset)" \
-      "$((widths[3]-2))" "$c4" \
-      "$((widths[4]-2))" "$c5" \
-      "$(c "$progress_color")" "$((widths[5]-2))" "$c6" "$(reset)"
-  done <<<"$rows"
-  printf "+"
-  for i in "${!widths[@]}"; do
-    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '-')"
-    if (( i == last )); then
-      printf "+\n"
-    else
-      printf "+"
-    fi
-  done
-  printf "\n"
+  local header_line=$'Story\tTitle\tStatus\tEpic\tTasks\tProgress'
+  local payload="${header_line}"$'\n'"${rows}"
+  [[ "$payload" != *$'\n' ]] && payload+=$'\n'
+  printf "%s" "$payload" | draw_table "14,52,16,16,18,10" "text,text,status,text,text,percent"
 }
 
 print_story_tasks_table() {
   local table_rows="$1"
   [[ -z "$table_rows" ]] && return 0
-  local headers=("#" "Order" "Task ID" "Title" "Status" "SP")
-  local -a widths=()
-  local i
-  for i in "${!headers[@]}"; do
-    widths[i]=${#headers[i]}
-  done
-  while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6; do
-    [[ -z "$c1" ]] && continue
-    local cols=("$c1" "$c2" "$c3" "$c4" "$c5" "$c6")
-    for i in "${!cols[@]}"; do
-      local len=${#cols[i]}
-      (( len > widths[i] )) && widths[i]=$len
-    done
-  done <<<"$table_rows"
-  for i in "${!widths[@]}"; do
-    widths[i]=$((widths[i] + 2))
-  done
-  local last=$(( ${#headers[@]} - 1 ))
-  printf "+"
-  for i in "${!widths[@]}"; do
-    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '-')"
-    if (( i == last )); then
-      printf "+\n"
-    else
-      printf "+"
-    fi
-  done
-  printf "|"
-  for i in "${!headers[@]}"; do
-    printf " %s%-*s%s |" "$(c "1;38;5;45")" "$((widths[i]-2))" "${headers[i]}" "$(reset)"
-  done
-  printf "\n"
-  printf "+"
-  for i in "${!widths[@]}"; do
-    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '-')"
-    if (( i == last )); then
-      printf "+\n"
-    else
-      printf "+"
-    fi
-  done
-  while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6; do
-    [[ -z "$c1" ]] && continue
-    local status_code
-    status_code="$(status_color_code "$c5")"
-    printf "| %-*s | %-*s | %-*s | %-*s | %s%-*s%s | %-*s |\n" \
-      "$((widths[0]-2))" "$c1" \
-      "$((widths[1]-2))" "$c2" \
-      "$((widths[2]-2))" "$c3" \
-      "$((widths[3]-2))" "$c4" \
-      "$(c "$status_code")" "$((widths[4]-2))" "$c5" "$(reset)" \
-      "$((widths[5]-2))" "$c6"
-  done <<<"$table_rows"
-  printf "+"
-  for i in "${!widths[@]}"; do
-    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '-')"
-    if (( i == last )); then
-      printf "+\n"
-    else
-      printf "+"
-    fi
-  done
-  printf "\n"
+  local header_line=$'#\tOrder\tTask ID\tTitle\tStatus\tSP'
+  local payload="${header_line}"$'\n'"${table_rows}"
+  [[ "$payload" != *$'\n' ]] && payload+=$'\n'
+  printf "%s" "$payload" | draw_table "4,8,18,60,18,6" "text,text,text,text,status,text"
 }
 
 status_color() {
@@ -381,14 +442,40 @@ status_color() {
   esac
 }
 
-badge() { # fancy rounded badge
+badge() { # fancy rounded badge, with ASCII fallback
   local label="$1" col="$2"
-  printf "%s%s%s%s%s" "$(fg 240)" "$(fg "$col")" "$(c 1)" " $label " "$(reset)"
+  local accent="$(fg "$col")$(c 1)"
+  if [[ "$BADGE_STYLE" == "unicode" ]]; then
+    local left=$'\ue0b6' right=$'\ue0b4'
+    printf "%s%s" "$(fg 240)" "$left"
+    printf "%s %s %s" "$accent" "$label" "$(reset)"
+    printf "%s%s" "$(fg 240)" "$right"
+  else
+    printf "%s[" "$(fg 240)"
+    printf "%s %s %s" "$accent" "$label" "$(reset)"
+    printf "%s]%s" "$(fg 240)" "$(reset)"
+  fi
+  printf "%s" "$(reset)"
 }
 
 lc(){ c "1;38;5;${1}"; }
 
 numclean(){ tr -d ', ' <<<"$1"; }
+
+badge_supports_unicode() {
+  local charmap glyph_len
+  charmap="$(LC_ALL=C locale charmap 2>/dev/null || echo UTF-8)"
+  [[ "$charmap" == "UTF-8" ]] || return 1
+  glyph_len="$(printf '%s' $'\ue0b6' | LC_ALL=C wc -m 2>/dev/null | tr -d '[:space:]')"
+  [[ "$glyph_len" == "1" ]]
+}
+
+BADGE_STYLE="unicode"
+if [[ "${GC_BADGE_STYLE:-}" =~ ^([Aa][Ss][Cc][Ii][Ii])$ || "${GC_BADGE_ASCII:-0}" == "1" ]]; then
+  BADGE_STYLE="ascii"
+elif ! badge_supports_unicode; then
+  BADGE_STYLE="ascii"
+fi
 
 # ============================ Read stdin ============================
 INPUT="$(cat)"
@@ -443,7 +530,7 @@ render_estimate() {
   printf "\n\n"
 
   printf "  %sProgress%s\n" "$(lc 111)" "$(reset)"
-  fancy_progress_bar "$progress_pct" 30 "Complete"
+  solid_progress_bar "$progress_pct" 40 "Complete"
   printf "\n"
 
   printf "%s🧾 Remaining Work Snapshot%s\n" "$(lc 111)" "$(reset)"
@@ -671,7 +758,7 @@ render_overall() {
   printf "• Total tasks:                   %s\n" "${total_tasks:-—}"
   printf "\n%s📈 Visual Progress%s\n" "$(lc 111)" "$(reset)"
   printf "──────────────────────────────────────────────────────────────\n"
-  fancy_progress_bar "$pct" 30 "Complete"
+  solid_progress_bar "$pct" 40 "Complete"
   printf "\n"
 
   if grep -q '^Backlog totals (canonical)' <<<"$INPUT"; then

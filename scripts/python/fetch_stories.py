@@ -621,9 +621,6 @@ def print_epics_table():
     if not entries:
         print("No epics found in the backlog.")
         return
-    if COLOR_ENABLED:
-        render_epics_color(entries)
-        return
     headers = ["Epic ID", "Slug", "Title", "Stories", "Tasks", "Progress"]
     rows = []
     for entry in entries:
@@ -669,78 +666,6 @@ def print_epics_table():
     print_table(headers, rows)
 
 
-def describe_story_counts(counts: dict) -> str:
-    stories_desc = f"{counts['stories']}"
-    story_bits = []
-    if counts.get("stories_complete"):
-        story_bits.append(f"{counts['stories_complete']} complete")
-    if counts.get("stories_in_progress"):
-        story_bits.append(f"{counts['stories_in_progress']} in-progress")
-    if counts.get("stories_pending"):
-        story_bits.append(f"{counts['stories_pending']} pending")
-    if story_bits:
-        stories_desc += f" ({', '.join(story_bits)})"
-    return stories_desc
-
-
-def describe_task_counts(counts: dict) -> str:
-    tasks_desc = f"{counts['tasks']}"
-    task_bits = []
-    if counts.get("tasks_complete"):
-        task_bits.append(f"{counts['tasks_complete']}✓")
-    if counts.get("tasks_in_progress"):
-        task_bits.append(f"{counts['tasks_in_progress']} in-progress")
-    if counts.get("tasks_pending"):
-        task_bits.append(f"{counts['tasks_pending']} pending")
-    if task_bits:
-        tasks_desc += f" ({', '.join(task_bits)})"
-    return tasks_desc
-
-
-def render_epics_color(epic_entries):
-    project_label = PROJECT_ROOT.expanduser()
-    top, body, bottom = boxed_header_lines(f"GPT-Creator :: Backlog Summary ({project_label})")
-    print(top)
-    print(body)
-    print(bottom)
-    print()
-    print(color_text(SECTION_COLOR, "📋 Epic Progress Overview"))
-    print("──────────────────────────────────────────────────────────────")
-    high = medium = low = 0
-    table_rows: list[list[str]] = []
-    for entry in epic_entries:
-        counts = entry.get("counts") or empty_counts()
-        epic = entry.get("epic") or {}
-        epic_id = (epic.get("epic_id") or epic.get("epic_key") or "-").strip() or "-"
-        slug = (epic.get("slug") or "-").strip() or "-"
-        title_value = entry.get("label") or epic.get("title") or "Epic"
-        stories_desc = describe_story_counts(counts)
-        tasks_desc = describe_task_counts(counts)
-        total_tasks = counts.get("tasks") or 0
-        progress_pct = (counts.get("tasks_complete", 0) / total_tasks * 100.0) if total_tasks else 0.0
-        if progress_pct >= 70.0:
-            high += 1
-        elif progress_pct >= 30.0:
-            medium += 1
-        elif progress_pct > 0:
-            low += 1
-        else:
-            low += 1
-        progress_str = color_text(progress_color(progress_pct), f"{progress_pct:5.1f}%")
-        slug_display = color_text("1;36", slug if slug != "-" else epic_id)
-        table_rows.append([slug_display, title_value, stories_desc, tasks_desc, progress_str])
-    if table_rows:
-        render_color_table(["EPIC", "TITLE", "STORIES", "TASKS", "PROGRESS"], table_rows)
-    if epic_entries:
-        print()
-        print(color_text(SECTION_COLOR, "📈 Overall Trend"))
-        print("──────────────────────────────────────────────")
-        print(f"• {color_text('1;32', str(high))} epics at ≥70% completion")
-        print(f"• {color_text('1;33', str(medium))} epics between 30-69%")
-        pending = max(len(epic_entries) - high - medium, 0)
-        print(f"• {color_text('1;31', str(pending))} epics below 30% or pending")
-    print()
-    print_color_totals()
 def print_story_children(entry, header_label):
     stories_for_epic = entry.get("stories") or []
     if not stories_for_epic:

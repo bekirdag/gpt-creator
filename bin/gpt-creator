@@ -7931,7 +7931,9 @@ cmd_work_on_tasks() {
   fi
 
   local i18n_guard_script="${CLI_ROOT}/scripts/preflight_i18n_guard.sh"
-  if [[ -x "$i18n_guard_script" ]]; then
+  if [[ "${WORK_ON_TASKS_SKIP_I18N_GUARD:-0}" =~ ^(1|true|yes)$ ]]; then
+    info "Skipping i18n preflight guard because WORK_ON_TASKS_SKIP_I18N_GUARD=${WORK_ON_TASKS_SKIP_I18N_GUARD}"
+  elif [[ -x "$i18n_guard_script" ]]; then
     local i18n_guard_output="" i18n_guard_code=0 i18n_guard_outcome=""
     local i18n_guard_autofix_attempts=0
     local i18n_guard_autofix_limit="${GC_PREFLIGHT_I18N_AUTO_SYNC_LIMIT:-1}"

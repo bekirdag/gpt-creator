@@ -45,6 +45,85 @@ bar() {
   printf "] %s%5.1f%%%s" "$(fg "$col")" "$pct" "$(reset)"
 }
 
+fancy_progress_bar() {
+  local pct="${1:-0}"
+  local width="${2:-30}"
+  local label="${3:-}"
+  if [[ ! "$pct" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    pct=0
+  fi
+  if [[ ! "$width" =~ ^[0-9]+$ ]] || (( width <= 0 )); then
+    width=30
+  fi
+  local fill
+  fill=$(awk -v p="$pct" -v w="$width" 'BEGIN{
+    if(p<0)p=0;
+    if(p>100)p=100;
+    printf "%d", int((p/100.0)*w + 0.5)
+  }')
+  [[ "$fill" =~ ^[0-9]+$ ]] || fill=0
+  (( fill > width )) && fill=$width
+  local empty=$((width - fill))
+
+  printf "["
+  if (( fill > 0 )); then
+    printf "%s" "$(c "1;32")"
+    rep "$fill" "#"
+    reset
+  fi
+  if (( empty > 0 )); then
+    printf "%s" "$(c "1;90")"
+    rep "$empty" "-"
+    reset
+  fi
+  printf "]"
+  if [[ -n "$label" ]]; then
+    printf "  %s%s%s" "$(c "1;32")" "$label" "$(reset)"
+  fi
+  printf "\n"
+}
+
+render_box_header() {
+  local text="$1"
+  local base="${2:-60}"
+  local border_color="${3:-$(c "1;38;5;214")}"
+  local title_color="${4:-$(c "1;38;5;39")}"
+  local inner="$base"
+  local text_len="${#text}"
+  local min_inner=$((text_len + 4))
+  if (( min_inner > inner )); then
+    inner="$min_inner"
+  fi
+  local hyphens
+  printf -v hyphens '%*s' "$inner" ''
+  hyphens="${hyphens// /─}"
+  local pad=$((inner - 3))
+  printf "\n%s╭%s╮%s\n" "$border_color" "$hyphens" "$(reset)"
+  printf "│  %s%-*s%s │\n" "$title_color" "$pad" "$text" "$(reset)"
+  printf "%s╰%s╯%s\n" "$border_color" "$hyphens" "$(reset)"
+}
+
+render_backlog_header() {
+  local text="$1"
+  local width="${2:-66}"
+  local border_color="${3:-$(c "1;38;5;214")}"
+  local title_color="${4:-$(c "1;38;5;39")}"
+  local inner=$((width - 2))
+  local text_len="${#text}"
+  (( inner < 0 )) && inner=0
+  local pad=$((inner - 4))
+  if (( pad < text_len )); then
+    inner=$((text_len + 4))
+    pad=$text_len
+  fi
+  local hyphens
+  printf -v hyphens '%*s' "$inner" ''
+  hyphens="${hyphens// /─}"
+  printf "\n%s╭%s╮%s\n" "$border_color" "$hyphens" "$(reset)"
+  printf "│  %s%-*s%s │\n" "$title_color" "$pad" "$text" "$(reset)"
+  printf "%s╰%s╯%s\n" "$border_color" "$hyphens" "$(reset)"
+}
+
 status_color() {
   case "$(tr '[:upper:]' '[:lower:]' <<<"${1:-}")" in
     pending)      fg 245 ;;
@@ -106,9 +185,7 @@ render_estimate() {
     progress_pct="$(awk -v c="$comp_eff_clean" -v t="$total_clean" 'BEGIN{printf "%.1f",(c/t)*100}')"
   fi
 
-  printf "\n%s╭────────────────────────────────────────────────────────────╮%s\n" "$(c "1;38;5;214")" "$(reset)"
-  printf "│  %sGPT-Creator :: Project Estimate Summary%s                │\n" "$(c "1;38;5;39")" "$(reset)"
-  printf "%s╰────────────────────────────────────────────────────────────╯%s\n" "$(c "1;38;5;214")" "$(reset)"
+  render_box_header "GPT-Creator :: Project Estimate Summary" 60
 
   printf "  "; badge "TOTAL ${total:-N/A}" 39; printf "  "
   badge "DONE ${comp_eff:-N/A}" 46; printf "  "
@@ -118,9 +195,8 @@ render_estimate() {
   printf "\n\n"
 
   printf "  %sProgress%s\n" "$(lc 111)" "$(reset)"
-  printf "  "
-  bar "$progress_pct" 40
-  printf "  %s%s%% complete%s\n\n" "$(c "1;38;5;82")" "$progress_pct" "$(reset)"
+  fancy_progress_bar "$progress_pct" 30 "$(printf '%s%% Complete' "$progress_pct")"
+  printf "\n"
 
   printf "%s🧾 Remaining Work Snapshot%s\n" "$(lc 111)" "$(reset)"
   printf "────────────────────────────────────────────\n"
@@ -156,14 +232,15 @@ render_epic_children() {
   header="$(sed -n 's/^Stories for epic: \(.*\)$/\1/p' <<<"$INPUT" | head -1)"
   epic="${header%% *}"
 
-  printf "\n%s╭──────────────────────────────────────────────────────────────╮%s\n" "$(c 1';38;5;214')" "$(reset)"
-  printf "│  %sStories for Epic: %s%s │\n" "$(c 1';38;5;39')" "$header" "$(reset)"
-  printf "%s╰──────────────────────────────────────────────────────────────╯%s\n" "$(c 1';38;5;214')" "$(reset)"
+  render_backlog_header "Stories for Epic: ${header}" 66
 
-  local migration_line
-  migration_line="$(grep -m1 'Carried forward migration state' <<<"$INPUT" || true)"
-  [[ -n "$migration_line" ]] && printf "%s\n" "$migration_line"
-  printf "\n%s📘 Story Breakdown%s\n" "$(lc 111)" "$(reset)"
+  if grep -q 'Carried forward migration state' <<<"$INPUT"; then
+    local mig
+    mig="$(grep -m1 'Carried forward migration state' <<<"$INPUT")"
+    printf "➜ %s\n\n" "$mig"
+  fi
+
+  printf "%s📘 Story Breakdown%s\n" "$(lc 111)" "$(reset)"
   printf "──────────────────────────────────────────────────────────────\n"
   printf "%s%-14s %-58s %-13s %-8s %-30s %-s%s\n" "$(c 1';90')" "Story Slug" "Title" "Status" "Epic" "Tasks" "Progress" "$(reset)"
   printf "%s%-14s %-58s %-13s %-8s %-30s %-s%s\n" "$(c 1';90')" "────────────" "────────────────────────────────────────────" "───────────" "──────" "──────────────────────────────" "────────" "$(reset)"
@@ -173,20 +250,21 @@ render_epic_children() {
     /^Story Slug[[:space:]]/ { show=1; next }
     show && NF>=6 {
       slug=$1; title=$2; status=$3; epic=$4; tasks=$5; progress=$6;
-      gsub(/^[ \t]+|[ \t]+$/,"",slug); gsub(/^[ \t]+|[ \t]+$/,"",title);
-      gsub(/^[ \t]+|[ \t]+$/,"",status); gsub(/^[ \t]+|[ \t]+$/,"",epic);
-      gsub(/^[ \t]+|[ \t]+$/,"",tasks); gsub(/^[ \t]+|[ \t]+$/,"",progress);
+      gsub(/^[ \t]+|[ \t]+$/,"",slug);
+      gsub(/^[ \t]+|[ \t]+$/,"",title);
+      gsub(/^[ \t]+|[ \t]+$/,"",status);
+      gsub(/^[ \t]+|[ \t]+$/,"",epic);
+      gsub(/^[ \t]+|[ \t]+$/,"",tasks);
+      gsub(/^[ \t]+|[ \t]+$/,"",progress);
       printf("%s\t%s\t%s\t%s\t%s\n", slug,title,status,epic,progress"|"tasks);
     }' <<<"$INPUT" | while IFS=$'\t' read -r slug title status epic progress_tasks; do
       tasks="${progress_tasks#*|}"
       progress="${progress_tasks%%|*}"
       pct="${progress%%%}"
       printf "%s%-14s%s %-58s " "$(c 1';37')" "$slug" "$(reset)" "$title"
-      sc=$(status_color "$status")
-      printf "%s%-13s%s " "$sc" "$status" "$(reset)"
+      sc=$(status_color "$status"); printf "%s%-13s%s " "$sc" "$status" "$(reset)"
       printf "%-8s %-30s " "$epic" "$tasks"
-      bar "${pct:-0}" 22
-      printf "\n"
+      bar "${pct:-0}" 22; printf "\n"
     done
 
   if grep -q '^Backlog totals (canonical)' <<<"$INPUT"; then
@@ -214,14 +292,15 @@ render_story_tasks() {
   local header
   header="$(sed -n 's/^Tasks for story: \(.*\)$/\1/p' <<<"$INPUT" | head -1)"
 
-  printf "\n%s╭──────────────────────────────────────────────────────────────╮%s\n" "$(c 1';38;5;214')" "$(reset)"
-  printf "│  %sTasks for Story: %s%s │\n" "$(c 1';38;5;39')" "$header" "$(reset)"
-  printf "%s╰──────────────────────────────────────────────────────────────╯%s\n" "$(c 1';38;5;214')" "$(reset)"
+  render_backlog_header "Tasks for Story: ${header}" 70
 
-  local migration_line
-  migration_line="$(grep -m1 'Carried forward migration state' <<<"$INPUT" || true)"
-  [[ -n "$migration_line" ]] && printf "%s\n" "$migration_line"
-  printf "\n%s🧩 Task Breakdown%s\n" "$(lc 111)" "$(reset)"
+  if grep -q 'Carried forward migration state' <<<"$INPUT"; then
+    local mig
+    mig="$(grep -m1 'Carried forward migration state' <<<"$INPUT")"
+    printf "➜ %s\n\n" "$mig"
+  fi
+
+  printf "%s🧩 Task Breakdown%s\n" "$(lc 111)" "$(reset)"
   printf "──────────────────────────────────────────────────────────────\n"
   printf "%s%-4s %-6s %-12s %-66s %-10s %-4s %-s%s\n" "$(c 1';90')" "#" "Order" "Task ID" "Title" "Status" "SP" "Weight" "$(reset)"
   printf "%s%-4s %-6s %-12s %-66s %-10s %-4s %-s%s\n" "$(c 1';90')" "─" "─────" "────────────" "───────────────────────────────────────────────" "───────" "──" "────────────" "$(reset)"
@@ -269,14 +348,15 @@ render_overall() {
   pct="$(sed -n 's/^Completed tasks (effective): .* (\(.*\)%).*/\1/p' <<<"$INPUT" | head -1)"
   pct="${pct:-0}"
 
-  printf "\n%s╭──────────────────────────────────────────────────────────────╮%s\n" "$(c 1';38;5;214')" "$(reset)"
-  printf "│  %sOverall Backlog Progress%s                                 │\n" "$(c 1';38;5;39')" "$(reset)"
-  printf "%s╰──────────────────────────────────────────────────────────────╯%s\n" "$(c 1';38;5;214')" "$(reset)"
+  render_backlog_header "Overall Backlog Progress" 66
 
-  local migration_line
-  migration_line="$(grep -m1 'Carried forward migration state' <<<"$INPUT" || true)"
-  [[ -n "$migration_line" ]] && printf "%s\n" "$migration_line"
-  printf "\n%s📊 Backlog Summary%s\n" "$(lc 111)" "$(reset)"
+  if grep -q 'Carried forward migration state' <<<"$INPUT"; then
+    local mig
+    mig="$(grep -m1 'Carried forward migration state' <<<"$INPUT")"
+    printf "➜ %s\n\n" "$mig"
+  fi
+
+  printf "%s📊 Backlog Summary%s\n" "$(lc 111)" "$(reset)"
   printf "──────────────────────────────────────────────────────────────\n"
   sed -n \
     -e 's/^Completed tasks (canonical): /• Completed tasks (canonical):   /p' \
@@ -288,8 +368,8 @@ render_overall() {
     <<<"$INPUT"
   printf "\n%s📈 Visual Progress%s\n" "$(lc 111)" "$(reset)"
   printf "──────────────────────────────────────────────────────────────\n"
-  bar "$pct" 30
-  printf "  %sComplete%s\n\n" "$(c 1';32')" "$(reset)"
+  fancy_progress_bar "$pct" 30 "$(printf '%s%% Complete' "$pct")"
+  printf "\n"
 
   if grep -q '^Backlog totals (canonical)' <<<"$INPUT"; then
     printf "%s📊 Backlog Totals (Canonical)%s\n" "$(lc 111)" "$(reset)"
@@ -330,9 +410,7 @@ render_task_start() {
   session="$(sed -n 's/^session id:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
   [[ -z "$session" ]] && session="$(sed -n 's/^Session:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
 
-  printf "\n%s╭────────────────────────────────────────────────────────────╮%s\n" "$(c 1';38;5;214')" "$(reset)"
-  printf "│  %sSTART OF TASK%s                                             │\n" "$(c 1';38;5;39')" "$(reset)"
-  printf "%s╰────────────────────────────────────────────────────────────╯%s\n" "$(c 1';38;5;214')" "$(reset)"
+  render_box_header "START OF TASK" 60
 
   printf "  %s[#]%s %sStart Task ID:%s  %s%s%s\n"        "$(fg 244)" "$(reset)" "$(fg 111)" "$(reset)" "$(c 1';38;5;45')" "${id:-N/A}" "$(reset)"
   [[ -n "$alias"   ]] && printf "  %s[↪]%s %sAlias:%s          %s%s%s\n"   "$(fg 244)" "$(reset)" "$(fg 111)" "$(reset)" "$(c 1';38;5;39')"  "$alias"      "$(reset)"
@@ -383,9 +461,7 @@ render_task_end() {
     ratio_x="$(awk -v a="$tokens_n" -v b="$est_n" 'BEGIN{printf "%.2f", (a/b)}')"
   fi
 
-  printf "\n%s╭────────────────────────────────────────────────────────────╮%s\n" "$(c 1';38;5;214')" "$(reset)"
-  printf "│  %sEND OF TASK%s                                               │\n" "$(c 1';38;5;39')" "$(reset)"
-  printf "%s╰────────────────────────────────────────────────────────────╯%s\n" "$(c 1';38;5;214')" "$(reset)"
+  render_box_header "END OF TASK" 60
 
   printf "  "
   badge "TASK ${id:-N/A}" 45
@@ -464,9 +540,7 @@ render_task_end() {
 
 render_epic_overview() {
   local project_display="${PROJECT_ROOT:-$PWD}"
-  printf "\n%s╭────────────────────────────────────────────────────────────╮%s\n" "$(c "1;38;5;214")" "$(reset)"
-  printf "│  %sGPT-Creator :: Backlog Summary (%s)%s     │\n" "$(c "1;38;5;39")" "$project_display" "$(reset)"
-  printf "%s╰────────────────────────────────────────────────────────────╯%s\n" "$(c "1;38;5;214")" "$(reset)"
+  render_box_header "GPT-Creator :: Backlog Summary (${project_display})" 60
 
   local migration_line
   migration_line="$(grep -m1 'Carried forward migration state' <<<"$INPUT" || true)"

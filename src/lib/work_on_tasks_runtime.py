@@ -1238,12 +1238,12 @@ def main():
                 normalized['diff'] = text if text.endswith('\n') else text + '\n'
                 normalized.pop('diff_path', None)
             ctype = normalized.get('type')
-        if not ctype:
-            if normalized.get('diff'):
-                normalized['type'] = 'patch'
-            elif 'content' in normalized:
-                normalized['type'] = 'file'
-        changes.append(normalized)
+            if not ctype:
+                if normalized.get('diff'):
+                    normalized['type'] = 'patch'
+                elif 'content' in normalized:
+                    normalized['type'] = 'file'
+            changes.append(normalized)
 
         def _ensure_dev_branch_exists() -> Tuple[bool, List[str]]:
             notes: List[str] = []

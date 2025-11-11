@@ -1452,10 +1452,6 @@ gc_renderer_cache_path() {
 }
 
 gc_renderer_path_if_enabled() {
-  if [[ "${GC_RENDER_GPT_CREATOR_DISABLE:-0}" == "1" ]]; then
-    return 1
-  fi
-
   local -a candidates=()
   local -a copy_sources=()
 
@@ -1535,7 +1531,7 @@ gc_render_with_renderer() {
   else
     local render_status=$?
     if [[ "$render_strict" == "1" ]]; then
-      printf '%s!%s Renderer failed via %s (exit=%s). Raw output suppressed. Re-run with GC_RENDER_GPT_CREATOR_DISABLE=1 if you need the legacy view.\n' \
+      printf '%s!%s Renderer failed via %s (exit=%s). Raw output suppressed; fix the renderer or run it manually for debugging.\n' \
         "$c_yellow" "$c_reset" "$renderer_path" "$render_status" >&2
       rm -f "$tmpfile"
       return 0

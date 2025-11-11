@@ -4,8 +4,6 @@
 # Usage: gpt-creator <command> [args]
 
 set -Eeuo pipefail
-# git branching helper
-[ -f scripts/lib/git-branches.sh ] && . scripts/lib/git-branches.sh || true
 
 mkdir -p "${PWD}/.gpt-creator/shims" 2>/dev/null || true
 export BASH_ENV="${BASH_ENV:-$PWD/.gpt-creator/shims/bash_env.sh}"
@@ -265,6 +263,11 @@ cmd_task_convert() {
 
 CLI_ROOT="$(resolve_cli_root)"
 unset -f resolve_cli_root
+
+if [[ -f "${CLI_ROOT}/scripts/lib/git-branches.sh" ]]; then
+  # shellcheck disable=SC1090
+  . "${CLI_ROOT}/scripts/lib/git-branches.sh"
+fi
 
 GC_TEMPLATE_DIR="${CLI_ROOT}/assets/templates"
 export PATH="${CLI_ROOT}/bin:${PATH}"

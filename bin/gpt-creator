@@ -1229,8 +1229,15 @@ MYSQL_BIN="${MYSQL_BIN:-mysql}"
 if [[ -t 1 ]]; then
   c_reset=$'\033[0m'
   c_red=$'\033[31m'; c_yellow=$'\033[33m'; c_cyan=$'\033[36m'; c_green=$'\033[32m'
+  gc_color_border=$'\033[1;38;5;214m'
+  gc_color_title=$'\033[1;38;5;39m'
+  gc_color_label=$'\033[1;38;5;111m'
+  gc_color_muted=$'\033[38;5;245m'
+  gc_color_bar_fill=$'\033[1;38;5;39m'
+  gc_color_bar_empty=$'\033[38;5;240m'
 else
   c_reset=; c_red=; c_yellow=; c_cyan=; c_green=
+  gc_color_border=; gc_color_title=; gc_color_label=; gc_color_muted=; gc_color_bar_fill=; gc_color_bar_empty=
 fi
 
 ts() { date +"%Y-%m-%dT%H:%M:%S"; }
@@ -1281,6 +1288,47 @@ gc_render_task_banner() {
   local header="${1:?header text required}"
   shift
   local -a lines=("$@")
+
+  if [[ "$header" == "START OF A NEW TASK" ]] || [[ "$header" == "END OF THE TASK WORK" ]]; then
+    local content_width="${#header}"
+    local line
+    for line in "${lines[@]}"; do
+      if (( ${#line} > content_width )); then
+        content_width=${#line}
+      fi
+    done
+    local inner_width=$(( content_width + 6 ))
+    local shading
+    printf -v shading '%*s' "$inner_width" ''
+    shading="${shading// /═}"
+    local top_border="╔${shading}╗"
+    local mid_border="╠${shading}╣"
+    local bottom_border="╚${shading}╝"
+    local shade_line="$shading"
+    local header_line
+    printf -v header_line "║  %-${content_width}s  ║" "$header"
+    if [[ "$header" == "START OF A NEW TASK" ]]; then
+      info "$top_border"
+      info "$header_line"
+      info "$mid_border"
+      for line in "${lines[@]}"; do
+        printf -v line "║  %-${content_width}s  ║" "$line"
+        info "$line"
+      done
+      info "$bottom_border"
+    else
+      info "$top_border"
+      for line in "${lines[@]}"; do
+        printf -v line "║  %-${content_width}s  ║" "$line"
+        info "$line"
+      done
+      info "$bottom_border"
+      info "$shade_line"
+      info "$header_line"
+      info "$shade_line"
+    fi
+    return
+  fi
 
   local min_width=23
   local banner_margin=4
@@ -1343,6 +1391,167 @@ gc_render_task_banner() {
     info "$header_line"
     info "$shade_line"
   fi
+}
+
+gc_numclean() {
+  local raw="${1:-}"
+  raw="${raw//,/}"
+  raw="${raw// /}"
+  printf '%s' "$raw"
+}
+
+gc_story_points_percent() {
+  local value="${1:-0}"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    value=0
+  fi
+  if (( value < 0 )); then
+    value=0
+  elif (( value > 13 )); then
+    value=13
+  fi
+  awk -v s="$value" 'BEGIN{printf "%.1f",(s/13)*100}'
+}
+
+gc_render_bar() {
+  local pct="${1:-0}"
+  local width="${2:-20}"
+  if [[ ! "$pct" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    pct=0
+  fi
+  if [[ ! "$width" =~ ^[0-9]+$ ]] || (( width <= 0 )); then
+    width=20
+  fi
+  local filled
+  filled="$(awk -v p="$pct" -v w="$width" 'BEGIN{if(p<0)p=0;if(p>100)p=100;printf "%d", int((p/100)*w + 0.5)}')"
+  [[ "$filled" =~ ^[0-9]+$ ]] || filled=0
+  local i=0
+  while (( i < width )); do
+    if (( i < filled )); then
+      printf '%s█%s' "${gc_color_bar_fill:-}" "${gc_color_bar_fill:+$c_reset}"
+    else
+      printf '%s░%s' "${gc_color_bar_empty:-}" "${gc_color_bar_empty:+$c_reset}"
+    fi
+    (( i++ ))
+  done
+}
+
+gc_status_color_seq() {
+  local status="${1:-}"
+  status="${status,,}"
+  case "$status" in
+    completed|complete|success|ok|passed)
+      printf '%s' "$c_green"
+      ;;
+    blocked*|failed|dead-letter|permanent-fail|error|aborted|interrupted)
+      printf '%s' "$c_red"
+      ;;
+    in-progress|running|pending)
+      printf '%s' "$c_cyan"
+      ;;
+    *)
+      printf '%s' "$c_yellow"
+      ;;
+  esac
+}
+
+gc_render_task_start_panel() {
+  local task_id="${1:-N/A}"
+  local alias_line="${2:-}"
+  local summary_line="${3:-}"
+  local model_line="${4:-}"
+  local provider_line="${5:-}"
+  local workdir_line="${6:-}"
+  local reasoning_line="${7:-}"
+  local session_line="${8:-}"
+  local step_line="${9:-}"
+
+  printf '\n%s╭────────────────────────────────────────────────────────────╮%s\n' "${gc_color_border:-}" "$c_reset"
+  printf '│  %sSTART OF TASK%s                                           │\n' "${gc_color_title:-}" "$c_reset"
+  printf '%s╰────────────────────────────────────────────────────────────╯%s\n' "${gc_color_border:-}" "$c_reset"
+
+  printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Start Task ID:" "$c_reset" "$task_id"
+  [[ -n "$alias_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Alias:" "$c_reset" "$alias_line"
+  [[ -n "$summary_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Summary:" "$c_reset" "$summary_line"
+  [[ -n "$model_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Model:" "$c_reset" "$model_line"
+  [[ -n "$provider_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Provider:" "$c_reset" "$provider_line"
+  [[ -n "$workdir_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Workdir:" "$c_reset" "$workdir_line"
+  [[ -n "$reasoning_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Reasoning:" "$c_reset" "$reasoning_line"
+  [[ -n "$session_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Session:" "$c_reset" "$session_line"
+  [[ -n "$step_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Step:" "$c_reset" "$step_line"
+
+  printf '\n%s░░░░░ START OF A NEW TASK ░░░░░%s\n\n' "${gc_color_muted:-}" "$c_reset"
+}
+
+gc_render_task_end_panel() {
+  local task_id="${1:-N/A}"
+  local status="${2:-unknown}"
+  local terminal="${3:-N/A}"
+  local time_spent="${4:-0S}"
+  local story_points_display="${5:-—}"
+  local story_points_raw="${6:-0}"
+  local tokens_used="${7:-0}"
+  local tokens_estimate="${8:-0}"
+  local tokens_display="${9:-}"
+  local tokens_estimate_display="${10:-}"
+  local failure_class="${11:-}"
+  local detail_line="${12:-}"
+
+  if [[ -z "$tokens_display" ]]; then
+    tokens_display="$(gc_format_tokens_compact "$tokens_used")"
+  fi
+  if [[ -z "$tokens_estimate_display" ]]; then
+    tokens_estimate_display="$(gc_format_tokens_compact "$tokens_estimate")"
+  fi
+
+  local tokens_numeric="$tokens_used"
+  local est_numeric="$tokens_estimate"
+  if [[ ! "$tokens_numeric" =~ ^[0-9]+$ ]]; then
+    tokens_numeric="$(gc_numclean "$tokens_display")"
+  fi
+  if [[ ! "$est_numeric" =~ ^[0-9]+$ ]]; then
+    est_numeric="$(gc_numclean "$tokens_estimate_display")"
+  fi
+  [[ "$tokens_numeric" =~ ^[0-9]+$ ]] || tokens_numeric=0
+  [[ "$est_numeric" =~ ^[0-9]+$ ]] || est_numeric=0
+
+  local ratio_pct="0.0"
+  local ratio_multiplier="0.00"
+  if (( est_numeric > 0 )); then
+    ratio_pct="$(awk -v a="$tokens_numeric" -v b="$est_numeric" 'BEGIN{printf "%.1f", (a/b)*100}')"
+    ratio_multiplier="$(awk -v a="$tokens_numeric" -v b="$est_numeric" 'BEGIN{if(b>0){printf "%.2f", a/b}else{printf "0.00"} }')"
+  fi
+
+  local sp_pct
+  sp_pct="$(gc_story_points_percent "$story_points_raw")"
+
+  printf '\n%s╭────────────────────────────────────────────────────────────╮%s\n' "${gc_color_border:-}" "$c_reset"
+  printf '│  %sEND OF TASK%s                                             │\n' "${gc_color_title:-}" "$c_reset"
+  printf '%s╰────────────────────────────────────────────────────────────╯%s\n' "${gc_color_border:-}" "$c_reset"
+
+  printf '%s%-18s%s %s\n' "${gc_color_label:-}" "Task ID:" "$c_reset" "$task_id"
+  printf '%s%-18s%s %s%s%s\n' "${gc_color_label:-}" "Status:" "$c_reset" "$(gc_status_color_seq "$status")" "$status" "$c_reset"
+  printf '%s%-18s%s %s\n' "${gc_color_label:-}" "Terminal:" "$c_reset" "$terminal"
+  printf '%s%-18s%s %s\n' "${gc_color_label:-}" "Time spent:" "$c_reset" "$time_spent"
+  printf '%s%-18s%s %s\n' "${gc_color_label:-}" "Story points:" "$c_reset" "$story_points_display"
+  printf '   '
+  gc_render_bar "$sp_pct" 22
+  printf ' (SP)\n'
+
+  printf "%s%-18s%s %s\n" "${gc_color_label:-}" "Tokens used:" "$c_reset" "$tokens_display"
+  printf '   '
+  gc_render_bar "$ratio_pct" 30
+  printf ' used vs prompt est (x%s)\n' "$ratio_multiplier"
+  printf "%s%-18s%s %s\n" "${gc_color_label:-}" "Est. tokens:" "$c_reset" "$tokens_estimate_display"
+
+  if [[ -n "$failure_class" && "$failure_class" != "NONE" ]]; then
+    printf "%s%-18s%s %s\n" "${gc_color_label:-}" "Failure:" "$c_reset" "$failure_class"
+  fi
+  if [[ -n "$detail_line" ]]; then
+    printf "%s%-18s%s %s\n" "${gc_color_label:-}" "Detail:" "$c_reset" "$detail_line"
+  fi
+
+  printf '\n%s░░░░░ END OF THE TASK WORK ░░░░░%s\n\n' "${gc_color_muted:-}" "$c_reset"
 }
 
 gc_user_config_root() {
@@ -3532,14 +3741,20 @@ gc_finalize_active_task() {
   while [[ "$detail" == *"  "* ]]; do
     detail="${detail//  / }"
   done
-  local -a banner_lines=("END TASK ID" "${banner_id}" "STATUS: INTERRUPTED")
-  if [[ -n "$detail" ]]; then
-    banner_lines+=("DETAIL: ${detail}")
-  fi
-  if [[ -n "$signal" ]]; then
-    banner_lines+=("TERMINAL STATE: ${signal}")
-  fi
-  gc_render_task_banner --header-bottom "END OF THE TASK WORK" "${banner_lines[@]}"
+  local terminal_state_display="${signal:-Interrupted}"
+  gc_render_task_end_panel \
+    "$banner_id" \
+    "INTERRUPTED" \
+    "$terminal_state_display" \
+    "0S" \
+    "—" \
+    "0" \
+    "0" \
+    "0" \
+    "" \
+    "" \
+    "" \
+    "$detail"
   # Interrupted/error finalization
   gc_finalize_and_report "interrupted" "$reason"
 
@@ -5850,6 +6065,39 @@ gc_exec_with_timeout() {
   return "$?"
 }
 
+gc_codex_profile_for_step() {
+  local step="${1:-patch}"
+  local model_ref="${2:?model ref required}"
+  local reasoning_ref="${3:?reasoning ref required}"
+
+  local model_value=""
+  local reasoning_value=""
+  case "$step" in
+    patch|apply|code|implement)
+      model_value="${CODEX_MODEL_CODE:-${CODEX_MODEL}}"
+      reasoning_value="${CODEX_REASONING_EFFORT_CODE:-${CODEX_REASONING_EFFORT:-low}}"
+      ;;
+    *)
+      model_value="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL}}"
+      reasoning_value="${CODEX_REASONING_EFFORT_NON_CODE:-${CODEX_REASONING_EFFORT:-low}}"
+      ;;
+  esac
+
+  if [[ -z "$model_value" ]]; then
+    model_value="${CODEX_MODEL:-gpt-5-codex-mini}"
+  fi
+  if [[ -z "$reasoning_value" ]]; then
+    if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
+      reasoning_value="${CODEX_REASONING_EFFORT}"
+    else
+      reasoning_value="low"
+    fi
+  fi
+
+  printf -v "$model_ref" '%s' "$model_value"
+  printf -v "$reasoning_ref" '%s' "$reasoning_value"
+}
+
 codex_call() {
   local task="${1:?task}"; shift || true
   local prompt_dir="${GC_DIR}/prompts"
@@ -5902,28 +6150,7 @@ codex_call() {
 
   local codex_model_for_step=""
   local codex_reasoning_for_step=""
-  case "$call_step" in
-    patch|apply|code|implement)
-      codex_model_for_step="${CODEX_MODEL_CODE:-${CODEX_MODEL}}"
-      if [[ -n "${CODEX_REASONING_EFFORT_CODE:-}" ]]; then
-        codex_reasoning_for_step="${CODEX_REASONING_EFFORT_CODE}"
-      fi
-      ;;
-    *)
-      codex_model_for_step="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL}}"
-      if [[ -n "${CODEX_REASONING_EFFORT_NON_CODE:-}" ]]; then
-        codex_reasoning_for_step="${CODEX_REASONING_EFFORT_NON_CODE}"
-      fi
-      ;;
-  esac
-  [[ -n "$codex_model_for_step" ]] || codex_model_for_step="$CODEX_MODEL"
-  if [[ -z "$codex_reasoning_for_step" ]]; then
-    if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
-      codex_reasoning_for_step="${CODEX_REASONING_EFFORT}"
-    else
-      codex_reasoning_for_step="low"
-    fi
-  fi
+  gc_codex_profile_for_step "$call_step" codex_model_for_step codex_reasoning_for_step
 
   if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" && "${GC_CODEX_USAGE_LIMIT_CONFIRMED:-0}" == "1" ]]; then
     warn "Codex usage limit previously reached; skipping ${task}."
@@ -9154,9 +9381,27 @@ print(error)'
       fi
 
       printf '\n'
-      gc_render_task_banner "START OF A NEW TASK" "START TASK ID" "$banner_task_id"
-      info "  → Working on task ${task_number} (${banner_task_id})"
-      info "    ${task_title:-(untitled)}"
+      local task_codex_step="patch"
+      local task_codex_model=""
+      local task_codex_reasoning=""
+      gc_codex_profile_for_step "$task_codex_step" task_codex_model task_codex_reasoning
+
+      local task_alias_line="Working on task ${task_number} (${banner_task_id})"
+      local task_summary_line="${task_title:-(untitled)}"
+      local task_provider_display="${CODEX_BIN:-codex}"
+      local task_workdir_display="${PROJECT_ROOT:-$PWD}"
+      gc_render_task_start_panel \
+        "$banner_task_id" \
+        "$task_alias_line" \
+        "$task_summary_line" \
+        "$task_codex_model" \
+        "$task_provider_display" \
+        "$task_workdir_display" \
+        "$task_codex_reasoning" \
+        "$run_stamp" \
+        "$task_codex_step"
+      info "  → ${task_alias_line}"
+      info "    ${task_summary_line}"
 
       local call_name="story-${slug}-task-${task_number}"
       local codex_ok=0
@@ -9537,7 +9782,7 @@ print(error)'
         if (( diff_guard_enabled )); then
           diff_before="$(gc_diff_fingerprint)"
         fi
-        if codex_call "$call_name" --step patch --prompt "$prompt_path" --output "$output_path"; then
+        if codex_call "$call_name" --step "$task_codex_step" --prompt "$prompt_path" --output "$output_path"; then
           attempt_tokens="${GC_CODEX_CALL_TOKEN_ACCUM:-${GC_LAST_CODEX_TOTAL_TOKENS:-0}}"
           if [[ "$attempt_tokens" =~ ^[0-9]+$ ]]; then
             task_tokens_total=$((task_tokens_total + attempt_tokens))
@@ -11001,20 +11246,19 @@ print(flag("notes_contains_already_satisfied"))'
       fi
 
       printf '\n'
-      local -a banner_lines=(
-        "END TASK ID" "$banner_task_id"
-        "REPORT:"
-        "TOKENS USED: ${task_tokens_display}"
-        "EST. TOKENS (PROMPT): ${task_prompt_estimate_display}"
-        "STORY POINTS: ${task_story_points_display}"
-        "TIME SPENT: ${task_duration_display}"
-        "STATUS: ${task_status_display}"
-        "TERMINAL STATE: ${task_terminal_state}"
-      )
-      if [[ "$task_failure_class" != "NONE" ]]; then
-        banner_lines+=("FAILURE CLASS: ${task_failure_class}")
-      fi
-      gc_render_task_banner --header-bottom "END OF THE TASK WORK" "${banner_lines[@]}"
+      gc_render_task_end_panel \
+        "$banner_task_id" \
+        "$task_status_display" \
+        "$task_terminal_state" \
+        "$task_duration_display" \
+        "$task_story_points_display" \
+        "$task_story_points" \
+        "$task_tokens_total" \
+        "$task_prompt_estimate" \
+        "$task_tokens_display" \
+        "$task_prompt_estimate_display" \
+        "$task_failure_class" \
+        ""
       # Write JSON & run end scripts
       gc_finalize_and_report "${task_result_status:-success}" "${task_notes_display:-}"
 

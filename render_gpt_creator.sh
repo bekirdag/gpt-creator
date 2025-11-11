@@ -18,7 +18,7 @@ rep()    { local n="$1" ch="${2:- }"; printf "%*s" "$n" "" | tr ' ' "$ch"; }
 
 # 0..100 → 256-color gradient (red→yellow→green)
 gradient_256() {
-  local pct="${1%%.%*}"
+  local pct="${1%.*}"
   (( pct < 0 )) && pct=0
   (( pct > 100 )) && pct=100
   if (( pct <= 50 )); then
@@ -59,7 +59,7 @@ badge() { # fancy rounded badge
   printf "%s%s%s%s%s" "$(fg 240)" "$(fg "$col")" "$(c 1)" " $label " "$(reset)"
 }
 
-lc(){ printf "%s" "$(c 1';38;5;$1')"; }
+lc(){ c "1;38;5;${1}"; }
 
 numclean(){ tr -d ', ' <<<"$1"; }
 
@@ -71,6 +71,7 @@ is_estimate()         { grep -q '^Remaining Work Summary' <<<"$INPUT"; }
 is_epic_children()    { grep -qE '^Stories for epic:' <<<"$INPUT"; }
 is_story_tasks()      { grep -qE '^Tasks for story:' <<<"$INPUT"; }
 is_overall_progress() { grep -qiE '^Overall backlog progress' <<<"$INPUT"; }
+is_epic_overview()    { grep -qE '^Epic ID[[:space:]]+Slug|^┌' <<<"$INPUT"; }
 is_task_end()         { grep -qiE 'END TASK ID|^Task ID:' <<<"$INPUT"; }
 is_task_start()       { grep -qiE 'START TASK ID|→ Working on task' <<<"$INPUT"; }
 
@@ -96,42 +97,58 @@ render_estimate() {
   burn="$(sed -n 's/^Estimated token burn[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT")"
   proj="$(sed -n 's/^Projected remaining tokens[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT")"
 
-  printf "\n%s╭────────────────────────────────────────────╮%s\n" "$(c 1';38;5;214')" "$(reset)"
-  printf "│   %sGPT-Creator :: Project Estimate Summary%s  │\n" "$(c 1';38;5;39')" "$(reset)"
-  printf "%s╰────────────────────────────────────────────╯%s\n\n" "$(c 1';38;5;214')" "$(reset)"
+  local total_clean comp_eff_clean rem_clean
+  total_clean="$(numclean "${total:-0}")"
+  comp_eff_clean="$(numclean "${comp_eff:-0}")"
+  rem_clean="$(numclean "${rem_can:-0}")"
+  local progress_pct="0.0"
+  if [[ "$total_clean" =~ ^[0-9]+$ ]] && (( total_clean > 0 )); then
+    progress_pct="$(awk -v c="$comp_eff_clean" -v t="$total_clean" 'BEGIN{printf "%.1f",(c/t)*100}')"
+  fi
 
-  printf "%s📦 Migration State%s\n" "$(lc 111)" "$(reset)"
-  printf "────────────────────────────────────────────\n"
-  grep -m1 'Carried forward migration state' <<<"$INPUT" || true
-  printf "\n"
+  printf "\n%s╭────────────────────────────────────────────────────────────╮%s\n" "$(c "1;38;5;214")" "$(reset)"
+  printf "│  %sGPT-Creator :: Project Estimate Summary%s                │\n" "$(c "1;38;5;39")" "$(reset)"
+  printf "%s╰────────────────────────────────────────────────────────────╯%s\n" "$(c "1;38;5;214")" "$(reset)"
 
-  printf "%s📊 Remaining Work Summary%s\n" "$(lc 111)" "$(reset)"
+  printf "  "; badge "TOTAL ${total:-N/A}" 39; printf "  "
+  badge "DONE ${comp_eff:-N/A}" 46; printf "  "
+  badge "REMAIN ${rem_can:-N/A}" 208; printf "  "
+  [[ -n "$eta" ]] && { badge "ETA ${eta}" 111; printf "  "; }
+  [[ -n "$rem_sp" ]] && badge "SP ${rem_sp}" 201
+  printf "\n\n"
+
+  printf "  %sProgress%s\n" "$(lc 111)" "$(reset)"
+  printf "  "
+  bar "$progress_pct" 40
+  printf "  %s%s%% complete%s\n\n" "$(c "1;38;5;82")" "$progress_pct" "$(reset)"
+
+  printf "%s🧾 Remaining Work Snapshot%s\n" "$(lc 111)" "$(reset)"
   printf "────────────────────────────────────────────\n"
-  printf "• Completed (canonical):   %s%s%s\n" "$(c 1';32')" "${comp_can:-?}" "$(reset)"
-  printf "• Completed (effective):   %s%s%s\n" "$(c 1';32')" "${comp_eff:-?}" "$(reset)"
-  printf "• Completed SP:            %s%s%s\n" "$(c 1';32')" "${sp_done:-?}" "$(reset)"
-  printf "• Detections pending:      %s%s%s\n" "$(c 1';38;5;214')" "${detect:-?}" "$(reset)"
-  printf "• In-progress (canonical): %s%s%s\n" "$(c 1';38;5;220')" "${inprog_can:-?}" "$(reset)"
-  printf "• Pending / Remaining:     %s%s%s / %s%s%s\n" "$(c 1';37')" "${pend_can:-?}" "$(reset)" "$(c 1';37')" "${rem_can:-?}" "$(reset)"
-  printf "• Remaining (effective):   %s%s%s\n" "$(c 1';37')" "${rem_eff:-?}" "$(reset)"
-  printf "• Total tasks:             %s%s%s\n" "$(c 1';36')" "${total:-?}" "$(reset)"
-  printf "• Remaining story points:  %s%s%s\n" "$(c 1';31')" "${rem_sp:-?}" "$(reset)"
-  printf "• ETA:                     %s%s%s\n\n" "$(c 1';35')" "${eta:-?}" "$(reset)"
+  printf "  • %sCompleted (canonical):%s   %s\n" "$(c "1;32")" "$(reset)" "${comp_can:-—}"
+  printf "  • %sCompleted (effective):%s   %s\n" "$(c "1;32")" "$(reset)" "${comp_eff:-—}"
+  printf "  • %sCompleted SP:%s            %s\n" "$(c "1;32")" "$(reset)" "${sp_done:-—}"
+  printf "  • %sDetections pending:%s      %s\n" "$(c "1;38;5;214")" "$(reset)" "${detect:-—}"
+  printf "  • %sIn-progress:%s             %s\n" "$(c "1;38;5;220")" "$(reset)" "${inprog_can:-—}"
+  printf "  • %sPending / Remaining:%s     %s / %s\n" "$(c "1;37")" "$(reset)" "${pend_can:-—}" "${rem_can:-—}"
+  printf "  • %sRemaining (effective):%s   %s\n" "$(c "1;37")" "$(reset)" "${rem_eff:-—}"
+  printf "  • %sRemaining story points:%s  %s\n" "$(c "1;31")" "$(reset)" "${rem_sp:-—}"
+  printf "  • %sETA:%s                     %s\n\n" "$(c "1;35")" "$(reset)" "${eta:-—}"
 
   printf "%s⚙️ Throughput%s\n" "$(lc 111)" "$(reset)"
   printf "────────────────────────────────────────────\n"
-  sed -n -e 's/^Throughput basis/• Basis/p' \
+  local throughput_section
+  throughput_section="$(sed -n -e 's/^Throughput basis/• Basis/p' \
          -e 's/^Effective throughput/• Effective throughput/p' \
          -e 's/^Throughput window/• Window/p' \
-         -e 's/^Run status/• Run status/p' <<<"$INPUT"
-  printf "\n"
+         -e 's/^Run status/• Run status/p' <<<"$INPUT")"
+  printf "%s\n\n" "${throughput_section:-  • (not reported)}"
 
   printf "%s🔢 Token Telemetry%s\n" "$(lc 111)" "$(reset)"
   printf "────────────────────────────────────────────\n"
-  printf "• Observed tokens:                 %s%s%s\n" "$(c 1';36')" "${obs_tokens:-?}" "$(reset)"
-  printf "• Avg tokens / SP:                 %s%s%s\n" "$(c 1';37')" "${avg_per_sp:-?}" "$(reset)"
-  printf "• Est. token burn:                 %s%s%s @ %s%s SP/h%s\n" "$(c 1';31')" "${burn:-?}" "$(reset)" "$(c 1';32')" "${throughput:-?}" "$(reset)"
-  printf "• Projected remaining tokens:      %s%s%s\n\n" "$(c 1';35')" "${proj:-?}" "$(reset)"
+  printf "  • Observed tokens:            %s%s%s\n" "$(c "1;36")" "${obs_tokens:-—}" "$(reset)"
+  printf "  • Avg tokens / SP:            %s%s%s\n" "$(c "1;37")" "${avg_per_sp:-—}" "$(reset)"
+  printf "  • Est. token burn:            %s%s%s @ %s%s SP/h%s\n" "$(c "1;31")" "${burn:-—}" "$(reset)" "$(c "1;32")" "${throughput:-—}" "$(reset)"
+  printf "  • Projected remaining tokens: %s%s%s\n\n" "$(c "1;35")" "${proj:-—}" "$(reset)"
 }
 
 render_epic_children() {
@@ -143,7 +160,9 @@ render_epic_children() {
   printf "│  %sStories for Epic: %s%s │\n" "$(c 1';38;5;39')" "$header" "$(reset)"
   printf "%s╰──────────────────────────────────────────────────────────────╯%s\n" "$(c 1';38;5;214')" "$(reset)"
 
-  grep -m1 'Carried forward migration state' <<<"$INPUT" | sed 's/^/➜ /'
+  local migration_line
+  migration_line="$(grep -m1 'Carried forward migration state' <<<"$INPUT" || true)"
+  [[ -n "$migration_line" ]] && printf "%s\n" "$migration_line"
   printf "\n%s📘 Story Breakdown%s\n" "$(lc 111)" "$(reset)"
   printf "──────────────────────────────────────────────────────────────\n"
   printf "%s%-14s %-58s %-13s %-8s %-30s %-s%s\n" "$(c 1';90')" "Story Slug" "Title" "Status" "Epic" "Tasks" "Progress" "$(reset)"
@@ -199,7 +218,9 @@ render_story_tasks() {
   printf "│  %sTasks for Story: %s%s │\n" "$(c 1';38;5;39')" "$header" "$(reset)"
   printf "%s╰──────────────────────────────────────────────────────────────╯%s\n" "$(c 1';38;5;214')" "$(reset)"
 
-  grep -m1 'Carried forward migration state' <<<"$INPUT" | sed 's/^/➜ /'
+  local migration_line
+  migration_line="$(grep -m1 'Carried forward migration state' <<<"$INPUT" || true)"
+  [[ -n "$migration_line" ]] && printf "%s\n" "$migration_line"
   printf "\n%s🧩 Task Breakdown%s\n" "$(lc 111)" "$(reset)"
   printf "──────────────────────────────────────────────────────────────\n"
   printf "%s%-4s %-6s %-12s %-66s %-10s %-4s %-s%s\n" "$(c 1';90')" "#" "Order" "Task ID" "Title" "Status" "SP" "Weight" "$(reset)"
@@ -252,7 +273,9 @@ render_overall() {
   printf "│  %sOverall Backlog Progress%s                                 │\n" "$(c 1';38;5;39')" "$(reset)"
   printf "%s╰──────────────────────────────────────────────────────────────╯%s\n" "$(c 1';38;5;214')" "$(reset)"
 
-  grep -m1 'Carried forward migration state' <<<"$INPUT" | sed 's/^/➜ /'
+  local migration_line
+  migration_line="$(grep -m1 'Carried forward migration state' <<<"$INPUT" || true)"
+  [[ -n "$migration_line" ]] && printf "%s\n" "$migration_line"
   printf "\n%s📊 Backlog Summary%s\n" "$(lc 111)" "$(reset)"
   printf "──────────────────────────────────────────────────────────────\n"
   sed -n \
@@ -308,7 +331,7 @@ render_task_start() {
   [[ -z "$session" ]] && session="$(sed -n 's/^Session:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
 
   printf "\n%s╭────────────────────────────────────────────────────────────╮%s\n" "$(c 1';38;5;214')" "$(reset)"
-  printf "│  %sSTART OF TASK%s                                           │\n" "$(c 1';38;5;39')" "$(reset)"
+  printf "│  %sSTART OF TASK%s                                             │\n" "$(c 1';38;5;39')" "$(reset)"
   printf "%s╰────────────────────────────────────────────────────────────╯%s\n" "$(c 1';38;5;214')" "$(reset)"
 
   printf "  %s[#]%s %sStart Task ID:%s  %s%s%s\n"        "$(fg 244)" "$(reset)" "$(fg 111)" "$(reset)" "$(c 1';38;5;45')" "${id:-N/A}" "$(reset)"
@@ -361,7 +384,7 @@ render_task_end() {
   fi
 
   printf "\n%s╭────────────────────────────────────────────────────────────╮%s\n" "$(c 1';38;5;214')" "$(reset)"
-  printf "│  %sEND OF TASK%s                                             │\n" "$(c 1';38;5;39')" "$(reset)"
+  printf "│  %sEND OF TASK%s                                               │\n" "$(c 1';38;5;39')" "$(reset)"
   printf "%s╰────────────────────────────────────────────────────────────╯%s\n" "$(c 1';38;5;214')" "$(reset)"
 
   printf "  "
@@ -439,6 +462,107 @@ render_task_end() {
   printf "    %s%s%s\n\n" "$(fg 245)" "░░░░░ END OF THE TASK WORK ░░░░░" "$(reset)"
 }
 
+render_epic_overview() {
+  local project_display="${PROJECT_ROOT:-$PWD}"
+  printf "\n%s╭────────────────────────────────────────────────────────────╮%s\n" "$(c "1;38;5;214")" "$(reset)"
+  printf "│  %sGPT-Creator :: Backlog Summary (%s)%s     │\n" "$(c "1;38;5;39")" "$project_display" "$(reset)"
+  printf "%s╰────────────────────────────────────────────────────────────╯%s\n" "$(c "1;38;5;214")" "$(reset)"
+
+  local migration_line
+  migration_line="$(grep -m1 'Carried forward migration state' <<<"$INPUT" || true)"
+  [[ -n "$migration_line" ]] && printf "%s\n" "$migration_line"
+
+  printf "\n%s📋 Epic Progress Overview%s\n" "$(lc 111)" "$(reset)"
+  printf "──────────────────────────────────────────────────────────────\n"
+
+  local ascii_table data_rows
+  ascii_table="$(awk '
+    /^[[:space:]]*┌/ {capture=1}
+    capture {
+      print
+      if ($0 ~ /┘[[:space:]]*$/) exit
+    }
+  ' <<<"$INPUT")"
+
+  if [[ -n "$ascii_table" ]]; then
+    printf "%s\n\n" "$ascii_table"
+    data_rows="$(printf "%s\n" "$ascii_table" | awk -F'│' '
+      function trim(s){ sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+      /^[[:space:]]*┌/ {next}
+      /^[[:space:]]*├/ {next}
+      /^[[:space:]]*└/ {exit}
+      /^[[:space:]]*│/ {
+        epic=trim($2); title=trim($3); stories=trim($4); tasks=trim($5); progress=trim($6);
+        if (epic == "" || epic == "EPIC") next
+        printf "%s\t%s\t%s\t%s\t%s\n", epic, title, stories, tasks, progress
+      }
+    ')"
+  else
+    local table_block
+    table_block="$(awk '
+      BEGIN{flag=0}
+      /^Epic ID[[:space:]]/ {flag=1; next}
+      flag {
+        if ($0 ~ /^$/) { exit }
+        print
+      }
+    ' <<<"$INPUT")"
+    printf "%s\n\n" "$table_block"
+    data_rows="$(printf "%s" "$table_block" | awk -F'  +' '
+      function trim(s){ sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+      NF >= 6 {
+        epic=trim($1); title=trim($3); stories=trim($4); tasks=trim($5); prog=trim($6);
+        if (epic ~ /^-+$/) next
+        printf "%s\t%s\t%s\t%s\t%s\n", epic, title, stories, tasks, prog
+      }
+    ')"
+  fi
+
+  local total_epics=0 high=0 mid=0 low=0
+  if [[ -n "$data_rows" ]]; then
+    while IFS=$'\t' read -r epic title stories tasks progress; do
+      [[ -z "$epic" ]] && continue
+      ((total_epics++))
+      local pct
+      pct="$(printf '%s' "$progress" | tr -cd '0-9.')"
+      [[ -z "$pct" ]] && pct="0"
+      if (( $(awk "BEGIN {print ($pct >= 70)}") )); then
+        ((high++))
+      elif (( $(awk "BEGIN {print ($pct >= 30)}") )); then
+        ((mid++))
+      else
+        ((low++))
+      fi
+    done <<<"$data_rows"
+  fi
+
+  printf "%s📈 Overall Trend%s\n" "$(lc 111)" "$(reset)"
+  printf "──────────────────────────────────────────────\n"
+  printf "• %d epics at ≥70%% completion\n" "$high"
+  printf "• %d epics between 30-69%%\n" "$mid"
+  printf "• %d epics below 30%% or pending\n\n" "$low"
+
+  if grep -q '^Backlog totals (canonical)' <<<"$INPUT"; then
+    printf "%s📊 Backlog totals (canonical)%s\n" "$(lc 111)" "$(reset)"
+    printf "──────────────────────────────────────────────\n"
+    while IFS= read -r line; do
+      case "$line" in
+        "Completed:"*) comp="${line#Completed: }";;
+        "In-progress:"*) inprog="${line#In-progress: }";;
+        "Pending:"*) pend="${line#Pending: }";;
+        "Remaining:"*) remain="${line#Remaining: }";;
+        "Total tasks:"*) total="${line#Total tasks: }";;
+      esac
+    done < <(sed -n '/^Backlog totals (canonical)/,$p' <<<"$INPUT")
+    printf "• Completed: %s%s%s | In-progress: %s%s%s | Pending: %s%s%s | Remaining: %s%s%s | Total: %s%s%s\n\n" \
+      "$(c "1;32")" "${comp:-?}" "$(reset)" \
+      "$(c "1;38;5;220")" "${inprog:-?}" "$(reset)" \
+      "$(c "1;37")" "${pend:-?}" "$(reset)" \
+      "$(c "1;37")" "${remain:-?}" "$(reset)" \
+      "$(c "1;36")" "${total:-?}" "$(reset)"
+  fi
+}
+
 # ============================ Router ============================
 if   is_task_end;         then render_task_end;         exit 0
 elif is_task_start;       then render_task_start;       exit 0
@@ -446,6 +570,7 @@ elif is_estimate;         then render_estimate;         exit 0
 elif is_epic_children;    then render_epic_children;    exit 0
 elif is_story_tasks;      then render_story_tasks;      exit 0
 elif is_overall_progress; then render_overall;          exit 0
+elif is_epic_overview;    then render_epic_overview;    exit 0
 else
   echo "Unrecognized gpt-creator output. Pipe one of:
   - estimate

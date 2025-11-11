@@ -649,7 +649,7 @@ gc_clone_python_tool() {
   if [[ ! -d "$target_dir" ]]; then
     mkdir -p "$target_dir" || die "Failed to create ${target_dir}"
   fi
-  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
+  if [[ ! -f "$target_path" ]] || ! cmp -s "$source_path" "$target_path"; then
     cp "$source_path" "$target_path" || die "Failed to copy ${script_name} helper"
   fi
   echo "$target_path"

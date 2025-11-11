@@ -1119,7 +1119,7 @@ try:
     if type_arg:
         t = type_arg.strip().lower()
         if t == "epics":
-            # print_epics_table()
+            print_epics_table()
             printed = True
         elif t == "stories":
             print_stories_overview()

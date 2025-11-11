@@ -48,12 +48,20 @@ bar() {
 fancy_progress_bar() {
   local pct="${1:-0}"
   local width="${2:-30}"
-  local label="${3:-}"
+  local label="${3:-Complete}"
   if [[ ! "$pct" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     pct=0
   fi
   if [[ ! "$width" =~ ^[0-9]+$ ]] || (( width <= 0 )); then
     width=30
+  fi
+  local color
+  if (( $(awk "BEGIN{print ($pct >= 70)}") )); then
+    color="1;32"
+  elif (( $(awk "BEGIN{print ($pct >= 30)}") )); then
+    color="1;38;5;214"
+  else
+    color="1;31"
   fi
   local fill
   fill=$(awk -v p="$pct" -v w="$width" 'BEGIN{
@@ -67,20 +75,17 @@ fancy_progress_bar() {
 
   printf "["
   if (( fill > 0 )); then
-    printf "%s" "$(c "1;32")"
-    rep "$fill" "#"
+    printf "%s" "$(c "$color")"
+    rep "$fill" "█"
     reset
   fi
   if (( empty > 0 )); then
     printf "%s" "$(c "1;90")"
-    rep "$empty" "-"
+    rep "$empty" "─"
     reset
   fi
   printf "]"
-  if [[ -n "$label" ]]; then
-    printf "  %s%s%s" "$(c "1;32")" "$label" "$(reset)"
-  fi
-  printf "\n"
+  printf "  %s%5.1f%%%s  %s%s%s\n" "$(c "$color")" "$pct" "$(reset)" "$(c "$color")" "$label" "$(reset)"
 }
 
 render_box_header() {

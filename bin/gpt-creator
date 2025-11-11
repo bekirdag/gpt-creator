@@ -2178,6 +2178,8 @@ ensure_ctx() {
   TMP_DIR="${GC_DIR}/tmp"
   mkdir -p "$GC_DIR" "$STAGING_DIR" "$INPUT_DIR" "$PLAN_DIR" "$LOG_DIR" "$ART_DIR" "$TMP_DIR"
   export INPUT_DIR
+  GC_GIT_DIR="$PROJECT_ROOT"
+  export GC_GIT_DIR
   gc_migrate_progress_artifacts "$PROJECT_ROOT"
   gc_configure_tmpdir "$PROJECT_ROOT"
   gc_create_env_if_missing
@@ -6909,11 +6911,17 @@ cmd_backlog() {
 
   local backlog_helper
   backlog_helper="$(gc_clone_python_tool "fetch_stories.py" "${PROJECT_ROOT:-$PWD}")" || die "Failed to prepare backlog helper script"
+  local output
   if [[ -n "$color_flag" ]]; then
-    GC_COLOR_OUTPUT="$color_flag" gc_render_with_renderer python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
+    if ! output="$(GC_COLOR_OUTPUT="$color_flag" python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}")"; then
+      return 1
+    fi
   else
-    gc_render_with_renderer python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
+    if ! output="$(python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}")"; then
+      return 1
+    fi
   fi
+  printf "%s" "$output" | gc_render_with_renderer cat
 }
 
 cmd_order_tasks() {
@@ -8081,9 +8089,38 @@ cmd_work_on_tasks() {
 
     local commit_message="chore(gpt-creator): auto snapshot before work-on-tasks ${snapshot_timestamp}"
     info "Dirty working tree detected; attempting auto snapshot commit before run."
+    local branch_state_file="${git_root}/.gpt-creator/state/current-branch"
+    local preferred_branch=""
+    if [[ -f "$branch_state_file" ]]; then
+      preferred_branch="$(head -n1 "$branch_state_file" 2>/dev/null || printf '')"
+      preferred_branch="${preferred_branch%%[$'\r\n']*}"
+    fi
+    local current_branch=""
+    current_branch="$(cd "$git_root" && git rev-parse --abbrev-ref HEAD 2>/dev/null || printf '')"
+    local branch_switched=0
+    local branch_restore_target=""
+    local branch_switch_source=""
+    if [[ -n "$preferred_branch" && "$preferred_branch" != "$current_branch" ]]; then
+      if (cd "$git_root" && git show-ref --verify --quiet "refs/heads/$preferred_branch"); then
+        if (cd "$git_root" && git checkout -q "$preferred_branch" >/dev/null 2>&1); then
+          branch_switched=1
+          branch_restore_target="$current_branch"
+          branch_switch_source="$preferred_branch"
+          info "Dirty working tree likely belongs to ${preferred_branch}; snapshotting there before continuing."
+        else
+          warn "Auto snapshot: unable to checkout ${preferred_branch}; continuing on ${current_branch:-current branch}."
+        fi
+      fi
+    fi
     if (cd "$git_root" && git add --all >/dev/null 2>&1); then
       if (cd "$git_root" && git diff --cached --quiet); then
         info "Working tree clean after staging; nothing to snapshot."
+        if (( branch_switched )) && [[ -n "$branch_restore_target" && "$branch_restore_target" != "HEAD" ]]; then
+          if ! (cd "$git_root" && git checkout -q "$branch_restore_target" >/dev/null 2>&1); then
+            warn "Auto snapshot: failed to restore branch ${branch_restore_target}; currently on ${branch_switch_source:-unknown}."
+          fi
+          branch_switched=0
+        fi
         return 0
       fi
       if (cd "$git_root" && GIT_AUTHOR_NAME="gpt-creator automation" GIT_AUTHOR_EMAIL="automation@gpt-creator" GIT_COMMITTER_NAME="gpt-creator automation" GIT_COMMITTER_EMAIL="automation@gpt-creator" git commit -m "$commit_message" >/dev/null 2>&1); then
@@ -8093,6 +8130,12 @@ cmd_work_on_tasks() {
           info "Auto commit created (${commit_message}) [${commit_hash:0:7}]."
         else
           info "Auto commit created (${commit_message})."
+        fi
+        if (( branch_switched )) && [[ -n "$branch_restore_target" && "$branch_restore_target" != "HEAD" ]]; then
+          if ! (cd "$git_root" && git checkout -q "$branch_restore_target" >/dev/null 2>&1); then
+            warn "Auto snapshot: failed to restore branch ${branch_restore_target}; currently on ${branch_switch_source:-unknown}."
+          fi
+          branch_switched=0
         fi
         return 0
       fi
@@ -8111,12 +8154,24 @@ cmd_work_on_tasks() {
       post_status="$(cd "$git_root" && git status --porcelain=v1 --untracked-files=all 2>/dev/null || true)"
       if [[ -z "$post_status" ]]; then
         info "Auto stash created (${snapshot_label})."
+        if (( branch_switched )) && [[ -n "$branch_restore_target" && "$branch_restore_target" != "HEAD" ]]; then
+          if ! (cd "$git_root" && git checkout -q "$branch_restore_target" >/dev/null 2>&1); then
+            warn "Auto snapshot: failed to restore branch ${branch_restore_target}; currently on ${branch_switch_source:-unknown}."
+          fi
+          branch_switched=0
+        fi
         return 0
       fi
       warn "Auto stash incomplete; working tree still dirty."
     else
       stash_output="${stash_output//$'\n'/ }"
       warn "Auto stash failed; ${stash_output}"
+    fi
+    if (( branch_switched )) && [[ -n "$branch_restore_target" && "$branch_restore_target" != "HEAD" ]]; then
+      if ! (cd "$git_root" && git checkout -q "$branch_restore_target" >/dev/null 2>&1); then
+        warn "Auto snapshot: failed to restore branch ${branch_restore_target}; currently on ${branch_switch_source:-unknown}."
+      fi
+      branch_switched=0
     fi
     return 1
   }

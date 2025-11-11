@@ -6,7 +6,10 @@ set -euo pipefail
 : "${GC_GIT_DEV_BRANCH:=dev}"
 : "${GC_GIT_MAIN_BRANCH:=main}"            # fallback if origin/HEAD missing
 
-_gc_git() { git -c advice.detachedHead=false "$@"; }
+_gc_git() {
+  local git_dir="${GC_GIT_DIR:-${PROJECT_ROOT:-$PWD}}"
+  git -C "$git_dir" -c advice.detachedHead=false "$@"
+}
 gc_git_repo_root() { _gc_git rev-parse --show-toplevel 2>/dev/null || echo ""; }
 gc_git_sanitize_branch() {
   tr "[:upper:]" "[:lower:]" | sed -E "s/[^a-z0-9]+/-/g; s/^-+|-+$//g; s/-{2,}/-/g" | cut -c1-48
@@ -88,7 +91,9 @@ gc_git_begin_task_branch() {
   if ! gc_git_remote_branch_exists "$slug"; then
     gc_git_push_set_upstream "$slug" || true
   fi
-  mkdir -p .gpt-creator/state && printf "%s\n" "$slug" > .gpt-creator/state/current-branch
+  local state_dir="${GC_GIT_DIR:-${PROJECT_ROOT:-$PWD}}/.gpt-creator/state"
+  mkdir -p "$state_dir"
+  printf "%s\n" "$slug" > "${state_dir}/current-branch"
 }
 
 # args: <task_id> <status> <reason-file?>

@@ -1,9 +1,22 @@
-# Automated Review — ${GC_REVIEW_TITLE}
+# Auto Review: ${GC_REVIEW_TITLE:-unknown}
 
-Generated automatically because GC_AUTO_REVIEW=1.
+- **Status:** ${GC_REVIEW_STATUS:-unknown}
+- **Tokens used:** ${GC_REVIEW_TOKENS:-unknown}
+- **Run:** ${GC_REVIEW_RUN:-unknown}
+- **Timestamp:** ${GC_REVIEW_TIMESTAMP:-unknown}
 
-- Status: ${GC_REVIEW_STATUS}
-- Tokens used: ${GC_REVIEW_TOKENS}
-- Run: ${GC_REVIEW_RUN}
-- Generated: ${GC_REVIEW_TIMESTAMP}
+## Summary
+
+Provide a short summary of the automated review outcome here. Mention any risky areas, files touched, or follow-up steps required.
+
+## Findings
+
+1. _Finding #1_
+2. _Finding #2_
+
+## Next Steps
+
+- [ ] Verify CI/build status
+- [ ] Run targeted tests if needed
+- [ ] Coordinate with reviewers/stakeholders
 

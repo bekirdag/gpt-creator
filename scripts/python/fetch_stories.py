@@ -621,8 +621,13 @@ def print_epics_table():
     if not entries:
         print("No epics found in the backlog.")
         return
-    headers = ["Epic ID", "Slug", "Title", "Stories", "Tasks", "Progress"]
-    rows = []
+    headers = ["Epic ID", "Title", "Stories", "Tasks", "Progress"]
+    lines = ["__GC_EPIC_TABLE__"]
+
+    def sanitize(value: str) -> str:
+        return str(value).replace("\t", " ").strip()
+
+    lines.append("\t".join(headers))
     for entry in entries:
         counts = entry.get("counts") or empty_counts()
         epic = entry.get("epic") or {}
@@ -655,15 +660,16 @@ def print_epics_table():
         progress = 0.0
         if total_tasks:
             progress = (counts["tasks_complete"] / total_tasks) * 100
-        rows.append([
+        row = [
             epic_id,
-            slug,
             title,
             stories_desc,
             tasks_desc,
             f"{progress:5.1f}%",
-        ])
-    print_table(headers, rows)
+        ]
+        lines.append("\t".join(sanitize(cell) for cell in row))
+    lines.append("__GC_EPIC_TABLE_END__")
+    print("\n".join(lines))
 
 
 def print_story_children(entry, header_label):

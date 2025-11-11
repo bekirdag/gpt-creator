@@ -105,20 +105,20 @@ list_conflicting_node_packages() {
   command -v dpkg >/dev/null 2>&1 || return 1
 
   local conflicts=(libnode-dev npm)
-  local installed=()
+  local conflicts_found=()
   local pkg
 
   for pkg in "${conflicts[@]}"; do
     if dpkg -s "$pkg" >/dev/null 2>&1; then
-      installed+=("$pkg")
+      conflicts_found+=("$pkg")
     fi
   done
 
-  if (( ${#installed[@]} == 0 )); then
+  if (( ${#conflicts_found[@]} == 0 )); then
     return 1
   fi
 
-  printf '%s\n' "${installed[@]}"
+  printf '%s\n' "${conflicts_found[@]}"
   return 0
 }
 
@@ -496,6 +496,7 @@ install_files() {
     --no-owner
     --no-group
     --include '/bin/' --include '/bin/*'
+    --include '/render_gpt_creator.sh'
     --include '/templates/***'
     --include '/src/***'
     --include '/scripts/***'

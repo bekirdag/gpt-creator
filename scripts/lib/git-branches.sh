@@ -22,8 +22,28 @@ gc_git_safe_commit_all() {
   fi
 }
 gc_git_push_set_upstream() { _gc_git push -u "$GC_GIT_REMOTE" "$1" >/dev/null 2>&1 || _gc_git push -u "$GC_GIT_REMOTE" "$1"; }
+gc_git_push_branch() { _gc_git push "$GC_GIT_REMOTE" "$1" >/dev/null 2>&1 || _gc_git push "$GC_GIT_REMOTE" "$1"; }
 gc_git_merge_ff_only() { _gc_git merge --ff-only "$1"; }
 gc_git_merge_no_ff() { _gc_git merge --no-ff -q --no-edit "$1" || return 1; }
+gc_git_sync_main_from_dev() {
+  local main_branch="${1:-$GC_GIT_MAIN_BRANCH}"
+  [ -n "$main_branch" ] || return 0
+  if ! gc_git_branch_exists "$main_branch"; then
+    if gc_git_remote_branch_exists "$main_branch"; then
+      _gc_git checkout -q -t "$GC_GIT_REMOTE/$main_branch" || return 0
+    else
+      return 0
+    fi
+  else
+    gc_git_checkout "$main_branch"
+  fi
+  _gc_git pull --ff-only "$GC_GIT_REMOTE" "$main_branch" >/dev/null 2>&1 || true
+  if gc_git_merge_ff_only "$GC_GIT_DEV_BRANCH"; then
+    gc_git_push_branch "$main_branch" || true
+  else
+    echo "[git] main branch fast-forward from dev failed; manual intervention required" >&2
+  fi
+}
 
 gc_git_branching_init() {
   [ "$GC_GIT_BRANCHING" = "1" ] || return 0
@@ -47,19 +67,26 @@ gc_git_branching_init() {
     # Fast-forward dev to remote if possible
     _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
   fi
+  if ! gc_git_remote_branch_exists "$GC_GIT_DEV_BRANCH"; then
+    gc_git_push_set_upstream "$GC_GIT_DEV_BRANCH" || true
+  fi
 }
 
 # Exports GC_GIT_CURRENT_TASK_BRANCH
 gc_git_begin_task_branch() {
   [ "$GC_GIT_BRANCHING" = "1" ] || return 0
   local task_id="$1"
-  local slug="task/$(printf "%s" "$task_id" | gc_git_sanitize_branch)"
+  local slug
+  slug="task/$(printf "%s" "$task_id" | gc_git_sanitize_branch)"
   export GC_GIT_CURRENT_TASK_BRANCH="$slug"
   if gc_git_branch_exists "$slug"; then
     gc_git_checkout "$slug"
   else
     gc_git_checkout "$GC_GIT_DEV_BRANCH"
     gc_git_create_from "$GC_GIT_DEV_BRANCH" "$slug"
+  fi
+  if ! gc_git_remote_branch_exists "$slug"; then
+    gc_git_push_set_upstream "$slug" || true
   fi
   mkdir -p .gpt-creator/state && printf "%s\n" "$slug" > .gpt-creator/state/current-branch
 }
@@ -68,6 +95,8 @@ gc_git_begin_task_branch() {
 gc_git_finalize_task_branch() {
   [ "$GC_GIT_BRANCHING" = "1" ] || return 0
   local task_id="$1"; local status="$2"; local reason_file="${3:-}"
+  local status_upper
+  status_upper="$(printf "%s" "$status" | tr '[:lower:]' '[:upper:]')"
   local msg="gpt-creator: task ${task_id} → ${status}"
   if [ -n "$reason_file" ] && [ -f "$reason_file" ]; then
     local reason; reason="$(tr -d "\0" < "$reason_file" | head -c 500)"
@@ -78,14 +107,21 @@ gc_git_finalize_task_branch() {
     gc_git_push_set_upstream "${GC_GIT_CURRENT_TASK_BRANCH:-}" || true
   fi
   # Merge on success-like terminal states only
-  case "$status" in
+  case "$status_upper" in
     SUCCESS|COMPLETED|COMPLETED_OK|COMPLETED_NO_CHANGES)
       gc_git_checkout "$GC_GIT_DEV_BRANCH"
       _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
       gc_git_merge_no_ff "${GC_GIT_CURRENT_TASK_BRANCH:-}" || { echo "[git] merge failed; leaving branch unmerged" >&2; return 0; }
-      _gc_git push "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" || true
+      gc_git_push_branch "$GC_GIT_DEV_BRANCH" || true
+      gc_git_sync_main_from_dev "$GC_GIT_MAIN_BRANCH" || true
       ;;
     *) : ;; # leave feature branch as-is for follow-up
   esac
+  if gc_git_branch_exists "$GC_GIT_DEV_BRANCH"; then
+    gc_git_push_branch "$GC_GIT_DEV_BRANCH" || true
+  fi
+  if gc_git_branch_exists "$GC_GIT_MAIN_BRANCH" && ! gc_git_remote_branch_exists "$GC_GIT_MAIN_BRANCH"; then
+    gc_git_push_set_upstream "$GC_GIT_MAIN_BRANCH" || true
+  fi
   gc_git_checkout "$GC_GIT_DEV_BRANCH"
 }

@@ -367,7 +367,7 @@ render_task_end() {
   printf "  "
   badge "TASK ${id:-N/A}" 45
   printf "  "
-  [[ -n "$status" ]] && badge "STATUS ${status}" $([[ "$status" =~ ^(COMPLETE|COMPLETED)$ ]] && echo 46 || echo 208)
+  [[ -n "$status" ]] && badge "STATUS ${status}" "$([[ "$status" =~ ^(COMPLETE|COMPLETED)$ ]] && echo 46 || echo 208)"
   printf "  "
   [[ -n "$term"   ]] && badge "TERMINAL ${term}"  111
   printf "  "

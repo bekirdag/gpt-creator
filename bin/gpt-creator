@@ -1441,37 +1441,100 @@ gc_render_bar() {
   done
 }
 
+gc_renderer_cache_path() {
+  local base="${GC_DIR:-}"
+  if [[ -z "$base" && -n "${PROJECT_ROOT:-}" ]]; then
+    base="${PROJECT_ROOT}/.gpt-creator"
+  elif [[ -z "$base" ]]; then
+    base="${PWD}/.gpt-creator"
+  fi
+  printf '%s\n' "${base%/}/renderers/render_gpt_creator.sh"
+}
+
 gc_renderer_path_if_enabled() {
   if [[ "${GC_RENDER_GPT_CREATOR_DISABLE:-0}" == "1" ]]; then
     return 1
   fi
-  local candidate=""
+
+  local -a candidates=()
+  local -a copy_sources=()
+
   if [[ -n "${GC_RENDER_GPT_CREATOR:-}" ]]; then
-    candidate="${GC_RENDER_GPT_CREATOR}"
-    if [[ -x "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
+    candidates+=("${GC_RENDER_GPT_CREATOR}")
   fi
+
   if [[ -n "${CLI_ROOT:-}" ]]; then
-    candidate="${CLI_ROOT}/render_gpt_creator.sh"
-    if [[ -x "$candidate" ]]; then
+    copy_sources+=("${CLI_ROOT}/render_gpt_creator.sh")
+    copy_sources+=("${CLI_ROOT}/bin/render_gpt_creator.sh")
+    copy_sources+=("${CLI_ROOT}/scripts/render_gpt_creator.sh")
+    candidates+=("${copy_sources[@]}")
+  fi
+
+  local cache_path
+  cache_path="$(gc_renderer_cache_path)"
+  if [[ -n "$cache_path" ]]; then
+    candidates+=("$cache_path")
+  fi
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
       printf '%s\n' "$candidate"
       return 0
     fi
+  done
+
+  if [[ -n "$cache_path" ]]; then
+    local source
+    for source in "${copy_sources[@]}"; do
+      if [[ -n "$source" && -r "$source" ]]; then
+        local cache_dir
+        cache_dir="$(dirname "$cache_path")"
+        mkdir -p "$cache_dir" 2>/dev/null || true
+        if cp "$source" "$cache_path"; then
+          chmod +x "$cache_path" 2>/dev/null || true
+          printf '%s\n' "$cache_path"
+          return 0
+        fi
+      fi
+    done
   fi
-  if [[ -n "${PROJECT_ROOT:-}" ]]; then
-    candidate="${PROJECT_ROOT}/render_gpt_creator.sh"
-    if [[ -x "$candidate" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  fi
+
   return 1
 }
 
 gc_renderer_available() {
   gc_renderer_path_if_enabled >/dev/null
+}
+
+gc_render_with_renderer() {
+  local renderer_path=""
+  if ! renderer_path="$(gc_renderer_path_if_enabled)"; then
+    "$@"
+    return $?
+  fi
+
+  local tmpfile
+  tmpfile="$(mktemp "${TMPDIR:-/tmp}/gc-render.XXXXXX")" || {
+    "$@"
+    return $?
+  }
+
+  if ! "$@" >"$tmpfile"; then
+    local status=$?
+    cat "$tmpfile"
+    rm -f "$tmpfile"
+    return $status
+  fi
+
+  if "$renderer_path" <"$tmpfile"; then
+    rm -f "$tmpfile"
+    return 0
+  fi
+
+  cat "$tmpfile"
+  rm -f "$tmpfile"
+  return 0
 }
 
 gc_status_color_seq() {
@@ -6846,19 +6909,10 @@ cmd_backlog() {
 
   local backlog_helper
   backlog_helper="$(gc_clone_python_tool "fetch_stories.py" "${PROJECT_ROOT:-$PWD}")" || die "Failed to prepare backlog helper script"
-  local renderer_path=""
-  if renderer_path="$(gc_renderer_path_if_enabled)"; then
-    if [[ -n "$color_flag" ]]; then
-      GC_COLOR_OUTPUT="$color_flag" python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}" | "$renderer_path"
-    else
-      python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}" | "$renderer_path"
-    fi
+  if [[ -n "$color_flag" ]]; then
+    GC_COLOR_OUTPUT="$color_flag" gc_render_with_renderer python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
   else
-    if [[ -n "$color_flag" ]]; then
-      GC_COLOR_OUTPUT="$color_flag" python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
-    else
-      python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
-    fi
+    gc_render_with_renderer python3 "$backlog_helper" "$tasks_db" "${type_arg:-}" "${item_children:-}" "$show_progress" "${task_details:-}" "${dag_limit:-}"
   fi
 }
 
@@ -11883,11 +11937,10 @@ cmd_estimate() {
   elif [[ "$color_flag" == "never" ]]; then
     helper_args+=(--no-color)
   fi
-  local renderer_path=""
-  if renderer_path="$(gc_renderer_path_if_enabled)"; then
-    python3 "${helper_args[@]}" | "$renderer_path"
+  if [[ -n "$color_flag" ]]; then
+    GC_COLOR_OUTPUT="$color_flag" gc_render_with_renderer python3 "${helper_args[@]}"
   else
-    python3 "${helper_args[@]}"
+    gc_render_with_renderer python3 "${helper_args[@]}"
   fi
 }
 

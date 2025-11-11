@@ -171,6 +171,14 @@ __gc_is_sed_script() {
       return 0
       ;;
   esac
+  # Treat address ranges (`,`) that reference regex delimiters as scripts.
+  if [[ "$token" == *,* && "$token" == */* ]]; then
+    return 0
+  fi
+  # Sed expressions that include whitespace are overwhelmingly scripts, not paths.
+  if [[ "$token" == *" "* ]]; then
+    return 0
+  fi
   [[ "$token" == *";"* ]] && return 0
   [[ "$token" == *"{"* || "$token" == *"}"* ]] && return 0
   [[ "$token" == *"("* || "$token" == *")"* ]] && return 0

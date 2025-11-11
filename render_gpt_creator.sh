@@ -737,13 +737,24 @@ render_story_tasks() {
 
   if [[ -n "$ascii_task_table" ]]; then
     task_rows="$(printf "%s\n" "$ascii_task_table" | awk -F'│' '
-      function trim(s){ sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+      function strip_ansi(val){ gsub(/\033\[[0-9;]*[[:alpha:]]/, "", val); return val }
+      function trim(s){
+        s = strip_ansi(s)
+        sub(/^[ \t]+/, "", s)
+        sub(/[ \t]+$/, "", s)
+        return s
+      }
+      function is_sep(val){
+        return val ~ /^[-─]+$/ || val ~ /^[-─]+…$/ || val ~ /^[-─.]+$/
+      }
       /^[[:space:]]*┌/ {next}
       /^[[:space:]]*├/ {next}
       /^[[:space:]]*└/ {exit}
       /^[[:space:]]*│/ {
-        idx=trim($2); order=trim($3); id=trim($4); title=trim($5); status=trim($6); sp=trim($7);
-        if (idx == "" || idx == "#") next
+        idx=trim($2); order=trim($3); id=trim($4); title=trim($5); status=trim($6); sp=trim($7)
+        if (idx == "" || idx == "#" || is_sep(idx)) next
+        if (is_sep(order) && is_sep(id)) next
+        if (sp == "" && status ~ /^[0-9]+([.][0-9]+)?$/) { sp=status; status="-" }
         printf "%s\t%s\t%s\t%s\t%s\t%s\n", idx,order,id,title,status,sp
       }
     ')"
@@ -754,9 +765,13 @@ render_story_tasks() {
       BEGIN{ show=0 }
       /^#  Order[[:space:]]/ { show=1; next }
       show && $1 ~ /^[0-9-]+$/ && NF>=6 {
+        if ($1 ~ /^-+$/ && $2 ~ /^-+$/) next
         idx=$1; order=$2; id=$3; status=$(NF-1); sp=$NF;
         title=$4; for(i=5;i<=NF-2;i++){ title=title " " $i }
         gsub(/^[ \t]+|[ \t]+$/,"",title);
+        gsub(/^[ \t]+|[ \t]+$/,"",status);
+        gsub(/^[ \t]+|[ \t]+$/,"",sp);
+        if (sp == "" && status ~ /^[0-9]+([.][0-9]+)?$/) { sp=status; status="-" }
         printf("%s\t%s\t%s\t%s\t%s\t%s\n", idx,order,id,title,status,sp);
       }' <<<"$INPUT")"
   fi

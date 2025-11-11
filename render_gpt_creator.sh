@@ -76,7 +76,7 @@ fancy_progress_bar() {
   printf "["
   if (( fill > 0 )); then
     printf "%s" "$(c "$color")"
-    rep "$fill" "█"
+    rep "$fill" $'\u2588'
     reset
   fi
   if (( empty > 0 )); then
@@ -86,6 +86,31 @@ fancy_progress_bar() {
   fi
   printf "]"
   printf "  %s%5.1f%%%s  %s%s%s\n" "$(c "$color")" "$pct" "$(reset)" "$(c "$color")" "$label" "$(reset)"
+}
+
+progress_color_code() {
+  local pct="${1:-0}"
+  if [[ ! "$pct" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    pct="$(printf '%s' "$pct" | tr -cd '0-9.')"
+  fi
+  [[ -z "$pct" ]] && pct=0
+  if (( $(awk "BEGIN{print ($pct >= 70)}") )); then
+    printf "1;32"
+  elif (( $(awk "BEGIN{print ($pct >= 30)}") )); then
+    printf "1;38;5;214"
+  else
+    printf "1;31"
+  fi
+}
+
+colorize_pct_string() {
+  local raw="${1:-0%}"
+  local clean
+  clean="$(printf '%s' "$raw" | tr -cd '0-9.')"
+  [[ -z "$clean" ]] && clean="0"
+  local color
+  color="$(progress_color_code "$clean")"
+  printf "%s%s%s" "$(c "$color")" "$raw" "$(reset)"
 }
 
 render_box_header() {
@@ -127,6 +152,203 @@ render_backlog_header() {
   printf "\n%s╭%s╮%s\n" "$border_color" "$hyphens" "$(reset)"
   printf "│  %s%-*s%s │\n" "$title_color" "$pad" "$text" "$(reset)"
   printf "%s╰%s╯%s\n" "$border_color" "$hyphens" "$(reset)"
+}
+
+print_epic_table_from_rows() {
+  local table_rows="$1"
+  [[ -z "$table_rows" ]] && return 0
+  local headers=("EPIC" "TITLE" "STORIES" "TASKS" "PROGRESS")
+  local -a widths=()
+  local i
+  for i in "${!headers[@]}"; do
+    widths[i]=${#headers[i]}
+  done
+  while IFS=$'\t' read -r c1 c2 c3 c4 c5; do
+    [[ -z "$c1" ]] && continue
+    local cols=("$c1" "$c2" "$c3" "$c4" "$c5")
+    for i in "${!cols[@]}"; do
+      local len=${#cols[i]}
+      (( len > widths[i] )) && widths[i]=$len
+    done
+  done <<<"$table_rows"
+  for i in "${!widths[@]}"; do
+    widths[i]=$((widths[i] + 2))
+  done
+  local last=$(( ${#headers[@]} - 1 ))
+  printf "┌"
+  for i in "${!widths[@]}"; do
+    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '─')"
+    if (( i == last )); then
+      printf "┐\n"
+    else
+      printf "┬"
+    fi
+  done
+  printf "│"
+  for i in "${!headers[@]}"; do
+    printf " %-*s │" "$((widths[i]-2))" "${headers[i]}"
+  done
+  printf "\n"
+  printf "├"
+  for i in "${!widths[@]}"; do
+    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '─')"
+    if (( i == last )); then
+      printf "┤\n"
+    else
+      printf "┼"
+    fi
+  done
+  while IFS=$'\t' read -r c1 c2 c3 c4 c5; do
+    [[ -z "$c1" ]] && continue
+    printf "│ %-*s │ %-*s │ %-*s │ %-*s │ %-*s │\n" \
+      "$((widths[0]-2))" "$c1" \
+      "$((widths[1]-2))" "$c2" \
+      "$((widths[2]-2))" "$c3" \
+      "$((widths[3]-2))" "$c4" \
+      "$((widths[4]-2))" "$(colorize_pct_string "$c5")"
+  done <<<"$table_rows"
+  printf "└"
+  for i in "${!widths[@]}"; do
+    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '─')"
+    if (( i == last )); then
+      printf "┘\n"
+    else
+      printf "┴"
+    fi
+  done
+  printf "\n"
+}
+
+print_story_breakdown_table() {
+  local rows="$1"
+  [[ -z "$rows" ]] && return 0
+  local headers=("Story" "Title" "Status" "Epic" "Tasks" "Progress")
+  local -a widths=()
+  local i
+  for i in "${!headers[@]}"; do
+    widths[i]=${#headers[i]}
+  done
+  while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6; do
+    [[ -z "$c1" ]] && continue
+    local cols=("$c1" "$c2" "$c3" "$c4" "$c5" "$c6")
+    for i in "${!cols[@]}"; do
+      local len=${#cols[i]}
+      (( len > widths[i] )) && widths[i]=$len
+    done
+  done <<<"$rows"
+  for i in "${!widths[@]}"; do
+    widths[i]=$((widths[i] + 2))
+  done
+  local last=$(( ${#headers[@]} - 1 ))
+  printf "┌"
+  for i in "${!widths[@]}"; do
+    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '─')"
+    if (( i == last )); then
+      printf "┐\n"
+    else
+      printf "┬"
+    fi
+  done
+  printf "│"
+  for i in "${!headers[@]}"; do
+    printf " %-*s │" "$((widths[i]-2))" "${headers[i]}"
+  done
+  printf "\n"
+  printf "├"
+  for i in "${!widths[@]}"; do
+    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '─')"
+    if (( i == last )); then
+      printf "┤\n"
+    else
+      printf "┼"
+    fi
+  done
+  while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6; do
+    [[ -z "$c1" ]] && continue
+    printf "│ %-*s │ %-*s │ %-*s │ %-*s │ %-*s │ %-*s │\n" \
+      "$((widths[0]-2))" "$c1" \
+      "$((widths[1]-2))" "$c2" \
+      "$((widths[2]-2))" "$c3" \
+      "$((widths[3]-2))" "$c4" \
+      "$((widths[4]-2))" "$c5" \
+      "$((widths[5]-2))" "$(colorize_pct_string "$c6")"
+  done <<<"$rows"
+  printf "└"
+  for i in "${!widths[@]}"; do
+    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '─')"
+    if (( i == last )); then
+      printf "┘\n"
+    else
+      printf "┴"
+    fi
+  done
+  printf "\n"
+}
+
+print_story_tasks_table() {
+  local table_rows="$1"
+  [[ -z "$table_rows" ]] && return 0
+  local headers=("#" "Order" "Task ID" "Title" "Status" "SP")
+  local -a widths=()
+  local i
+  for i in "${!headers[@]}"; do
+    widths[i]=${#headers[i]}
+  done
+  while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6; do
+    [[ -z "$c1" ]] && continue
+    local cols=("$c1" "$c2" "$c3" "$c4" "$c5" "$c6")
+    for i in "${!cols[@]}"; do
+      local len=${#cols[i]}
+      (( len > widths[i] )) && widths[i]=$len
+    done
+  done <<<"$table_rows"
+  for i in "${!widths[@]}"; do
+    widths[i]=$((widths[i] + 2))
+  done
+  local last=$(( ${#headers[@]} - 1 ))
+  printf "┌"
+  for i in "${!widths[@]}"; do
+    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '─')"
+    if (( i == last )); then
+      printf "┐\n"
+    else
+      printf "┬"
+    fi
+  done
+  printf "│"
+  for i in "${!headers[@]}"; do
+    printf " %-*s │" "$((widths[i]-2))" "${headers[i]}"
+  done
+  printf "\n"
+  printf "├"
+  for i in "${!widths[@]}"; do
+    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '─')"
+    if (( i == last )); then
+      printf "┤\n"
+    else
+      printf "┼"
+    fi
+  done
+  while IFS=$'\t' read -r c1 c2 c3 c4 c5 c6; do
+    [[ -z "$c1" ]] && continue
+    printf "│ %-*s │ %-*s │ %-*s │ %-*s │ %-*s │ %-*s │\n" \
+      "$((widths[0]-2))" "$c1" \
+      "$((widths[1]-2))" "$c2" \
+      "$((widths[2]-2))" "$c3" \
+      "$((widths[3]-2))" "$c4" \
+      "$((widths[4]-2))" "$c5" \
+      "$((widths[5]-2))" "$c6"
+  done <<<"$table_rows"
+  printf "└"
+  for i in "${!widths[@]}"; do
+    printf "%s" "$(printf '%*s' "${widths[i]}" '' | tr ' ' '─')"
+    if (( i == last )); then
+      printf "┘\n"
+    else
+      printf "┴"
+    fi
+  done
+  printf "\n"
 }
 
 status_color() {
@@ -247,30 +469,35 @@ render_epic_children() {
 
   printf "%s📘 Story Breakdown%s\n" "$(lc 111)" "$(reset)"
   printf "──────────────────────────────────────────────────────────────\n"
-  printf "%s%-14s %-58s %-13s %-8s %-30s %-s%s\n" "$(c 1';90')" "Story Slug" "Title" "Status" "Epic" "Tasks" "Progress" "$(reset)"
-  printf "%s%-14s %-58s %-13s %-8s %-30s %-s%s\n" "$(c 1';90')" "────────────" "────────────────────────────────────────────" "───────────" "──────" "──────────────────────────────" "────────" "$(reset)"
+  local ascii_story_table
+  ascii_story_table="$(awk '
+    /^[[:space:]]*┌/ {capture=1}
+    capture {
+      print
+      if ($0 ~ /┘[[:space:]]*$/) exit
+    }
+  ' <<<"$INPUT")"
 
-  awk -F'  +' '
-    BEGIN{ show=0 }
-    /^Story Slug[[:space:]]/ { show=1; next }
-    show && NF>=6 {
-      slug=$1; title=$2; status=$3; epic=$4; tasks=$5; progress=$6;
-      gsub(/^[ \t]+|[ \t]+$/,"",slug);
-      gsub(/^[ \t]+|[ \t]+$/,"",title);
-      gsub(/^[ \t]+|[ \t]+$/,"",status);
-      gsub(/^[ \t]+|[ \t]+$/,"",epic);
-      gsub(/^[ \t]+|[ \t]+$/,"",tasks);
-      gsub(/^[ \t]+|[ \t]+$/,"",progress);
-      printf("%s\t%s\t%s\t%s\t%s\n", slug,title,status,epic,progress"|"tasks);
-    }' <<<"$INPUT" | while IFS=$'\t' read -r slug title status epic progress_tasks; do
-      tasks="${progress_tasks#*|}"
-      progress="${progress_tasks%%|*}"
-      pct="${progress%%%}"
-      printf "%s%-14s%s %-58s " "$(c 1';37')" "$slug" "$(reset)" "$title"
-      sc=$(status_color "$status"); printf "%s%-13s%s " "$sc" "$status" "$(reset)"
-      printf "%-8s %-30s " "$epic" "$tasks"
-      bar "${pct:-0}" 22; printf "\n"
-    done
+  if [[ -n "$ascii_story_table" ]]; then
+    printf "%s\n\n" "$ascii_story_table"
+  else
+    local story_rows
+    story_rows="$(awk -F'  +' '
+      BEGIN{ show=0 }
+      /^Story Slug[[:space:]]/ { show=1; next }
+      show && NF>=6 {
+        slug=$1; title=$2; status=$3; epic=$4; tasks=$5; progress=$6;
+        gsub(/^[ \t]+|[ \t]+$/,"",slug);
+        gsub(/^[ \t]+|[ \t]+$/,"",title);
+        gsub(/^[ \t]+|[ \t]+$/,"",status);
+        gsub(/^[ \t]+|[ \t]+$/,"",epic);
+        gsub(/^[ \t]+|[ \t]+$/,"",tasks);
+        gsub(/^[ \t]+|[ \t]+$/,"",progress);
+        printf "%s\t%s\t%s\t%s\t%s\t%s\n", slug,title,status,epic,tasks,progress;
+      }' <<<"$INPUT")"
+
+    print_story_breakdown_table "$story_rows"
+  fi
 
   if grep -q '^Backlog totals (canonical)' <<<"$INPUT"; then
     printf "\n%s📊 Epic Totals%s\n" "$(lc 111)" "$(reset)"
@@ -307,25 +534,31 @@ render_story_tasks() {
 
   printf "%s🧩 Task Breakdown%s\n" "$(lc 111)" "$(reset)"
   printf "──────────────────────────────────────────────────────────────\n"
-  printf "%s%-4s %-6s %-12s %-66s %-10s %-4s %-s%s\n" "$(c 1';90')" "#" "Order" "Task ID" "Title" "Status" "SP" "Weight" "$(reset)"
-  printf "%s%-4s %-6s %-12s %-66s %-10s %-4s %-s%s\n" "$(c 1';90')" "─" "─────" "────────────" "───────────────────────────────────────────────" "───────" "──" "────────────" "$(reset)"
+  local ascii_task_table
+  ascii_task_table="$(awk '
+    /^[[:space:]]*┌/ {capture=1}
+    capture {
+      print
+      if ($0 ~ /┘[[:space:]]*$/) exit
+    }
+  ' <<<"$INPUT")"
 
-  awk -F'  +' '
-    BEGIN{ show=0 }
-    /^#  Order[[:space:]]/ { show=1; next }
-    show && $1 ~ /^[0-9-]+$/ && NF>=6 {
-      idx=$1; order=$2; id=$3; status=$(NF-1); sp=$NF;
-      title=$4; for(i=5;i<=NF-2;i++){ title=title " " $i }
-      gsub(/^[ \t]+|[ \t]+$/,"",title);
-      printf("%s\t%s\t%s\t%s\t%s\t%s\n", idx,order,id,title,status,sp);
-    }' <<<"$INPUT" | while IFS=$'\t' read -r idx order id title status sp; do
-      sc=$(status_color "$status")
-      pct=$(awk -v s="${sp:-0}" 'BEGIN{ if(s<0)s=0; if(s>13)s=13; printf "%.1f", (s/13.0)*100 }')
-      printf "%s%-4s%s %-6s %-12s %-66s %s%-10s%s %-4s " \
-        "$(c 1';36')" "$idx" "$(reset)" "$order" "$id" "$title" "$sc" "$status" "$(reset)" "$sp"
-      bar "$pct" 18
-      printf "\n"
-    done
+  if [[ -n "$ascii_task_table" ]]; then
+    printf "%s\n" "$ascii_task_table"
+  else
+    local task_rows=""
+    task_rows="$(awk -F'  +' '
+      BEGIN{ show=0 }
+      /^#  Order[[:space:]]/ { show=1; next }
+      show && $1 ~ /^[0-9-]+$/ && NF>=6 {
+        idx=$1; order=$2; id=$3; status=$(NF-1); sp=$NF;
+        title=$4; for(i=5;i<=NF-2;i++){ title=title " " $i }
+        gsub(/^[ \t]+|[ \t]+$/,"",title);
+        printf("%s\t%s\t%s\t%s\t%s\t%s\n", idx,order,id,title,status,sp);
+      }' <<<"$INPUT")"
+    print_story_tasks_table "$task_rows"
+  fi
+  printf "\n"
 
   if grep -q '^Backlog totals (canonical)' <<<"$INPUT"; then
     printf "\n%s📊 Backlog Totals%s\n" "$(lc 111)" "$(reset)"
@@ -586,7 +819,6 @@ render_epic_overview() {
         print
       }
     ' <<<"$INPUT")"
-    printf "%s\n\n" "$table_block"
     data_rows="$(printf "%s" "$table_block" | awk -F'  +' '
       function trim(s){ sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
       NF >= 6 {
@@ -595,6 +827,7 @@ render_epic_overview() {
         printf "%s\t%s\t%s\t%s\t%s\n", epic, title, stories, tasks, prog
       }
     ')"
+    print_epic_table_from_rows "$data_rows"
   fi
 
   local total_epics=0 high=0 mid=0 low=0

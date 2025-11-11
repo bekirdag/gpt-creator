@@ -1514,6 +1514,8 @@ gc_render_with_renderer() {
     return $?
   fi
 
+  local render_strict="${GC_RENDER_GPT_CREATOR_STRICT:-0}"
+
   local tmpfile
   tmpfile="$(mktemp "${TMPDIR:-/tmp}/gc-render.XXXXXX")" || {
     "$@"
@@ -1530,11 +1532,19 @@ gc_render_with_renderer() {
   if "$renderer_path" <"$tmpfile"; then
     rm -f "$tmpfile"
     return 0
-  fi
+  else
+    local render_status=$?
+    if [[ "$render_strict" == "1" ]]; then
+      printf '%s!%s Renderer failed via %s (exit=%s). Raw output suppressed. Re-run with GC_RENDER_GPT_CREATOR_DISABLE=1 if you need the legacy view.\n' \
+        "$c_yellow" "$c_reset" "$renderer_path" "$render_status" >&2
+      rm -f "$tmpfile"
+      return 0
+    fi
 
-  cat "$tmpfile"
-  rm -f "$tmpfile"
-  return 0
+    cat "$tmpfile"
+    rm -f "$tmpfile"
+    return 0
+  fi
 }
 
 gc_status_color_seq() {
@@ -6921,7 +6931,19 @@ cmd_backlog() {
       return 1
     fi
   fi
+  local gc_render_strict_restore="__unset__"
+  if [[ -n "${GC_RENDER_GPT_CREATOR_STRICT+x}" ]]; then
+    gc_render_strict_restore="$GC_RENDER_GPT_CREATOR_STRICT"
+  fi
+  GC_RENDER_GPT_CREATOR_STRICT=1
   printf "%s" "$output" | gc_render_with_renderer cat
+  local render_status=$?
+  if [[ "$gc_render_strict_restore" == "__unset__" ]]; then
+    unset GC_RENDER_GPT_CREATOR_STRICT
+  else
+    GC_RENDER_GPT_CREATOR_STRICT="$gc_render_strict_restore"
+  fi
+  return $render_status
 }
 
 cmd_order_tasks() {

@@ -3413,6 +3413,31 @@ def main():
                 return set()
             return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
+        def _git_changes_since_task_branch(root: Path) -> Optional[int]:
+            base_file = root / ".gpt-creator" / "state" / "base-sha"
+            if not base_file.exists():
+                return None
+            try:
+                base_sha = base_file.read_text(encoding='utf-8').strip()
+            except Exception:
+                return None
+            if not base_sha:
+                return None
+            try:
+                proc = subprocess.run(
+                    ['git', 'diff', '--name-only', base_sha, 'HEAD'],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(root),
+                    check=False,
+                )
+            except Exception:
+                return None
+            if proc.returncode != 0:
+                return None
+            count = sum(1 for line in proc.stdout.splitlines() if line.strip())
+            return count
+
         def _git_has_head(root: Path) -> bool:
             try:
                 proc = subprocess.run(
@@ -4130,13 +4155,23 @@ def main():
                     change_bytes[path] = size_value
                 actual_changes += len(delta_status)
             elif executed_commands:
-                manual_notes.append(
-                    _format_action_result(
-                        "post-command-delta",
-                        "blocked — commands ran but produced no tracked changes; rerun only after confirming patches actually landed (check git status or inspect warnings above)."
+                branch_delta = _git_changes_since_task_branch(project_root)
+                if branch_delta and branch_delta > 0:
+                    manual_notes.append(
+                        _format_action_result(
+                            "post-command-delta",
+                            f"info — {branch_delta} files changed via task baseline; treating commands as modifying the repo."
+                        )
                     )
-                )
-                command_failure_detected = True
+                    actual_changes += branch_delta
+                else:
+                    manual_notes.append(
+                        _format_action_result(
+                            "post-command-delta",
+                            "blocked — commands ran but produced no tracked changes; rerun only after confirming patches actually landed (check git status or inspect warnings above)."
+                        )
+                    )
+                    command_failure_detected = True
 
         if executed_commands:
             payload['commands'] = executed_commands[:]

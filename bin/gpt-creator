@@ -268,6 +268,10 @@ if [[ -f "${CLI_ROOT}/scripts/lib/git-branches.sh" ]]; then
   # shellcheck disable=SC1090
   . "${CLI_ROOT}/scripts/lib/git-branches.sh"
 fi
+if [[ -f "${CLI_ROOT}/scripts/render_task_footer.sh" ]]; then
+  # shellcheck disable=SC1090
+  . "${CLI_ROOT}/scripts/render_task_footer.sh"
+fi
 
 GC_TEMPLATE_DIR="${CLI_ROOT}/assets/templates"
 export PATH="${CLI_ROOT}/bin:${PATH}"
@@ -1462,7 +1466,7 @@ gc_renderer_path_if_enabled() {
   if [[ -n "${CLI_ROOT:-}" ]]; then
     copy_sources+=("${CLI_ROOT}/render_gpt_creator.sh")
     copy_sources+=("${CLI_ROOT}/bin/render_gpt_creator.sh")
-    copy_sources+=("${CLI_ROOT}/scripts/render_gpt_creator.sh")
+    copy_sources+=("${CLI_ROOT}/scripts/render_task_footer.sh")
     candidates+=("${copy_sources[@]}")
   fi
 
@@ -10336,6 +10340,18 @@ print(flag("notes_contains_already_satisfied"))'
             fi
           fi
 
+          if (( task_changes_applied == 0 )) && declare -F gc_git_changes_since_task_branch >/dev/null 2>&1; then
+            local git_branch_changes=""
+            if git_branch_changes="$(gc_git_changes_since_task_branch 2>/dev/null)" \
+              && [[ "$git_branch_changes" =~ ^[0-9]+$ ]] \
+              && (( git_branch_changes > 0 )); then
+              task_changes_applied="$git_branch_changes"
+              if (( task_last_change_operations == 0 )); then
+                task_last_change_operations="$git_branch_changes"
+              fi
+            fi
+          fi
+
           if (( task_changes_applied == 0 )); then
             if (( empty_checkpoint_created == 0 )); then
               local checkpoint_story="${story_id:-$slug}"
@@ -13449,6 +13465,32 @@ gc_finalize_and_report() {
   if [[ -z "$project_root" ]]; then
     project_root="$(gc_detect_project_root)"
   fi
+
+  local git_state_helper=""
+  local git_state_path="${project_root}/.gpt-creator/state/git-last.json"
+  if declare -F gc_clone_python_tool >/dev/null 2>&1; then
+    git_state_helper="$(gc_clone_python_tool "git_last_state.py" "$project_root")" || git_state_helper=""
+  fi
+  if [[ -z "$git_state_helper" && -n "${CLI_ROOT:-}" && -f "${CLI_ROOT}/scripts/python/git_last_state.py" ]]; then
+    git_state_helper="${CLI_ROOT}/scripts/python/git_last_state.py"
+  fi
+  if [[ -n "$git_state_helper" && -f "$git_state_path" ]]; then
+    local git_changed
+    git_changed="$(python3 "$git_state_helper" "$git_state_path" 2>/dev/null | awk -F= '$1=="changed"{print $2}' | tail -1)"
+    if [[ "$git_changed" =~ ^[0-9]+$ ]] && (( git_changed > 0 )); then
+      local normalized_status="${status,,}"
+      normalized_status="${normalized_status//_/-}"
+      if [[ "$normalized_status" == "completed-no-changes" ]]; then
+        info "[git] overriding task status to COMPLETED (${git_changed} files changed since branch start)"
+        status="completed"
+      fi
+    fi
+  fi
+
+  if declare -F render_task_end >/dev/null 2>&1; then
+    render_task_end "$finalize_task_id" "${status:-UNKNOWN}" || true
+  fi
+
   local reports_dir="${project_root}/.gpt-creator/reports"
   mkdir -p "$reports_dir"
   local key="${story_slug:-story}-${task_number:-unknown}"

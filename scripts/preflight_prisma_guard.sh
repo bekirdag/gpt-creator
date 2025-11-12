@@ -116,29 +116,14 @@ derive_shadow_url() {
     printf ''
     return 0
   fi
-  python3 - "$url" "$suffix" <<'PY'
-import sys
-from urllib.parse import urlparse, urlunparse
-
-if len(sys.argv) < 3:
-    sys.exit(0)
-
-raw = sys.argv[1].strip()
-suffix = sys.argv[2]
-if not raw:
-    sys.exit(0)
-
-parsed = urlparse(raw)
-if not parsed.path or parsed.path == "/":
-    sys.exit(0)
-
-head, _, tail = parsed.path.rpartition("/")
-if not tail:
-    sys.exit(0)
-new_tail = f"{tail}{suffix}"
-new_path = f"{head}/{new_tail}" if head else f"/{new_tail}"
-print(urlunparse(parsed._replace(path=new_path)))
-PY
+  local helper_path=""
+  if declare -F gc_clone_python_tool >/dev/null 2>&1; then
+    helper_path="$(gc_clone_python_tool "derive_shadow_url.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  fi
+  if [[ -z "$helper_path" ]]; then
+    helper_path="${SCRIPT_DIR}/python/derive_shadow_url.py"
+  fi
+  python3 "$helper_path" "$url" "$suffix"
 }
 
 mapfile -t schema_paths < <(
@@ -178,13 +163,16 @@ for schema_path in "${schema_paths[@]}"; do
   schema_ok=0
   shadow_url="${PRISMA_MIGRATE_SHADOW_DATABASE_URL:-}"
   if [[ -z "$shadow_url" ]]; then
+    if [[ -z "${ENV_FILE_ABS_HELPER:-}" ]]; then
+      if declare -F gc_clone_python_tool >/dev/null 2>&1; then
+        ENV_FILE_ABS_HELPER="$(gc_clone_python_tool "resolve_env_file_path.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+      fi
+      if [[ -z "$ENV_FILE_ABS_HELPER" ]]; then
+        ENV_FILE_ABS_HELPER="${SCRIPT_DIR}/python/resolve_env_file_path.py"
+      fi
+    fi
     for env_file in "$schema_dir/.env" "$schema_dir/../.env" "$schema_dir/../../.env" "$schema_dir/.env.local" "$schema_dir/../.env.local" "$schema_dir/../../.env.local"; do
-      env_file="$(cd "$schema_dir" && python3 - "$env_file" <<'PY'
-import os, sys
-path = sys.argv[1]
-print(os.path.abspath(path))
-PY
-)"
+      env_file="$(cd "$schema_dir" && python3 "$ENV_FILE_ABS_HELPER" "$env_file")"
       db_url="$(read_env_var "DATABASE_URL" "$env_file")"
       if [[ -n "$db_url" ]]; then
         shadow_derived="$(derive_shadow_url "$db_url" "_shadow")"

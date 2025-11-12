@@ -9,6 +9,9 @@
 
 set -euo pipefail
 
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GIT_LAST_HELPER="${SCRIPT_ROOT}/scripts/python/git_last_state.py"
+
 # ============================ ANSI helpers ============================
 c()      { printf "\033[%sm" "$1"; }
 fg()     { printf "\033[38;5;%sm" "$1"; }
@@ -544,7 +547,7 @@ is_epic_children()    { grep -qE '^Stories for epic:' <<<"$INPUT"; }
 is_story_tasks()      { grep -qE '^Tasks for story:' <<<"$INPUT"; }
 is_overall_progress() { grep -qiE '^Overall backlog progress' <<<"$INPUT"; }
 is_epic_overview()    { grep -qE '__GC_EPIC_TABLE__|^Epic ID[[:space:]]+Slug|^┌' <<<"$INPUT"; }
-is_task_end()         { grep -qiE 'END TASK ID|^Task ID:' <<<"$INPUT"; }
+is_task_end()         { grep -qiE 'END OF TASK REPORT|END TASK ID|^Task ID:' <<<"$INPUT"; }
 is_task_start()       { grep -qiE 'START TASK ID|→ Working on task' <<<"$INPUT"; }
 
 # ============================ Renderers ============================
@@ -926,6 +929,22 @@ render_task_end() {
     ratio_x="$(awk -v a="$tokens_n" -v b="$est_n" 'BEGIN{printf "%.2f", (a/b)}')"
   fi
 
+  local project_root="${GC_GIT_DIR:-${PROJECT_ROOT:-$PWD}}"
+  local git_branch="" git_head="" git_merge="" git_base="" git_changed="" git_log=""
+  git_log="${GC_GIT_LOG:-${project_root}/.gpt-creator/logs/git/$(date -u +%Y%m%d).log}"
+  local git_state="${project_root}/.gpt-creator/state/git-last.json"
+  if [[ -f "$git_state" && -f "$GIT_LAST_HELPER" ]]; then
+    while IFS='=' read -r key value; do
+      case "$key" in
+        branch) git_branch="$value" ;;
+        merge) git_merge="$value" ;;
+        base) git_base="$value" ;;
+        head) git_head="$value" ;;
+        changed) git_changed="$value" ;;
+      esac
+    done < <(python3 "$GIT_LAST_HELPER" "$git_state" 2>/dev/null)
+  fi
+
   render_box_header "END OF TASK" 60
 
   printf "  "
@@ -956,6 +975,18 @@ render_task_end() {
     [[ -n "$est_n" ]] && printf "  %sEst. tokens:%s   %'d\n" "$(lc 111)" "$(reset)" "${est_n}"
   fi
   printf "\n"
+
+  if [[ -n "${git_branch}${git_merge}${git_head}${git_base}${git_changed}" ]]; then
+    printf "%s🌿 Git summary%s\n" "$(lc 111)" "$(reset)"
+    printf "────────────────────────────────────────────────────────────\n"
+    printf "  %sBranch:%s    %s\n" "$(fg 244)" "$(reset)" "${git_branch:-n/a}"
+    printf "  %sMerge:%s     %s\n" "$(fg 244)" "$(reset)" "${git_merge:-n/a}"
+    printf "  %sChanged:%s   %s files\n" "$(fg 244)" "$(reset)" "${git_changed:-0}"
+    printf "  %sHead:%s      %s\n" "$(fg 244)" "$(reset)" "${git_head:-n/a}"
+    printf "  %sBase:%s      %s\n" "$(fg 244)" "$(reset)" "${git_base:-n/a}"
+    printf "  %sLog:%s       %s\n" "$(fg 244)" "$(reset)" "${git_log:-n/a}"
+    printf "\n"
+  fi
 
   if [[ -n "$notes_block" ]]; then
     printf "%s📝 Notes%s\n" "$(lc 111)" "$(reset)"

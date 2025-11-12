@@ -1,86 +1,145 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${GC_GIT_BRANCHING:=1}"                 # 1=on, 0=off
+: "${GC_GIT_BRANCHING:=1}"
 : "${GC_GIT_REMOTE:=origin}"
 : "${GC_GIT_DEV_BRANCH:=dev}"
-: "${GC_GIT_MAIN_BRANCH:=main}"            # fallback if origin/HEAD missing
+: "${GC_GIT_MAIN_BRANCH:=main}"
+: "${GC_GIT_TASK_PREFIX:=}"
+
+gc_git_state_dir() {
+  local root
+  root="$(gc_git_repo_root)"
+  [[ -n "$root" ]] || return 1
+  printf '%s/.gpt-creator/state\n' "$root"
+}
 
 _gc_git() {
   local git_dir="${GC_GIT_DIR:-${PROJECT_ROOT:-$PWD}}"
   git -C "$git_dir" -c advice.detachedHead=false "$@"
 }
-gc_git_repo_root() { _gc_git rev-parse --show-toplevel 2>/dev/null || echo ""; }
+
+gc_git_repo_root() {
+  local git_dir="${GC_GIT_DIR:-${PROJECT_ROOT:-$PWD}}"
+  git -C "$git_dir" rev-parse --show-toplevel 2>/dev/null || echo ""
+}
+
 gc_git_sanitize_branch() {
   tr "[:upper:]" "[:lower:]" | sed -E "s/[^a-z0-9]+/-/g; s/^-+|-+$//g; s/-{2,}/-/g" | cut -c1-48
 }
-gc_git_branch_exists() { _gc_git show-ref --verify --quiet "refs/heads/$1"; }
+
+gc_git_branch_exists() { _gc_git show-ref --verify --quiet "refs/heads/$1" >/dev/null 2>&1; }
 gc_git_remote_branch_exists() { _gc_git ls-remote --exit-code --heads "$GC_GIT_REMOTE" "$1" >/dev/null 2>&1; }
 gc_git_checkout() { _gc_git checkout -q "$1"; }
 gc_git_create_from() { _gc_git checkout -q -B "$2" "$1"; }
-gc_git_safe_commit_all() {
-  if [ -n "$(_gc_git status --porcelain)" ]; then
-    _gc_git add -A
-    _gc_git commit -q -m "$1" || true
-  fi
+gc_git_current_branch() { _gc_git rev-parse --abbrev-ref HEAD 2>/dev/null || echo ""; }
+gc_git_has_changes() { [[ -n "$(_gc_git status --porcelain 2>/dev/null)" ]]; }
+
+gc_git_log() {
+  local msg="$*"
+  local root="${GC_GIT_DIR:-${PROJECT_ROOT:-$PWD}}"
+  local log_path="${GC_GIT_LOG:-${root}/.gpt-creator/logs/git/$(date -u +%Y%m%d).log}"
+  mkdir -p "$(dirname "$log_path")" 2>/dev/null || true
+  printf "%s %s\n" "$(date -u +%FT%TZ)" "$msg" | tee -a "$log_path" >&2
+  echo "gpt-creator:     Note: Action: git/log | Result: $msg" >&2
 }
-gc_git_push_set_upstream() { _gc_git push -u "$GC_GIT_REMOTE" "$1" >/dev/null 2>&1 || _gc_git push -u "$GC_GIT_REMOTE" "$1"; }
-gc_git_push_branch() { _gc_git push "$GC_GIT_REMOTE" "$1" >/dev/null 2>&1 || _gc_git push "$GC_GIT_REMOTE" "$1"; }
-gc_git_merge_ff_only() { _gc_git merge --ff-only "$1"; }
-gc_git_merge_no_ff() { _gc_git merge --no-ff -q --no-edit "$1" || return 1; }
-gc_git_sync_main_from_dev() {
-  local main_branch="${1:-$GC_GIT_MAIN_BRANCH}"
-  [ -n "$main_branch" ] || return 0
-  if ! gc_git_branch_exists "$main_branch"; then
-    if gc_git_remote_branch_exists "$main_branch"; then
-      _gc_git checkout -q -t "$GC_GIT_REMOTE/$main_branch" || return 0
-    else
-      return 0
-    fi
-  else
-    gc_git_checkout "$main_branch"
+
+gc_git_autosnap() {
+  gc_git_has_changes || return 0
+  local ts head msg
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  msg="chore(gpt-creator): autosnap before branch switch ${ts}"
+  _gc_git add -A >/dev/null 2>&1 || true
+  if _gc_git diff --cached --quiet >/dev/null 2>&1; then
+    return 0
   fi
-  _gc_git pull --ff-only "$GC_GIT_REMOTE" "$main_branch" >/dev/null 2>&1 || true
-  if gc_git_merge_ff_only "$GC_GIT_DEV_BRANCH"; then
-    gc_git_push_branch "$main_branch" || true
-  else
-    echo "[git] main branch fast-forward from dev failed; manual intervention required" >&2
+  if _gc_git commit -q -m "$msg"; then
+    head="$(gc_git_current_branch)"
+    local sha
+    sha="$(_gc_git rev-parse --short HEAD 2>/dev/null || true)"
+    gc_git_log "[git] autosnap commit recorded on ${head:-HEAD} ${sha:+[$sha]}"
+    return 0
   fi
+  gc_git_log "[git] autosnap commit failed; leaving tree dirty"
+}
+
+gc_git_push_set_upstream() {
+  local branch="${1:-}"
+  [[ -n "$branch" ]] || return 0
+  if _gc_git push -u "$GC_GIT_REMOTE" "$branch" >/dev/null 2>&1; then
+    gc_git_log "[git] push/upstream ok → ${branch}"
+    return 0
+  fi
+  if _gc_git push -u "$GC_GIT_REMOTE" "$branch"; then
+    gc_git_log "[git] push/upstream ok → ${branch}"
+    return 0
+  fi
+  _gc_git fetch -q "$GC_GIT_REMOTE" "$branch" >/dev/null 2>&1 || true
+  _gc_git rebase "$GC_GIT_REMOTE/$branch" >/dev/null 2>&1 || true
+  if _gc_git push -u "$GC_GIT_REMOTE" "$branch" >/dev/null 2>&1; then
+    gc_git_log "[git] push/upstream ok (post-rebase) → ${branch}"
+    return 0
+  fi
+  if _gc_git push --force-with-lease -u "$GC_GIT_REMOTE" "$branch"; then
+    gc_git_log "[git] force push (with lease) → ${branch}"
+    return 0
+  fi
+  gc_git_log "[git] push failed for ${branch}"
+  return 1
+}
+
+gc_git_merge_no_ff() {
+  _gc_git merge --no-ff -q --no-edit "$1" >/dev/null 2>&1
+}
+
+gc_git_status_ok() {
+  local s
+  s="$(printf "%s" "${1:-}" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
+  case "$s" in
+    SUCCESS|COMPLETED|COMPLETED_OK) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 gc_git_branching_init() {
   [ "$GC_GIT_BRANCHING" = "1" ] || return 0
-  local root; root="$(gc_git_repo_root)"; [ -n "$root" ] || { echo "[git] not a git repo; branching disabled" >&2; return 0; }
-  _gc_git fetch -q "$GC_GIT_REMOTE" --prune || true
-  local base_ref; base_ref="$GC_GIT_MAIN_BRANCH"
-  # Prefer remote HEAD if available
+  local root; root="$(gc_git_repo_root)"; [ -n "$root" ] || { gc_git_log "[git] not a git repo; branching disabled"; return 0; }
+  _gc_git fetch -q "$GC_GIT_REMOTE" --prune >/dev/null 2>&1 || true
+  local base_ref="$GC_GIT_MAIN_BRANCH"
   if _gc_git symbolic-ref -q refs/remotes/"$GC_GIT_REMOTE"/HEAD >/dev/null 2>&1; then
     base_ref="$(_gc_git symbolic-ref -q --short refs/remotes/"$GC_GIT_REMOTE"/HEAD | cut -d/ -f2)"
   fi
-  # Ensure dev branch exists, create from base if missing
   if ! gc_git_branch_exists "$GC_GIT_DEV_BRANCH"; then
     if gc_git_remote_branch_exists "$GC_GIT_DEV_BRANCH"; then
-      _gc_git checkout -q -t "$GC_GIT_REMOTE/$GC_GIT_DEV_BRANCH"
+      _gc_git checkout -q -t "$GC_GIT_REMOTE/$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
     else
       gc_git_create_from "$base_ref" "$GC_GIT_DEV_BRANCH"
       gc_git_push_set_upstream "$GC_GIT_DEV_BRANCH" || true
     fi
-  else
-    gc_git_checkout "$GC_GIT_DEV_BRANCH"
-    # Fast-forward dev to remote if possible
-    _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
   fi
-  if ! gc_git_remote_branch_exists "$GC_GIT_DEV_BRANCH"; then
-    gc_git_push_set_upstream "$GC_GIT_DEV_BRANCH" || true
+  local current_branch
+  current_branch="$(gc_git_current_branch)"
+  if [[ "$current_branch" != "$GC_GIT_DEV_BRANCH" ]] && gc_git_has_changes; then
+    gc_git_log "[git] dirty tree before switching to ${GC_GIT_DEV_BRANCH}; autosnapping"
+    gc_git_autosnap || true
   fi
+  gc_git_checkout "$GC_GIT_DEV_BRANCH"
+  _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
+  gc_git_log "[git] ready on ${GC_GIT_DEV_BRANCH}"
 }
 
-# Exports GC_GIT_CURRENT_TASK_BRANCH
 gc_git_begin_task_branch() {
   [ "$GC_GIT_BRANCHING" = "1" ] || return 0
-  local task_id="$1"
-  local slug
-  slug="task/$(printf "%s" "$task_id" | gc_git_sanitize_branch)"
+  local root; root="$(gc_git_repo_root)"; [ -n "$root" ] || return 0
+  local task_id="${1:-}"
+  local id slug candidate
+  id="$(printf "%s" "$task_id" | gc_git_sanitize_branch)"
+  [[ -n "$id" ]] || id="task"
+  candidate="$id"
+  slug="${GC_GIT_TASK_PREFIX}${id}"
+  if gc_git_remote_branch_exists "$candidate" || gc_git_branch_exists "$candidate"; then
+    slug="$candidate"
+  fi
   export GC_GIT_CURRENT_TASK_BRANCH="$slug"
   if gc_git_branch_exists "$slug"; then
     gc_git_checkout "$slug"
@@ -88,45 +147,98 @@ gc_git_begin_task_branch() {
     gc_git_checkout "$GC_GIT_DEV_BRANCH"
     gc_git_create_from "$GC_GIT_DEV_BRANCH" "$slug"
   fi
-  if ! gc_git_remote_branch_exists "$slug"; then
-    gc_git_push_set_upstream "$slug" || true
-  fi
-  local state_dir="${GC_GIT_DIR:-${PROJECT_ROOT:-$PWD}}/.gpt-creator/state"
-  mkdir -p "$state_dir"
+  gc_git_log "[git] begin branch ${slug} ← ${GC_GIT_DEV_BRANCH}"
+  local state_dir base_file
+  state_dir="$(gc_git_state_dir 2>/dev/null || printf '%s/.gpt-creator/state' "$root")"
+  mkdir -p "$state_dir" 2>/dev/null || true
   printf "%s\n" "$slug" > "${state_dir}/current-branch"
+  base_file="${state_dir}/base-sha"
+  _gc_git rev-parse HEAD 2>/dev/null | tr -d '[:space:]' >"$base_file" 2>/dev/null || true
 }
 
-# args: <task_id> <status> <reason-file?>
 gc_git_finalize_task_branch() {
   [ "$GC_GIT_BRANCHING" = "1" ] || return 0
-  local task_id="$1"; local status="$2"; local reason_file="${3:-}"
-  local status_upper
-  status_upper="$(printf "%s" "$status" | tr '[:lower:]' '[:upper:]')"
-  local msg="gpt-creator: task ${task_id} → ${status}"
-  if [ -n "$reason_file" ] && [ -f "$reason_file" ]; then
-    local reason; reason="$(tr -d "\0" < "$reason_file" | head -c 500)"
-    msg="${msg} — ${reason}"
+  local root; root="$(gc_git_repo_root)"; [ -n "$root" ] || return 0
+  local task_id="${1:-unknown}"
+  local status="${2:-UNKNOWN}"
+  local reason_file="${3:-}"
+  local message="gpt-creator: task ${task_id} → ${status}"
+  if [[ -n "$reason_file" && -f "$reason_file" ]]; then
+    local reason
+    reason="$(tr -d '\0' <"$reason_file" | head -c 500)"
+    [[ -n "$reason" ]] && message="${message} — ${reason}"
   fi
-  gc_git_safe_commit_all "$msg"
-  if [ -n "${GC_GIT_CURRENT_TASK_BRANCH:-}" ]; then
-    gc_git_push_set_upstream "${GC_GIT_CURRENT_TASK_BRANCH:-}" || true
+
+  if gc_git_has_changes; then
+    _gc_git add -A >/dev/null 2>&1 || true
+    if _gc_git commit -q -m "$message"; then
+      gc_git_log "[git] commit: ${message}"
+    else
+      gc_git_log "[git] commit failed for ${task_id}; leaving tree dirty"
+    fi
+  else
+    gc_git_log "[git] no local changes to commit for ${task_id}"
   fi
-  # Merge on success-like terminal states only
-  case "$status_upper" in
-    SUCCESS|COMPLETED|COMPLETED_OK|COMPLETED_NO_CHANGES)
-      gc_git_checkout "$GC_GIT_DEV_BRANCH"
-      _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
-      gc_git_merge_no_ff "${GC_GIT_CURRENT_TASK_BRANCH:-}" || { echo "[git] merge failed; leaving branch unmerged" >&2; return 0; }
-      gc_git_push_branch "$GC_GIT_DEV_BRANCH" || true
-      gc_git_sync_main_from_dev "$GC_GIT_MAIN_BRANCH" || true
-      ;;
-    *) : ;; # leave feature branch as-is for follow-up
-  esac
-  if gc_git_branch_exists "$GC_GIT_DEV_BRANCH"; then
-    gc_git_push_branch "$GC_GIT_DEV_BRANCH" || true
+
+  if [[ -n "${GC_GIT_CURRENT_TASK_BRANCH:-}" ]]; then
+    gc_git_push_set_upstream "$GC_GIT_CURRENT_TASK_BRANCH" || true
   fi
-  if gc_git_branch_exists "$GC_GIT_MAIN_BRANCH" && ! gc_git_remote_branch_exists "$GC_GIT_MAIN_BRANCH"; then
-    gc_git_push_set_upstream "$GC_GIT_MAIN_BRANCH" || true
+
+  local merge_result="skipped"
+  local state_dir base_file base_sha head_sha changed_count="0"
+  state_dir="$(gc_git_state_dir 2>/dev/null || printf '%s/.gpt-creator/state' "$root")"
+  base_file="${state_dir}/base-sha"
+  if [[ -f "$base_file" ]]; then
+    base_sha="$(tr -d '[:space:]' <"$base_file")"
   fi
+  head_sha="$(_gc_git rev-parse HEAD 2>/dev/null || echo "")"
+  if [[ -n "$base_sha" && -n "$head_sha" ]]; then
+    changed_count="$(_gc_git diff --name-only "$base_sha" "$head_sha" 2>/dev/null | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+    [[ -n "$changed_count" ]] || changed_count="0"
+  fi
+  export GC_LAST_BRANCH_CHANGED="${changed_count}"
+  gc_git_log "[git] files changed since task start: ${changed_count}"
+
+  local should_merge=0
+  if gc_git_status_ok "$status" && [[ "${changed_count:-0}" =~ ^[0-9]+$ ]] && (( changed_count > 0 )); then
+    should_merge=1
+  fi
+  if (( should_merge )) && [[ -n "${GC_GIT_CURRENT_TASK_BRANCH:-}" ]]; then
+    gc_git_checkout "$GC_GIT_DEV_BRANCH"
+    _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
+    if gc_git_merge_no_ff "${GC_GIT_CURRENT_TASK_BRANCH}"; then
+      _gc_git push "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
+      gc_git_log "[git] merged ${GC_GIT_CURRENT_TASK_BRANCH} → ${GC_GIT_DEV_BRANCH}"
+      merge_result="ok"
+    else
+      gc_git_log "[git] merge failed; leaving branch unmerged"
+      merge_result="failed"
+    fi
+  else
+    if [[ "${changed_count:-0}" =~ ^[0-9]+$ ]] && (( changed_count == 0 )); then
+      merge_result="skipped-no-changes"
+    fi
+  fi
+
+  printf '{"branch":"%s","merge":"%s","base":"%s","head":"%s","changed":%s}\n' \
+    "${GC_GIT_CURRENT_TASK_BRANCH:-}" "$merge_result" "${base_sha:-}" "${head_sha:-}" "${changed_count:-0}" \
+    > "${state_dir}/git-last.json" 2>/dev/null || true
   gc_git_checkout "$GC_GIT_DEV_BRANCH"
+}
+
+gc_git_changes_since_task_branch() {
+  [ "$GC_GIT_BRANCHING" = "1" ] || return 1
+  local root; root="$(gc_git_repo_root)"; [ -n "$root" ] || return 1
+  local base_file="${root}/.gpt-creator/state/base-sha"
+  [[ -f "$base_file" ]] || return 1
+  local base_sha
+  base_sha="$(tr -d '[:space:]' <"$base_file")"
+  [[ -n "$base_sha" ]] || return 1
+  local head_sha
+  head_sha="$(_gc_git rev-parse HEAD 2>/dev/null || echo "")"
+  [[ -n "$head_sha" ]] || return 1
+  local count
+  count="$(_gc_git diff --name-only "$base_sha" "$head_sha" 2>/dev/null | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+  [[ -n "$count" ]] || count="0"
+  printf '%s\n' "$count"
 }

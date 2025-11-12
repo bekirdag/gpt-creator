@@ -905,8 +905,10 @@ render_task_end() {
   time="$(sed -n 's/^Time spent:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
   sp="$(sed -n 's/^Story points:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
   tokens="$(sed -n 's/.*TOKENS USED:\s*\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
+  [[ -z "$tokens" ]] && tokens="$(sed -n 's/.*Tokens used:\s*\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
   est="$(sed -n 's/.*EST\. TOKENS (PROMPT):\s*\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
-  notes_block="$(sed -n '/^Notes/,/^$/p' <<<"$INPUT")"
+  [[ -z "$est" ]] && est="$(sed -n 's/.*Est\.\s*tokens:\s*\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
+  notes_block="$(sed -n '/Notes/,/^$/p' <<<"$INPUT")"
 
   if grep -q '^Traceback (most recent call last):' <<<"$INPUT"; then
     tb_exception="$(grep -E '^[A-Za-z]*Error: ' -m1 <<<"$INPUT" || true)"

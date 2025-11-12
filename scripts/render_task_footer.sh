@@ -25,9 +25,9 @@ render_task_end() {
   if (( repo_ok )); then
     head_sha="$(git -C "$project_root" rev-parse --short HEAD 2>/dev/null || echo "n/a")"
     if [[ -n "$branch" ]]; then
-      upstream="$(git -C "$project_root" rev-parse --abbrev-ref --symbolic-full-name "${branch}@{u}" 2>/dev/null || echo "none")"
+      upstream="$(git -C "$project_root" rev-parse --abbrev-ref --symbolic-full-name "${branch}@\{u\}" 2>/dev/null || echo "none")"
     else
-      upstream="$(git -C "$project_root" rev-parse --abbrev-ref --symbolic-full-name HEAD@{u} 2>/dev/null || echo "none")"
+      upstream="$(git -C "$project_root" rev-parse --abbrev-ref --symbolic-full-name HEAD@\{u\} 2>/dev/null || echo "none")"
     fi
   fi
   local state_file="${project_root}/.gpt-creator/state/git-last.json"

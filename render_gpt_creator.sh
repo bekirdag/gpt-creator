@@ -367,8 +367,10 @@ solid_progress_bar() {
   (( fill < 0 )) && fill=0
   local empty=$(( width - fill ))
 
-  local reset="$(tput sgr0 2>/dev/null || printf '')"
-  local color_count="$(tput colors 2>/dev/null || printf 8)"
+  local reset
+  reset="$(tput sgr0 2>/dev/null || printf '')"
+  local color_count
+  color_count="$(tput colors 2>/dev/null || printf 8)"
   local bg_empty bg_fill
   if (( color_count >= 256 )); then
     bg_empty="$(tput setab 236 2>/dev/null || printf '')"
@@ -505,7 +507,8 @@ status_color() {
 
 badge() { # fancy rounded badge, with ASCII fallback
   local label="$1" col="$2"
-  local accent="$(fg "$col")$(c 1)"
+  local accent
+  accent="$(fg "$col")$(c 1)"
   if [[ "$BADGE_STYLE" == "unicode" ]]; then
     local left=$'\ue0b6' right=$'\ue0b4'
     printf "%s%s" "$(fg 240)" "$left"
@@ -572,10 +575,9 @@ render_estimate() {
   burn="$(sed -n 's/^Estimated token burn[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT")"
   proj="$(sed -n 's/^Projected remaining tokens[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT")"
 
-  local total_clean comp_eff_clean rem_clean
+  local total_clean comp_eff_clean
   total_clean="$(numclean "${total:-0}")"
   comp_eff_clean="$(numclean "${comp_eff:-0}")"
-  rem_clean="$(numclean "${rem_can:-0}")"
   local progress_pct="0.0"
   if [[ "$total_clean" =~ ^[0-9]+$ ]] && (( total_clean > 0 )); then
     progress_pct="$(awk -v c="$comp_eff_clean" -v t="$total_clean" 'BEGIN{printf "%.1f",(c/t)*100}')"
@@ -1052,7 +1054,7 @@ render_epic_overview() {
 
   local total_epics=0 high=0 mid=0 low=0
   if [[ -n "$data_rows" ]]; then
-    while IFS=$'\t' read -r epic title stories tasks progress; do
+    while IFS=$'\t' read -r epic title _stories _tasks progress; do
       [[ -z "$epic" ]] && continue
       ((++total_epics))
       local pct

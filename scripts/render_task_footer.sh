@@ -76,44 +76,30 @@ render_task_end() {
     footer_fd="${GC_FOOTER_FD:-2}"
   fi
 
+  local block
+  block="$(cat <<EOF
++==========================================================+
+|                    END OF TASK REPORT                    |
++==========================================================+
+  [#] Task:        ${task_id}
+  [=] Status:      ${status}
+  [B] Task branch: ${branch:-none}
+  [U] Tracking:    ${upstream}
+  [M] Merge->${dev_branch}: ${merge_result}
+  [H] HEAD:        ${head_sha}
+  [Δ] Files:       ${change_count}
+  [↘] Base:        ${base_sha}
+
+  Artifacts:
+    - History   : ${GC_ACTIVE_TASK_OUTPUT:-n/a}
+    - Git log   : ${git_log}
+EOF
+)"
+
   if [[ -n "$footer_fd" ]]; then
-    cat >&"$footer_fd" <<EOF
-+==========================================================+
-|                    END OF TASK REPORT                    |
-+==========================================================+
-  [#] Task:        ${task_id}
-  [=] Status:      ${status}
-  [B] Task branch: ${branch:-none}
-  [U] Tracking:    ${upstream}
-  [M] Merge->${dev_branch}: ${merge_result}
-  [H] HEAD:        ${head_sha}
-  [Δ] Files:       ${change_count}
-  [↘] Base:        ${base_sha}
-
-  Artifacts:
-    - History   : ${GC_ACTIVE_TASK_OUTPUT:-n/a}
-    - Git log   : ${git_log}
-EOF
-    return
+    printf '%s\n' "$block" >&"$footer_fd" || true
   fi
-
-  cat <<EOF
-+==========================================================+
-|                    END OF TASK REPORT                    |
-+==========================================================+
-  [#] Task:        ${task_id}
-  [=] Status:      ${status}
-  [B] Task branch: ${branch:-none}
-  [U] Tracking:    ${upstream}
-  [M] Merge->${dev_branch}: ${merge_result}
-  [H] HEAD:        ${head_sha}
-  [Δ] Files:       ${change_count}
-  [↘] Base:        ${base_sha}
-
-  Artifacts:
-    - History   : ${GC_ACTIVE_TASK_OUTPUT:-n/a}
-    - Git log   : ${git_log}
-EOF
+  printf '%s\n' "$block"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

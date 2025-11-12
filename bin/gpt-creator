@@ -13326,7 +13326,9 @@ gc_mark_finalize_done() {
 
 # --- Child error bridge (Node/Python -> Bash finalizer) ---------------------
 gc_child_unhandled_bridge() {
-  if [[ "${GC_FINALIZE_AND_REPORT_DONE:-0}" == "1" ]]; then
+  local finalize_key
+  finalize_key="$(gc_finalize_lock_key)"
+  if [[ "${GC_FINALIZE_AND_REPORT_DONE:-}" == "$finalize_key" ]]; then
     return 0
   fi
   local reason="${1:-Child process reported an unhandled exception.}"
@@ -13420,15 +13422,17 @@ gc_run_end_scripts() {
 }
 
 gc_finalize_and_report() {
-  if [[ "${GC_FINALIZE_AND_REPORT_DONE:-0}" == "1" ]]; then
+  local finalize_key
+  finalize_key="$(gc_finalize_lock_key)"
+  if [[ "${GC_FINALIZE_AND_REPORT_DONE:-}" == "$finalize_key" ]]; then
     return 0
   fi
   if ! gc_try_acquire_finalize_lock; then
-    GC_FINALIZE_AND_REPORT_DONE=1
+    GC_FINALIZE_AND_REPORT_DONE="$finalize_key"
     echo "[finalize] already completed for this task-run; skipping." >&2
     return 0
   fi
-  GC_FINALIZE_AND_REPORT_DONE=1
+  GC_FINALIZE_AND_REPORT_DONE="$finalize_key"
 
   local status="${1:-}" reason="${2:-}"
   local now_utc

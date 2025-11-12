@@ -5,6 +5,21 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   set -euo pipefail
 fi
 
+# File descriptor (default stderr) to emit pretty footer panels to.
+: "${GC_FOOTER_FD:=2}"
+# Set to 1 to force footer rendering even when the FD is not a TTY.
+: "${GC_FORCE_FOOTER:=0}"
+
+# Prefer stderr (or a caller supplied FD) when deciding if we should render the
+# pretty footer panel; this keeps the footer visible when stdout is piped.
+gc_footer_is_tty() {
+  if [[ "${GC_FORCE_FOOTER}" == "1" ]]; then
+    return 0
+  fi
+  local fd="${GC_FOOTER_FD:-2}"
+  [[ -t "$fd" ]]
+}
+
 render_task_end() {
   local task_id="${1:-unknown}"
   local status="${2:-UNKNOWN}"
@@ -55,6 +70,32 @@ render_task_end() {
     [[ -z "$merge_result" ]] && merge_result="n/a"
   fi
   local git_log="${GC_GIT_LOG:-${project_root}/.gpt-creator/logs/git/$(date -u +%Y%m%d).log}"
+
+  local footer_fd=""
+  if gc_footer_is_tty; then
+    footer_fd="${GC_FOOTER_FD:-2}"
+  fi
+
+  if [[ -n "$footer_fd" ]]; then
+    cat >&"$footer_fd" <<EOF
++==========================================================+
+|                    END OF TASK REPORT                    |
++==========================================================+
+  [#] Task:        ${task_id}
+  [=] Status:      ${status}
+  [B] Task branch: ${branch:-none}
+  [U] Tracking:    ${upstream}
+  [M] Merge->${dev_branch}: ${merge_result}
+  [H] HEAD:        ${head_sha}
+  [Δ] Files:       ${change_count}
+  [↘] Base:        ${base_sha}
+
+  Artifacts:
+    - History   : ${GC_ACTIVE_TASK_OUTPUT:-n/a}
+    - Git log   : ${git_log}
+EOF
+    return
+  fi
 
   cat <<EOF
 +==========================================================+

@@ -1,2 +1,4 @@
 
   --git-branching[=1|0]   enable per-task branching (default: 1)
+  GC_FORCE_FOOTER=1        force pretty end-of-task footer even when piped
+  GC_FOOTER_FD=<n>         file descriptor to render footer to (default: 2)

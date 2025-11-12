@@ -1382,6 +1382,7 @@ def main():
             return fallback_slug or "task"
 
         def _update_task_branch_record(task_row_id: Optional[str], branch: Optional[str], base_branch: Optional[str]) -> None:
+            global sqlite3
             if not task_row_id or tasks_db_path is None:
                 return
             try:

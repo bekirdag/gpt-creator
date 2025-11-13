@@ -66,20 +66,24 @@ gc_git_autosnap() {
 gc_git_push_set_upstream() {
   local branch="${1:-}"
   [[ -n "$branch" ]] || return 0
+  gc_git_log "[git] pushing ${branch} to ${GC_GIT_REMOTE} (set-upstream)"
   if _gc_git push -u "$GC_GIT_REMOTE" "$branch" >/dev/null 2>&1; then
     gc_git_log "[git] push/upstream ok → ${branch}"
     return 0
   fi
+  gc_git_log "[git] push failed silently; retrying with verbose output"
   if _gc_git push -u "$GC_GIT_REMOTE" "$branch"; then
     gc_git_log "[git] push/upstream ok → ${branch}"
     return 0
   fi
+  gc_git_log "[git] push still failing; fetching ${branch} from ${GC_GIT_REMOTE} before rebase"
   _gc_git fetch -q "$GC_GIT_REMOTE" "$branch" >/dev/null 2>&1 || true
   _gc_git rebase "$GC_GIT_REMOTE/$branch" >/dev/null 2>&1 || true
   if _gc_git push -u "$GC_GIT_REMOTE" "$branch" >/dev/null 2>&1; then
     gc_git_log "[git] push/upstream ok (post-rebase) → ${branch}"
     return 0
   fi
+  gc_git_log "[git] push still failing; force pushing with lease"
   if _gc_git push --force-with-lease -u "$GC_GIT_REMOTE" "$branch"; then
     gc_git_log "[git] force push (with lease) → ${branch}"
     return 0
@@ -104,15 +108,22 @@ gc_git_status_ok() {
 gc_git_branching_init() {
   [ "$GC_GIT_BRANCHING" = "1" ] || return 0
   local root; root="$(gc_git_repo_root)"; [ -n "$root" ] || { gc_git_log "[git] not a git repo; branching disabled"; return 0; }
-  _gc_git fetch -q "$GC_GIT_REMOTE" --prune >/dev/null 2>&1 || true
+  gc_git_log "[git] syncing remote refs from ${GC_GIT_REMOTE} before dev branch init"
+  if _gc_git fetch -q "$GC_GIT_REMOTE" --prune >/dev/null 2>&1; then
+    gc_git_log "[git] remote refs fetched from ${GC_GIT_REMOTE}"
+  else
+    gc_git_log "[git] remote fetch failed; continuing with local refs"
+  fi
   local base_ref="$GC_GIT_MAIN_BRANCH"
   if _gc_git symbolic-ref -q refs/remotes/"$GC_GIT_REMOTE"/HEAD >/dev/null 2>&1; then
     base_ref="$(_gc_git symbolic-ref -q --short refs/remotes/"$GC_GIT_REMOTE"/HEAD | cut -d/ -f2)"
   fi
   if ! gc_git_branch_exists "$GC_GIT_DEV_BRANCH"; then
     if gc_git_remote_branch_exists "$GC_GIT_DEV_BRANCH"; then
+      gc_git_log "[git] tracking ${GC_GIT_REMOTE}/${GC_GIT_DEV_BRANCH} locally"
       _gc_git checkout -q -t "$GC_GIT_REMOTE/$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
     else
+      gc_git_log "[git] creating local ${GC_GIT_DEV_BRANCH} from ${base_ref}"
       gc_git_create_from "$base_ref" "$GC_GIT_DEV_BRANCH"
       gc_git_push_set_upstream "$GC_GIT_DEV_BRANCH" || true
     fi
@@ -125,7 +136,9 @@ gc_git_branching_init() {
   fi
   gc_git_checkout "$GC_GIT_DEV_BRANCH"
   _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
-  gc_git_log "[git] ready on ${GC_GIT_DEV_BRANCH}"
+  local dev_head
+  dev_head="$(_gc_git rev-parse --short HEAD 2>/dev/null || echo "")"
+  gc_git_log "[git] ready on ${GC_GIT_DEV_BRANCH} ${dev_head:+[$dev_head]}"
 }
 
 gc_git_begin_task_branch() {
@@ -142,10 +155,13 @@ gc_git_begin_task_branch() {
   fi
   export GC_GIT_CURRENT_TASK_BRANCH="$slug"
   if gc_git_branch_exists "$slug"; then
+    gc_git_log "[git] reusing existing branch ${slug}"
     gc_git_checkout "$slug"
   else
+    gc_git_log "[git] creating branch ${slug} from ${GC_GIT_DEV_BRANCH}"
     gc_git_checkout "$GC_GIT_DEV_BRANCH"
     gc_git_create_from "$GC_GIT_DEV_BRANCH" "$slug"
+    gc_git_log "[git] created branch ${slug} from ${GC_GIT_DEV_BRANCH}"
   fi
   gc_git_log "[git] begin branch ${slug} ← ${GC_GIT_DEV_BRANCH}"
   local state_dir base_file
@@ -153,7 +169,12 @@ gc_git_begin_task_branch() {
   mkdir -p "$state_dir" 2>/dev/null || true
   printf "%s\n" "$slug" > "${state_dir}/current-branch"
   base_file="${state_dir}/base-sha"
-  _gc_git rev-parse HEAD 2>/dev/null | tr -d '[:space:]' >"$base_file" 2>/dev/null || true
+  local branch_base
+  branch_base="$(_gc_git rev-parse HEAD 2>/dev/null | tr -d '[:space:]')"
+  printf "%s\n" "$branch_base" >"$base_file" 2>/dev/null || true
+  if [[ -n "$branch_base" ]]; then
+    gc_git_log "[git] recorded baseline ${branch_base} for ${slug}"
+  fi
 }
 
 gc_git_finalize_task_branch() {
@@ -170,6 +191,7 @@ gc_git_finalize_task_branch() {
   fi
 
   if gc_git_has_changes; then
+    gc_git_log "[git] staging and committing ${task_id} updates"
     _gc_git add -A >/dev/null 2>&1 || true
     if _gc_git commit -q -m "$message"; then
       gc_git_log "[git] commit: ${message}"
@@ -181,6 +203,7 @@ gc_git_finalize_task_branch() {
   fi
 
   if [[ -n "${GC_GIT_CURRENT_TASK_BRANCH:-}" ]]; then
+    gc_git_log "[git] pushing ${GC_GIT_CURRENT_TASK_BRANCH} upstream"
     gc_git_push_set_upstream "$GC_GIT_CURRENT_TASK_BRANCH" || true
   fi
 
@@ -206,9 +229,13 @@ gc_git_finalize_task_branch() {
   if (( should_merge )) && [[ -n "${GC_GIT_CURRENT_TASK_BRANCH:-}" ]]; then
     gc_git_checkout "$GC_GIT_DEV_BRANCH"
     _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
+    gc_git_log "[git] merging ${GC_GIT_CURRENT_TASK_BRANCH} into ${GC_GIT_DEV_BRANCH}"
     if gc_git_merge_no_ff "${GC_GIT_CURRENT_TASK_BRANCH}"; then
-      _gc_git push "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
-      gc_git_log "[git] merged ${GC_GIT_CURRENT_TASK_BRANCH} → ${GC_GIT_DEV_BRANCH}"
+      if _gc_git push "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1; then
+        gc_git_log "[git] merged ${GC_GIT_CURRENT_TASK_BRANCH} → ${GC_GIT_DEV_BRANCH} and pushed update"
+      else
+        gc_git_log "[git] merged ${GC_GIT_CURRENT_TASK_BRANCH} → ${GC_GIT_DEV_BRANCH} but push failed"
+      fi
       merge_result="ok"
     else
       gc_git_log "[git] merge failed; leaving branch unmerged"

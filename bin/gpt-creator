@@ -1462,6 +1462,15 @@ gc_render_bar() {
   done
 }
 
+gc_render_task_badge() {
+  local label="${1:-N/A}"
+  local color="${2:-39}"
+  local border_color="${gc_color_border:-$'\033[38;5;240m'}"
+  local accent
+  printf -v accent '\033[1;38;5;%sm' "$color"
+  printf '%s%s %s %s%s' "$border_color" "$accent" "$label" "$border_color" "$c_reset"
+}
+
 gc_renderer_cache_path() {
   local base="${GC_DIR:-}"
   if [[ -z "$base" && -n "${PROJECT_ROOT:-}" ]]; then
@@ -1744,28 +1753,52 @@ gc_render_task_end_panel() {
 
   printf '\n%s╭────────────────────────────────────────────────────────────╮%s\n' "${gc_color_border:-}" "$c_reset"
   printf '│  %sEND OF TASK%s                                             │\n' "${gc_color_title:-}" "$c_reset"
-  printf '%s╰────────────────────────────────────────────────────────────╯%s\n' "${gc_color_border:-}" "$c_reset"
+  printf '%s╰────────────────────────────────────────────────────────────╯%s\n\n' "${gc_color_border:-}" "$c_reset"
 
-  printf '%s%-18s%s %s\n' "${gc_color_label:-}" "Task ID:" "$c_reset" "$task_id"
-  printf '%s%-18s%s %s%s%s\n' "${gc_color_label:-}" "Status:" "$c_reset" "$(gc_status_color_seq "$status")" "$status" "$c_reset"
-  printf '%s%-18s%s %s\n' "${gc_color_label:-}" "Terminal:" "$c_reset" "$terminal"
-  printf '%s%-18s%s %s\n' "${gc_color_label:-}" "Time spent:" "$c_reset" "$time_spent"
-  printf '%s%-18s%s %s\n' "${gc_color_label:-}" "Story points:" "$c_reset" "$story_points_display"
-  printf '   '
-  gc_render_bar "$sp_pct" 22
-  printf ' (SP)\n'
+  printf '  '
+  gc_render_task_badge "TASK ${task_id:-N/A}" 45
+  printf '  '
+  if [[ -n "$status" ]]; then
+    local status_col
+    if [[ "$status" =~ ^(COMPLETE|COMPLETED|SUCCESS)$ ]]; then
+      status_col=46
+    elif [[ "$status" =~ ^(RETRYABLE|NEEDS-RETRY|FAILED)$ ]]; then
+      status_col=208
+    else
+      status_col=111
+    fi
+    gc_render_task_badge "STATUS ${status}" "$status_col"
+    printf '  '
+  fi
+  if [[ -n "$terminal" ]]; then
+    gc_render_task_badge "TERMINAL ${terminal}" 111
+    printf '  '
+  fi
+  if [[ -n "$story_points_display" ]]; then
+    gc_render_task_badge "SP ${story_points_display}" 39
+    printf '  '
+  fi
+  gc_render_task_badge "TIME ${time_spent}" 221
+  printf '\n\n'
 
-  printf "%s%-18s%s %s\n" "${gc_color_label:-}" "Tokens used:" "$c_reset" "$tokens_display"
-  printf '   '
+  if [[ -n "$story_points_display" ]]; then
+    printf '  %s📈 Story points:%s %s\n' "${gc_color_label:-}" "$c_reset" "$story_points_display"
+    printf '    '
+    gc_render_bar "$sp_pct" 22
+    printf ' %s%4.1f%%%s (SP)\n' "${gc_color_muted:-}" "$sp_pct" "$c_reset"
+  fi
+
+  printf '  %s🪙 Tokens used:%s  %s\n' "${gc_color_label:-}" "$c_reset" "$tokens_display"
+  printf '    '
   gc_render_bar "$ratio_pct" 30
-  printf ' used vs prompt est (x%s)\n' "$ratio_multiplier"
-  printf "%s%-18s%s %s\n" "${gc_color_label:-}" "Est. tokens:" "$c_reset" "$tokens_estimate_display"
+  printf ' %s%5.1f%%%s used vs prompt est (x%s)\n' "${gc_color_muted:-}" "$ratio_pct" "$c_reset" "$ratio_multiplier"
+  printf '  %s📊 Est. tokens:%s %s\n' "${gc_color_label:-}" "$c_reset" "$tokens_estimate_display"
 
   if [[ -n "$failure_class" && "$failure_class" != "NONE" ]]; then
-    printf "%s%-18s%s %s\n" "${gc_color_label:-}" "Failure:" "$c_reset" "$failure_class"
+    printf '\n  %s⚠ Failure:%s %s\n' "${c_yellow:-}" "$c_reset" "$failure_class"
   fi
   if [[ -n "$detail_line" ]]; then
-    printf "%s%-18s%s %s\n" "${gc_color_label:-}" "Detail:" "$c_reset" "$detail_line"
+    printf '  %s📝 Detail:%s %s\n' "${gc_color_label:-}" "$c_reset" "$detail_line"
   fi
 
   printf '\n%s░░░░░ END OF THE TASK WORK ░░░░░%s\n\n' "${gc_color_muted:-}" "$c_reset"
@@ -3058,7 +3091,7 @@ gc_record_codex_usage() {
   fi
 
 
-  if GC_USAGE_SUPPRESS_WRITE=1 python3 "$usage_script_py" "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" "${GC_COMMAND_FAILURE_CACHE:-}" "${GC_COMMAND_STREAM_CACHE:-}" "${GC_COMMAND_FILE_CACHE:-}" "${GC_COMMAND_SCAN_CACHE:-}" "$step" "$max_output" "$duration_ms" >"$tmp_output"
+  if python3 "$usage_script_py" "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" "${GC_COMMAND_FAILURE_CACHE:-}" "${GC_COMMAND_STREAM_CACHE:-}" "${GC_COMMAND_FILE_CACHE:-}" "${GC_COMMAND_SCAN_CACHE:-}" "$step" "$max_output" "$duration_ms" >"$tmp_output"
   then
     py_output="$(<"$tmp_output")"
     rm -f "$usage_script_py" || true

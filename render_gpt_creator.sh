@@ -929,7 +929,8 @@ render_task_start() {
 }
 
 render_task_end() {
-  local id tokens est sp time status term notes_block tb_exception tb_file tb_note needs_retry next_line
+  local id="" tokens="" est="" sp="" time="" status="" term="" notes_block=""
+  local tb_exception="" tb_file="" tb_note="" needs_retry="" next_line=""
   id="$(sed -n 's/^[^A-Z0-9-]*|\s*\(.*-T[0-9]\+\)\s*|\s*$/\1/p' <<<"$INPUT" | head -1)"
   [[ -z "$id" ]] && id="$(sed -n 's/^Task ID:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
   status="$(sed -n 's/^Status:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
@@ -948,7 +949,7 @@ render_task_end() {
     tb_note="$(grep -m1 'gc-child-unhandled' <<<"$INPUT" || true)"
   fi
   needs_retry="$(grep -i 'STATUS: *needs-retry' <<<"$INPUT" || true)"
-  next_line="$(grep -E '█▶|Working on task' <<<"$INPUT" | head -1)"
+  next_line="$(grep -E '█▶|Working on task' <<<"$INPUT" | head -1 || true)"
 
   local tokens_n est_n ratio_p ratio_x sp_clean story_pct
   tokens_n="$(numclean "$tokens")"

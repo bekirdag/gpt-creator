@@ -982,12 +982,7 @@ render_task_end() {
     done < <(python3 "$GIT_LAST_HELPER" "$git_state" 2>/dev/null)
   fi
 
-  local header_col border_col
-  header_col="$(c "1;38;5;39")"
-  border_col="$(c "1;38;5;214")"
-  printf "\n%s╭────────────────────────────────────────────────────────────╮%s\n" "$border_col" "$(reset)"
-  printf "│  %sEND OF TASK%s                                             │\n" "$header_col" "$(reset)"
-  printf "%s╰────────────────────────────────────────────────────────────╯%s\n\n" "$border_col" "$(reset)"
+  render_box_header "END OF TASK" 60
 
   printf "  "
   task_badge "TASK ${id:-N/A}" 45

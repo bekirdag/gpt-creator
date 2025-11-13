@@ -99,7 +99,6 @@ EOF
   if [[ -n "$footer_fd" ]]; then
     printf '%s\n' "$block" >&"$footer_fd" || true
   fi
-  printf '%s\n' "$block"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

@@ -929,19 +929,28 @@ render_task_start() {
 }
 
 render_task_end() {
-  local id="" tokens="" est="" sp="" time="" status="" term="" notes_block=""
-  local tb_exception="" tb_file="" tb_note="" needs_retry="" next_line=""
-  id="$(sed -n 's/^[^A-Z0-9-]*|\s*\(.*-T[0-9]\+\)\s*|\s*$/\1/p' <<<"$INPUT" | head -1)"
-  [[ -z "$id" ]] && id="$(sed -n 's/^Task ID:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
-  status="$(sed -n 's/^Status:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
-  term="$(sed -n 's/^Terminal:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
-  time="$(sed -n 's/^Time spent:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
-  sp="$(sed -n 's/^Story points:\s*\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
-  tokens="$(sed -n 's/.*TOKENS USED:\s*\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
-  [[ -z "$tokens" ]] && tokens="$(sed -n 's/.*Tokens used:\s*\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
-  est="$(sed -n 's/.*EST\. TOKENS (PROMPT):\s*\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
-  [[ -z "$est" ]] && est="$(sed -n 's/.*Est\.\s*tokens:\s*\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
-  notes_block="$(sed -n '/Notes/,/^$/p' <<<"$INPUT")"
+  local id="" tokens="" est="" sp="" time="" status="" term=""
+  local notes_block="" tb_exception="" tb_file="" tb_note=""
+  local needs_retry="" next_line=""
+  local project_root="${GC_GIT_DIR:-${PROJECT_ROOT:-$PWD}}"
+  local git_branch="${GC_GIT_CURRENT_TASK_BRANCH:-}"
+  local git_head="" git_merge="" git_base="" git_changed=""
+  local git_tracking="none"
+  local git_log="${GC_GIT_LOG:-${project_root}/.gpt-creator/logs/git/$(date -u +%Y%m%d).log}"
+  local git_state="${project_root}/.gpt-creator/state/git-last.json"
+
+  id="$(sed -nE 's/^[^A-Z0-9-]*\|[[:space:]]*(.*-T[0-9]+)[[:space:]]*\|[[:space:]]*$/\1/p' <<<"$INPUT" | head -1)"
+  [[ -z "$id" ]] && id="$(sed -nE 's/^Task ID:[[:space:]]*(.*)$/\1/p' <<<"$INPUT" | head -1)"
+  status="$(sed -nE 's/^Status:[[:space:]]*(.*)$/\1/p' <<<"$INPUT" | head -1)"
+  term="$(sed -nE 's/^Terminal:[[:space:]]*(.*)$/\1/p' <<<"$INPUT" | head -1)"
+  time="$(sed -nE 's/^Time spent:[[:space:]]*(.*)$/\1/p' <<<"$INPUT" | head -1)"
+  sp="$(sed -nE 's/^Story points:[[:space:]]*(.*)$/\1/p' <<<"$INPUT" | head -1)"
+  tokens="$(sed -nE 's/.*TOKENS USED:[[:space:]]*([0-9,]+).*/\1/p' <<<"$INPUT" | head -1)"
+  [[ -z "$tokens" ]] && tokens="$(sed -nE 's/.*Tokens used:[[:space:]]*([0-9,]+).*/\1/p' <<<"$INPUT" | head -1)"
+  est="$(sed -nE 's/.*EST\. TOKENS \(PROMPT\):[[:space:]]*([0-9,]+).*/\1/p' <<<"$INPUT" | head -1)"
+  [[ -z "$est" ]] && est="$(sed -nE 's/.*Est\.[[:space:]]*tokens:[[:space:]]*([0-9,]+).*/\1/p' <<<"$INPUT" | head -1)"
+
+  notes_block="$(sed -n '/^Notes/,/^$/p' <<<"$INPUT")"
 
   if grep -q '^Traceback (most recent call last):' <<<"$INPUT"; then
     tb_exception="$(grep -E '^[A-Za-z]*Error: ' -m1 <<<"$INPUT" || true)"
@@ -951,30 +960,41 @@ render_task_end() {
   needs_retry="$(grep -i 'STATUS: *needs-retry' <<<"$INPUT" || true)"
   next_line="$(grep -E '█▶|Working on task' <<<"$INPUT" | head -1 || true)"
 
-  local tokens_n est_n ratio_p ratio_x sp_clean story_pct
+  local tokens_n="" est_n="" ratio_p="" ratio_x=""
   tokens_n="$(numclean "$tokens")"
   est_n="$(numclean "$est")"
   if [[ -n "$tokens_n" && -n "$est_n" && "$est_n" -gt 0 ]]; then
     ratio_p="$(awk -v a="$tokens_n" -v b="$est_n" 'BEGIN{printf "%.1f", (a/b)*100}')"
     ratio_x="$(awk -v a="$tokens_n" -v b="$est_n" 'BEGIN{printf "%.2f", (a/b)}')"
   fi
+
+  local sp_pct=""
+  local sp_clean
   sp_clean="$(numclean "$sp")"
   if [[ -n "$sp_clean" ]]; then
-    story_pct="$(awk -v s="$sp_clean" 'BEGIN{
+    sp_pct="$(awk -v s="$sp_clean" 'BEGIN{
       if(s<0)s=0;
       if(s>13)s=13;
-      printf "%.1f", (s/13)*100
+      printf "%.1f",(s/13)*100
     }')"
   fi
 
-  local project_root="${GC_GIT_DIR:-${PROJECT_ROOT:-$PWD}}"
-  local git_branch="" git_head="" git_merge="" git_base="" git_changed="" git_log=""
-  git_log="${GC_GIT_LOG:-${project_root}/.gpt-creator/logs/git/$(date -u +%Y%m%d).log}"
-  local git_state="${project_root}/.gpt-creator/state/git-last.json"
-  if [[ -f "$git_state" && -f "$GIT_LAST_HELPER" ]]; then
+  local repo_ok=0
+  if [[ -n "$project_root" ]] && git -C "$project_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    repo_ok=1
+    if [[ -z "$git_branch" ]]; then
+      git_branch="$(git -C "$project_root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+    fi
+    local branch_for_tracking="${git_branch:-}"
+    if [[ -n "$branch_for_tracking" ]]; then
+      git_tracking="$(git -C "$project_root" rev-parse --abbrev-ref --symbolic-full-name "${branch_for_tracking}@{u}" 2>/dev/null || echo "none")"
+    fi
+  fi
+
+  if [[ -f "$git_state" && -n "$GIT_LAST_HELPER" && -f "$GIT_LAST_HELPER" ]]; then
     while IFS='=' read -r key value; do
       case "$key" in
-        branch) git_branch="$value" ;;
+        branch) [[ -z "$git_branch" && -n "$value" ]] && git_branch="$value" ;;
         merge) git_merge="$value" ;;
         base) git_base="$value" ;;
         head) git_head="$value" ;;
@@ -982,6 +1002,28 @@ render_task_end() {
       esac
     done < <(python3 "$GIT_LAST_HELPER" "$git_state" 2>/dev/null)
   fi
+  if (( repo_ok )) && [[ -z "$git_head" ]]; then
+    git_head="$(git -C "$project_root" rev-parse --short HEAD 2>/dev/null || echo "n/a")"
+  fi
+
+  local history_path="${GC_ACTIVE_TASK_OUTPUT:-}"
+  [[ -z "$history_path" ]] && history_path="n/a"
+  local final_report="${GC_ACTIVE_TASK_FINAL_REPORT:-}"
+  if [[ -z "$final_report" ]]; then
+    final_report="$(sed -nE 's/.*Wrote[[:space:]]+(\/[^[:space:]]*\.final\.json).*/\1/p' <<<"$INPUT" | head -1)"
+  fi
+
+  local -a git_ops=()
+  while IFS= read -r git_line; do
+    [[ -z "$git_line" ]] && continue
+    git_ops+=("$git_line")
+  done < <(grep -E '(\[git\])|git/log' <<<"$INPUT" || true)
+
+  local -a ops_lines=()
+  while IFS= read -r op_line; do
+    [[ -z "$op_line" ]] && continue
+    ops_lines+=("$op_line")
+  done < <(grep -E '^(➜|(\[warn\]))' <<<"$INPUT" || true)
 
   render_box_header "END OF TASK" 60
 
@@ -990,10 +1032,12 @@ render_task_end() {
   printf "  "
   if [[ -n "$status" ]]; then
     local status_col
-    if [[ "$status" =~ ^(COMPLETE|COMPLETED)$ ]]; then
+    if [[ "$status" =~ ^(COMPLETE|COMPLETED|SUCCESS)$ ]]; then
       status_col=46
-    else
+    elif [[ "$status" =~ ^(RETRYABLE|NEEDS-RETRY|FAILED)$ ]]; then
       status_col=208
+    else
+      status_col=111
     fi
     task_badge "STATUS ${status}" "$status_col"
     printf "  "
@@ -1003,42 +1047,70 @@ render_task_end() {
   [[ -n "$time" ]] && task_badge "TIME ${time}" 221
   printf "\n\n"
 
-  if [[ -n "$story_pct" ]]; then
-    printf "  %s📈 Story points:%s " "$(lc 111)" "$(reset)"
-    task_meter "$story_pct" 23
-    printf "  %s%4.1f%%%s (SP)\n" "$(fg 244)" "$story_pct" "$(reset)"
+  if [[ -n "$sp_pct" ]]; then
+    printf "  %sStory points:%s " "$(lc 111)" "$(reset)"
+    bar "$sp_pct" 28
+    printf " %s%4.1f%%%s (SP)\n" "$(fg 244)" "$sp_pct" "$(reset)"
   fi
 
   if [[ -n "$tokens_n" || -n "$est_n" ]]; then
-    printf "  %s🪙 Tokens used:%s  %s%'d%s\n" "$(lc 111)" "$(reset)" "$(c "1")" "${tokens_n:-0}" "$(reset)"
+    local tokens_val="${tokens_n:-0}"
+    printf "  %sTokens used:%s  %s%'d%s\n" "$(lc 111)" "$(reset)" "$(c "1")" "$tokens_val" "$(reset)"
     if [[ -n "$ratio_p" ]]; then
       printf "    "
-      task_meter "$ratio_p" 23
-      printf "  %s%5.1f%%%s used vs prompt est (x%s)\n" "$(fg 244)" "$ratio_p" "$(reset)" "${ratio_x}"
+      bar "$ratio_p" 30
+      printf "  %s%5.1f%%%s used vs prompt est (x%s)\n" "$(fg 244)" "$ratio_p" "$(reset)" "$ratio_x"
     fi
-    [[ -n "$est_n" ]] && printf "  %s📊 Est. tokens:%s %s%'d%s\n" "$(lc 111)" "$(reset)" "$(c "1")" "${est_n}" "$(reset)"
+    if [[ -n "$est_n" ]]; then
+      printf "  %sEst. tokens:%s   %s%'d%s\n" "$(lc 111)" "$(reset)" "$(c "1")" "$est_n" "$(reset)"
+    fi
   fi
   printf "\n"
 
-  if [[ -n "${git_branch}${git_merge}${git_head}${git_base}${git_changed}" ]]; then
+  if [[ -n "${git_branch}${git_merge}${git_head}${git_base}${git_changed}" || "$git_tracking" != "none" ]]; then
     printf "%s🌿 Git summary%s\n" "$(lc 111)" "$(reset)"
     printf "────────────────────────────────────────────────────────────\n"
-    printf "  %sBranch:%s    %s\n" "$(fg 244)" "$(reset)" "${git_branch:-n/a}"
-    printf "  %sMerge:%s     %s\n" "$(fg 244)" "$(reset)" "${git_merge:-n/a}"
-    printf "  %sChanged:%s   %s files\n" "$(fg 244)" "$(reset)" "${git_changed:-0}"
-    printf "  %sHead:%s      %s\n" "$(fg 244)" "$(reset)" "${git_head:-n/a}"
-    printf "  %sBase:%s      %s\n" "$(fg 244)" "$(reset)" "${git_base:-n/a}"
-    printf "  %sLog:%s       %s\n" "$(fg 244)" "$(reset)" "${git_log:-n/a}"
+    printf "  %s[B]%s Task branch: %s%s%s\n" "$(fg 244)" "$(reset)" "$(fg 250)" "${git_branch:-n/a}" "$(reset)"
+    printf "  %s[U]%s Tracking:    %s%s%s\n" "$(fg 244)" "$(reset)" "$(fg 250)" "${git_tracking:-none}" "$(reset)"
+    printf "  %s[M]%s Merge→dev:   %s%s%s\n" "$(fg 244)" "$(reset)" "$(fg 250)" "${git_merge:-n/a}" "$(reset)"
+    printf "  %s[H]%s HEAD:        %s%s%s\n" "$(fg 244)" "$(reset)" "$(fg 250)" "${git_head:-n/a}" "$(reset)"
+    printf "  %s[Δ]%s Files:       %s%s%s\n" "$(fg 244)" "$(reset)" "$(fg 250)" "${git_changed:-0}" "$(reset)"
+    printf "  %s[↘]%s Base:        %s%s%s\n" "$(fg 244)" "$(reset)" "$(fg 250)" "${git_base:-n/a}" "$(reset)"
+    printf "  %s[🧾]%s Git log:    %s%s%s\n" "$(fg 244)" "$(reset)" "$(fg 250)" "${git_log:-n/a}" "$(reset)"
     printf "\n"
   fi
 
-  if [[ -n "$notes_block" ]]; then
+  if [[ -n "$history_path" || -n "$final_report" ]]; then
+    printf "%s🗂 Artifacts%s\n" "$(lc 111)" "$(reset)"
+    printf "────────────────────────────────────────────────────────────\n"
+    printf "  %s•%s History:    %s%s%s\n" "$(fg 244)" "$(reset)" "$(fg 250)" "${history_path:-n/a}" "$(reset)"
+    printf "  %s•%s Git log:    %s%s%s\n" "$(fg 244)" "$(reset)" "$(fg 250)" "${git_log:-n/a}" "$(reset)"
+    if [[ -n "$final_report" ]]; then
+      printf "  %s•%s Final report: %s%s%s\n" "$(fg 244)" "$(reset)" "$(fg 250)" "$final_report" "$(reset)"
+    fi
+    printf "\n"
+  fi
+
+  if ((${#git_ops[@]})); then
+    printf "%s⚙ Git ops%s\n" "$(lc 111)" "$(reset)"
+    printf "────────────────────────────────────────────────────────────\n"
+    local git_line
+    for git_line in "${git_ops[@]}"; do
+      printf "  %s•%s %s\n" "$(fg 244)" "$(reset)" "$git_line"
+    done
+    printf "\n"
+  fi
+
+  local notes_body=""
+  notes_body="$(sed -n '1d;p' <<<"$notes_block" | sed '/^$/d')"
+  if [[ -n "$notes_body" ]]; then
     printf "%s📝 Notes%s\n" "$(lc 111)" "$(reset)"
     printf "────────────────────────────────────────────────────────────\n"
-    sed -n '1d;p' <<<"$notes_block" | sed '/^$/d' | while IFS= read -r ln; do
+    while IFS= read -r ln; do
+      [[ -z "$ln" ]] && continue
       ln="${ln#- }"
       printf "  %s•%s %s\n" "$(fg 244)" "$(reset)" "$ln"
-    done
+    done <<<"$notes_body"
     printf "\n"
   fi
 
@@ -1061,13 +1133,13 @@ render_task_end() {
     printf "  %s%s%s\n\n" "$(fg 110)" "$next_line" "$(reset)"
   fi
 
-  mapfile -t ops_lines < <(grep -E '^(➜|(\[warn\]))' <<<"$INPUT" || true)
   if ((${#ops_lines[@]})); then
     printf "%s🧭 Follow-up Ops%s\n" "$(lc 111)" "$(reset)"
     printf "────────────────────────────────────────────────────────────\n"
+    local op
     for op in "${ops_lines[@]}"; do
       if [[ "$op" =~ ^\[warn\] ]]; then
-        printf "  %s⚠ %s%s\n" "$(c 1';38;5;214')" "${op}" "$(reset)"
+        printf "  %s⚠ %s%s\n" "$(c "1;38;5;214")" "$op" "$(reset)"
       else
         printf "  %s➜%s %s\n" "$(fg 244)" "$(reset)" "${op#➜ }"
       fi

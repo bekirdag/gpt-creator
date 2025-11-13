@@ -1472,12 +1472,26 @@ def main():
         initial_repository_branch = dev_branch_name if branch_management_enabled else _get_current_branch()
         forced_canonical_status: Optional[str] = None
         forced_legacy_status: Optional[str] = None
+        branch_setup_retry_needed = False
+
+        def _is_checkout_blocked_by_local_changes(error_text: str) -> bool:
+            lowered = (error_text or "").lower()
+            if not lowered:
+                return False
+            patterns = (
+                "would be overwritten by checkout",
+                "please commit your changes or stash them",
+                "you have local changes to the following files",
+                "untracked working tree files would be overwritten",
+            )
+            return any(pattern in lowered for pattern in patterns)
 
         def _checkout_dev_branch() -> List[str]:
             notes: List[str] = []
-            nonlocal branch_management_enabled
+            nonlocal branch_management_enabled, branch_setup_retry_needed
             if not branch_management_enabled:
                 return notes
+            branch_setup_retry_needed = False
             current_branch = _get_current_branch()
             if current_branch == dev_branch_name:
                 update = _run_git_command(['pull', '--ff-only', 'origin', dev_branch_name])
@@ -1507,12 +1521,21 @@ def main():
                             )
                             return notes
                         stderr_text = (checkout.stderr or "").strip()
-                notes.append(
-                    _format_action_result(
-                        "branch",
-                        f"blocked — unable to checkout dev branch {dev_branch_name}: {stderr_text or 'see stderr'}"
+                if _is_checkout_blocked_by_local_changes(stderr_text):
+                    branch_setup_retry_needed = True
+                    notes.append(
+                        _format_action_result(
+                            "branch",
+                            f"warning — deferred checkout of dev branch {dev_branch_name} until pending changes are cleaned up ({stderr_text or 'dirty working tree'})"
+                        )
                     )
-                )
+                else:
+                    notes.append(
+                        _format_action_result(
+                            "branch",
+                            f"blocked — unable to checkout dev branch {dev_branch_name}: {stderr_text or 'see stderr'}"
+                        )
+                    )
                 branch_management_enabled = False
                 return notes
             _run_git_command(['pull', '--ff-only', 'origin', dev_branch_name])
@@ -1939,11 +1962,23 @@ def main():
                         normalized.append(str(entry))
             return normalized
 
-        def _append_section_block(buffer: List[str], title: str, entries: Sequence[str]) -> None:
+        def _append_section_block(
+            buffer: List[str],
+            title: str,
+            entries: Sequence[str],
+            *,
+            preserve_indent: bool = False,
+        ) -> None:
             buffer.append(title)
             if entries:
                 for item in entries:
-                    buffer.append(f"- {item.strip() if isinstance(item, str) else item}")
+                    if isinstance(item, str):
+                        text = item.rstrip()
+                        if not preserve_indent:
+                            text = text.strip()
+                    else:
+                        text = str(item)
+                    buffer.append(f"- {text}")
             else:
                 buffer.append("- (none)")
             buffer.append("")
@@ -2015,7 +2050,7 @@ def main():
             ]
             _append_section_block(summary_lines, "Plan", plan_list)
             _append_section_block(summary_lines, "Focus", focus_list)
-            _append_section_block(summary_lines, "Commands", command_list)
+            _append_section_block(summary_lines, "Commands", command_list, preserve_indent=True)
             _append_section_block(summary_lines, "Notes", note_list)
             summary_text = "\n".join(summary_lines).rstrip() + "\n"
             raw_body = raw_text if raw_text.endswith("\n") else raw_text + ("\n" if raw_text else "\n")
@@ -3660,6 +3695,29 @@ def main():
             LAST_PENDING_CHANGES.pop(cache_key, None)
         if pending_changes_before:
             preexisting_pending_changes = True
+
+        if branch_setup_retry_needed and not dirty_tree_blocked:
+            if pending_changes_before:
+                manual_notes.append(
+                    _format_action_result(
+                        "branch",
+                        "warning — dev checkout still blocked by pending changes; rerun after cleaning the working tree"
+                    )
+                )
+                branch_setup_retry_needed = False
+            else:
+                branch_management_enabled = True
+                branch_ready = False
+                manual_notes.append(
+                    _format_action_result(
+                        "branch",
+                        f"info — retrying dev checkout for clean working tree on {dev_branch_name}"
+                    )
+                )
+                manual_notes.extend(_checkout_dev_branch())
+                if branch_management_enabled:
+                    manual_notes.extend(_prepare_task_branch_if_needed())
+                branch_setup_retry_needed = False
 
         def _record_blocked_command(reason: str, command: str) -> None:
             nonlocal blocked_command_total

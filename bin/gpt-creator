@@ -275,6 +275,7 @@ fi
 
 GC_TEMPLATE_DIR="${CLI_ROOT}/assets/templates"
 export PATH="${CLI_ROOT}/bin:${PATH}"
+GC_LAST_RENDER_TASK_FOOTER=""
 
 gc_template_path() {
   local name="${1:?template name required}"
@@ -1668,7 +1669,7 @@ gc_render_task_end_panel() {
   local sp_pct
   sp_pct="$(gc_story_points_percent "$story_points_raw")"
 
-  local renderer_path=""
+  local renderer_path="" renderer_output=""
   if renderer_path="$(gc_renderer_path_if_enabled)"; then
     local -a end_lines=()
     end_lines+=("|-----------------------|")
@@ -1706,8 +1707,23 @@ gc_render_task_end_panel() {
     if (( notes_added )); then
       end_lines+=("")
     fi
-    printf '%s\n' "${end_lines[@]}" | "$renderer_path"
-    return
+    if renderer_output="$(
+      {
+        local line
+        for line in "${end_lines[@]}"; do
+          printf '%s\n' "$line"
+        done
+      } | "$renderer_path"
+    )"; then
+      if [[ -n "$renderer_output" ]]; then
+        printf '%s' "$renderer_output"
+        if declare -F render_task_end >/dev/null 2>&1; then
+          render_task_end "$task_id" "$status" || true
+          GC_LAST_RENDER_TASK_FOOTER="$task_id"
+        fi
+        return
+      fi
+    fi
   fi
 
   printf '\n%s╭────────────────────────────────────────────────────────────╮%s\n' "${gc_color_border:-}" "$c_reset"
@@ -1737,6 +1753,11 @@ gc_render_task_end_panel() {
   fi
 
   printf '\n%s░░░░░ END OF THE TASK WORK ░░░░░%s\n\n' "${gc_color_muted:-}" "$c_reset"
+
+  if declare -F render_task_end >/dev/null 2>&1; then
+    render_task_end "$task_id" "$status" || true
+    GC_LAST_RENDER_TASK_FOOTER="$task_id"
+  fi
 }
 
 gc_user_config_root() {
@@ -13492,8 +13513,11 @@ gc_finalize_and_report() {
   fi
 
   if declare -F render_task_end >/dev/null 2>&1; then
-    render_task_end "$finalize_task_id" "${status:-UNKNOWN}" || true
+    if [[ "${GC_LAST_RENDER_TASK_FOOTER:-}" != "$finalize_task_id" ]]; then
+      render_task_end "$finalize_task_id" "${status:-UNKNOWN}" || true
+    fi
   fi
+  GC_LAST_RENDER_TASK_FOOTER=""
 
   local reports_dir="${project_root}/.gpt-creator/reports"
   mkdir -p "$reports_dir"

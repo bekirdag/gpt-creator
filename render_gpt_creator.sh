@@ -48,6 +48,33 @@ bar() {
   printf "] %s%5.1f%%%s" "$(fg "$col")" "$pct" "$(reset)"
 }
 
+task_meter() {
+  local pct="${1:-0}"
+  local width="${2:-22}"
+  local fill
+  fill=$(awk -v p="$pct" -v w="$width" 'BEGIN{
+    if(p<0)p=0;
+    if(p>100)p=100;
+    printf "%d", (p/100.0)*w + 0.5
+  }')
+  (( fill < 0 )) && fill=0
+  (( fill > width )) && fill="$width"
+  local empty=$(( width - fill ))
+  local col
+  col="$(gradient_256 "$pct")"
+  printf "[%s" "$(fg "$col")"
+  rep "$fill" "█"
+  printf "%s" "$(reset)"
+  rep "$empty" "─"
+  printf "]"
+}
+
+task_badge() {
+  local label="$1"
+  local color="${2:-39}"
+  printf "%s%s%s %s %s%s" "$(fg 238)" "$(fg "$color")" "$(c "1")" "$label" "$(fg "$color")" "$(reset)"
+}
+
 fancy_progress_bar() {
   local pct="${1:-0}"
   local width="${2:-30}"
@@ -923,12 +950,20 @@ render_task_end() {
   needs_retry="$(grep -i 'STATUS: *needs-retry' <<<"$INPUT" || true)"
   next_line="$(grep -E '█▶|Working on task' <<<"$INPUT" | head -1)"
 
-  local tokens_n est_n ratio_p ratio_x
+  local tokens_n est_n ratio_p ratio_x sp_clean story_pct
   tokens_n="$(numclean "$tokens")"
   est_n="$(numclean "$est")"
   if [[ -n "$tokens_n" && -n "$est_n" && "$est_n" -gt 0 ]]; then
     ratio_p="$(awk -v a="$tokens_n" -v b="$est_n" 'BEGIN{printf "%.1f", (a/b)*100}')"
     ratio_x="$(awk -v a="$tokens_n" -v b="$est_n" 'BEGIN{printf "%.2f", (a/b)}')"
+  fi
+  sp_clean="$(numclean "$sp")"
+  if [[ -n "$sp_clean" ]]; then
+    story_pct="$(awk -v s="$sp_clean" 'BEGIN{
+      if(s<0)s=0;
+      if(s>13)s=13;
+      printf "%.1f", (s/13)*100
+    }')"
   fi
 
   local project_root="${GC_GIT_DIR:-${PROJECT_ROOT:-$PWD}}"
@@ -947,34 +982,45 @@ render_task_end() {
     done < <(python3 "$GIT_LAST_HELPER" "$git_state" 2>/dev/null)
   fi
 
-  render_box_header "END OF TASK" 60
+  local header_col border_col
+  header_col="$(c "1;38;5;39")"
+  border_col="$(c "1;38;5;214")"
+  printf "\n%s╭────────────────────────────────────────────────────────────╮%s\n" "$border_col" "$(reset)"
+  printf "│  %sEND OF TASK%s                                             │\n" "$header_col" "$(reset)"
+  printf "%s╰────────────────────────────────────────────────────────────╯%s\n\n" "$border_col" "$(reset)"
 
   printf "  "
-  badge "TASK ${id:-N/A}" 45
+  task_badge "TASK ${id:-N/A}" 45
   printf "  "
-  [[ -n "$status" ]] && badge "STATUS ${status}" "$([[ "$status" =~ ^(COMPLETE|COMPLETED)$ ]] && echo 46 || echo 208)"
-  printf "  "
-  [[ -n "$term"   ]] && badge "TERMINAL ${term}"  111
-  printf "  "
-  [[ -n "$sp"     ]] && badge "SP ${sp}"          39
-  printf "  "
-  [[ -n "$time"   ]] && badge "TIME ${time}"      221
+  if [[ -n "$status" ]]; then
+    local status_col
+    if [[ "$status" =~ ^(COMPLETE|COMPLETED)$ ]]; then
+      status_col=46
+    else
+      status_col=208
+    fi
+    task_badge "STATUS ${status}" "$status_col"
+    printf "  "
+  fi
+  [[ -n "$term" ]] && { task_badge "TERMINAL ${term}" 111; printf "  "; }
+  [[ -n "$sp"   ]] && { task_badge "SP ${sp}" 39; printf "  "; }
+  [[ -n "$time" ]] && task_badge "TIME ${time}" 221
   printf "\n\n"
 
-  if [[ -n "$sp" ]]; then
-    printf "  %sStory points:%s " "$(lc 111)" "$(reset)"
-    bar "$(awk -v s="$sp" 'BEGIN{ if(s<0)s=0; if(s>13)s=13; printf "%.1f",(s/13)*100 }')" 28
-    printf "\n"
+  if [[ -n "$story_pct" ]]; then
+    printf "  %s📈 Story points:%s " "$(lc 111)" "$(reset)"
+    task_meter "$story_pct" 23
+    printf "  %s%4.1f%%%s (SP)\n" "$(fg 244)" "$story_pct" "$(reset)"
   fi
 
   if [[ -n "$tokens_n" || -n "$est_n" ]]; then
-    printf "  %sTokens used:%s  %'d\n" "$(lc 111)" "$(reset)" "${tokens_n:-0}"
+    printf "  %s🪙 Tokens used:%s  %s%'d%s\n" "$(lc 111)" "$(reset)" "$(c "1")" "${tokens_n:-0}" "$(reset)"
     if [[ -n "$ratio_p" ]]; then
       printf "    "
-      bar "$ratio_p" 30
-      printf "  used vs prompt est (x%s)\n" "${ratio_x}"
+      task_meter "$ratio_p" 23
+      printf "  %s%5.1f%%%s used vs prompt est (x%s)\n" "$(fg 244)" "$ratio_p" "$(reset)" "${ratio_x}"
     fi
-    [[ -n "$est_n" ]] && printf "  %sEst. tokens:%s   %'d\n" "$(lc 111)" "$(reset)" "${est_n}"
+    [[ -n "$est_n" ]] && printf "  %s📊 Est. tokens:%s %s%'d%s\n" "$(lc 111)" "$(reset)" "$(c "1")" "${est_n}" "$(reset)"
   fi
   printf "\n"
 
@@ -1003,14 +1049,14 @@ render_task_end() {
   if [[ -n "$tb_exception" || -n "$tb_file" ]]; then
     printf "%s💥 Exception%s\n" "$(lc 203)" "$(reset)"
     printf "────────────────────────────────────────────────────────────\n"
-    [[ -n "$tb_exception" ]] && printf "  %s%s%s\n" "$(c 1';38;5;203')" "$tb_exception" "$(reset)"
+    [[ -n "$tb_exception" ]] && printf "  %s%s%s\n" "$(c "1;38;5;203")" "$tb_exception" "$(reset)"
     [[ -n "$tb_file"      ]] && printf "  %s%s%s\n" "$(fg 245)" "$tb_file" "$(reset)"
     [[ -n "$tb_note"      ]] && printf "  %s%s%s\n" "$(fg 245)" "$tb_note" "$(reset)"
     printf "\n"
   fi
 
   if [[ -n "$needs_retry" ]]; then
-    printf "  %s⚠ STATUS: NEEDS-RETRY%s\n\n" "$(c 1';38;5;208')" "$(reset)"
+    printf "  %s⚠ STATUS: NEEDS-RETRY%s\n\n" "$(c "1;38;5;208")" "$(reset)"
   fi
 
   if [[ -n "$next_line" ]]; then

@@ -142,6 +142,7 @@ def capture(field: str, value: str) -> None:
     except Exception:
         pass
 
+ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 number_pattern = r'((?:\d[\d,._]*|\d*\.\d+)(?:[kKmMbBgGtT]?))'
 line_patterns = [
     ("total_tokens", re.compile(r'tokens[\s_\-]*used[^0-9]{0,16}' + number_pattern, re.IGNORECASE)),
@@ -161,13 +162,15 @@ line_patterns = [
 pending_total_line = False
 
 for line in raw_text.splitlines():
-    if not line:
+    clean_line = ansi_escape.sub("", line)
+    stripped = clean_line.strip()
+    if not stripped and not pending_total_line:
         continue
-    stripped = line.strip()
     lower = stripped.lower()
-    if pending_total_line:
+    if pending_total_line and stripped:
         capture("total_tokens", stripped)
         pending_total_line = False
+        continue
     if lower.startswith("tokens used"):
         remainder = stripped[len("tokens used"):].strip()
         if remainder.startswith(":"):
@@ -178,7 +181,7 @@ for line in raw_text.splitlines():
             pending_total_line = True
         continue
     for field, pattern in line_patterns:
-        for match in pattern.finditer(line):
+        for match in pattern.finditer(clean_line):
             capture(field, match.group(1))
 
 if "total_tokens" not in fields:

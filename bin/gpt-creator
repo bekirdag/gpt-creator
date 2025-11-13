@@ -1283,6 +1283,22 @@ gc_format_tokens_compact() {
   printf '%s' "$(printf '%d' "$raw" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"
 }
 
+gc_log_tokens_used() {
+  local total="${1:-0}"
+  local prompt="${2:-0}"
+  local completion="${3:-0}"
+  if [[ ! "$total" =~ ^[0-9]+$ ]] || (( total <= 0 )); then
+    return
+  fi
+  printf 'tokens used\n%s\n' "$(gc_format_tokens_compact "$total")"
+  if [[ "$prompt" =~ ^[0-9]+$ ]] && (( prompt > 0 )); then
+    printf 'prompt tokens\n%s\n' "$(gc_format_tokens_compact "$prompt")"
+  fi
+  if [[ "$completion" =~ ^[0-9]+$ ]] && (( completion > 0 )); then
+    printf 'completion tokens\n%s\n' "$(gc_format_tokens_compact "$completion")"
+  fi
+}
+
 gc_render_task_banner() {
   local header_position="top"
   case "$1" in
@@ -6437,6 +6453,7 @@ codex_call() {
         if [[ "$attempt_tokens" =~ ^[0-9]+$ ]]; then
           GC_CODEX_CALL_TOKEN_ACCUM=$((GC_CODEX_CALL_TOKEN_ACCUM + attempt_tokens))
         fi
+        gc_log_tokens_used "${GC_LAST_CODEX_TOTAL_TOKENS:-0}" "${GC_LAST_CODEX_PROMPT_TOKENS:-0}" "${GC_LAST_CODEX_COMPLETION_TOKENS:-0}"
         if [[ "${GC_STAGE_LIMIT_LAST_STEP:-}" == "$call_step" ]]; then
           skip_codex=1
           skip_codex_reason="stage-limit"

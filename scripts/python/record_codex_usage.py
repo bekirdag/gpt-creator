@@ -158,8 +158,24 @@ line_patterns = [
     ("cached_tokens", re.compile(r'\bcached\s*=\s*' + number_pattern, re.IGNORECASE)),
 ]
 
+pending_total_line = False
+
 for line in raw_text.splitlines():
     if not line:
+        continue
+    stripped = line.strip()
+    lower = stripped.lower()
+    if pending_total_line:
+        capture("total_tokens", stripped)
+        pending_total_line = False
+    if lower.startswith("tokens used"):
+        remainder = stripped[len("tokens used"):].strip()
+        if remainder.startswith(":"):
+            remainder = remainder[1:].strip()
+        if remainder:
+            capture("total_tokens", remainder)
+        else:
+            pending_total_line = True
         continue
     for field, pattern in line_patterns:
         for match in pattern.finditer(line):

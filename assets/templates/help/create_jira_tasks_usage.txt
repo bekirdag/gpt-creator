@@ -4,7 +4,7 @@ Generate Jira epics, user stories, and tasks directly from project documentation
 
 Options:
   --project PATH     Project root (defaults to current directory)
-  --model NAME       Codex model to use (default: gpt-5-codex-mini)
+  --model NAME       Codex model to use (default: gpt-5.1-codex (high))
   --force            Rebuild tasks.db from scratch (ignore saved progress)
   --dry-run          Prepare prompts but do not call Codex
   -h, --help         Show this help message

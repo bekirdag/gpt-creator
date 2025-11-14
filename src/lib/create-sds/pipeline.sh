@@ -147,7 +147,7 @@ csds::extract_json() {
 
 csds::init() {
   CSDS_PROJECT_ROOT="${1:?project root required}"
-  local csds_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5-codex-mini}}}"
+  local csds_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex}}}"
   CSDS_MODEL="${2:-$csds_default_model}"
   CSDS_DRY_RUN="${3:-0}"
   CSDS_FORCE="${4:-0}"

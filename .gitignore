@@ -98,3 +98,5 @@ src+scripts.zip
 *.zip
 src+scripts.zip
 src+scripts.zip
+tmp/
+tmp/*

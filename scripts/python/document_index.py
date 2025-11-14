@@ -75,6 +75,7 @@ ESTIMATE_MARGIN = 1.06
 DEFAULT_SOFT_LIMIT_RATIO = 1.0
 DEFAULT_MIN_OUTPUT_TOKENS = 1024
 MODEL_CONTEXTS: Dict[str, int] = {
+    "gpt-5.1-codex": 1001024,
     "gpt-5-codex": 1001024,
     "gpt-5-codex-mini": 1001024,
     "gpt-5": 1001024,

@@ -11,6 +11,7 @@ Options:
                         Keep task status as complete even when follow-up notes are recorded
   --auto-push[=REMOTE/BRANCH]
                         Push commits after each successful task (defaults to upstream or origin/current)
+  --agent NAME         Override the Codex model for this run (alias: --codex-model; default: gpt-5.1-codex (high))
   --keep-artifacts     Retain Codex prompt/output files for each task (default cleans up)
   --memory-cycle       Process one task at a time, prune caches, and auto-resume to limit memory usage
   --batch-size NUM     Process at most NUM tasks this run, then pause (default: unlimited)

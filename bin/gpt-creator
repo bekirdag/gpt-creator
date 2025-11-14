@@ -1216,8 +1216,8 @@ export APP_NAME VERSION
 
 # Defaults (override via env)
 CODEX_BIN="${CODEX_BIN:-codex}"
-CODEX_MODEL="${CODEX_MODEL:-gpt-5-codex-mini}"
-CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-gpt-5-codex-mini}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.1-codex}"
+CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-gpt-5.1-codex}"
 
 # Stage-aware model selection (defaults fall back to CODEX_MODEL for compatibility)
 CODEX_MODEL_LOW="${CODEX_MODEL_LOW:-${CODEX_MODEL}}"
@@ -3001,7 +3001,7 @@ gc_budget_log_stage() {
   local run_id="${GC_BUDGET_RUN_ID:-manual}"
   local story_ref="${GC_BUDGET_STORY_ID:-}"
   local task_ref="${GC_BUDGET_TASK_ID:-}"
-  local model_name="${CODEX_MODEL:-gpt-5-codex-mini}"
+  local model_name="${CODEX_MODEL:-gpt-5.1-codex}"
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   local blocked_flag="${blocked_quota:-false}"
@@ -6341,7 +6341,7 @@ gc_codex_profile_for_step() {
   esac
 
   if [[ -z "$model_value" ]]; then
-    model_value="${CODEX_MODEL:-gpt-5-codex-mini}"
+    model_value="${CODEX_MODEL:-gpt-5.1-codex}"
   fi
   if [[ -z "$reasoning_value" ]]; then
     if [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
@@ -7663,6 +7663,7 @@ cmd_work_on_tasks() {
   local prompt_safeguard_helper=""
   local empty_apply_mode=""
   local prepare_prompts=1
+  local agent_model_override=""
 
   local auto_review_enabled=1
   if [[ -n "${GC_AUTO_REVIEW:-}" ]]; then
@@ -7782,6 +7783,16 @@ cmd_work_on_tasks() {
         else
           export GC_AUTO_PUSH_REMOTE="$auto_push_arg"
         fi
+        shift
+        ;;
+      --agent|--codex-model)
+        agent_model_override="${2:-}"
+        [[ -n "$agent_model_override" ]] || die "--agent requires a Codex model name"
+        shift 2
+        ;;
+      --agent=*|--codex-model=*)
+        agent_model_override="${1#*=}"
+        [[ -n "$agent_model_override" ]] || die "--agent requires a Codex model name"
         shift
         ;;
       --keep-artifacts) keep_artifacts=1; shift;;
@@ -7948,6 +7959,15 @@ cmd_work_on_tasks() {
   # shellcheck disable=SC2034
   GC_LAST_VERIFY_STATUS="skipped"
   export GC_LAST_VERIFY_SUMMARY=""
+
+  if [[ -n "$agent_model_override" ]]; then
+    CODEX_MODEL="$agent_model_override"
+    CODEX_MODEL_LOW="$agent_model_override"
+    CODEX_MODEL_NON_CODE="$agent_model_override"
+    CODEX_MODEL_CODE="$agent_model_override"
+    export CODEX_MODEL CODEX_MODEL_LOW CODEX_MODEL_NON_CODE CODEX_MODEL_CODE
+    info "Codex agent override active → ${agent_model_override}"
+  fi
   export GC_LAST_VERIFY_REPORT=""
   export GC_LAST_VERIFY_DETAILS=""
   GC_LAST_AUTO_PUSH_ERROR=""

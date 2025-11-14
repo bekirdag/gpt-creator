@@ -140,7 +140,7 @@ cjt::derive_project_title() {
 
 cjt::init() {
   CJT_PROJECT_ROOT="${1:?project root required}"
-  local cjt_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5-codex-mini}}}"
+  local cjt_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex}}}"
   CJT_MODEL="${2:-$cjt_default_model}"
   CJT_FORCE="${3:-0}"
   CJT_SKIP_REFINE="${4:-0}"

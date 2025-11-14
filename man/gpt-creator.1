@@ -184,6 +184,7 @@ Sweep legacy Codex work artifacts (for example \fItmp_*.json\fR, \fIfinal_*.json
 Drive Codex over tasks sourced from the SQLite backlog, apply returned JSON diff/file instructions automatically, and persist task/story status back into the database for precise resume support.
 Artifacts (prompt/output pairs) are removed after each successful task to limit memory use unless \fB--keep-artifacts\fR is supplied.
 Use \fB--batch-size\fR to pause after a fixed number of tasks and \fB--sleep-between\fR to insert delays between Codex runs when conserving resources.
+\fB--agent\fR MODEL (alias \fB--codex-model\fR) overrides the Codex model for the current run so you can hop between Codex tiers (default \fIgpt-5.1-codex\fR, the high tier) without touching global config.
 Codex invocations are also capped by the \fBGC_CODEX_EXEC_MAX_DURATION\fR watchdog (default 3600 seconds) to prevent runaway loops; set it to 0 when you explicitly need longer manual sessions.
 \fB--context-lines\fR controls how many lines from the shared context appendix are appended to each prompt (default 400) and \fB--context-none\fR omits that appendix entirely for minimal prompts.
 \fB--context-file-lines\fR clips each staged document before inclusion, while \fB--context-skip\fR accepts repeatable glob patterns to drop noisy files (for example, \fB--context-skip '*.css'\fR).

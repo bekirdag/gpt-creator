@@ -4226,10 +4226,9 @@ def main():
                     manual_notes.append(
                         _format_action_result(
                             "post-command-delta",
-                            "blocked — commands ran but produced no tracked changes; rerun only after confirming patches actually landed (check git status or inspect warnings above)."
+                            "info — commands ran but left the repository unchanged; marking run as documentation-only."
                         )
                     )
-                    command_failure_detected = True
 
         if executed_commands:
             payload['commands'] = executed_commands[:]

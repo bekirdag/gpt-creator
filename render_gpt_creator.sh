@@ -1049,7 +1049,8 @@ render_task_end() {
 
   if [[ -n "$sp_pct" ]]; then
     printf "  %sStory points:%s " "$(lc 111)" "$(reset)"
-    bar "$sp_pct" 28
+    # bar "$sp_pct" 28
+    solid_progress_bar "$sp_pct" 40 "Complete"
     printf " %s%4.1f%%%s (SP)\n" "$(fg 244)" "$sp_pct" "$(reset)"
   fi
 
@@ -1058,7 +1059,8 @@ render_task_end() {
     printf "  %sTokens used:%s  %s%'d%s\n" "$(lc 111)" "$(reset)" "$(c "1")" "$tokens_val" "$(reset)"
     if [[ -n "$ratio_p" ]]; then
       printf "    "
-      bar "$ratio_p" 30
+      # bar "$ratio_p" 30
+      solid_progress_bar "$ratio_p" 40 "Complete"
       printf "  %s%5.1f%%%s used vs prompt est (x%s)\n" "$(fg 244)" "$ratio_p" "$(reset)" "$ratio_x"
     fi
     if [[ -n "$est_n" ]]; then
@@ -1147,7 +1149,7 @@ render_task_end() {
     printf "\n"
   fi
 
-  printf "    %s%s%s\n\n" "$(fg 245)" "░░░░░ END OF THE TASK WORK ░░░░░" "$(reset)"
+  printf "    %s%s%s\n\n" "$(fg 245)" "░░░░░ END OF THE TASK WORK ░░░░░\n\n\n\n" "$(reset)"
 }
 
 render_epic_overview() {

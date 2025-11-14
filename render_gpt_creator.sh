@@ -1149,7 +1149,8 @@ render_task_end() {
     printf "\n"
   fi
 
-  printf "    %s%s%s\n\n" "$(fg 245)" "░░░░░ END OF THE TASK WORK ░░░░░\n\n\n\n" "$(reset)"
+  printf "    %s%s%s\n\n" "$(fg 245)" "░░░░░ END OF THE TASK WORK ░░░░░" "%s%s%s%s\n\n\n\n" "$(reset)"
+  printf "────────────────────────────────────────────────────────────\n"
 }
 
 render_epic_overview() {

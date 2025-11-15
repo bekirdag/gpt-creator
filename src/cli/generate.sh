@@ -9,6 +9,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
+source "${ROOT_DIR}/src/cli/lib/agents.sh"
 
 # shellcheck disable=SC1091
 if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
@@ -33,6 +34,7 @@ show_usage() {
 : "${PROJECT_ROOT:=${ROOT_DIR}}"
 : "${CODEX_MODEL:=gpt-5-high}"
 : "${CODEX_CMD:=codex}"
+AGENT_NAME=""
 
 TARGET="all"
 ARGS=()
@@ -40,6 +42,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     all|api|web|admin) TARGET="$1"; shift ;;
     -m|--model) CODEX_MODEL="$2"; shift 2 ;;
+    --agent) AGENT_NAME="${2:?--agent requires a name}"; shift 2 ;;
     --codex-cmd) CODEX_CMD="$2"; shift 2 ;;
     -y|--yes) GC_NONINTERACTIVE=1; shift ;;
     -n|--dry-run) GC_DRY_RUN=1; shift ;;
@@ -51,6 +54,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 export CODEX_MODEL CODEX_CMD GC_NONINTERACTIVE GC_DRY_RUN GC_SKIP_INSTALL PROJECT_ROOT
+
+if [[ -n "$AGENT_NAME" ]]; then
+  if resolved_model="$(gc_cli_resolve_agent_model "$PROJECT_ROOT" "$AGENT_NAME")"; then
+    CODEX_MODEL="$resolved_model"
+    export CODEX_MODEL
+    log_info "[agents] generate using agent '${AGENT_NAME}' (model ${CODEX_MODEL})"
+  else
+    log_warn "[agents] agent '${AGENT_NAME}' not found; treating argument as raw model id"
+    CODEX_MODEL="$AGENT_NAME"
+    export CODEX_MODEL
+  fi
+fi
 
 run_part () {
   local part="$1"

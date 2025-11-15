@@ -11,6 +11,13 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+HELPERS_DIR = REPO_ROOT / "scripts" / "python"
+if str(HELPERS_DIR) not in sys.path:
+    sys.path.insert(0, str(HELPERS_DIR))
+
+from ensure_agents_schema import ensure_agents_schema
+
 
 def read_payload(path: Path) -> Dict[str, List[Dict[str, object]]]:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -205,6 +212,7 @@ def ensure_table(cur: sqlite3.Cursor) -> None:
         )
         """
     )
+    ensure_agents_schema(cur)
 
 
 def ensure_column(cur: sqlite3.Cursor, table: str, column: str, definition: str) -> None:

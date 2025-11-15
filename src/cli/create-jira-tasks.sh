@@ -7,6 +7,7 @@ ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
+source "${ROOT_DIR}/src/cli/lib/agents.sh"
 
 source "$ROOT_DIR/src/lib/create-jira-tasks/pipeline.sh"
 
@@ -18,6 +19,7 @@ PROJECT_PATH="$PWD"
 MODEL="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex}}}"
 FORCE=0
 DRY_RUN=0
+AGENT_NAME=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -27,6 +29,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --model)
       MODEL="${2:?--model requires a value}"
+      shift 2
+      ;;
+    --agent)
+      AGENT_NAME="${2:?--agent requires a name}"
       shift 2
       ;;
     --force)
@@ -48,6 +54,16 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "$AGENT_NAME" ]]; then
+  if resolved_model="$(gc_cli_resolve_agent_model "$PROJECT_PATH" "$AGENT_NAME")"; then
+    MODEL="$resolved_model"
+    echo "[agents] create-jira-tasks using agent '${AGENT_NAME}' (model ${MODEL})"
+  else
+    echo "[agents] create-jira-tasks agent '${AGENT_NAME}' missing; treating argument as raw model id" >&2
+    MODEL="$AGENT_NAME"
+  fi
+fi
 
 cjt::init "$PROJECT_PATH" "$MODEL" "$FORCE" 0 "$DRY_RUN"
 cjt::run_pipeline

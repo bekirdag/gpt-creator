@@ -1,0 +1,22 @@
+Usage: gpt-creator list-agents [--project PATH] [--client CLIENT] [--model MODEL]
+                               [--active true|false] [--name-like SUBSTR]
+                               [--limit N] [--json]
+
+List stored agents from the project tasks database. Soft-deleted agents remain
+in the DB (with `Active=no`) so they can be reinstated later via `edit-agent`.
+
+Filters:
+  --client CLIENT       Only show agents for this client id.
+  --model MODEL         Only show agents using this specific model.
+  --active true|false   Filter by activation status (defaults to all).
+  --name-like TEXT      Case-insensitive substring match on the agent name.
+  --tag TAG             Filter by tag (repeatable).
+  --limit N             Clip the number of rows returned.
+
+Output:
+  Default output is a tab-separated table with Name, Client, Model, summaries,
+  and active flag.
+  --json emits the raw rows (without document bodies) for further scripting.
+
+Always run commands inside the same project directory or pass --project PATH so
+the CLI can locate `.gpt-creator/staging/plan/tasks/tasks.db`.

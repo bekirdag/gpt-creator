@@ -7,6 +7,8 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
+from ensure_agents_schema import ensure_agents_schema
+
 
 def slugify(text: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
@@ -235,6 +237,7 @@ def main() -> int:
             )
         """
         )
+        ensure_agents_schema(cur)
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS doc_observations (

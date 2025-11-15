@@ -145,6 +145,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
    gpt-creator create-db-dump --project /path/to/project
    ```
    - `create-db-dump` synthesizes a MySQL schema and seed dump, stores them under `.gpt-creator/staging/plan/create-db-dump/sql/`, and finishes with a Codex review to ensure consistency across tables, constraints, and seed data.
+   - All of the Codex-backed doc commands above accept `-m/--model <model-id>` to override the `CODEX_MODEL`/`CODEX_MODEL_NON_CODE` defaults for that single run (for example, `gpt-creator create-sds --project /path/to/project --model gpt-4.1-mini`).
 
 5. **Work Jira backlog** (optional):
    ```bash
@@ -169,17 +170,81 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
    # Browse epics → stories → tasks from the backlog database
    gpt-creator backlog --project /path/to/project          # defaults to epic summaries
 
-   # Drill into a specific epic or story
-   gpt-creator backlog --project /path/to/project --item-children epic-slug
+  # Drill into a specific epic or story
+  gpt-creator backlog --project /path/to/project --item-children epic-slug
 
-   # Show aggregate task progress
-   gpt-creator backlog --project /path/to/project --progress
-   ```
+  # Show aggregate task progress
+  gpt-creator backlog --project /path/to/project --progress
+
+  # Manage reusable agents (job + character personas)
+  gpt-creator create-agent --project /path/to/project --name Fixer-A \
+      --client openai --model gpt-5.1-codex \
+      --job-doc agents/jobs/bug-fixer.md \
+      --character-doc agents/chars/strict.md
+  gpt-creator list-agents --project /path/to/project
+  gpt-creator work-on-tasks --project /path/to/project --agent Fixer-A
+  gpt-creator export-agents --project /path/to/project --output agents.json
+  gpt-creator import-agents --project /another/project --input agents.json
+  ```
+- Client-specific agents (OpenAI/Anthropic/xAI) snapshot their API credentials
+  from the corresponding env vars when created. Ensure the following env vars
+  are populated before running `create-agent`, or pass `--allow-missing-key`
+  when you want to stage the agent first and wire up credentials later (the CLI
+  will warn that keys are still required). `--json` responses now return
+  `{"agent": {...}, "warnings": [...]}` so automation can capture both the
+  agent payload and any missing-credential warnings in one response:
+  - **OpenAI**: `OPENAI_API_KEY` (optional `OPENAI_API_BASE`, `OPENAI_ORG_ID`)
+  - **Anthropic**: `ANTHROPIC_API_KEY` (optional `ANTHROPIC_API_BASE`)
+  - **xAI (Grok)**: `GROK_API_KEY` (optional `GROK_API_BASE`, `GROK_ORG_ID`)
+  Run `gpt-creator keys set <service>` (`openai`, `anthropic`, `grok`) to store
+  these values securely under `~/.config/gpt-creator/api-keys.env`.
+- The agent registry is LLM-agnostic. `config/agent_clients.json` now accepts
+  adapter metadata so you can wire up any CLI-based client (Codex, Gemini,
+  custom wrappers, etc.) without changing code. Use `adapter: "command"` with a
+  `command` array (placeholders such as `{model}` are substituted at runtime) and
+  optional env overrides. See `docs/agents.md` for a Gemini example and point
+  `GC_AGENT_REGISTRY_PATH` at a different file when each project needs its own
+  catalog.
+- Providers/models from the [Catwalk](https://catwalk.charm.sh) catalog are
+  fetched automatically every 24 hours and merged into `list-clients` output so
+  you can explore newer LLMs without editing the registry file manually. The
+  cache (`~/.config/gpt-creator/cache/llm_catalog.json`) is used as an offline
+  fallback, and `python3 scripts/python/agents_registry.py catalog --refresh`
+  forces a manual refresh. Set `GC_AGENT_CATALOG_DISABLE=1` to skip the sync on
+  air-gapped hosts. To persist the catalog directly into a workspace database,
+  invoke `python3 scripts/python/llm_catalog.py --db-path /path/to/tasks.db` (add
+  `--refresh` to bypass the TTL).
+- Use `gpt-creator list-llms` to inspect the catalog (filters: `--provider`,
+  `--adapter`, `--source`, `--model`, `--name-like`, `--status`,
+  `--needs-key`). The output now highlights API key warnings (disable with
+  `--no-warn-keys`). Run
+  `gpt-creator check-llms` to detect whether CLI adapters (Codex, Gemini, etc.)
+  are installed locally; the results are stored back into `tasks.db` so you can
+  see which personas are runnable on a given machine. Pass
+  `--install-missing` to `check-llms` if you want gpt-creator to invoke the
+  stored install command for each missing adapter (Claude Code, Gemini CLI,
+  Codestral, DeepSeek, Code Llama, StarCoder2, Qwen Code, etc.). Commands are
+  per-OS (Linux/macOS/Windows) and typically print or run the vendor’s official
+  installer so teammates can bootstrap the right tooling quickly. Add
+  `--health-check` to `check-llms` when you want a lightweight `--version`
+  probe for installed adapters before running a long job. When you want to
+  inspect or run a single installer interactively, use
+  `gpt-creator install-llm --provider <id> [--run --yes]`. Use
+  `gpt-creator sync-llms` to pre-seed the catalog with all registry entries
+  (optionally `--refresh` to pull the Catwalk API at the same time) in brand-new
+  workspaces. In CI, add `--require-adapters --require-keys` (or just `--ci`) so the
+  command fails early when adapters or credentials are missing.
+- `create-agent --summarize` (and `edit-agent --resummarize --summarize`) call the
+  active LLM to produce concise job/character summaries. This consumes extra
+  tokens, so override the summarizer provider/model via
+  `GC_AGENT_SUMMARIZER_CLIENT` / `GC_AGENT_SUMMARIZER_MODEL`, or use the CLI
+  flags `--summarize-client` / `--summarize-model` to point at a cheaper tier.
   - `create-jira-tasks` crawls the staged docs (PDR, SDS, OpenAPI, SQL, UI samples) to synthesize epics → user stories → detailed task JSON under `.gpt-creator/staging/plan/create-jira-tasks/json/` and refreshes the consolidated payload/SQLite database. Progress is recorded in `.gpt-creator/staging/plan/create-jira-tasks/state.json` (use `--force` to restart). The extractor now strips Codex code fences, normalizes smart quotes, removes stray comments/trailing commas, and even coerces Python-style literals before giving up.
+  - Pass `-m/--model <model-id>` to `create-jira-tasks` whenever you need to override the Codex tier for backlog synthesis without touching the global `CODEX_MODEL_NON_CODE`.
   - `migrate-tasks` regenerates `.gpt-creator/staging/plan/tasks/tasks.db` directly from the JSON artifacts — ideal when you want to sync the DB without re-running Codex.
   - `refine-tasks` streams tasks from `tasks.db` one at a time, rehydrates the original story context, runs Codex against the staged docs, writes the refined JSON to `json/refined`, and updates the task row in SQLite immediately after each successful response. Use `--force` to reset refinement flags and reprocess every task.
   - `create-tasks` snapshots a Jira markdown export into the same database if you already maintain backlog files.
-  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, `--from-task TASK` (or `--fresh-from`) to rewind the backlog so execution resumes from that task id or `story-slug:position` reference, and `--force` to reset all story/task statuses to `pending` before the run. Pass `--prepare-prompts` when you explicitly want story prompts regenerated/published during the run (skipped by default to avoid redundant prep). The runner now invokes `order-tasks` automatically, populates `task_dependencies` on demand, recomputes the deterministic cross-story DAG queue (persisted to the `global_order` column in `tasks.db`), and always advances to the next ready task across the entire backlog. It still blocks early if the workspace has merge conflicts, dirty/untracked files, or Prisma schema drift (detected via `prisma migrate diff`), so resolve those issues before retrying. When you need to temporarily swap Codex tiers, pass `--agent MODEL` (alias `--codex-model`) to override the per-run model (default `gpt-5.1-codex`, the high tier).
+  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically. Use `--fresh` to restart from the first story without clearing stored progress, `--from-task TASK` (or `--fresh-from`) to rewind the backlog so execution resumes from that task id or `story-slug:position` reference, and `--force` to reset all story/task statuses to `pending` before the run. Pass `--prepare-prompts` when you explicitly want story prompts regenerated/published during the run (skipped by default to avoid redundant prep). The runner now invokes `order-tasks` automatically, populates `task_dependencies` on demand, recomputes the deterministic cross-story DAG queue (persisted to the `global_order` column in `tasks.db`), and always advances to the next ready task across the entire backlog. It still blocks early if the workspace has merge conflicts, dirty/untracked files, or Prisma schema drift (detected via `prisma migrate diff`), so resolve those issues before retrying. When you need to switch personas, pass `--agent NAME` to reuse a stored agent (see [Agents](docs/agents.md)); the CLI injects the agent’s job/character docs and selects the configured client/model. `--agent MODEL` still works as the legacy “raw model id” override.
   - `order-tasks` is a utility command that (re)hydrates `task_dependencies` from each task’s metadata and rebuilds the stored DAG order. Pass `--force` to drop and repopulate the table even when dependencies already exist.
   - `backlog` renders summaries directly to the terminal: run it with no extra flags (or `--type epics`) to list each epic with progress metrics, `--type stories` for an all-story table, `--item-children <slug>` to drill into an epic or story, `--task-details <id>` to print a single task, and `--progress` to draw an overall task progress bar. Task tables now show the stored DAG order, and `--dag-limit N` prints the next `N` globally prioritised tasks (default 20). Use `--project` (or legacy `--root`) to point at a different workspace.
   - The legacy `iterate` command is deprecated.
@@ -220,7 +285,7 @@ Useful flags:
 - `--allow-dirty` → bypass the clean-tree check when you intentionally have local edits.
 - `--message "apply-block: custom summary"` → override the default commit message.
 
-When crafting prompts/instructions for Codex or other agents, explicitly require them to (1) emit the block JSON for each file and (2) run `gpt-creator apply-block` instead of heredocs. The guardrails will reject non-compliant commands, so giving the model the sanctioned workflow up front avoids blocked/no-op runs.
+When crafting prompts/instructions for Codex or other agents, explicitly require them to (1) emit the block JSON for each file and (2) run `gpt-creator apply-block` instead of heredocs. The guardrails will reject non-compliant commands, so giving the model the sanctioned workflow up front avoids blocked/no-op runs. Agent-specific guardrails can be captured via `create-agent --guardrails` / `edit-agent --guardrails` when you need additional persona-specific instructions.
 
 ### Backlog Browser
 
@@ -358,6 +423,7 @@ gpt-creator generate all --project /path/to/project
   - `docker/` (Dockerfiles, Compose, nginx)
 - `.tmpl` files receive `DB_NAME`, `DB_USER`, `DB_PASSWORD`, and an auto-selected MySQL host port (first free port ≥ 3306).
 - Outputs are scaffolds; wire business logic, DTOs, and UI flows manually or via Codex responses.
+- Add `-m/--model <model-id>` when running `gpt-creator generate ...` to override the `CODEX_MODEL` default for that single invocation; the flag propagates down to `generate api|web|admin` when you target an individual surface.
 
 ### 5. Database Helpers
 ```
@@ -366,6 +432,7 @@ gpt-creator db import      # mysql < staging/inputs/sql/*.sql
 gpt-creator db seed        # placeholder for custom seeds
 ```
 - The `.env` file already holds the DB host/user/password (including the mapped host port), so these commands work without extra setup.
+- `gpt-creator generate-db --sql dump.sql [--model gpt-4.1-mini]` introspects a live MySQL instance when `DATABASE_URL` is reachable and falls back to a Codex-assisted Prisma/TypeORM schema when offline; `--model` controls the Codex tier used during that fallback synthesis.
 
 ### 6. Run Stack
 ```
@@ -393,6 +460,7 @@ gpt-creator create-tasks --project /path/to/project --jira docs/jira.md
  - Preserves story slugs, task ordering, and prior status data unless `--force` is supplied (which regenerates the DB without reusing saved progress).
  - All task attributes (description, assignees, tags, acceptance criteria, dependencies, estimates) are persisted as columns within the `tasks` table for downstream tooling.
  - Captures additional delivery metadata per task (story points, document links, idempotency notes, rate limits, RBAC, messaging/workflows, performance targets, observability, endpoints, sample payloads, and story/epic reference IDs) to support richer automation.
+ - Override the Codex tier for this extractor with `-m/--model <model-id>` (defaults to `CODEX_MODEL_NON_CODE` from your environment or config).
 
 ### 9. Generate Database Dumps
 ```
@@ -401,6 +469,7 @@ gpt-creator create-db-dump --project /path/to/project
 - Produces `schema.sql` and `seed.sql` under `.gpt-creator/staging/plan/create-db-dump/sql/`, derived from the SDS (plus optional PDR context).
 - Concludes with a Codex review that rewrites both files to ensure data types, keys, and seed rows align; the initial drafts are preserved as `schema.initial.sql` / `seed.initial.sql` backups.
 - Use `--dry-run` to preview prompts without calling Codex or `--force` to regenerate dumps after SDS changes.
+- Pass `--model <model-id>` when you need this stage to call a different Codex tier than the default non-code model.
 
 ### 10. Work on Tasks (resumable Codex loop)
 ```
@@ -509,6 +578,7 @@ gpt-creator refine-tasks --project /path/to/project [--force]
 gpt-creator iterate --project /path/to/project --jira docs/jira.md
 ```
 - The command emits a deprecation warning but still runs the legacy Codex loop. Prefer `create-tasks` + `work-on-tasks` for resumable execution.
+- Support for `--model <model-id>` remains; use it to override the legacy loop’s Codex model without mutating global settings.
 
 ---
 

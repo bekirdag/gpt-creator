@@ -7,6 +7,7 @@ ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/src/cli/lib/templates.sh"
+source "${ROOT_DIR}/src/cli/lib/agents.sh"
 
 # shellcheck source=src/lib/create-db-dump/pipeline.sh
 source "$ROOT_DIR/src/lib/create-db-dump/pipeline.sh"
@@ -19,6 +20,7 @@ PROJECT_PATH="$PWD"
 MODEL="${CODEX_MODEL:-gpt-5.1-codex}"
 DRY_RUN=0
 FORCE=0
+AGENT_NAME=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,6 +30,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --model)
       MODEL="${2:?--model requires a value}"
+      shift 2
+      ;;
+    --agent)
+      AGENT_NAME="${2:?--agent requires a name}"
       shift 2
       ;;
     --dry-run)
@@ -49,6 +55,16 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "$AGENT_NAME" ]]; then
+  if resolved_model="$(gc_cli_resolve_agent_model "$PROJECT_PATH" "$AGENT_NAME")"; then
+    MODEL="$resolved_model"
+    echo "[agents] create-db-dump using agent '${AGENT_NAME}' (model ${MODEL})"
+  else
+    echo "[agents] create-db-dump agent '${AGENT_NAME}' missing; treating argument as raw model id" >&2
+    MODEL="$AGENT_NAME"
+  fi
+fi
 
 cddb::init "$PROJECT_PATH" "$MODEL" "$DRY_RUN" "$FORCE"
 cddb::run_pipeline

@@ -1,0 +1,19 @@
+Usage: gpt-creator sync-llms [options]
+
+Seed the LLM catalog with registry-defined providers/models and optionally refresh
+Catwalk data.
+
+Options:
+  --project DIR       Project root (default: current directory)
+  --provider ID       Restrict to a single provider id
+  --model ID          Restrict to a single model id
+  --refresh           Refresh Catwalk catalog entries after seeding registry entries
+  --require-adapters  Fail if seeded adapters are not installed
+  --require-keys      Fail if API keys are missing for seeded providers
+  --ci                Shortcut for --require-adapters --require-keys --json
+  --json              Output JSON summary
+  -h, --help          Show this help message
+
+Examples:
+  gpt-creator sync-llms --project /repo
+  gpt-creator sync-llms --provider openai --refresh

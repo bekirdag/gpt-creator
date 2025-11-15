@@ -1,0 +1,39 @@
+Usage: gpt-creator create-agent --name NAME --client CLIENT --model MODEL \
+       --job-doc PATH --character-doc PATH [--project PATH] [--tags "a,b"] \
+       [--json] [--full] [--summarize] [--verbose]
+
+Create a reusable agent persona stored inside the project tasks database. Each
+agent captures the client/model pairing, a job/role description, and a
+character guide that is injected into future `work-on-tasks --agent NAME`
+runs.
+
+Required flags:
+  --name NAME           Unique identifier (1-64 chars; letters, numbers, _, -, . allowed).
+  --client CLIENT       Registry client id (e.g. openai, anthropic, xai).
+  --model MODEL         Model key for the chosen client.
+  --job-doc PATH        Path to a Markdown/text file describing the role (use '-' to read stdin).
+  --character-doc PATH  Path to the character doc (style/voice guidance).
+
+Optional flags:
+  --project PATH        Target project root (defaults to current directory).
+  --tags "a,b,c"        Comma/space separated labels to aid filtering.
+  --json                Emit the created agent as JSON instead of a status line.
+  --full                Include full doc bodies when used together with --json.
+  --summarize           Use the active LLM to generate summaries for job/character docs (falls back to deterministic truncation if unavailable).
+  --summarize-model NAME   Use a dedicated summarizer model (defaults to GC_AGENT_SUMMARIZER_MODEL or the agent model).
+  --summarize-client NAME  Use a dedicated summarizer client/provider (defaults to GC_AGENT_SUMMARIZER_CLIENT or the agent client).
+  --guardrails TEXT     Custom guardrail text injected before the defaults.
+  --guardrails-file PATH   Load guardrails from a file (repeatable).
+  --guardrails-dir PATH    Load guardrails from every file under a directory (repeatable).
+  --allow-missing-key   Create the agent even when the required API key env var is missing (warns instead of failing).
+  --verbose             Print extra progress details to stderr.
+
+Documents larger than 512 KB are rejected. Raw doc bodies are never logged; use
+--full/--json only when you intend to capture them explicitly. For providers
+such as OpenAI/Anthropic/xAI, ensure the corresponding API key env vars are set
+before creating the agent so credentials can be stored alongside the record, or
+pass `--allow-missing-key` when you need to stage the agent prior to key
+provisioning (the CLI will warn that credentials are still required).
+`--summarize` consumes additional LLM tokens; configure
+`GC_AGENT_SUMMARIZER_CLIENT` / `GC_AGENT_SUMMARIZER_MODEL` or the CLI flags above
+to point at a cheaper summarizer tier if desired.

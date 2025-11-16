@@ -274,7 +274,9 @@ if [[ -f "${CLI_ROOT}/scripts/render_task_footer.sh" ]]; then
 fi
 
 GC_TEMPLATE_DIR="${CLI_ROOT}/assets/templates"
-export PATH="${CLI_ROOT}/bin:${PATH}"
+CLI_SHIM_BIN="${CLI_ROOT}/.gpt-creator/shims/bin"
+mkdir -p "${CLI_SHIM_BIN}" 2>/dev/null || true
+export PATH="${CLI_SHIM_BIN}:${CLI_ROOT}/bin:${PATH}"
 GC_LAST_RENDER_TASK_FOOTER=""
 
 gc_template_path() {
@@ -8634,7 +8636,7 @@ cmd_work_on_tasks() {
   local override_status_max_out=""
   local override_patch_max_out=""
   local override_hard_cap=""
-  local complete_on_followup=0
+  local complete_on_followup="${GC_WOT_COMPLETE_ON_FOLLOWUP:-1}"
   local backlog_guard_window_days="${GC_BACKLOG_GUARD_WINDOW_DAYS:-7}"
   local backlog_guard_wip_limit="${GC_BACKLOG_GUARD_WIP_LIMIT:-12}"
   local backlog_snapshot_before_path=""
@@ -12504,11 +12506,6 @@ print(flag("notes_contains_already_satisfied"))'
           output_entry="(missing)"
         fi
       fi
-      if [[ ! -f "$task_log_archive_path" ]]; then
-        report_entry_db=""
-        report_entry_display="(missing)"
-      fi
-
       local history_summary_path=""
       local history_meta_path=""
       local history_summary_entry=""
@@ -12593,54 +12590,6 @@ print(flag("notes_contains_already_satisfied"))'
         commands_payload="$(printf '%s\n' "${task_commands[@]}")"
       fi
 
-      local observation_hash=""
-      if (( task_tokens_total > 0 )); then
-        local observation_seed="${task_id:-}:${stdout_hash:-}:${apply_status:-}:${task_result_status:-}:${task_tokens_total:-0}"
-        if observation_hash="$(gc_make_observation_hash "$observation_seed" 2>/dev/null)"; then
-          :
-        else
-          observation_hash=""
-        fi
-      fi
-      local stage_retrieve_after_int stage_plan_after_int stage_patch_after_int stage_verify_after_int
-      stage_retrieve_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_RETRIEVE:-0}" 0)"
-      stage_plan_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_PLAN:-0}" 0)"
-      stage_patch_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_PATCH:-0}" 0)"
-      stage_verify_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_VERIFY:-0}" 0)"
-      local stage_retrieve_start_int stage_plan_start_int stage_patch_start_int stage_verify_start_int
-      stage_retrieve_start_int="$(gc_parse_int "$stage_baseline_retrieve" 0)"
-      stage_plan_start_int="$(gc_parse_int "$stage_baseline_plan" 0)"
-      stage_patch_start_int="$(gc_parse_int "$stage_baseline_patch" 0)"
-      stage_verify_start_int="$(gc_parse_int "$stage_baseline_verify" 0)"
-      local task_stage_tokens_retrieve=$((stage_retrieve_after_int - stage_retrieve_start_int))
-      local task_stage_tokens_plan=$((stage_plan_after_int - stage_plan_start_int))
-      local task_stage_tokens_patch=$((stage_patch_after_int - stage_patch_start_int))
-      local task_stage_tokens_verify=$((stage_verify_after_int - stage_verify_start_int))
-      (( task_stage_tokens_retrieve < 0 )) && task_stage_tokens_retrieve=0
-      (( task_stage_tokens_plan < 0 )) && task_stage_tokens_plan=0
-      (( task_stage_tokens_patch < 0 )) && task_stage_tokens_patch=0
-      (( task_stage_tokens_verify < 0 )) && task_stage_tokens_verify=0
-
-      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$observation_hash" "$timestamp_utc" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_story_points" "$task_verify_status" "$task_verify_summary" "$task_verify_report" "$task_verify_details" "$task_meta_plan_flag" "$task_meta_focus_flag" "$task_meta_no_changes_flag" "$task_meta_already_flag" "${GC_LAST_AUTO_COMMIT_HASH:-}" "${GC_LAST_AUTO_COMMIT_STATUS:-}" "${GC_LAST_AUTO_PUSH_STATUS:-}" "${GC_LAST_AUTO_PUSH_REMOTE:-}" "${GC_LAST_AUTO_PUSH_BRANCH:-}" "${GC_LAST_AUTO_PUSH_ERROR:-}" "$task_attempt_signature" "$task_changes_count" "$task_outcome_reason" "$history_summary_entry" "$history_meta_entry"
-
-      gc_log_task_metrics "$run_stamp" "$slug" "$task_number" "$banner_task_id" "$task_result_status" "$task_story_points" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens"
-      if [[ -n "${AGENT_TELEMETRY_PAYLOAD:-}" ]]; then
-        gc_telemetry_record "agent_usage" "${AGENT_TELEMETRY_PAYLOAD}" || true
-      fi
-
-      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
-        local throughput_task_msg=""
-        if throughput_task_msg="$(gc_update_throughput_metrics "$tasks_db" "task-complete" "$slug" "$task_index")"; then
-          if [[ -n "$throughput_task_msg" ]]; then
-            info "  ${throughput_task_msg}"
-            now_ts="$(date +%s)"
-            throughput_next_checkpoint=$((now_ts + throughput_checkpoint_interval))
-          fi
-        else
-          warn "  Failed to record throughput metrics for task ${task_number}."
-        fi
-      fi
-
       {
         printf 'task_number: %s\n' "$task_number"
         printf 'task_id: %s\n' "${task_id:-}"
@@ -12692,6 +12641,59 @@ print(flag("notes_contains_already_satisfied"))'
       if ! cp -f "$task_report_path" "$task_log_archive_path"; then
         warn "  Failed to archive task log to ${task_log_archive_path}."
       fi
+      if [[ ! -f "$task_log_archive_path" ]]; then
+        report_entry_db=""
+        report_entry_display="(missing)"
+      fi
+
+      local observation_hash=""
+      if (( task_tokens_total > 0 )); then
+        local observation_seed="${task_id:-}:${stdout_hash:-}:${apply_status:-}:${task_result_status:-}:${task_tokens_total:-0}"
+        if observation_hash="$(gc_make_observation_hash "$observation_seed" 2>/dev/null)"; then
+          :
+        else
+          observation_hash=""
+        fi
+      fi
+      local stage_retrieve_after_int stage_plan_after_int stage_patch_after_int stage_verify_after_int
+      stage_retrieve_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_RETRIEVE:-0}" 0)"
+      stage_plan_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_PLAN:-0}" 0)"
+      stage_patch_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_PATCH:-0}" 0)"
+      stage_verify_after_int="$(gc_parse_int "${GC_BUDGET_STAGE_TOTAL_VERIFY:-0}" 0)"
+      local stage_retrieve_start_int stage_plan_start_int stage_patch_start_int stage_verify_start_int
+      stage_retrieve_start_int="$(gc_parse_int "$stage_baseline_retrieve" 0)"
+      stage_plan_start_int="$(gc_parse_int "$stage_baseline_plan" 0)"
+      stage_patch_start_int="$(gc_parse_int "$stage_baseline_patch" 0)"
+      stage_verify_start_int="$(gc_parse_int "$stage_baseline_verify" 0)"
+      local task_stage_tokens_retrieve=$((stage_retrieve_after_int - stage_retrieve_start_int))
+      local task_stage_tokens_plan=$((stage_plan_after_int - stage_plan_start_int))
+      local task_stage_tokens_patch=$((stage_patch_after_int - stage_patch_start_int))
+      local task_stage_tokens_verify=$((stage_verify_after_int - stage_verify_start_int))
+      (( task_stage_tokens_retrieve < 0 )) && task_stage_tokens_retrieve=0
+      (( task_stage_tokens_plan < 0 )) && task_stage_tokens_plan=0
+      (( task_stage_tokens_patch < 0 )) && task_stage_tokens_patch=0
+      (( task_stage_tokens_verify < 0 )) && task_stage_tokens_verify=0
+
+      gc_record_task_progress "$tasks_db" "$slug" "$task_index" "$run_stamp" "$task_result_status" "$report_entry_db" "$prompt_entry" "$output_entry" "$attempt" "$task_tokens_total" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens" "$task_duration_seconds" "$apply_status" "$changes_flag" "$notes_payload" "$written_payload" "$patched_payload" "$commands_payload" "$observation_hash" "$timestamp_utc" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_story_points" "$task_verify_status" "$task_verify_summary" "$task_verify_report" "$task_verify_details" "$task_meta_plan_flag" "$task_meta_focus_flag" "$task_meta_no_changes_flag" "$task_meta_already_flag" "${GC_LAST_AUTO_COMMIT_HASH:-}" "${GC_LAST_AUTO_COMMIT_STATUS:-}" "${GC_LAST_AUTO_PUSH_STATUS:-}" "${GC_LAST_AUTO_PUSH_REMOTE:-}" "${GC_LAST_AUTO_PUSH_BRANCH:-}" "${GC_LAST_AUTO_PUSH_ERROR:-}" "$task_attempt_signature" "$task_changes_count" "$task_outcome_reason" "$history_summary_entry" "$history_meta_entry"
+
+      gc_log_task_metrics "$run_stamp" "$slug" "$task_number" "$banner_task_id" "$task_result_status" "$task_story_points" "$task_stage_tokens_retrieve" "$task_stage_tokens_plan" "$task_stage_tokens_patch" "$task_stage_tokens_verify" "$task_prompt_estimate" "$task_llm_prompt_tokens" "$task_llm_completion_tokens"
+      if [[ -n "${AGENT_TELEMETRY_PAYLOAD:-}" ]]; then
+        gc_telemetry_record "agent_usage" "${AGENT_TELEMETRY_PAYLOAD}" || true
+      fi
+
+      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
+        local throughput_task_msg=""
+        if throughput_task_msg="$(gc_update_throughput_metrics "$tasks_db" "task-complete" "$slug" "$task_index")"; then
+          if [[ -n "$throughput_task_msg" ]]; then
+            info "  ${throughput_task_msg}"
+            now_ts="$(date +%s)"
+            throughput_next_checkpoint=$((now_ts + throughput_checkpoint_interval))
+          fi
+        else
+          warn "  Failed to record throughput metrics for task ${task_number}."
+        fi
+      fi
+
       gc_clear_active_task
 
       case "$task_result_status" in

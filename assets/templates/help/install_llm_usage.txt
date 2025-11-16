@@ -1,0 +1,20 @@
+Usage: gpt-creator install-llm --provider ID [options]
+
+Inspect or run the stored installation command for an LLM provider/adapter.
+
+Options:
+  --project DIR        Project root (defaults to current directory)
+  --provider ID        Provider id (required)
+  --adapter NAME       Filter by adapter name when multiple entries exist
+  --os {default,macos,windows}
+                       Force a specific OS command (default autodetect)
+  --run                Execute the stored install command after confirmation
+  --yes                Skip confirmation when paired with --run
+  --dry-run            Preview only; do not execute
+  --json               Emit JSON output
+  -h, --help           Show this help message
+
+Examples:
+  gpt-creator install-llm --provider openai
+  gpt-creator install-llm --provider gemini --run --yes
+  gpt-creator install-llm --provider qwen-code --os windows --json

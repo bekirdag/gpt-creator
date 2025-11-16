@@ -1,0 +1,14 @@
+Usage: gpt-creator import-agents --input FILE [options]
+
+Import agents from a JSON export (produced by `export-agents`) into the current
+project. By default, existing agents are skipped when names collide.
+
+Options:
+  --input FILE             Path to JSON export (required)
+  --on-collision MODE      skip (default), overwrite, or rename
+  --tags "foo,bar"         Append extra tags to every imported agent
+  --client CLIENT          Override client id for every agent
+  --model MODEL            Override model id for every agent
+  --include-keys           Import stored API keys when present (use with care)
+  --activate true|false    Force active state after import
+  -h, --help               Show this help message

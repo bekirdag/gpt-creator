@@ -85,6 +85,17 @@ def populate_dependencies(
 
     ensure_table(cur)
 
+    has_tasks_table = (
+        cur.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'"
+        ).fetchone()[0]
+        > 0
+    )
+    if not has_tasks_table:
+        raise RuntimeError(
+            "Task database missing 'tasks' table. Run 'gpt-creator create-tasks' (or create-jira-tasks + migrate-tasks) before ordering dependencies."
+        )
+
     existing_count = 0
     try:
         existing_count = cur.execute("SELECT COUNT(*) FROM task_dependencies").fetchone()[0]
@@ -173,7 +184,11 @@ def main(argv: List[str]) -> int:
         print(f"[order] tasks database not found at {args.db_path}", file=sys.stderr)
         return 1
 
-    populate_dependencies(args.db_path, only_if_empty=args.only_if_empty, force=args.force)
+    try:
+        populate_dependencies(args.db_path, only_if_empty=args.only_if_empty, force=args.force)
+    except RuntimeError as exc:
+        print(f"[order] {exc}", file=sys.stderr)
+        return 1
     return 0
 
 

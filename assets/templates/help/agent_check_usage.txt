@@ -1,0 +1,20 @@
+Usage: gpt-creator agent-check --name NAME --prompt "what is 2+2" \
+       [--project PATH] [--client CLIENT] [--model MODEL] [--json] [--verbose]
+
+Send a quick prompt to an existing agent to verify that its client/model pair,
+API key, and guardrails are all wired up correctly. The command reuses the
+stored job + character docs to build the system prompt, so the response mirrors
+how `work-on-tasks --agent NAME` would behave.
+
+Flags:
+  --name NAME     Required agent identifier.
+  --prompt TEXT   Required question or instruction to send (single turn).
+  --project DIR   Project root (defaults to current working directory).
+  --client ID     Override the stored client/provider (rare; defaults to agent).
+  --model NAME    Override the stored model id (defaults to agent).
+  --json          Emit the response payload (agent, client, model, prompt, answer, tokens).
+  --verbose       Print the resolved tasks.db path and extra diagnostics.
+
+Agent health-checks never mutate the database—they only issue a single
+round-trip call. If the configured adapter or API key is missing the command
+fails with a clear explanation so you can fix credentials before queuing work.

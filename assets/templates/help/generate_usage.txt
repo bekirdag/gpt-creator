@@ -5,6 +5,7 @@ USAGE
 
 OPTIONS
   -m, --model <name>        Codex model (default: ${GENERATE_USAGE_CODEX_MODEL})
+      --agent <name>        Resolve the model from a stored agent persona (fallbacks to raw model id when missing)
   --codex-cmd <cmd>         Codex CLI (default: ${GENERATE_USAGE_CODEX_CMD})
   -y, --yes                 Non-interactive; auto-accept prompts
   -n, --dry-run             Plan only; do not call Codex
@@ -17,4 +18,3 @@ EXAMPLES
   gpt-creator generate api  --model gpt-5-high
   gpt-creator generate web  --out-root ./apps
   gpt-creator generate admin -n
-

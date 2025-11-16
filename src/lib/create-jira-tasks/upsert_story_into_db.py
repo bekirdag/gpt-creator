@@ -10,6 +10,13 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Optional, Tuple
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+HELPERS_DIR = REPO_ROOT / "scripts" / "python"
+if str(HELPERS_DIR) not in sys.path:
+    sys.path.insert(0, str(HELPERS_DIR))
+
+from ensure_agents_schema import ensure_agents_schema
+
 
 def _as_list(value: Any) -> list[str]:
     if value is None:
@@ -222,6 +229,7 @@ def ensure_schema(cur: sqlite3.Cursor) -> None:
         )
         """
     )
+    ensure_agents_schema(cur)
 
     # Optional columns that may appear in existing databases
     optional_story_columns = {

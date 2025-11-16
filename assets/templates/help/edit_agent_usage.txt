@@ -1,0 +1,27 @@
+Usage: gpt-creator edit-agent --name NAME [options]
+
+Update stored metadata for an existing agent. Only the provided fields change.
+
+General flags:
+  --project PATH        Project root (defaults to current directory).
+  --name NAME           Agent identifier to update (required).
+  --new-name VALUE      Rename the agent (enforces uniqueness).
+  --client CLIENT       Replace the registered client id.
+  --model MODEL         Replace the model (validated against the registry).
+  --job-doc PATH        Replace the role/job document.
+  --character-doc PATH  Replace the character document.
+  --tags "a,b"          Overwrite tag list (comma/space separated).
+  --active true|false   Activate/deactivate the agent (soft delete toggle).
+  --resummarize         Regenerate summaries from the stored docs.
+  --summarize           Use the active LLM when --resummarize is supplied (falls back to deterministic truncation if unavailable).
+  --summarize-model NAME   Dedicated summarizer model for --summarize/--resummarize.
+  --summarize-client NAME  Dedicated summarizer client/provider for --summarize/--resummarize.
+  --guardrails TEXT     Custom guardrail text (set to empty string to clear).
+  --guardrails-file PATH   Guardrail file to append (repeatable).
+  --guardrails-dir PATH    Load guardrails from every file under a directory (repeatable).
+  --json                Emit the resulting record in JSON.
+
+Documents follow the same 512 KB size constraint as creation. By default only
+summaries are returned; use --json when scripting. LLM summarisation consumes
+additional tokens; configure GC_AGENT_SUMMARIZER_CLIENT / GC_AGENT_SUMMARIZER_MODEL
+or the CLI flags above to point at a cheaper tier when needed.

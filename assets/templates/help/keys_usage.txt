@@ -4,3 +4,14 @@ Usage: ${APP_NAME} keys [list|status]
 
 Lists required third-party API keys and stores credentials under your user config directory.
 
+Supported services/env vars:
+  openai      → OPENAI_API_KEY
+  anthropic   → ANTHROPIC_API_KEY
+  grok / xai  → GROK_API_KEY
+  jira        → JIRA_API_TOKEN
+  github      → GC_GITHUB_TOKEN
+
+Commands:
+  keys list / status       Show current env status (redacted)
+  keys set <service>       Prompt for a new value and persist it
+  keys <service>           Shortcut for `keys set <service>`

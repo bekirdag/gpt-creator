@@ -116,6 +116,21 @@
       "kind": "sql"
     },
     {
+      "name": "agents",
+      "file": "scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "llm_providers",
+      "file": "scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "llm_models",
+      "file": "scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
       "name": "task_dependencies",
       "file": "scripts/python/populate_task_dependencies.py",
       "kind": "sql"
@@ -261,6 +276,11 @@
       "kind": "sql"
     },
     {
+      "name": "agents",
+      "file": "test/python/test_agents_repository.py",
+      "kind": "sql"
+    },
+    {
       "name": "metadata",
       "file": "test/python/test_estimate_and_backlog.py",
       "kind": "sql"
@@ -378,6 +398,54 @@
       "kind": "sql"
     },
     {
+      "name": "idx_agents_name_normalized",
+      "on": "agents",
+      "file": "scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_agents_client",
+      "on": "agents",
+      "file": "scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_agents_model",
+      "on": "agents",
+      "file": "scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_agents_active",
+      "on": "agents",
+      "file": "scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_agents_last_used",
+      "on": "agents",
+      "file": "scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_llm_providers_type",
+      "on": "llm_providers",
+      "file": "scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_llm_models_provider",
+      "on": "llm_models",
+      "file": "scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_llm_models_name",
+      "on": "llm_models",
+      "file": "scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
       "name": "idx_task_dependencies_unique",
       "on": "task_dependencies",
       "file": "scripts/python/populate_task_dependencies.py",
@@ -478,6 +546,12 @@
       "on": "documentation_excerpts",
       "file": "src/lib/doc_registry.py",
       "kind": "sql"
+    },
+    {
+      "name": "idx_agents_name_normalized",
+      "on": "agents",
+      "file": "test/python/test_agents_repository.py",
+      "kind": "sql"
     }
   ],
   "models": [],
@@ -488,6 +562,7 @@
     "examples/sample-project/sql/schema.sql",
     "scripts/python/bootstrap_min_catalog.py",
     "scripts/python/build_tasks_db.py",
+    "scripts/python/ensure_agents_schema.py",
     "scripts/python/populate_task_dependencies.py",
     "scripts/python/progress_migration.py",
     "scripts/python/record_task_progress.py",
@@ -498,6 +573,7 @@
     "src/lib/create-jira-tasks/upsert_story_into_db.py",
     "src/lib/doc_indexer.py",
     "src/lib/doc_registry.py",
+    "test/python/test_agents_repository.py",
     "test/python/test_estimate_and_backlog.py",
     "test/python/test_progress_migration.py",
     "test/python/test_prompt_budget.py"

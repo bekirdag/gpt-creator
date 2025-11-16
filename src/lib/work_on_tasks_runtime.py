@@ -7,8 +7,9 @@ import logging
 import os
 import sqlite3
 import sys
+import json
 from pathlib import Path
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, Tuple, Optional, List
 
 LAST_PENDING_CHANGES: Dict[str, Tuple[str, ...]] = {}
 
@@ -5706,7 +5707,7 @@ def main():
 
         sample_limit_env = os.getenv("GC_PROMPT_SAMPLE_LINES", "").strip()
         try:
-            sample_limit = int(sample_limit_env) if sample_limit_env else 80
+        sample_limit = int(sample_limit_env) if sample_limit_env else 80
         except ValueError:
             sample_limit = 80
         if sample_limit < 0:
@@ -5714,9 +5715,27 @@ def main():
 
         compact_mode = os.getenv("GC_PROMPT_COMPACT", "").strip().lower() not in {"", "0", "false"}
 
-        lines = []
-        lines.append(f"# You are Codex (model: {MODEL_NAME})")
-        lines.append("")
+        agent_header_lines: List[str] = []
+        agent_header_path = os.getenv("GC_ACTIVE_AGENT_FILE", "").strip()
+        if agent_header_path:
+            try:
+                with open(agent_header_path, "r", encoding="utf-8") as agent_file:
+                    agent_payload = json.load(agent_file)
+                    prompt_section = agent_payload.get("prompt") or {}
+                    header_text = (prompt_section.get("header") or "").strip()
+                    if header_text:
+                        agent_header_lines = header_text.splitlines()
+            except Exception:
+                agent_header_lines = []
+
+        lines: List[str] = []
+        if agent_header_lines:
+            lines.extend(agent_header_lines)
+            if agent_header_lines[-1].strip():
+                lines.append("")
+        else:
+            lines.append(f"# You are Codex (model: {MODEL_NAME})")
+            lines.append("")
         lines.append(f"You are assisting the {project_display} delivery team. Implement the task precisely using the repository at: {repo_path}")
         lines.append("")
         doc_helpers_available = bool(

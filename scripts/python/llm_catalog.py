@@ -10,7 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import httpx
+try:
+    import httpx  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback handled below
+    httpx = None  # type: ignore
 
 from agents.llm_store import LLMCatalogStore
 
@@ -88,9 +91,20 @@ def _normalize_provider(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _fetch_remote(url: str) -> List[Dict[str, Any]]:
-    response = httpx.get(url, timeout=30.0)
-    response.raise_for_status()
-    payload = response.json()
+    if httpx is not None:
+        response = httpx.get(url, timeout=30.0)
+        response.raise_for_status()
+        payload = response.json()
+    else:  # pragma: no cover - exercised in environments without httpx
+        import urllib.error
+        import urllib.request
+
+        req = urllib.request.Request(url, headers={"User-Agent": "gpt-creator/llm-catalog"})
+        try:
+            with urllib.request.urlopen(req, timeout=30.0) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.URLError as exc:  # type: ignore[attr-defined]
+            raise RuntimeError(f"Catalog request failed: {exc}") from exc
     if not isinstance(payload, list):
         raise ValueError("Catalog payload must be a list")
     return payload

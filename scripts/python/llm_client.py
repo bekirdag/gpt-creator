@@ -10,7 +10,10 @@ import time
 from dataclasses import dataclass
 from typing import List, Sequence, Dict, Any, Optional
 
-import httpx
+try:
+    import httpx  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover - fallback handled elsewhere
+    httpx = None  # type: ignore
 
 
 @dataclass

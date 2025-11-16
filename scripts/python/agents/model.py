@@ -16,17 +16,17 @@ class Agent:
     name: str
     client: str
     model: str
-    llm_provider_id: Optional[str] = None
-    llm_model_id: Optional[str] = None
-    client_api_key: Optional[str] = None
-    client_api_base: Optional[str] = None
-    client_api_org: Optional[str] = None
     job_doc: str
     job_doc_sha256: str
     job_summary: str
     character_doc: str
     character_doc_sha256: str
     character_summary: str
+    llm_provider_id: Optional[str] = None
+    llm_model_id: Optional[str] = None
+    client_api_key: Optional[str] = None
+    client_api_base: Optional[str] = None
+    client_api_org: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     guardrails: Optional[str] = None
     is_active: bool = True
@@ -95,17 +95,17 @@ class AgentCreate:
     name: str
     client: str
     model: str
-    llm_provider_id: Optional[str] = None
-    llm_model_id: Optional[str] = None
-    client_api_key: Optional[str] = None
-    client_api_base: Optional[str] = None
-    client_api_org: Optional[str] = None
     job_doc: str
     job_doc_sha256: str
     job_summary: str
     character_doc: str
     character_doc_sha256: str
     character_summary: str
+    llm_provider_id: Optional[str] = None
+    llm_model_id: Optional[str] = None
+    client_api_key: Optional[str] = None
+    client_api_base: Optional[str] = None
+    client_api_org: Optional[str] = None
     tags_json: str = "[]"
     guardrails: Optional[str] = None
 
@@ -130,15 +130,15 @@ class PromptBundle:
 class LLMInfo:
     provider_id: str
     provider_name: str
-    adapter: Optional[str]
-    source: Optional[str]
-    install_status: Optional[str]
-    install_checked_at: Optional[str]
-    install_hint: Optional[str]
     model_id: str
     model_name: str
-    context_window: Optional[int]
-    default_max_tokens: Optional[int]
+    adapter: Optional[str] = None
+    source: Optional[str] = None
+    install_status: Optional[str] = None
+    install_checked_at: Optional[str] = None
+    install_hint: Optional[str] = None
+    context_window: Optional[int] = None
+    default_max_tokens: Optional[int] = None
     metadata: Dict[str, object] = field(default_factory=dict)
 
 

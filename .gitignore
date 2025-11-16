@@ -100,3 +100,6 @@ src+scripts.zip
 src+scripts.zip
 tmp/
 tmp/*
+
+.gpt-creator/python-env/
+.gpt-creator/python-env/**/*

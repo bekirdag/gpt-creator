@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import shutil
+import sqlite3
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,7 +30,7 @@ from .model import (
     iso_timestamp,
 )
 from .repository import AgentRepository
-from .summarizer import AgentSummarizer
+from .summarizer import AgentSummarizer, SummarizerError
 
 GUARDRAILS = [
     "- Stay within the job scope and acceptance criteria.",
@@ -52,7 +53,11 @@ class AgentService:
         self._summarizer = AgentSummarizer(self.registry)
         self._catalog_store = LLMCatalogStore(db_path)
         self._warnings: List[str] = []
-        self._sync_catalog_registry()
+        try:
+            self._sync_catalog_registry()
+        except RuntimeError as exc:
+            warning = str(exc)
+            self._record_warning(warning)
         self._seed_registry_providers()
 
     def _load_doc(self, source: DocSource) -> DocBundle:
@@ -105,6 +110,8 @@ class AgentService:
                 job_bundle.text,
                 pair["client"],
                 pair["model"],
+                api_key_value=api_key_value,
+                pair=pair,
                 client_override=summarize_client,
                 model_override=summarize_model,
             ) or job_summary
@@ -112,6 +119,8 @@ class AgentService:
                 char_bundle.text,
                 pair["client"],
                 pair["model"],
+                api_key_value=api_key_value,
+                pair=pair,
                 client_override=summarize_client,
                 model_override=summarize_model,
             ) or char_summary
@@ -232,6 +241,10 @@ class AgentService:
             self._attach_install_commands(record, metadata)
             adapter_name = (record.get("adapter") or "").strip().lower()
             binary = self._resolve_adapter_binary(metadata, adapter_name)
+            if not binary:
+                cfg = self.registry.get_client_config(record.get("id", ""))
+                if cfg:
+                    binary = self._resolve_adapter_binary_from_config(cfg)
             install_command = self._select_install_command(metadata, record, target_os=None)
             status = "not_applicable"
             hint = record.get("install_hint") or metadata.get("install_hint") or ""
@@ -379,6 +392,7 @@ class AgentService:
         if new_name:
             fields["name"] = validate_name(new_name)
             fields["name_normalized"] = fields["name"].lower()
+        validated_pair: Optional[Dict[str, Any]] = None
         if client or model:
             target_client = client or existing.client
             target_model = model or existing.model
@@ -388,6 +402,7 @@ class AgentService:
             provider_ref = self._ensure_llm_reference(pair["client"], pair["model"])
             fields["llm_provider_id"] = provider_ref[0]
             fields["llm_model_id"] = provider_ref[1]
+            validated_pair = pair
             api_key_env = pair.get("apiKeyEnv") or ""
             api_base_value = pair.get("apiBase") or ""
             org_env = pair.get("orgEnv") or ""
@@ -436,11 +451,14 @@ class AgentService:
             char_text = fields.get("character_doc", existing.character_doc)
             summary_client = fields.get("client", existing.client)
             summary_model = fields.get("model", existing.model)
+            api_key_value = fields.get("client_api_key", existing.client_api_key or "")
             if summarize:
                 fields["job_summary"] = self._summarize_with_llm(
                     job_text,
                     summary_client,
                     summary_model,
+                    api_key_value=api_key_value,
+                    pair=validated_pair,
                     client_override=summarize_client,
                     model_override=summarize_model,
                 )
@@ -448,6 +466,8 @@ class AgentService:
                     char_text,
                     summary_client,
                     summary_model,
+                    api_key_value=api_key_value,
+                    pair=validated_pair,
                     client_override=summarize_client,
                     model_override=summarize_model,
                 )
@@ -505,13 +525,38 @@ class AgentService:
         client: str,
         model: str,
         *,
+        api_key_value: Optional[str] = None,
+        pair: Optional[Dict[str, Any]] = None,
         client_override: Optional[str] = None,
         model_override: Optional[str] = None,
     ) -> str:
         target_client = client_override or os.getenv("GC_AGENT_SUMMARIZER_CLIENT", client)
         target_model = model_override or os.getenv("GC_AGENT_SUMMARIZER_MODEL", model)
-        summary = self._summarizer.summarize(text, target_client, target_model)
-        return summary or summarize_text(text)
+        env_overrides = {}
+        resolved_pair = pair
+        if not resolved_pair:
+            try:
+                resolved_pair = self.registry.validate_pair(target_client, target_model)
+            except Exception:
+                resolved_pair = None
+        if resolved_pair and api_key_value:
+            api_key_env = resolved_pair.get("apiKeyEnv")
+            if api_key_env:
+                env_overrides[api_key_env] = api_key_value
+        try:
+            summary = self._summarizer.summarize(
+                text,
+                target_client,
+                target_model,
+                env_overrides=env_overrides,
+            )
+            return summary or summarize_text(text)
+        except SummarizerError as exc:
+            snippet = str(exc).splitlines()[0].strip() or "summarizer error"
+            self._record_warning(
+                f"Summaries skipped: {target_client}/{target_model} failed ({snippet}). Falling back to deterministic summary."
+            )
+            return summarize_text(text)
 
     def _sync_catalog_registry(self) -> None:
         try:
@@ -525,6 +570,15 @@ class AgentService:
         fetched_at = meta.get("fetched_at")
         try:
             self._catalog_store.sync(providers, source=source, fetched_at=fetched_at)
+        except sqlite3.IntegrityError as exc:
+            db_path = getattr(self.repo, "db_path", None)
+            suggestion = ""
+            if db_path:
+                suggestion = (
+                    f" Run: sqlite3 {db_path} \"PRAGMA foreign_keys=OFF; DELETE FROM llm_models; "
+                    "DELETE FROM llm_providers; PRAGMA foreign_keys=ON;\" and rerun sync-llms."
+                )
+            raise RuntimeError(f"Catalog sync failed ({exc}).{suggestion}") from exc
         except Exception:
             pass
 
@@ -672,9 +726,12 @@ class AgentService:
 
     def _attach_install_commands(self, record: Dict[str, Any], metadata: Dict[str, Any]) -> None:
         commands = metadata.get("installCommands") or {}
-        record.setdefault("install_command", record.get("install_command") or commands.get("default"))
-        record.setdefault("install_command_macos", record.get("install_command_macos") or commands.get("macos"))
-        record.setdefault("install_command_windows", record.get("install_command_windows") or commands.get("windows"))
+        if not record.get("install_command"):
+            record["install_command"] = commands.get("default")
+        if not record.get("install_command_macos"):
+            record["install_command_macos"] = commands.get("macos")
+        if not record.get("install_command_windows"):
+            record["install_command_windows"] = commands.get("windows")
 
 if TYPE_CHECKING:
     from agents_registry import ClientConfig

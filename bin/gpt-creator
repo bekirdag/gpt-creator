@@ -988,6 +988,9 @@ gc_load_env() {
 
 GC_API_KEYS_METADATA=(
   "openai|OpenAI Codex|OPENAI_API_KEY|AI automation commands (plan, generate, work-on-tasks)|GC_OPENAI_API_KEY,GC_OPENAI_KEY"
+  "anthropic|Anthropic Claude|ANTHROPIC_API_KEY|Claude HTTP adapter (--client anthropic)|"
+  "grok|xAI Grok|GROK_API_KEY|Grok HTTP adapter (--client xai)|GROK_KEY"
+  "gemini|Google Gemini CLI|GEMINI_API_KEY|Gemini CLI adapter (--client gemini)|"
   "jira|Jira Automation|JIRA_API_TOKEN|Backlog integrations that sync with Jira (create-jira-tasks)|GC_JIRA_API_TOKEN"
   "github|GitHub Auto Reports|GC_GITHUB_TOKEN|Crash/stall reports published as GitHub issues|"
 )
@@ -3665,7 +3668,7 @@ gc_run_agents_cli() {
   shift 2
   local helper_path
   helper_path="$(gc_clone_python_tool "agents_cli.py" "$project")" || return "$GC_AGENT_EXIT_IO"
-  python3 "$helper_path" --project "$project" --db-path "$db_path" "$@"
+  GC_CLI_ROOT="${CLI_ROOT:-}" python3 "$helper_path" --project "$project" --db-path "$db_path" "$@"
 }
 
 gc_agents_emit_agent_json() {
@@ -3675,7 +3678,18 @@ import json
 import sys
 
 indent = int(sys.argv[1])
-payload = json.load(sys.stdin)
+raw = sys.stdin.read()
+if not raw.strip():
+    sys.stderr.write("agents command returned no JSON output; run with --verbose for details.\n")
+    sys.exit(1)
+try:
+    payload = json.loads(raw)
+except json.JSONDecodeError as exc:
+    sys.stderr.write("agents command produced invalid JSON ({}):\n".format(exc))
+    sys.stderr.write(raw)
+    if not raw.endswith("\n"):
+        sys.stderr.write("\n")
+    sys.exit(1)
 indent_value = None if indent <= 0 else indent
 warnings = []
 agent_payload = None
@@ -7010,8 +7024,10 @@ _gc_agents_require_db() {
 }
 
 cmd_create_agent() {
-  local root="" name="" client="" model="" job_doc="" character_doc="" tags=""
+  local root="" name="" client="" model="" job_doc="" character_doc="" tags="" guardrails=""
+  local summarize_model="" summarize_client=""
   local json=0 full=0 summarize=0 verbose=0 allow_missing_key=0
+  local -a guardrails_files=() guardrails_dirs=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project)
@@ -7054,6 +7070,26 @@ cmd_create_agent() {
         summarize=1
         shift
         ;;
+      --summarize-model)
+        summarize_model="${2:-}"
+        shift 2
+        ;;
+      --summarize-client)
+        summarize_client="${2:-}"
+        shift 2
+        ;;
+      --guardrails)
+        guardrails="${2:-}"
+        shift 2
+        ;;
+      --guardrails-file)
+        guardrails_files+=("${2:-}")
+        shift 2
+        ;;
+      --guardrails-dir)
+        guardrails_dirs+=("${2:-}")
+        shift 2
+        ;;
       --allow-missing-key)
         allow_missing_key=1
         shift
@@ -7087,9 +7123,22 @@ cmd_create_agent() {
   (( verbose )) && cli_args+=("--verbose")
   cli_args+=("create" "--name" "$name" "--client" "$client" "--model" "$model" "--job-doc" "$job_doc" "--character-doc" "$character_doc")
   [[ -n "$tags" ]] && cli_args+=("--tags" "$tags")
+  [[ -n "$guardrails" ]] && cli_args+=("--guardrails" "$guardrails")
+  if ((${#guardrails_files[@]})); then
+    for file in "${guardrails_files[@]}"; do
+      cli_args+=("--guardrails-file" "$file")
+    done
+  fi
+  if ((${#guardrails_dirs[@]})); then
+    for dir in "${guardrails_dirs[@]}"; do
+      cli_args+=("--guardrails-dir" "$dir")
+    done
+  fi
   (( json )) && cli_args+=("--json")
   (( full )) && cli_args+=("--full")
   (( summarize )) && cli_args+=("--summarize")
+  [[ -n "$summarize_model" ]] && cli_args+=("--summarize-model" "$summarize_model")
+  [[ -n "$summarize_client" ]] && cli_args+=("--summarize-client" "$summarize_client")
   (( allow_missing_key )) && cli_args+=("--allow-missing-key")
 
   if (( json )); then
@@ -7104,6 +7153,19 @@ cmd_create_agent() {
     printf '%s\n' "$output" | gc_agents_emit_agent_json 0
     return 0
   fi
+  if (( json )); then
+    local output status
+    if ! output="$(gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" "${cli_args[@]}")"; then
+      status=$?
+      if [[ -n "$output" ]]; then
+        printf '%s\n' "$output"
+      fi
+      return "$status"
+    fi
+    printf '%s\n' "$output" | gc_agents_emit_agent_json 2
+    return 0
+  fi
+
   gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" "${cli_args[@]}"
   return $?
 }
@@ -7299,7 +7361,7 @@ cmd_list_llms() {
 }
 
 cmd_check_llms() {
-  local root="" provider="" adapter="" json=0 dry_run=0 verbose=0 install_missing=0
+  local root="" provider="" adapter="" json=0 dry_run=0 verbose=0 install_missing=0 health_check=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project)
@@ -7324,6 +7386,10 @@ cmd_check_llms() {
         ;;
       --install-missing)
         install_missing=1
+        shift
+        ;;
+      --health-check)
+        health_check=1
         shift
         ;;
       --verbose)
@@ -7351,6 +7417,7 @@ cmd_check_llms() {
   (( json )) && cli_args+=("--json")
   (( dry_run )) && cli_args+=("--dry-run")
   (( install_missing )) && cli_args+=("--install-missing")
+   (( health_check )) && cli_args+=("--health-check")
 
   gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" "${cli_args[@]}"
   return $?
@@ -7547,7 +7614,9 @@ cmd_show_agent() {
 }
 
 cmd_edit_agent() {
-  local root="" name="" new_name="" client="" model="" job_doc="" character_doc="" tags="" active="" resummarize=0 json=0 verbose=0 allow_missing_key=0
+  local root="" name="" new_name="" client="" model="" job_doc="" character_doc="" tags="" active="" resummarize=0 summarize=0 json=0 verbose=0 allow_missing_key=0 guardrails=""
+  local summarize_model="" summarize_client=""
+  local -a guardrails_files=() guardrails_dirs=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project)
@@ -7590,6 +7659,30 @@ cmd_edit_agent() {
         resummarize=1
         shift
         ;;
+      --summarize)
+        summarize=1
+        shift
+        ;;
+      --summarize-model)
+        summarize_model="${2:-}"
+        shift 2
+        ;;
+      --summarize-client)
+        summarize_client="${2:-}"
+        shift 2
+        ;;
+      --guardrails)
+        guardrails="${2:-}"
+        shift 2
+        ;;
+      --guardrails-file)
+        guardrails_files+=("${2:-}")
+        shift 2
+        ;;
+      --guardrails-dir)
+        guardrails_dirs+=("${2:-}")
+        shift 2
+        ;;
       --json)
         json=1
         shift
@@ -7627,8 +7720,22 @@ cmd_edit_agent() {
   [[ -n "$job_doc" ]] && cli_args+=("--job-doc" "$job_doc")
   [[ -n "$character_doc" ]] && cli_args+=("--character-doc" "$character_doc")
   [[ -n "$tags" ]] && cli_args+=("--tags" "$tags")
+  [[ -n "$guardrails" ]] && cli_args+=("--guardrails" "$guardrails")
+  if ((${#guardrails_files[@]})); then
+    for file in "${guardrails_files[@]}"; do
+      cli_args+=("--guardrails-file" "$file")
+    done
+  fi
+  if ((${#guardrails_dirs[@]})); then
+    for dir in "${guardrails_dirs[@]}"; do
+      cli_args+=("--guardrails-dir" "$dir")
+    done
+  fi
   [[ -n "$active" ]] && cli_args+=("--active" "$active")
   (( resummarize )) && cli_args+=("--resummarize")
+  (( summarize )) && cli_args+=("--summarize")
+  [[ -n "$summarize_model" ]] && cli_args+=("--summarize-model" "$summarize_model")
+  [[ -n "$summarize_client" ]] && cli_args+=("--summarize-client" "$summarize_client")
   (( json )) && cli_args+=("--json")
   (( allow_missing_key )) && cli_args+=("--allow-missing-key")
 
@@ -7644,6 +7751,66 @@ cmd_edit_agent() {
     printf '%s\n' "$output" | gc_agents_emit_agent_json 2
     return 0
   fi
+
+  gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" "${cli_args[@]}"
+  return $?
+}
+
+cmd_agent_check() {
+  local root="" name="" prompt="" client="" model="" json=0 verbose=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      --name)
+        name="${2:-}"
+        shift 2
+        ;;
+      --prompt)
+        prompt="${2:-}"
+        shift 2
+        ;;
+      --client)
+        client="${2:-}"
+        shift 2
+        ;;
+      --model)
+        model="${2:-}"
+        shift 2
+        ;;
+      --json)
+        json=1
+        shift
+        ;;
+      --verbose)
+        verbose=1
+        shift
+        ;;
+      -h|--help)
+        gc_render_template "help/agent_check_usage.txt"
+        return 0
+        ;;
+      *)
+        die "Unknown agent-check option: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$name" ]] || die "--name is required for agent-check"
+  [[ -n "$prompt" ]] || die "--prompt is required for agent-check"
+
+  ensure_ctx "$root"
+  local tasks_db
+  tasks_db="$(_gc_agents_require_db)" || return "$GC_AGENT_EXIT_DB"
+
+  local -a cli_args=()
+  (( verbose )) && cli_args+=("--verbose")
+  cli_args+=("agent-check" "--name" "$name" "--prompt" "$prompt")
+  [[ -n "$client" ]] && cli_args+=("--client" "$client")
+  [[ -n "$model" ]] && cli_args+=("--model" "$model")
+  (( json )) && cli_args+=("--json")
 
   gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" "${cli_args[@]}"
   return $?
@@ -14619,6 +14786,7 @@ main() {
     sync-llms)      cmd_sync_llms "$@" ;;
     show-agent)     cmd_show_agent "$@" ;;
     edit-agent)     cmd_edit_agent "$@" ;;
+    agent-check)    cmd_agent_check "$@" ;;
     delete-agent)   cmd_delete_agent "$@" ;;
     export-agents)  cmd_export_agents "$@" ;;
     import-agents)  cmd_import_agents "$@" ;;

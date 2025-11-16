@@ -33,7 +33,6 @@ else:
 from agents import AgentFilter, AgentService, DocSource, LLMFilter
 from agents.repository import AgentRepository  # type: ignore  # noqa: E402
 from agents.model import Agent
-from llm_client_factory import create_llm_client
 
 
 def _default_tasks_db(project_root: Path) -> Path:
@@ -143,24 +142,6 @@ def _load_guardrails(args: argparse.Namespace) -> Optional[str]:
                 parts.append(child.read_text(encoding="utf-8").strip())
     joined = "\n\n".join(part for part in parts if part)
     return joined or None
-
-
-def _apply_env_overrides(env_overrides: Dict[str, str]) -> Dict[str, Optional[str]]:
-    previous: Dict[str, Optional[str]] = {}
-    for key, value in env_overrides.items():
-        if not key:
-            continue
-        previous[key] = os.environ.get(key)
-        os.environ[key] = value
-    return previous
-
-
-def _restore_env(previous: Dict[str, Optional[str]]) -> None:
-    for key, value in previous.items():
-        if value is None:
-            os.environ.pop(key, None)
-        else:
-            os.environ[key] = value
 
 
 def _flush_warnings(service: AgentService) -> None:
@@ -342,58 +323,6 @@ def handle_install_llm(service: AgentService, args: argparse.Namespace) -> int:
         if result.get("credential_warning"):
             print(f"Warning: {result['credential_warning']}")
     return 0 if result.get("status") == "installed" else 1
-
-
-def handle_agent_check(service: AgentService, args: argparse.Namespace) -> int:
-    agent = service.get_agent(args.name)
-    if not agent:
-        return _exit(f"Agent '{args.name}' not found", 3)
-    client = args.client or agent.client
-    model = args.model or agent.model
-    try:
-        pair = service.registry.validate_pair(client, model)
-    except ValueError as exc:
-        return _exit(str(exc), 2)
-    adapter = pair.get("adapter") or "codex_cli"
-    env_overrides: Dict[str, str] = {}
-    api_key_env = pair.get("apiKeyEnv")
-    if api_key_env:
-        key_value = agent.client_api_key or os.getenv(api_key_env, "")
-        if key_value:
-            env_overrides[api_key_env] = key_value
-    previous_env = _apply_env_overrides(env_overrides)
-    try:
-        llm = create_llm_client(adapter, pair)
-        prompt_bundle = service.compose_prompt(agent)
-        system_prompt = prompt_bundle.header
-        if prompt_bundle.guardrails:
-            guardrail_text = "\n".join(prompt_bundle.guardrails)
-            system_prompt = f"{system_prompt}\n\n## Guardrails\n{guardrail_text}"
-        result = llm.send_chat(
-            messages=[args.prompt],
-            model=pair["model"],
-            system=system_prompt,
-        )
-    except Exception as exc:
-        return _exit(f"Agent check failed: {exc}", 1)
-    finally:
-        _restore_env(previous_env)
-    payload = {
-        "agent": agent.name,
-        "client": pair["client"],
-        "model": pair["model"],
-        "prompt": args.prompt,
-        "response": (result.content or "").strip(),
-        "tokens": {
-            "prompt": result.tokens.prompt,
-            "completion": result.tokens.completion,
-        },
-    }
-    if args.json:
-        print(json.dumps(payload, indent=2))
-    else:
-        print(f"Agent '{agent.name}' ({pair['client']}/{pair['model']}) response:\n{payload['response']}")
-    return 0
 
 
 def handle_llm_check(service: AgentService, args: argparse.Namespace) -> int:
@@ -689,7 +618,6 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     edit_parser.add_argument("--guardrails-file", dest="guardrails_files", action="append", help="Path to a guardrail file (repeatable).")
     edit_parser.add_argument("--guardrails-dir", dest="guardrails_dirs", action="append", help="Load guardrail files from a directory (repeatable).")
     edit_parser.set_defaults(guardrails_files=[], guardrails_dirs=[])
-    edit_parser.add_argument("--allow-missing-key", action="store_true", help="Update the agent even when the client API key is not set (warns instead of failing).")
     edit_parser.add_argument("--json", action="store_true")
 
     delete_parser = sub.add_parser("delete", help="Delete an agent.")
@@ -769,13 +697,6 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     llm_sync_parser.add_argument("--ci", action="store_true", help="Imply --require-adapters --require-keys --json for CI usage.")
     llm_sync_parser.add_argument("--json", action="store_true")
 
-    agent_check_parser = sub.add_parser("agent-check", help="Send a quick health-check prompt to an agent.")
-    agent_check_parser.add_argument("--name", required=True, help="Agent name.")
-    agent_check_parser.add_argument("--prompt", required=True, help="Prompt/question to send.")
-    agent_check_parser.add_argument("--client", help="Override the agent client/provider.")
-    agent_check_parser.add_argument("--model", help="Override the agent model id.")
-    agent_check_parser.add_argument("--json", action="store_true")
-
     return parser.parse_args(argv)
 
 
@@ -789,40 +710,32 @@ def main(argv: List[str]) -> int:
         print(f"[agents] Using tasks database at {db_path}", file=sys.stderr)
 
     command = args.command
-    try:
-        if command == "create":
-            result = handle_create(service, args)
-        elif command == "list":
-            result = handle_list(service, args)
-        elif command == "show":
-            result = handle_show(service, args)
-        elif command == "edit":
-            result = handle_edit(service, args)
-        elif command == "delete":
-            result = handle_delete(service, args)
-        elif command == "select":
-            result = handle_select(service, args)
-        elif command == "export":
-            result = handle_export(service, args)
-        elif command == "import":
-            result = handle_import(service, args)
-        elif command == "llms":
-            result = handle_llms(service, args)
-        elif command == "llms-check":
-            result = handle_llm_check(service, args)
-        elif command == "install-llm":
-            result = handle_install_llm(service, args)
-        elif command == "llms-sync":
-            result = handle_llm_sync(service, args)
-        elif command == "agent-check":
-            result = handle_agent_check(service, args)
-        else:
-            result = 1
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        _flush_warnings(service)
+    result = 1
+    if command == "create":
+        result = handle_create(service, args)
+    elif command == "list":
+        result = handle_list(service, args)
+    elif command == "show":
+        result = handle_show(service, args)
+    elif command == "edit":
+        result = handle_edit(service, args)
+    elif command == "delete":
+        result = handle_delete(service, args)
+    elif command == "select":
+        result = handle_select(service, args)
+    elif command == "export":
+        result = handle_export(service, args)
+    elif command == "import":
+        result = handle_import(service, args)
+    elif command == "llms":
+        result = handle_llms(service, args)
+    elif command == "llms-check":
+        result = handle_llm_check(service, args)
+    elif command == "install-llm":
+        result = handle_install_llm(service, args)
+    elif command == "llms-sync":
+        result = handle_llm_sync(service, args)
+    _flush_warnings(service)
     return result
 
 

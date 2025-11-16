@@ -13,6 +13,7 @@ from llm_client import (
     AnthropicClient,
     XAIClient,
     CommandLLMClient,
+    httpx,
 )
 
 
@@ -48,6 +49,8 @@ def create_llm_client(adapter: str, config: dict | None = None) -> LLMClient:
     if adapter_key in {"codex_cli", "openai_cli", "openai"}:
         return CodexCLIClient(max_context_tokens=max_context, max_output_tokens=max_output)
     if adapter_key == "anthropic":
+        if httpx is None:
+            raise RuntimeError("Anthropic adapter requires httpx; install it via pip")
         api_key_env = config.get("apiKeyEnv") or "ANTHROPIC_API_KEY"
         api_key = os.getenv(api_key_env)
         if not api_key:
@@ -63,6 +66,8 @@ def create_llm_client(adapter: str, config: dict | None = None) -> LLMClient:
             max_output_tokens=max_output,
         )
     if adapter_key == "xai":
+        if httpx is None:
+            raise RuntimeError("XAI adapter requires httpx; install it via pip")
         api_key_env = config.get("apiKeyEnv") or "GROK_API_KEY"
         api_key = os.getenv(api_key_env)
         if not api_key:

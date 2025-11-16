@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from ensure_agents_schema import ensure_agents_schema
-from agents_registry import AgentRegistry
 from .model import iso_timestamp
+
+if TYPE_CHECKING:  # pragma: no cover
+    from agents_registry import AgentRegistry
 
 
 class LLMCatalogStore:
@@ -21,10 +23,10 @@ class LLMCatalogStore:
             return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path))
-        conn.execute("PRAGMA foreign_keys = ON")
         try:
             cur = conn.cursor()
             ensure_agents_schema(cur)
+            conn.execute("PRAGMA foreign_keys = OFF")
             cur.execute(
                 "SELECT id, install_status, install_checked_at, install_hint, install_command, install_command_macos, install_command_windows FROM llm_providers"
             )
@@ -40,7 +42,6 @@ class LLMCatalogStore:
                 for row in cur.fetchall()
             }
             cur.execute("DELETE FROM llm_models")
-            cur.execute("DELETE FROM llm_providers")
             provider_rows = []
             model_rows = []
             for provider in providers:
@@ -96,6 +97,23 @@ class LLMCatalogStore:
                         created_at, updated_at
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name=excluded.name,
+                        type=excluded.type,
+                        adapter=excluded.adapter,
+                        source=excluded.source,
+                        fetched_at=excluded.fetched_at,
+                        api_key_hint=excluded.api_key_hint,
+                        api_endpoint_hint=excluded.api_endpoint_hint,
+                        metadata_json=excluded.metadata_json,
+                        install_status=excluded.install_status,
+                        install_checked_at=COALESCE(excluded.install_checked_at, llm_providers.install_checked_at),
+                        install_hint=COALESCE(excluded.install_hint, llm_providers.install_hint),
+                        install_command=COALESCE(excluded.install_command, llm_providers.install_command),
+                        install_command_macos=COALESCE(excluded.install_command_macos, llm_providers.install_command_macos),
+                        install_command_windows=COALESCE(excluded.install_command_windows, llm_providers.install_command_windows),
+                        created_at=COALESCE(llm_providers.created_at, excluded.created_at),
+                        updated_at=excluded.updated_at
                     """,
                     [
                         row + (now, now)  # type: ignore[operator]
@@ -117,6 +135,10 @@ class LLMCatalogStore:
                 )
             conn.commit()
         finally:
+            try:
+                conn.execute("PRAGMA foreign_keys = ON")
+            except Exception:
+                pass
             conn.close()
 
     def ensure_provider_model(
@@ -142,10 +164,10 @@ class LLMCatalogStore:
         model_payload.setdefault("id", model_id)
         model_payload.setdefault("name", model_name)
         conn = sqlite3.connect(str(self.db_path))
-        conn.execute("PRAGMA foreign_keys = ON")
         try:
             cur = conn.cursor()
             ensure_agents_schema(cur)
+            conn.execute("PRAGMA foreign_keys = OFF")
             now = iso_timestamp()
             cur.execute(
                 """
@@ -229,6 +251,10 @@ class LLMCatalogStore:
             )
             conn.commit()
         finally:
+            try:
+                conn.execute("PRAGMA foreign_keys = ON")
+            except Exception:
+                pass
             conn.close()
         return provider_id, model_id
 

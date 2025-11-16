@@ -82,9 +82,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_args(parser: argparse.ArgumentParser, argv: list[str] | None) -> argparse.Namespace:
+    args_list = sys.argv[1:] if argv is None else list(argv)
+    parse_intermixed = getattr(parser, "parse_intermixed_args", None)
+    if parse_intermixed is not None:
+        try:
+            return parse_intermixed(args_list)
+        except (TypeError, ValueError):
+            # Older Python builds or specific parser configurations may not support intermixed parsing.
+            pass
+    return parser.parse_args(args_list)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parse_args(parser, argv)
     if args.files:
         return cmd_files(args)
     if not args.pattern:

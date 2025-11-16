@@ -4,8 +4,10 @@
 - Outline a concise plan (<=3 bullets focused on actions), execute the required edits, and capture final status notes with clear pass/fail decisions.
 - Never create files named `PLAN.md` (or any case variant); summarize plans inline instead of emitting that artifact.
 - Apply changes by editing files directly via shell commands (no diff/patch output); never call `apply_patch`—use editors, `sed`, `python3 scripts/python/write_block.py`, or `gpt-creator apply-block` instead so the CLI can track edits automatically.
+- When emitting `cat <<'EOF' … EOF` or `python3 - <<'PY'` blocks, provide the full content and closing marker (no `...` placeholders). If the snippet is long, break it into smaller writes or use `python3 scripts/python/write_block.py`.
 - When running `rg`, keep the syntax `rg [options] <pattern> [path …]` (e.g., `rg -n --glob '*.ts' "foo" apps/api/src`) and list file paths only after the pattern (do **not** write `rg -n "foo" -n apps/...`); malformed commands waste attempts and will be treated as errors.
 - When wrapping commands with `bash -lc`/`sh -c`, write `bash -lc "actual command"` (no escaped outer quotes); strings such as `bash -lc \"...\"` cause `bash` to fail with `unexpected EOF while looking for matching '"'`.
+- If your inner command needs quoted environment variables (e.g., `"$GC_DOC_CATALOG_PY"`), wrap the entire command in single quotes or escape the inner quotes: `bash -lc 'python3 "$GC_DOC_CATALOG_PY" list --db "$GC_DOCUMENTATION_DB_PATH" --limit 5'`. Copying suggestions verbatim without fixing the quotes will fail.
 - Every time you run a command that edits files, writes content, stages changes, or runs tests/tools, list that exact command under the `Commands` heading; if you truly ran nothing, state `- (none)` explicitly.
 - If you publish “Plan/Focus/Commands” and then change files, rerun the summary (or at least refresh `Commands`) so it reflects the actual edits—you cannot leave “no code changes yet” after modifying the repo.
 - Commands you list under `Commands` must actually run (and succeed or be reported with their failures); do not invent command lists you never executed.

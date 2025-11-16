@@ -341,6 +341,18 @@ def main():
             'quote-mismatch': 'command quote mismatch',
             'repeat-failure': 'repeated command failure',
         }
+        FATAL_BLOCK_REASONS = {
+            'placeholder-ellipsis',
+            'heredoc',
+            'heredoc-unterminated',
+            'missing-helper',
+            'policy',
+            'non-whitelist',
+            'repeat-failure',
+            'quote-mismatch',
+            'redirection',
+            'python-non3',
+        }
         REDIRECTION_PATTERN = re.compile(r'(?<!\\)(?:>>|>\||\$\(|<\()')
         SHELL_META_CHARS = set('|&;()<>*$`\\\n')
 
@@ -4281,6 +4293,7 @@ def main():
             actual_changes += len(extra_command_changes) + len(extra_untracked)
 
         if blocked_command_total:
+            fatal_reasons_present = False
             for reason, data in blocked_command_counts.items():
                 total = int(data.get('total', 0))  # type: ignore[arg-type]
                 examples: List[str] = list(data.get('examples', []))  # type: ignore[assignment]
@@ -4294,9 +4307,13 @@ def main():
                 summary_text = f"{label}: {total} command(s) blocked"
                 if detail:
                     summary_text = f"{summary_text} ({detail})"
+                fatal_entry = reason in FATAL_BLOCK_REASONS
+                if fatal_entry:
+                    fatal_reasons_present = True
+                prefix = "blocked" if fatal_entry else "warning"
                 manual_notes.append(
                     _format_action_result(
-                        f"blocked-{reason}",
+                        f"{prefix}-{reason}",
                         summary_text
                     )
                 )
@@ -4314,13 +4331,14 @@ def main():
                         "replace `...` placeholders with the exact commands you intend to run before retrying"
                     )
                 )
-            manual_notes.append(
+            if fatal_reasons_present:
+                manual_notes.append(
                     _format_action_result(
                         "commands-remediation",
                         "replace blocked commands with approved workflows (gpt-creator apply-block, python3 scripts/python/write_block.py, pnpm --filter …) before retrying"
                     )
                 )
-            command_failure_detected = True
+                command_failure_detected = True
 
         declared_commands: List[str] = payload.get('commands') or []
         commands_missing = False
@@ -5343,7 +5361,14 @@ def main():
         doc_library_shim_str = _select_display_path([project_root_path / "docs" / "doc-library.md"])
         doc_index_shim_str = _select_display_path([project_root_path / "docs" / "doc-index.md"])
 
-        documentation_db_display = _select_display_path([Path(documentation_db_path)]) if documentation_db_path else ""
+        documentation_db_display = ""
+        documentation_db_available = False
+        if documentation_db_path:
+            try:
+                documentation_db_display = _select_display_path([Path(documentation_db_path)]) or ""
+                documentation_db_available = Path(documentation_db_path).is_file()
+            except Exception:
+                documentation_db_available = False
 
         vector_index_path = None
         vector_index_path_str = ""
@@ -5739,7 +5764,7 @@ def main():
         lines.append(f"You are assisting the {project_display} delivery team. Implement the task precisely using the repository at: {repo_path}")
         lines.append("")
         doc_helpers_available = bool(
-            documentation_db_path
+            documentation_db_available
             and has_doc_catalog_helper
             and has_doc_registry_helper
             and has_doc_indexer_helper
@@ -5772,19 +5797,24 @@ def main():
             lines.append("- `documentation_search` (FTS5): searchable text (surface, content) with doc_id/section_id; use MATCH with snippet() or ORDER BY bm25().")
             lines.append('- Schema quick look: sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables" or ".schema documentation"')
             lines.append("- Vector DB ($GC_DOCUMENTATION_INDEX_PATH) table `vectors`: embeddings per surface (embedding_id PK, doc_id, section_id, vector_json, dims, metadata_json, updated_at).")
-            lines.append("Common catalog commands:")
-            lines.append('- List recent docs: python3 "$GC_DOC_CATALOG_PY" list --db "$GC_DOCUMENTATION_DB_PATH" --limit 10')
-            lines.append('- Full-text search: python3 "$GC_DOC_CATALOG_PY" search --db "$GC_DOCUMENTATION_DB_PATH" --query "lockout" --limit 15')
-            lines.append('- Show document by id: python3 "$GC_DOC_CATALOG_PY" show --db "$GC_DOCUMENTATION_DB_PATH" --doc-id <id>')
-            lines.append('- Rebuild semantic index: python3 "$GC_DOC_INDEXER_PY" rebuild --db "$GC_DOCUMENTATION_DB_PATH" --out "$GC_DOC_VECTOR_INDEX_PATH"')
-            lines.append('- Register or sync discovery TSV: python3 "$GC_DOC_REGISTRY_PY" register --db "$GC_DOCUMENTATION_DB_PATH" --tsv ".gpt-creator/manifests/<latest>.tsv"')
+            lines.append("Common catalog commands (wrap inner commands in single quotes so the environment variables remain quoted):")
+            lines.append('- List recent docs: bash -lc \'python3 "$GC_DOC_CATALOG_PY" list --db "$GC_DOCUMENTATION_DB_PATH" --limit 10\'')
+            lines.append('- Full-text search: bash -lc \'python3 "$GC_DOC_CATALOG_PY" search --db "$GC_DOCUMENTATION_DB_PATH" --query "lockout" --limit 15\'')
+            lines.append('- Show document by id: bash -lc \'python3 "$GC_DOC_CATALOG_PY" show --db "$GC_DOCUMENTATION_DB_PATH" --doc-id <id>\'')
+            lines.append('- Rebuild semantic index: bash -lc \'python3 "$GC_DOC_INDEXER_PY" rebuild --db "$GC_DOCUMENTATION_DB_PATH" --out "$GC_DOC_VECTOR_INDEX_PATH"\'')
+            lines.append('- Register or sync discovery TSV: bash -lc \'python3 "$GC_DOC_REGISTRY_PY" register --db "$GC_DOCUMENTATION_DB_PATH" --tsv ".gpt-creator/manifests/<latest>.tsv"\'')
 
         else:
             lines.append("## Documentation Assets (sqlite3 fallback)")
             lines.append("")
             catalog_line = "- Catalog DB: $GC_DOCUMENTATION_DB_PATH"
             if documentation_db_display:
-                catalog_line += f" → `{documentation_db_display}`"
+                if documentation_db_available:
+                    catalog_line += f" → `{documentation_db_display}`"
+                else:
+                    catalog_line += (
+                        f" (missing at `{documentation_db_display}`; run `gpt-creator scan` to rebuild the doc catalog before issuing catalog commands)"
+                    )
             else:
                 catalog_line += " (run `gpt-creator scan` if the catalog needs to be regenerated)"
             lines.append(catalog_line)
@@ -5798,6 +5828,19 @@ def main():
             lines.append("- Latest changes:")
             lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" \\')
             lines.append('    "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"')
+            if not documentation_db_available:
+                lines.append("- (Documentation catalog helpers unavailable without the SQLite database; regenerate with `gpt-creator scan` before running catalog commands.)")
+            else:
+                missing_helpers: List[str] = []
+                if not has_doc_catalog_helper:
+                    missing_helpers.append("$GC_DOC_CATALOG_PY")
+                if not has_doc_registry_helper:
+                    missing_helpers.append("$GC_DOC_REGISTRY_PY")
+                if not has_doc_indexer_helper:
+                    missing_helpers.append("$GC_DOC_INDEXER_PY")
+                if missing_helpers:
+                    joined = ", ".join(missing_helpers)
+                    lines.append(f"- (Documentation helpers missing: {joined}. Re-run `gpt-creator install` or `gpt-creator scan` to refresh shims before invoking catalog commands.)")
 
         lines.append("")
 
@@ -6774,7 +6817,7 @@ def main():
                     example_doc_id = candidate_doc_id
                     break
 
-        if doc_catalog_entries:
+        if doc_catalog_entries and doc_helpers_available:
             lines.append("")
             lines.append("## Documentation Catalog")
             doc_id_token = "<ID>"
@@ -6782,7 +6825,7 @@ def main():
                 doc_id_token = shlex.quote(example_doc_id)
             lines.append(
                 "Use the catalog below to pick a section, then run "
-                f"`python3 \"$GC_DOC_CATALOG_PY\" show --db \"$GC_DOCUMENTATION_DB_PATH\" --doc-id {doc_id_token}` for a narrow excerpt. "
+                f"`bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" show --db \"$GC_DOCUMENTATION_DB_PATH\" --doc-id {doc_id_token}'` for a narrow excerpt. "
                 "Avoid reading the raw documentation files directly."
             )
             for entry in doc_catalog_entries[:6]:
@@ -7095,7 +7138,7 @@ def main():
         lines.append("## Helper Checklist (before exploring code or docs)")
         lines.append("- Map the repo once via `python3 scripts/python/repo_outline.py --max-depth 1 --focus apps/api` instead of issuing repetitive `ls` commands.")
         lines.append("- When you need to inspect code, run `python3 scripts/python/targeted_search.py --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.")
-        lines.append("- For SDS/PDR context or migrations, query the documentation catalog with `python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" ...` rather than opening entire doc files or grepping blindly.")
+        lines.append("- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.")
 
         lines.append("")
         lines.append("## Instructions")
@@ -7115,7 +7158,7 @@ def main():
             "- Push your work once committed (e.g., `git push origin <branch>`), and include that command under `Commands` as well.",
             "- Capture blockers or follow-ups in `Notes`.",
             "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",
-            "- Use `python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" …` for SDS/PDR context instead of opening doc files directly.",
+            "- Use `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` (or the `show` variant) for SDS/PDR context instead of opening doc files directly.",
             "- Need a repo overview? Run `python3 scripts/python/repo_outline.py --max-depth 1 --focus <path>` (see `assets/templates/help/repo_outline_usage.txt`).",
             "- Searching for symbols? Run `python3 scripts/python/targeted_search.py --pattern <needle> --paths <dirs> [--ext .ts]` instead of repo-wide `rg`/`python os.walk` loops (`assets/templates/help/targeted_search_usage.txt`).",
             "- Validating REST endpoints? Define a manifest and run `python3 scripts/python/rest_check_runner.py <manifest.yaml>` (`assets/templates/help/rest_check_runner_usage.txt`).",

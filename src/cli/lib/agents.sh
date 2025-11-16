@@ -20,9 +20,35 @@ gc_cli__registry_validate() {
   "${PYTHON_BIN:-python3}" "$registry_script" validate --client "$client" --model "$model"
 }
 
+gc_cli__agents_helper_path() {
+  local helper="${1:?python helper name required}"
+  local project="${2:-${PROJECT_ROOT:-$PWD}}"
+  if declare -f gc_clone_python_tool >/dev/null 2>&1; then
+    gc_clone_python_tool "$helper" "$project"
+    return
+  fi
+  if declare -f gc::clone_python_tool >/dev/null 2>&1; then
+    gc::clone_python_tool "$helper" "$project"
+    return
+  fi
+  local cli_root="${GC_ROOT:-${CLI_ROOT:-${ROOT_DIR:-}}}"
+  if [[ -n "$cli_root" && -f "${cli_root}/scripts/python/${helper}" ]]; then
+    printf '%s/scripts/python/%s\n' "$cli_root" "$helper"
+    return 0
+  fi
+  return 1
+}
+
+gc_cli__registry_adapter_helper() {
+  local project="${1:-${PROJECT_ROOT:-$PWD}}"
+  local helper="agents_registry_adapter_info.py"
+  gc_cli__agents_helper_path "$helper" "$project"
+}
+
 gc_cli__apply_agent_env() {
-  local client="$1" model="$2" name="$3" agent_file="$4"
-  local stored_key="$5" stored_base="$6" stored_org="$7"
+  local project="${1:-${PROJECT_ROOT:-$PWD}}"
+  local client="$2" model="$3" name="$4" agent_file="$5"
+  local stored_key="$6" stored_base="$7" stored_org="$8"
   export GC_ACTIVE_AGENT_FILE="$agent_file"
   export GC_ACTIVE_AGENT_NAME="$name"
   export GC_ACTIVE_AGENT_CLIENT="$client"
@@ -33,21 +59,11 @@ gc_cli__apply_agent_env() {
   )"
   local agent_adapter="" agent_ctx="" agent_out="" agent_api_base="" agent_api_key_env="" agent_org_env="" agent_api_base_env=""
   if [[ -n "$registry_json" ]]; then
-    adapter_info="$(${PYTHON_BIN:-python3} - <<'PY' "$registry_json"
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    data = {}
-print(data.get("adapter", ""))
-print(data.get("maxContextTokens") or "")
-print(data.get("maxOutputTokens") or "")
-print(data.get("apiBase") or "")
-print(data.get("apiKeyEnv") or "")
-print(data.get("orgEnv") or "")
-print(data.get("apiBaseEnv") or "")
-PY
-)"
+    local helper_path
+    helper_path="$(gc_cli__registry_adapter_helper "$project")" || helper_path=""
+    if [[ -n "$helper_path" ]]; then
+      adapter_info="$(${PYTHON_BIN:-python3} "$helper_path" <<<"$registry_json")" || adapter_info=""
+    fi
     IFS=$'\n' read -r agent_adapter agent_ctx agent_out agent_api_base agent_api_key_env agent_org_env agent_api_base_env <<<"$adapter_info"
     [[ -n "$agent_adapter" ]] && export GC_ACTIVE_AGENT_ADAPTER="$agent_adapter"
     [[ -n "$agent_ctx" ]] && export GC_ACTIVE_AGENT_MAX_CONTEXT="$agent_ctx"
@@ -93,44 +109,21 @@ gc_cli_resolve_agent_model() {
   tmp_dir="$tmp_root/tmp"
   mkdir -p "$tmp_dir"
   agent_tmp="$(mktemp "$tmp_dir/agent-select.XXXXXX.json" 2>/dev/null || mktemp)"
-  parse_output="$(${PYTHON_BIN:-python3} - "$agent_tmp" <<'PY' <<<"$output"
-import json, sys
-data = json.load(sys.stdin)
-tmp_path = sys.argv[1]
-kind = data.get("kind")
-if kind == "agent":
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh)
-    agent = data.get("agent") or {}
-    print("agent")
-    print(agent.get("client", ""))
-    print(agent.get("model", ""))
-    print(agent.get("name", ""))
-    print(agent.get("client_api_key", ""))
-    print(agent.get("client_api_base", ""))
-    print(agent.get("client_api_org", ""))
-elif kind == "model":
-    print("model")
-    print("")
-    print(data.get("model", ""))
-    print("")
-    print("")
-    print("")
-    print("")
-else:
-    print("unknown")
-    print("")
-    print("")
-    print("")
-    print("")
-    print("")
-    print("")
-PY
-)"
+  local parse_helper
+  if ! parse_helper="$(gc_cli__agents_helper_path "agents_cli_parse_selection.py" "$project")"; then
+    rm -f "$agent_tmp"
+    printf ''
+    return 1
+  fi
+  if ! parse_output="$(${PYTHON_BIN:-python3} "$parse_helper" "$agent_tmp" <<<"$output")"; then
+    rm -f "$agent_tmp"
+    printf ''
+    return 1
+  fi
   local resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org
   IFS=$'\n' read -r resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org <<<"$parse_output"
   if [[ "$resolved_kind" == "agent" && -n "$resolved_model" ]]; then
-    gc_cli__apply_agent_env "$resolved_client" "$resolved_model" "$resolved_name" "$agent_tmp" "$resolved_api_key" "$resolved_api_base" "$resolved_api_org"
+    gc_cli__apply_agent_env "$project" "$resolved_client" "$resolved_model" "$resolved_name" "$agent_tmp" "$resolved_api_key" "$resolved_api_base" "$resolved_api_org"
     printf '%s\n' "$resolved_model"
     return 0
   fi

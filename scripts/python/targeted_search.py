@@ -266,10 +266,10 @@ def main() -> None:
     sys.exit(1)
   if truncated and not args.allow_large:
     print(
-        f"[targeted-search] reached file limit ({args.max_files}). Refine --paths/--ext or pass --allow-large to continue.",
+        f"[targeted-search] reached file limit ({args.max_files}); searched first {len(files)} files only. "
+        "Refine --paths/--ext or pass --allow-large to cover more files.",
         file=sys.stderr,
     )
-    sys.exit(2)
 
   compiled = compile_patterns(
       args.pattern,

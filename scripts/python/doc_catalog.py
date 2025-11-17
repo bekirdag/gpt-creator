@@ -234,10 +234,13 @@ def cmd_search(args: argparse.Namespace) -> int:
     if base_docs is None:
         base_docs = load_from_fs()
     matches = list(search_documents(base_docs, query, limit))
+    if not matches:
+        print(f"[doc-catalog] no documents matched query {query!r}.", file=sys.stderr)
+        return 0
     for doc in matches:
         snippet = f" — {doc.snippet}" if doc.snippet else ""
         print(f"{doc.doc_id}\t{_display_path(doc)}{snippet}")
-    return 0 if matches else 1
+    return 0
 
 
 def cmd_show(args: argparse.Namespace) -> int:

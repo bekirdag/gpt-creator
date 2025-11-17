@@ -2370,6 +2370,7 @@ def main():
         elif existing_notes is not None:
             payload['notes'] = []
         actual_changes = 0
+        documentation_only_run = False
         change_bytes = {}
 
         def rewrite_patch_paths(diff_text: str) -> str:
@@ -4285,10 +4286,11 @@ def main():
                     )
                     actual_changes += branch_delta
                 else:
+                    documentation_only_run = True
                     manual_notes.append(
                         _format_action_result(
                             "post-command-delta",
-                            "info — commands ran but left the repository unchanged; marking run as documentation-only."
+                            "info — commands ran but left the repository unchanged; if the current code already satisfies the requirements, report the task as completed-no-changes instead of rerunning."
                         )
                     )
 
@@ -4525,6 +4527,13 @@ def main():
         if forced_canonical_status:
             canonical_status = forced_canonical_status
             legacy_status = forced_legacy_status or legacy_status
+        if (
+            documentation_only_run
+            and canonical_status == 'RETRYABLE'
+            and not dirty_tree_blocked
+        ):
+            canonical_status = 'COMPLETED-NO-CHANGES'
+            legacy_status = 'noop'
 
         if canonical_status == 'COMPLETED':
             _merge_branch_into_base_if_complete(canonical_status)

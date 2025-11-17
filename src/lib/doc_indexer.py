@@ -29,13 +29,7 @@ from .doc_registry import DocRegistry, SearchEntry
 
 def _log(message: str) -> None:
     ts = _iso_ts_now()
-    line = f"[doc-indexer {ts}] {message}\n"
-    for stream in (sys.stderr, sys.stdout):
-        try:
-            stream.write(line)
-            stream.flush()
-        except Exception:
-            continue
+    print(f"[doc-indexer {ts}] {message}", flush=True)
 
 
 def _iso_ts_now() -> str:
@@ -294,7 +288,11 @@ class DocIndexer:
             self.max_workers = default_workers
 
     def rebuild_full_text(self, doc_ids: Optional[Sequence[str]] = None) -> None:
+        _log("Loading catalog rows for full-text rebuild…")
+        _log("Loading catalog rows for vector index rebuild…")
         docs, summaries, excerpts = self._load_catalog_rows(doc_ids)
+        _log(f"Vector loader retrieved {len(docs)} docs, {len(summaries)} summaries, {sum(len(v) for v in excerpts.values())} excerpts.")
+        _log(f"Loaded {len(docs)} docs, {len(summaries)} summaries, {sum(len(v) for v in excerpts.values())} excerpts.")
         _log(f"Rebuilding full-text index for {len(docs)} document(s).")
         entries_map: Dict[str, List[SearchEntry]] = {}
         metadata_map: Dict[str, Dict[str, object]] = {}

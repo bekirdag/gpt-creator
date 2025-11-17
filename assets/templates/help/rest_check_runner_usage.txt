@@ -1,5 +1,6 @@
 Usage:
-  python3 scripts/python/rest_check_runner.py path/to/manifest.[yaml|toml] [options]
+  python3 "$GC_REST_CHECK_RUNNER_PY" path/to/manifest.[yaml|toml] [options]
+  # Fallback outside gpt-creator: python3 scripts/python/rest_check_runner.py …
 
 Requirements:
   python3.9+ plus `pip install httpx pyyaml`
@@ -74,10 +75,10 @@ Placeholders:
 
 Examples:
   # Parse but skip execution
-  python3 scripts/python/rest_check_runner.py assets/templates/examples/rest_check_manifest.example.yaml --dry-run
+  python3 "$GC_REST_CHECK_RUNNER_PY" assets/templates/examples/rest_check_manifest.example.yaml --dry-run
 
   # Run a focused subset and emit JSON summary alongside text output
-  python3 scripts/python/rest_check_runner.py smoke.yaml --only "auth-*,users-*"
+  python3 "$GC_REST_CHECK_RUNNER_PY" smoke.yaml --only "auth-*,users-*"
 
 Sample manifest:
   See assets/templates/examples/rest_check_manifest.example.yaml for a ready-to-run

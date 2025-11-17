@@ -1,5 +1,6 @@
 Usage:
-  python3 scripts/python/repo_outline.py [options]
+  python3 "$GC_REPO_OUTLINE_PY" [options]
+  # Fallback outside gpt-creator: python3 scripts/python/repo_outline.py [options]
 
 Purpose:
   Print a concise directory outline (and a few representative files) so you can
@@ -16,13 +17,13 @@ Key options:
 
 Examples:
   # Quick overview of the repo root
-  python3 scripts/python/repo_outline.py
+  python3 "$GC_REPO_OUTLINE_PY"
 
   # Dive deeper into apps/api while keeping the main tree shallow
-  python3 scripts/python/repo_outline.py --max-depth 1 --focus apps/api --focus apps/api/src
+  python3 "$GC_REPO_OUTLINE_PY" --max-depth 1 --focus apps/api --focus apps/api/src
 
   # Emphasize scripts without clutter from node_modules or dist
-  python3 scripts/python/repo_outline.py --focus scripts --ignore node_modules --ignore dist
+  python3 "$GC_REPO_OUTLINE_PY" --focus scripts --ignore node_modules --ignore dist
 
 Tips:
   • Copy/paste the outline into your task log instead of dumping entire files.

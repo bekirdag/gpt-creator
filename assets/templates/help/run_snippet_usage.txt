@@ -1,5 +1,6 @@
 Usage:
-  python3 scripts/python/run_snippet.py /path/to/snippet.py [--argv ...]
+  python3 "$GC_RUN_SNIPPET_PY" /path/to/snippet.py [--argv ...]
+  # Fallback outside gpt-creator: python3 scripts/python/run_snippet.py …
 
 Purpose:
   Execute short Python helpers without firing placeholder heredocs. The script
@@ -13,7 +14,7 @@ Typical workflow:
   print(root / "apps/api/prisma/schema.prisma")
   PY
 
-  python3 scripts/python/run_snippet.py /tmp/snippet.py
+  python3 "$GC_RUN_SNIPPET_PY" /tmp/snippet.py
 
 Options:
   --allow-placeholder     Skip the placeholder check (use sparingly)

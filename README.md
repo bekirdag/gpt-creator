@@ -32,11 +32,11 @@ Codex agents should prefer the purpose-built helpers below instead of ad‑hoc `
 
 | Tool | When to use it | Usage doc |
 |------|----------------|-----------|
-| `python3 scripts/python/repo_outline.py` | Get a concise directory tree (with optional focus paths) instead of running dozens of `ls` commands. | `assets/templates/help/repo_outline_usage.txt` |
-| `python3 scripts/python/targeted_search.py` | Search for strings/regex within a bounded set of files (depth/extension limited) instead of walking the entire repo. Supports multiple patterns and optional context output. | `assets/templates/help/targeted_search_usage.txt` |
-| `python3 scripts/python/rest_check_runner.py` | Run declarative REST smoke tests defined in a YAML/TOML manifest (auth, payloads, predicates) instead of writing bespoke HTTP scripts each turn. | `assets/templates/help/rest_check_runner_usage.txt` |
-| `python3 scripts/python/safe_show_file.py` | Preview file slices and get real path suggestions before running `sed`/`cat`, preventing token waste on missing files. | `assets/templates/help/safe_show_file_usage.txt` |
-| `python3 scripts/python/run_snippet.py` | Execute temporary Python helpers safely; refuses placeholder-only heredocs so commands stay valid. | `assets/templates/help/run_snippet_usage.txt` |
+| `python3 "$GC_REPO_OUTLINE_PY"` | Get a concise directory tree (with optional focus paths) instead of running dozens of `ls` commands. (If running outside `gpt-creator`, call `scripts/python/repo_outline.py` directly.) | `assets/templates/help/repo_outline_usage.txt` |
+| `python3 "$GC_TARGETED_SEARCH_PY"` | Search for strings/regex within a bounded set of files (depth/extension limited) instead of walking the entire repo. Supports multiple patterns and optional context output. (Fallback: `scripts/python/targeted_search.py`.) | `assets/templates/help/targeted_search_usage.txt` |
+| `python3 "$GC_REST_CHECK_RUNNER_PY"` | Run declarative REST smoke tests defined in a YAML/TOML manifest (auth, payloads, predicates) instead of writing bespoke HTTP scripts each turn. (Fallback: `scripts/python/rest_check_runner.py`.) | `assets/templates/help/rest_check_runner_usage.txt` |
+| `python3 "$GC_SAFE_SHOW_FILE_PY"` | Preview file slices and get real path suggestions before running `sed`/`cat`, preventing token waste on missing files. (Fallback: `scripts/python/safe_show_file.py`.) | `assets/templates/help/safe_show_file_usage.txt` |
+| `python3 "$GC_RUN_SNIPPET_PY"` | Execute temporary Python helpers safely; refuses placeholder-only heredocs so commands stay valid. (Fallback: `scripts/python/run_snippet.py`.) | `assets/templates/help/run_snippet_usage.txt` |
 
 These helpers are mandatory during `work-on-tasks` sessions: mention them in your task notes, keep token-heavy scans capped, and extend the manifest/usage templates rather than cloning new tooling.
 

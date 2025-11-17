@@ -1,5 +1,6 @@
 Usage:
-  python3 scripts/python/targeted_search.py --pattern PATTERN --paths DIR [options]
+  python3 "$GC_TARGETED_SEARCH_PY" --pattern PATTERN --paths DIR [options]
+  # Fallback outside gpt-creator: python3 scripts/python/targeted_search.py …
 
 Purpose:
   Search a focused slice of the repo (limited depth/file count) instead of
@@ -21,17 +22,17 @@ Key options:
 
 Examples:
   # Find REQUEST_ID_HEADER inside admin API controllers (depth limited)
-  python3 scripts/python/targeted_search.py \
+  python3 "$GC_TARGETED_SEARCH_PY" \
     --pattern REQUEST_ID_HEADER \
     --paths apps/api/src/admin --ext .ts --max-depth 3
 
   # Case-sensitive regex search for Controller('events') across events module
-  python3 scripts/python/targeted_search.py \
+  python3 "$GC_TARGETED_SEARCH_PY" \
     --pattern "@Controller\\('events'\\)" --regex --case-sensitive \
     --paths apps/api/src/events --ext .ts
 
   # Check multiple patterns within a few files
-  python3 scripts/python/targeted_search.py \
+  python3 "$GC_TARGETED_SEARCH_PY" \
     -p logProgramPublishEvent -p conflictId \
     -P apps/api/src/admin/admin-program.controller.ts
 

@@ -1,5 +1,6 @@
 Usage:
-  python3 scripts/python/safe_show_file.py <path-or-name> [options]
+  python3 "$GC_SAFE_SHOW_FILE_PY" <path-or-name> [options]
+  # Fallback outside gpt-creator: python3 scripts/python/safe_show_file.py …
 
 Purpose:
   Preview files (and get suggestions) without wasting tokens on `sed` failures
@@ -14,13 +15,13 @@ Key options:
 
 Examples:
   # Show the first 120 lines of a known file
-  python3 scripts/python/safe_show_file.py apps/api/src/admin/instructors/admin-instructor-audit.service.ts --start 1 --end 120
+  python3 "$GC_SAFE_SHOW_FILE_PY" apps/api/src/admin/instructors/admin-instructor-audit.service.ts --start 1 --end 120
 
   # Unsure about the exact path? Just pass the filename and use suggestions
-  python3 scripts/python/safe_show_file.py admin-instructor-audit.service.ts --suggest
+  python3 "$GC_SAFE_SHOW_FILE_PY" admin-instructor-audit.service.ts --suggest
 
   # Highlight occurrences of "status" with 2 lines of context
-  python3 scripts/python/safe_show_file.py admin-instructor-audit.service.ts --match status --context 2
+  python3 "$GC_SAFE_SHOW_FILE_PY" admin-instructor-audit.service.ts --match status --context 2
 
 Tips:
   • Always try this helper before `sed -n '…'` if you're not 100% sure of the path.

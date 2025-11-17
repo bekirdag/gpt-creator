@@ -7171,9 +7171,12 @@ def main():
         append_instruction_lines(
             [
                 "## Helper Checklist (before exploring code or docs)",
-                "- Map the repo once via `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus apps/api` (fallback: `scripts/python/repo_outline.py`) instead of issuing repetitive `ls` commands.",
+                "- Map the repo once via `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus apps/api` (helper is auto-cloned under .gpt-creator/shims/python/) instead of issuing repetitive `ls` commands.",
                 "- When you need to inspect code, run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
                 "- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.",
+                "- Validate REST endpoints via manifests and `python3 \"$GC_REST_CHECK_RUNNER_PY\" manifest.yaml` instead of crafting ad-hoc HTTP scripts.",
+                "- Preview file ranges safely using `python3 \"$GC_SAFE_SHOW_FILE_PY\" <path> --suggest` before `sed`/`cat`, so you avoid missing-file retries.",
+                "- Need a quick Python helper? Create /tmp/snippet.py and run `python3 \"$GC_RUN_SNIPPET_PY\" /tmp/snippet.py`; the script refuses placeholder-only heredocs and keeps commands deterministic.",
             ]
         )
 
@@ -7197,9 +7200,9 @@ def main():
             "- Use `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` (or the `show` variant) for SDS/PDR context instead of opening doc files directly.",
             "- Need a repo overview? Run `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus <path>` (see `assets/templates/help/repo_outline_usage.txt`).",
             "- Searching for symbols? Run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern <needle> --paths <dirs> [--ext .ts]` instead of repo-wide `rg`/`python os.walk` loops (`assets/templates/help/targeted_search_usage.txt`).",
-            "- Validating REST endpoints? Define a manifest and run `python3 scripts/python/rest_check_runner.py <manifest.yaml>` (`assets/templates/help/rest_check_runner_usage.txt`).",
-            "- Unsure about a file path? Run `python3 scripts/python/safe_show_file.py <path-or-name> --suggest` before `sed`/`cat` to avoid missing-file retries (`assets/templates/help/safe_show_file_usage.txt`).",
-            "- Need a quick Python helper? Create `/tmp/snippet.py` via heredoc and run `python3 scripts/python/run_snippet.py /tmp/snippet.py` to avoid placeholder heredocs (`assets/templates/help/run_snippet_usage.txt`).",
+            "- Validating REST endpoints? Define a manifest and run `python3 \"$GC_REST_CHECK_RUNNER_PY\" <manifest.yaml>` (`assets/templates/help/rest_check_runner_usage.txt`).",
+            "- Unsure about a file path? Run `python3 \"$GC_SAFE_SHOW_FILE_PY\" <path-or-name> --suggest` before `sed`/`cat` to avoid missing-file retries (`assets/templates/help/safe_show_file_usage.txt`).",
+            "- Need a quick Python helper? Create `/tmp/snippet.py` via heredoc and run `python3 \"$GC_RUN_SNIPPET_PY\" /tmp/snippet.py` to avoid placeholder heredocs (`assets/templates/help/run_snippet_usage.txt`).",
             "- End the `Notes` section with `STATUS: completed`, `STATUS: needs-retry`, or `STATUS: failed` so automation can classify the run.",
         ]
 

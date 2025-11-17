@@ -3238,9 +3238,12 @@ if guard_entries:
 append_instruction_lines(
     [
         "## Helper Checklist (before exploring code or docs)",
-        "- Map the repo once via `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus apps/api` (fallback: `scripts/python/repo_outline.py`) instead of issuing repetitive `ls` commands.",
+        "- Map the repo once via `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus apps/api` (helper is auto-cloned under .gpt-creator/shims/python/) instead of issuing repetitive `ls` commands.",
         "- When you need to inspect code, run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
         "- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.",
+        "- Validate REST endpoints via manifests and `python3 \"$GC_REST_CHECK_RUNNER_PY\" manifest.yaml` instead of writing bespoke HTTP scripts.",
+        "- Preview file ranges with `python3 \"$GC_SAFE_SHOW_FILE_PY\" <path> --suggest` before `sed`/`cat`.",
+        "- Use `python3 \"$GC_RUN_SNIPPET_PY\" /tmp/snippet.py` for temporary Python helpers; it rejects placeholder-only heredocs.",
     ]
 )
 

@@ -597,6 +597,18 @@ gc_setup_doc_catalog_helpers() {
   helper_path="$(gc_clone_python_tool "targeted_search.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   export GC_TARGETED_SEARCH_PY="$helper_path"
   ensure_helper_compat "$helper_path" "targeted_search.py"
+
+  helper_path="$(gc_clone_python_tool "rest_check_runner.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  export GC_REST_CHECK_RUNNER_PY="$helper_path"
+  ensure_helper_compat "$helper_path" "rest_check_runner.py"
+
+  helper_path="$(gc_clone_python_tool "safe_show_file.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  export GC_SAFE_SHOW_FILE_PY="$helper_path"
+  ensure_helper_compat "$helper_path" "safe_show_file.py"
+
+  helper_path="$(gc_clone_python_tool "run_snippet.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  export GC_RUN_SNIPPET_PY="$helper_path"
+  ensure_helper_compat "$helper_path" "run_snippet.py"
 }
 
 gc_populate_doc_catalog_shims() {
@@ -10088,6 +10100,7 @@ PY
     unset GC_DOC_CATALOG_HELPER GC_DOC_REGISTRY_HELPER GC_DOC_INDEXER_HELPER
     unset doc_catalog doc_registry doc_indexer
     unset GC_REPO_OUTLINE_PY GC_TARGETED_SEARCH_PY
+    unset GC_REST_CHECK_RUNNER_PY GC_SAFE_SHOW_FILE_PY GC_RUN_SNIPPET_PY
   fi
 
   local last_progress_ts

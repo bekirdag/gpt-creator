@@ -5827,6 +5827,10 @@ def main():
             lines.append('- Show document by id: bash -lc \'python3 "$GC_DOC_CATALOG_PY" show --db "$GC_DOCUMENTATION_DB_PATH" --doc-id <id>\'')
             lines.append('- Rebuild semantic index: bash -lc \'python3 "$GC_DOC_INDEXER_PY" rebuild --db "$GC_DOCUMENTATION_DB_PATH" --out "$GC_DOC_VECTOR_INDEX_PATH"\'')
             lines.append('- Register or sync discovery TSV: bash -lc \'python3 "$GC_DOC_REGISTRY_PY" register --db "$GC_DOCUMENTATION_DB_PATH" --tsv ".gpt-creator/manifests/<latest>.tsv"\'')
+            lines.append("- SQL samples (helpful when Python helpers are unavailable):")
+            lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables"')
+            lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" "SELECT doc_id, surface FROM documentation_search WHERE documentation_search MATCH \'lockout\' LIMIT 5;"')
+            lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"')
 
         else:
             lines.append("## Documentation Assets (sqlite3 fallback)")
@@ -5852,6 +5856,8 @@ def main():
             lines.append("- Latest changes:")
             lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" \\')
             lines.append('    "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"')
+            lines.append("- Schema quick look:")
+            lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables"')
             if not documentation_db_available:
                 lines.append("- (Documentation catalog helpers unavailable without the SQLite database; regenerate with `gpt-creator scan` before running catalog commands.)")
             else:
@@ -7165,8 +7171,8 @@ def main():
         append_instruction_lines(
             [
                 "## Helper Checklist (before exploring code or docs)",
-                "- Map the repo once via `python3 scripts/python/repo_outline.py --max-depth 1 --focus apps/api` instead of issuing repetitive `ls` commands.",
-                "- When you need to inspect code, run `python3 scripts/python/targeted_search.py --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
+                "- Map the repo once via `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus apps/api` (fallback: `scripts/python/repo_outline.py`) instead of issuing repetitive `ls` commands.",
+                "- When you need to inspect code, run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
                 "- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.",
             ]
         )
@@ -7189,8 +7195,8 @@ def main():
             "- Capture blockers or follow-ups in `Notes`.",
             "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",
             "- Use `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` (or the `show` variant) for SDS/PDR context instead of opening doc files directly.",
-            "- Need a repo overview? Run `python3 scripts/python/repo_outline.py --max-depth 1 --focus <path>` (see `assets/templates/help/repo_outline_usage.txt`).",
-            "- Searching for symbols? Run `python3 scripts/python/targeted_search.py --pattern <needle> --paths <dirs> [--ext .ts]` instead of repo-wide `rg`/`python os.walk` loops (`assets/templates/help/targeted_search_usage.txt`).",
+            "- Need a repo overview? Run `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus <path>` (see `assets/templates/help/repo_outline_usage.txt`).",
+            "- Searching for symbols? Run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern <needle> --paths <dirs> [--ext .ts]` instead of repo-wide `rg`/`python os.walk` loops (`assets/templates/help/targeted_search_usage.txt`).",
             "- Validating REST endpoints? Define a manifest and run `python3 scripts/python/rest_check_runner.py <manifest.yaml>` (`assets/templates/help/rest_check_runner_usage.txt`).",
             "- Unsure about a file path? Run `python3 scripts/python/safe_show_file.py <path-or-name> --suggest` before `sed`/`cat` to avoid missing-file retries (`assets/templates/help/safe_show_file_usage.txt`).",
             "- Need a quick Python helper? Create `/tmp/snippet.py` via heredoc and run `python3 scripts/python/run_snippet.py /tmp/snippet.py` to avoid placeholder heredocs (`assets/templates/help/run_snippet_usage.txt`).",

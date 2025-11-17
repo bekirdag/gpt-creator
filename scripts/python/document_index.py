@@ -1533,6 +1533,14 @@ if catalog_reference_docs:
     documentation_asset_lines.append(
         f"- Deep-dive docs: {', '.join(catalog_reference_docs)} explain indexing, metadata, and pipelines powering these caches."
     )
+documentation_asset_lines.extend(
+    [
+        "- SQL samples (run via sqlite3 when helpers are unavailable):",
+        '  sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables"',
+        '  sqlite3 "$GC_DOCUMENTATION_DB_PATH" "SELECT doc_id, surface FROM documentation_search WHERE documentation_search MATCH \'lockout\' LIMIT 5;"',
+        '  sqlite3 "$GC_DOCUMENTATION_DB_PATH" "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"',
+    ]
+)
 
 def parse_json_list(value):
     if not value:
@@ -3230,8 +3238,8 @@ if guard_entries:
 append_instruction_lines(
     [
         "## Helper Checklist (before exploring code or docs)",
-        "- Map the repo once via `python3 scripts/python/repo_outline.py --max-depth 1 --focus apps/api` instead of issuing repetitive `ls` commands.",
-        "- When you need to inspect code, run `python3 scripts/python/targeted_search.py --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
+        "- Map the repo once via `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus apps/api` (fallback: `scripts/python/repo_outline.py`) instead of issuing repetitive `ls` commands.",
+        "- When you need to inspect code, run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
         "- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.",
     ]
 )
@@ -3263,8 +3271,9 @@ if compact_mode:
 else:
     guidance_lines.extend(
         [
-            "- Use pnpm for installs unless the task requires something else; flag unavailable commands.",
-            "- Skip broad repository listings; open only the code files tied to your active plan and keep the slices minimal.",
+            "- Prefer pnpm for scripts; note commands that cannot run because of network limits.",
+            "- Route all documentation lookups through the catalog search/show helpers; never crawl SDS/PDR files directly.",
+            "- Avoid broad repository listings; open only the code files tied to your current plan steps and keep the slices minimal.",
         ]
     )
 

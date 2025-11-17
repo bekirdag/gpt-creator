@@ -589,6 +589,14 @@ gc_setup_doc_catalog_helpers() {
   helper_path="$(gc_clone_python_tool "doc_indexer.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   export GC_DOC_INDEXER_PY="$helper_path"
   ensure_helper_compat "$helper_path" "doc_indexer.py"
+
+  helper_path="$(gc_clone_python_tool "repo_outline.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  export GC_REPO_OUTLINE_PY="$helper_path"
+  ensure_helper_compat "$helper_path" "repo_outline.py"
+
+  helper_path="$(gc_clone_python_tool "targeted_search.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  export GC_TARGETED_SEARCH_PY="$helper_path"
+  ensure_helper_compat "$helper_path" "targeted_search.py"
 }
 
 gc_populate_doc_catalog_shims() {
@@ -10079,6 +10087,7 @@ PY
     unset GC_DOC_CATALOG_PY GC_DOC_REGISTRY_PY GC_DOC_INDEXER_PY
     unset GC_DOC_CATALOG_HELPER GC_DOC_REGISTRY_HELPER GC_DOC_INDEXER_HELPER
     unset doc_catalog doc_registry doc_indexer
+    unset GC_REPO_OUTLINE_PY GC_TARGETED_SEARCH_PY
   fi
 
   local last_progress_ts

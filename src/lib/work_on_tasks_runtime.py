@@ -5476,6 +5476,7 @@ def main():
 
         CLI_ROOT = Path(__file__).resolve().parents[2]
         BUILTIN_WORK_PROMPT_PATH = CLI_ROOT / "assets" / "templates" / "prompts" / "work_on_tasks_default.prompt.md"
+        BUILTIN_WORK_PROMPT_LABEL = "builtin/work_on_tasks.prompt.md"
         _BUILTIN_WORK_PROMPT_FALLBACK_LINES: List[str] = [
             "## work-on-tasks Prompt",
             "- Load the task details and acceptance criteria from the context section.",
@@ -5608,6 +5609,8 @@ def main():
 
         instruction_prompts = collect_instruction_prompts(plan_instruction_dir, project_root_path, registry_candidate)
 
+        default_prompt_lines = _load_builtin_work_prompt_lines()
+
         if not instruction_prompts:
             fallback_prompt_paths = [
                 project_root_path / "src" / "prompts" / "iterate" / "work_on_tasks.prompt.md",
@@ -5628,7 +5631,15 @@ def main():
                     instruction_prompts = [(rel_label, prompt_text.strip().splitlines())]
                     break
             else:
-                instruction_prompts = [("builtin/work_on_tasks.prompt.md", _load_builtin_work_prompt_lines())]
+                instruction_prompts = [(BUILTIN_WORK_PROMPT_LABEL, default_prompt_lines)]
+        else:
+            if not any(label == BUILTIN_WORK_PROMPT_LABEL for label, _ in instruction_prompts):
+                instruction_prompts.append((BUILTIN_WORK_PROMPT_LABEL, default_prompt_lines))
+
+        debug_prompt_flag = os.getenv("GC_DEBUG_PROMPTS", "").strip().lower()
+        if debug_prompt_flag in {"1", "true", "yes"}:
+            summary_labels = ", ".join(label for label, _ in instruction_prompts)
+            sys.stderr.write(f"gpt-creator: instruction prompts → {summary_labels or '(none)'}\n")
 
         def build_log_excerpt(path_obj: Path, max_lines: int = 40, max_chars: int = 160) -> list[str]:
             try:
@@ -5732,7 +5743,7 @@ def main():
 
         sample_limit_env = os.getenv("GC_PROMPT_SAMPLE_LINES", "").strip()
         try:
-        sample_limit = int(sample_limit_env) if sample_limit_env else 80
+            sample_limit = int(sample_limit_env) if sample_limit_env else 80
         except ValueError:
             sample_limit = 80
         if sample_limit < 0:

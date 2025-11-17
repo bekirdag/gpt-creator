@@ -16,10 +16,11 @@ import json
 import math
 import sqlite3
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import sys
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Any
 
 import argparse
 
@@ -28,7 +29,11 @@ from .doc_registry import DocRegistry, SearchEntry
 
 def _log(message: str) -> None:
     ts = _iso_ts_now()
-    print(f"[doc-indexer {ts}] {message}")
+    try:
+        sys.stderr.write(f"[doc-indexer {ts}] {message}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 
 def _iso_ts_now() -> str:
@@ -109,6 +114,36 @@ class HashEmbeddingProvider(EmbeddingProvider):
             seed = hashlib.sha256(seed).digest()
         norm = math.sqrt(sum(val * val for val in values)) or 1.0
         return [val / norm for val in values]
+
+
+def _embed_texts_process(payload: Tuple[List[str], Dict[str, Any]]) -> Sequence[Sequence[float]]:
+    texts, spec = payload
+    provider_type = spec.get("type")
+    if provider_type == "hash":
+        dims = int(spec.get("dims", 256))
+        provider = HashEmbeddingProvider(dims=dims)
+        return provider.embed(texts)
+    raise ValueError(f"Unsupported provider type for multiprocessing: {provider_type}")
+
+
+def _build_vector_records(chunk: Sequence["VectorTask"], embeddings: Sequence[Sequence[float]]) -> List["VectorRecord"]:
+    records: List[VectorRecord] = []
+    for task, vector in zip(chunk, embeddings):
+        metadata = dict(task.metadata)
+        metadata["text_hash"] = _hash_text(task.text)
+        metadata["token_estimate"] = _estimate_tokens(task.text)
+        records.append(
+            VectorRecord(
+                embedding_id=task.embedding_id,
+                doc_id=task.doc_id,
+                section_id=task.section_id,
+                surface=task.surface,
+                vector=vector,
+                source_version=task.source_version,
+                metadata=metadata,
+            )
+        )
+    return records
 
 
 class LocalVectorIndex:
@@ -239,6 +274,7 @@ class DocIndexer:
         vector_index: Optional[LocalVectorIndex] = None,
         embedding_provider: Optional[EmbeddingProvider] = None,
         embedding_model: Optional[str] = None,
+        max_workers: Optional[int] = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.registry = DocRegistry(self.db_path)
@@ -246,17 +282,14 @@ class DocIndexer:
         self.vector_index = vector_index or LocalVectorIndex(default_index_path)
         self.embedding_provider = embedding_provider or HashEmbeddingProvider()
         self.embedding_model = embedding_model or "hash://embedding"
-        max_workers_env = os.getenv("DOC_INDEXER_MAX_WORKERS", os.getenv("GC_DOC_INDEXER_MAX_WORKERS", "")).strip()
-        if max_workers_env:
-            try:
-                configured = int(max_workers_env)
-            except ValueError:
-                configured = 0
-        else:
-            configured = 0
         cpu_total = os.cpu_count() or 1
-        default_workers = min(4, max(1, cpu_total // 2))
-        self.max_workers = max(1, configured) if configured > 0 else default_workers
+        default_workers = max(1, cpu_total // 2)
+        if default_workers > 8:
+            default_workers = 8
+        if max_workers is not None and max_workers > 0:
+            self.max_workers = max_workers
+        else:
+            self.max_workers = default_workers
 
     def rebuild_full_text(self, doc_ids: Optional[Sequence[str]] = None) -> None:
         docs, summaries, excerpts = self._load_catalog_rows(doc_ids)
@@ -653,6 +686,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-full-text", action="store_true", help="Skip rebuilding the FTS index.")
     parser.add_argument("--skip-vector", action="store_true", help="Skip rebuilding the vector index.")
     parser.add_argument("--check", action="store_true", help="Print index health summary and exit.")
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        help="Maximum parallel workers for vector embeddings (default: half the CPU cores, min 1, max 8).",
+    )
     return parser
 
 
@@ -692,7 +730,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     runtime_dir = Path(args.runtime_dir).resolve()
     db_path = _runtime_db_path(runtime_dir)
     _log(f"Starting doc indexer using catalog DB {db_path}")
-    indexer = DocIndexer(db_path)
+    worker_arg = args.max_workers if args.max_workers and args.max_workers > 0 else None
+    indexer = DocIndexer(db_path, max_workers=worker_arg)
     doc_ids = args.doc_id if args.doc_id else None
     if not args.skip_full_text:
         indexer.rebuild_full_text(doc_ids)

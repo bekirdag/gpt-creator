@@ -2002,6 +2002,7 @@ else:
     lines.append("- (No documentation assets detected; ensure doc-library and doc-index are generated before editing.)")
 
 lines.append("")
+instruction_insert_index = len(lines)
 lines.append("## Story")
 
 epic_id = clean(story_row['epic_key'])
@@ -3296,8 +3297,13 @@ if instruction_prompts:
 if instruction_section_lines:
     while instruction_section_lines and instruction_section_lines[-1] == "":
         instruction_section_lines.pop()
-    instruction_section_lines.append("")
-    lines = instruction_section_lines + lines
+    while instruction_section_lines and instruction_section_lines[0] == "":
+        instruction_section_lines.pop(0)
+    if instruction_section_lines:
+        if instruction_insert_index > 0 and lines[instruction_insert_index - 1] != "":
+            instruction_section_lines.insert(0, "")
+        instruction_section_lines.append("")
+        lines[instruction_insert_index:instruction_insert_index] = instruction_section_lines
 
 if CONTEXT_TAIL_PATH:
     context_path = Path(CONTEXT_TAIL_PATH)

@@ -42,6 +42,10 @@ def parse_args() -> argparse.Namespace:
         help=f"Ending line number (default: {DEFAULT_END}).",
     )
     parser.add_argument(
+        "--range",
+        help="Shorthand for --start/--end (format: START:END).",
+    )
+    parser.add_argument(
         "--context",
         type=int,
         default=0,
@@ -174,6 +178,14 @@ def print_suggestions(paths: Sequence[Path]) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.range:
+        try:
+            start_text, end_text = args.range.split(":", 1)
+            args.start = int(start_text.strip() or args.start)
+            args.end = int(end_text.strip() or args.end)
+        except ValueError:
+            print("[safe-show] Invalid --range format; expected START:END (e.g., 10:80).", file=sys.stderr)
+            sys.exit(2)
     target = args.target.strip()
     candidates = suggest_paths(target, args.max_suggestions)
     if not candidates:

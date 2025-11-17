@@ -15,15 +15,19 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Iterable, Iterator, Optional, Sequence
 
 
 DEFAULT_DIRECTORIES = ("docs",)
 ALLOWED_SUFFIXES = {
     ".md",
+    ".markdown",
+    ".mdx",
     ".sql",
     ".mmd",
     ".json",
+    ".yaml",
+    ".yml",
     ".txt",
 }
 
@@ -169,7 +173,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     db_path = resolve_db_path(args)
     limit = args.limit
     docs = safe_load_from_sqlite(db_path, limit)
-    if docs is None:
+    if not docs:
         docs = load_from_fs(limit)
     for doc in docs:
         title_part = f" — {doc.title}" if doc.title else ""
@@ -177,13 +181,22 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def match_query(text: str, query: str) -> bool:
-    return query.lower() in text.lower()
+def tokenize_query(query: str) -> list[str]:
+    return [token for token in query.lower().split() if token]
+
+
+def match_query(text: str, tokens: Sequence[str]) -> bool:
+    if not tokens:
+        return False
+    lowered = text.lower()
+    return all(token in lowered for token in tokens)
 
 
 def search_documents(
-    docs: Iterable[Document], query: str, limit: Optional[int]
+    docs: Iterable[Document], tokens: Sequence[str], limit: Optional[int]
 ) -> Iterator[Document]:
+    if not tokens:
+        return
     for doc in docs:
         resolved_path = _resolve_existing_path(doc)
         text = ""
@@ -201,14 +214,14 @@ def search_documents(
             if doc.snippet:
                 fallback_parts.append(str(doc.snippet))
             text = "\n".join(part for part in fallback_parts if part).strip()
-        if not text or not match_query(text, query):
+        if not text or not match_query(text, tokens):
             continue
         lines = text.splitlines()
         if (not doc.title) and lines:
             doc.title = lines[0].strip()
         snippet = (doc.snippet or "").strip()
         for idx, line in enumerate(lines, 1):
-            if match_query(line, query):
+            if match_query(line, tokens):
                 prefix = f"L{idx}: " if resolved_path else ""
                 snippet = f"{prefix}{line.strip()}"
                 break
@@ -223,15 +236,37 @@ def search_documents(
 def cmd_search(args: argparse.Namespace) -> int:
     db_path = resolve_db_path(args)
     limit = args.limit
-    query = args.query
+    query_text = args.query
+    tokens = tokenize_query(query_text)
     base_docs = safe_load_from_sqlite(db_path)
-    if base_docs is None:
+    if not base_docs:
         base_docs = load_from_fs()
-    matches = list(search_documents(base_docs, query, limit))
+    matches = list(search_documents(base_docs, tokens, limit))
+    if not matches and len(tokens) > 1:
+        seen: set[str] = set()
+        fallback: list[Document] = []
+        remaining = limit
+        for token in tokens:
+            sub_limit = remaining if remaining is not None else None
+            for doc in search_documents(base_docs, [token], sub_limit):
+                if doc.doc_id in seen:
+                    continue
+                fallback.append(doc)
+                seen.add(doc.doc_id)
+                if remaining is not None:
+                    remaining -= 1
+                    if remaining <= 0:
+                        break
+            if remaining is not None and remaining <= 0:
+                break
+        matches = fallback
+    if not matches:
+        print(f"[doc-catalog] no documents matched query {query_text!r}.", file=sys.stderr)
+        return 0
     for doc in matches:
         snippet = f" — {doc.snippet}" if doc.snippet else ""
         print(f"{doc.doc_id}\t{_display_path(doc)}{snippet}")
-    return 0 if matches else 1
+    return 0
 
 
 def cmd_show(args: argparse.Namespace) -> int:
@@ -240,7 +275,7 @@ def cmd_show(args: argparse.Namespace) -> int:
     start = args.start or 1
     end = args.end
     docs = safe_load_from_sqlite(db_path)
-    if docs is None:
+    if not docs:
         docs = load_from_fs()
     target = None
     for doc in docs:

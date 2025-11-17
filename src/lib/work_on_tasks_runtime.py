@@ -2319,6 +2319,8 @@ def main():
             )
 
         existing_notes = payload.get('notes')
+        long_note_dir: Optional[Path] = None
+        long_note_counter = 0
         if isinstance(existing_notes, list):
             cleaned_notes: List[str] = []
             reasoning_chars = 0
@@ -2335,7 +2337,21 @@ def main():
                 has_action = _has_action_token(text)
                 if len(text) > NOTE_CHAR_LIMIT and not has_action:
                     longform_flag = True
-                    text = text[:NOTE_CHAR_LIMIT].rstrip() + '…'
+                    full_text = text
+                    long_note_counter += 1
+                    if long_note_dir is None:
+                        long_note_dir = project_root / "logs" / "notes"
+                        long_note_dir.mkdir(parents=True, exist_ok=True)
+                    timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+                    suffix = f"{long_note_counter:02d}"
+                    note_filename = f"note_{timestamp}_{suffix}.txt"
+                    archived_path = long_note_dir / note_filename
+                    archived_path.write_text(full_text, encoding='utf-8')
+                    try:
+                        rel_path = archived_path.relative_to(project_root)
+                        text = str(rel_path)
+                    except Exception:
+                        text = str(archived_path)
                 cleaned_notes.append(text)
                 if has_action:
                     non_action_streak = 0
@@ -2357,7 +2373,7 @@ def main():
                 manual_notes.append(
                     _format_action_result(
                         "notes-trim-longform",
-                        "blocked — narration trimmed (>300 chars); restate as Action/Result bullets referencing commands"
+                        "blocked — detected long-form notes; saved full content under logs/notes/*.txt and kept note entries referencing those paths. Restate as Action/Result bullets pointing to the archived files."
                     )
                 )
             if reasoning_chars > NOTE_REASONING_BUDGET_CHARS:

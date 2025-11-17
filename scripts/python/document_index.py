@@ -1573,6 +1573,7 @@ def format_duration(seconds_value):
 
 
 DEFAULT_WORK_PROMPT_LABEL = "builtin/work_on_tasks.prompt.md"
+WORK_PROMPT_ALLOWED_PREFIXES = ("work_on_tasks", "work-on-tasks")
 DEFAULT_WORK_PROMPT = """## work-on-tasks Prompt
 - Load the task details and acceptance criteria from the context section.
 - Consult the documentation catalog or search hits before modifying files.
@@ -1743,6 +1744,9 @@ def collect_instruction_prompts(
                 continue
             if _instruction_prompt_is_excluded(candidate, plan_dir, project_root):
                 skipped_excluded += 1
+                continue
+            name_lower = candidate.name.lower()
+            if not any(prefix in name_lower for prefix in WORK_PROMPT_ALLOWED_PREFIXES):
                 continue
             try:
                 size_bytes = candidate.stat().st_size

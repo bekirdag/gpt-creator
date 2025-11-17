@@ -4628,6 +4628,7 @@ def main():
             re.compile(r"^data[, ]+integrations? [&and]+ interfaces", re.IGNORECASE),
             re.compile(r"acceptance\s*\(mem-a\)", re.IGNORECASE),
         ]
+        WORK_PROMPT_ALLOWED_PREFIXES = ("work_on_tasks", "work-on-tasks")
 
         def _atomic_write_text(path: Path, data: str, *, encoding: str = "utf-8") -> None:
             target = Path(path)
@@ -5576,6 +5577,9 @@ def main():
                     if resolved in seen or not candidate.is_file():
                         continue
                     if _instruction_prompt_is_excluded(candidate, plan_dir, project_root):
+                        continue
+                    name_lower = candidate.name.lower()
+                    if not any(prefix in name_lower for prefix in WORK_PROMPT_ALLOWED_PREFIXES):
                         continue
                     try:
                         size_bytes = candidate.stat().st_size
@@ -7237,8 +7241,6 @@ def main():
             while instruction_section_lines and instruction_section_lines[0] == "":
                 instruction_section_lines.pop(0)
             if instruction_section_lines:
-                if instruction_insert_index > 0 and lines[instruction_insert_index - 1] != "":
-                    instruction_section_lines.insert(0, "")
                 instruction_section_lines.append("")
                 lines[instruction_insert_index:instruction_insert_index] = instruction_section_lines
 

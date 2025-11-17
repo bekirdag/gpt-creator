@@ -1444,6 +1444,7 @@ def main():
                 pass
 
         def _record_task_artifact(task_row_id: Optional[str], artifact_type: str, artifact_path_text: str) -> None:
+            global sqlite3
             if not task_row_id or not artifact_path_text or tasks_db_path is None:
                 return
             try:

@@ -4543,6 +4543,8 @@ def main():
                 if not allow_drift:
                     commands_drift_fatal = True
 
+        staging_root: Optional[Path] = None
+
         if invalid_regex_patterns:
             logged_patterns = []
             for raw_pattern in invalid_regex_patterns:
@@ -5670,7 +5672,6 @@ def main():
             except Exception:
                 project_root_path = project_root_candidate
 
-        staging_root: Optional[Path] = None
         if STAGING_DIR:
             staging_candidate = Path(STAGING_DIR)
             if not staging_candidate.is_absolute():

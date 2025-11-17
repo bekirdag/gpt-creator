@@ -3232,12 +3232,6 @@ append_instruction_lines(
     ]
 )
 
-if instruction_prompts:
-    for prompt_label, prompt_lines in instruction_prompts:
-        if not prompt_lines:
-            continue
-        append_instruction_lines(prompt_lines)
-
 guidance_lines = [
     "## Instructions",
     "### Response Format",
@@ -3283,6 +3277,12 @@ append_instruction_lines(
         "- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.",
     ]
 )
+
+if instruction_prompts:
+    for prompt_label, prompt_lines in instruction_prompts:
+        if not prompt_lines:
+            continue
+        append_instruction_lines(prompt_lines)
 
 if instruction_prompts:
     pointer_target = doc_catalog_pointer or ".gpt-creator/staging/plan/work/doc-catalog.json"

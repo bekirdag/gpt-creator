@@ -7167,12 +7167,6 @@ def main():
             ]
         )
 
-        if instruction_prompts:
-            for prompt_label, prompt_lines in instruction_prompts:
-                if not prompt_lines:
-                    continue
-                append_instruction_lines(prompt_lines)
-
         guidance_lines = [
             "## Instructions",
             "### Response Format",
@@ -7230,6 +7224,12 @@ def main():
                 "- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.",
             ]
         )
+
+        if instruction_prompts:
+            for prompt_label, prompt_lines in instruction_prompts:
+                if not prompt_lines:
+                    continue
+                append_instruction_lines(prompt_lines)
 
         if instruction_section_lines:
             while instruction_section_lines and instruction_section_lines[-1] == "":

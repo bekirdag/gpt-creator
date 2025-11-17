@@ -29,11 +29,13 @@ from .doc_registry import DocRegistry, SearchEntry
 
 def _log(message: str) -> None:
     ts = _iso_ts_now()
-    try:
-        sys.stderr.write(f"[doc-indexer {ts}] {message}\n")
-        sys.stderr.flush()
-    except Exception:
-        pass
+    line = f"[doc-indexer {ts}] {message}\n"
+    for stream in (sys.stderr, sys.stdout):
+        try:
+            stream.write(line)
+            stream.flush()
+        except Exception:
+            continue
 
 
 def _iso_ts_now() -> str:

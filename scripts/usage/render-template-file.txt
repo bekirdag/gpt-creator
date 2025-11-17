@@ -1,0 +1,28 @@
+# render_template_file.py
+
+Render infra/app templates with consistent values instead of letting Codex edit configs manually.
+
+## Usage
+
+```
+python3 scripts/python/render_template_file.py \
+  assets/templates/docker/.env.tmpl .gpt-creator/staging/docker/.env \
+  yoga_db yoga_app yoga_pass 3306 root_pass adm-06 4000 5173 5174 8080
+```
+
+Argument order:
+
+1. Source template path
+2. Destination path
+3. `DB_NAME`
+4. `DB_USER`
+5. `DB_PASSWORD`
+6. `DB_HOST_PORT`
+7. `DB_ROOT_PASSWORD`
+8. `PROJECT_SLUG` (defaults to `gptcreator`)
+9. `API_HOST_PORT`
+10. `WEB_HOST_PORT`
+11. `ADMIN_HOST_PORT`
+12. `PROXY_HOST_PORT`
+
+Re-running the script is idempotent: it simply replaces `{{TOKEN}}` placeholders and writes the result. Use it whenever you need to hydrate `.env`, docker-compose overrides, or other config templates—this avoids large inline edits and keeps token usage down.

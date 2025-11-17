@@ -1,0 +1,22 @@
+# render_sql.py
+
+Rewrite migration templates into idempotent SQL before committing them.
+
+## Usage
+
+```
+python3 scripts/python/render_sql.py \
+  sql/migrations/adm06/events_template.sql \
+  sql/migrations/adm06/events.sql \
+  yoga_db yoga_app yoga_pass
+```
+
+Arguments:
+
+1. Source template path (uses `{{DB_NAME}}`, etc.).
+2. Destination path for rendered SQL.
+3. `DB_NAME`
+4. `DB_USER`
+5. `DB_PASSWORD`
+
+The helper replaces the DB tokens and rewrites `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` (plus new indexes/constraints) into INFORMATION_SCHEMA-guarded dynamic SQL. Run it whenever a task mentions “idempotent migrations” so Codex can point to the generated file instead of re-deriving guards during the prompt.

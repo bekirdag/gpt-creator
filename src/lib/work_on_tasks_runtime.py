@@ -4560,6 +4560,259 @@ def main():
                     )
                 )
 
+        def _refresh_documentation_assets(doc_paths: Sequence[str]) -> List[str]:
+            notes: List[str] = []
+            normalized_candidates = []
+            seen_norm: Dict[str, None] = {}
+            for candidate in doc_paths:
+                normalized = _normalize_doc_path_label(candidate)
+                if not normalized or not _path_is_doc_file(normalized):
+                    continue
+                if normalized in seen_norm:
+                    continue
+                seen_norm[normalized] = None
+                normalized_candidates.append(normalized)
+            if not normalized_candidates:
+                return notes
+            python_bin = sys.executable or "python3"
+            lib_root = Path(__file__).resolve().parents[1]
+            env = os.environ.copy()
+            existing_py_path = env.get("PYTHONPATH", "")
+            lib_root_str = str(lib_root)
+            if existing_py_path:
+                paths = existing_py_path.split(os.pathsep)
+                if lib_root_str not in paths:
+                    env["PYTHONPATH"] = lib_root_str + os.pathsep + existing_py_path
+            else:
+                env["PYTHONPATH"] = lib_root_str
+            base_staging = staging_root or (project_root / ".gpt-creator" / "staging")
+            try:
+                base_staging.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            plan_dir = base_staging / "plan"
+            work_dir = plan_dir / "work"
+            docs_dir = plan_dir / "docs"
+            for directory in (plan_dir, work_dir, docs_dir):
+                try:
+                    directory.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
+            doc_catalog_json_path = work_dir / "doc-catalog.json"
+            doc_library_path = docs_dir / "doc-library.md"
+            doc_index_path = docs_dir / "doc-index.md"
+            runtime_dir = base_staging.parent if base_staging.parent else (project_root / ".gpt-creator")
+
+            def _shorten(text: str, limit: int = 200) -> str:
+                snippet = (text or "").strip()
+                if len(snippet) > limit:
+                    snippet = snippet[: limit - 1].rstrip() + "…"
+                return snippet
+
+            catalog_cmd: List[str]
+            doc_catalog_helper_local = (
+                globals().get("doc_catalog_helper")
+                or os.getenv("GC_DOC_CATALOG_PY", "").strip()
+                or os.getenv("GC_DOC_CATALOG_HELPER", "").strip()
+                or os.getenv("doc_catalog", "").strip()
+            )
+            doc_indexer_helper_local = (
+                globals().get("doc_indexer_helper")
+                or os.getenv("GC_DOC_INDEXER_PY", "").strip()
+                or os.getenv("GC_DOC_INDEXER_HELPER", "").strip()
+                or os.getenv("doc_indexer", "").strip()
+            )
+            if doc_catalog_helper_local:
+                catalog_cmd = [
+                    python_bin,
+                    doc_catalog_helper_local,
+                    "--project-root",
+                    str(project_root),
+                    "--staging-dir",
+                    str(base_staging),
+                    "--out-json",
+                    str(doc_catalog_json_path),
+                    "--out-library",
+                    str(doc_library_path),
+                    "--out-index",
+                    str(doc_index_path),
+                ]
+            else:
+                catalog_cmd = [
+                    python_bin,
+                    "-m",
+                    "lib.doc_catalog",
+                    "--project-root",
+                    str(project_root),
+                    "--staging-dir",
+                    str(base_staging),
+                    "--out-json",
+                    str(doc_catalog_json_path),
+                    "--out-library",
+                    str(doc_library_path),
+                    "--out-index",
+                    str(doc_index_path),
+                ]
+            try:
+                catalog_proc = subprocess.run(
+                    catalog_cmd,
+                    cwd=str(project_root),
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+            except OSError as exc:
+                notes.append(
+                    _format_action_result(
+                        "doc-catalog-refresh",
+                        f"warning — unable to refresh documentation catalog ({exc})",
+                    )
+                )
+                return notes
+            if catalog_proc.returncode != 0:
+                diagnostics = catalog_proc.stderr.strip() or catalog_proc.stdout.strip()
+                notes.append(
+                    _format_action_result(
+                        "doc-catalog-refresh",
+                        f"warning — doc catalog refresh failed (exit {catalog_proc.returncode}); {_shorten(diagnostics)}",
+                    )
+                )
+                return notes
+            preview = ", ".join(normalized_candidates[:3])
+            if len(normalized_candidates) > 3:
+                preview += ", …"
+            count_label = f"{len(normalized_candidates)} doc{'s' if len(normalized_candidates) != 1 else ''}"
+            display = preview or count_label
+            notes.append(
+                _format_action_result(
+                    "doc-catalog-refresh",
+                    f"ok — refreshed documentation catalog ({display})",
+                )
+            )
+
+            doc_ids_for_index: Set[str] = set()
+            try:
+                if doc_catalog_json_path.exists():
+                    catalog_raw = doc_catalog_json_path.read_text(encoding="utf-8")
+                    catalog_payload = json.loads(catalog_raw) if catalog_raw.strip() else {}
+                else:
+                    catalog_payload = {}
+            except Exception:
+                catalog_payload = {}
+            documents_section = catalog_payload.get("documents") if isinstance(catalog_payload, dict) else {}
+            normalized_lower = [item.lower() for item in normalized_candidates]
+            if isinstance(documents_section, dict):
+                for doc_id, payload in documents_section.items():
+                    rel_path = str(payload.get("rel_path") or "").replace("\\", "/").lstrip("./").lower()
+                    abs_path = str(payload.get("path") or "").replace("\\", "/").lower()
+                    for candidate in normalized_lower:
+                        if rel_path and rel_path == candidate:
+                            doc_ids_for_index.add(doc_id)
+                            break
+                        if abs_path and abs_path.endswith(candidate):
+                            doc_ids_for_index.add(doc_id)
+                            break
+
+            pipeline_cmd = [
+                python_bin,
+                "-m",
+                "lib.doc_pipeline",
+                "--project-root",
+                str(project_root),
+                "--runtime-dir",
+                str(runtime_dir),
+            ]
+            try:
+                pipeline_proc = subprocess.run(
+                    pipeline_cmd,
+                    cwd=str(project_root),
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+            except OSError as exc:
+                notes.append(
+                    _format_action_result(
+                        "doc-pipeline-refresh",
+                        f"warning — unable to refresh documentation summaries ({exc})",
+                    )
+                )
+                pipeline_proc = None
+            if pipeline_proc:
+                if pipeline_proc.returncode == 0:
+                    notes.append(
+                        _format_action_result(
+                            "doc-pipeline-refresh",
+                            "ok — regenerated documentation summaries/excerpts",
+                        )
+                    )
+                else:
+                    diagnostics = pipeline_proc.stderr.strip() or pipeline_proc.stdout.strip()
+                    notes.append(
+                        _format_action_result(
+                            "doc-pipeline-refresh",
+                            f"warning — documentation pipeline failed (exit {pipeline_proc.returncode}); {_shorten(diagnostics)}",
+                        )
+                    )
+
+            indexer_cmd: List[str]
+            if doc_indexer_helper_local:
+                indexer_cmd = [
+                    python_bin,
+                    doc_indexer_helper_local,
+                    "--runtime-dir",
+                    str(runtime_dir),
+                ]
+            else:
+                indexer_cmd = [
+                    python_bin,
+                    "-m",
+                    "lib.doc_indexer",
+                    "--runtime-dir",
+                    str(runtime_dir),
+                ]
+            for doc_id in sorted(doc_ids_for_index):
+                indexer_cmd.extend(["--doc-id", doc_id])
+            try:
+                indexer_proc = subprocess.run(
+                    indexer_cmd,
+                    cwd=str(project_root),
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+            except OSError as exc:
+                notes.append(
+                    _format_action_result(
+                        "doc-index-refresh",
+                        f"warning — unable to rebuild documentation indexes ({exc})",
+                    )
+                )
+                return notes
+            if indexer_proc.returncode == 0:
+                index_scope = f"{len(doc_ids_for_index) or 'all'} doc{'s' if len(doc_ids_for_index) not in (0, 1) else ''}"
+                notes.append(
+                    _format_action_result(
+                        "doc-index-refresh",
+                        f"ok — rebuilt documentation search/vector indexes ({index_scope})",
+                    )
+                )
+            else:
+                diagnostics = indexer_proc.stderr.strip() or indexer_proc.stdout.strip()
+                notes.append(
+                    _format_action_result(
+                        "doc-index-refresh",
+                        f"warning — documentation index rebuild failed (exit {indexer_proc.returncode}); {_shorten(diagnostics)}",
+                    )
+                )
+            return notes
+
         doc_change_candidates: List[str] = []
         for candidate_path in change_bytes.keys():
             if _path_is_doc_file(candidate_path):
@@ -6635,246 +6888,6 @@ def main():
             if doc_catalog_entries:
                 doc_catalog_entries_from_db = True
 
-        def _refresh_documentation_assets(doc_paths: Sequence[str]) -> List[str]:
-            notes: List[str] = []
-            normalized_candidates = []
-            seen_norm: Dict[str, None] = {}
-            for candidate in doc_paths:
-                normalized = _normalize_doc_path_label(candidate)
-                if not normalized or not _path_is_doc_file(normalized):
-                    continue
-                if normalized in seen_norm:
-                    continue
-                seen_norm[normalized] = None
-                normalized_candidates.append(normalized)
-            if not normalized_candidates:
-                return notes
-            python_bin = sys.executable or "python3"
-            lib_root = Path(__file__).resolve().parents[1]
-            env = os.environ.copy()
-            existing_py_path = env.get("PYTHONPATH", "")
-            lib_root_str = str(lib_root)
-            if existing_py_path:
-                paths = existing_py_path.split(os.pathsep)
-                if lib_root_str not in paths:
-                    env["PYTHONPATH"] = lib_root_str + os.pathsep + existing_py_path
-            else:
-                env["PYTHONPATH"] = lib_root_str
-            base_staging = staging_root or (project_root_path / ".gpt-creator" / "staging")
-            try:
-                base_staging.mkdir(parents=True, exist_ok=True)
-            except Exception:
-                pass
-            plan_dir = base_staging / "plan"
-            work_dir = plan_dir / "work"
-            docs_dir = plan_dir / "docs"
-            for directory in (plan_dir, work_dir, docs_dir):
-                try:
-                    directory.mkdir(parents=True, exist_ok=True)
-                except Exception:
-                    pass
-            doc_catalog_json_path = work_dir / "doc-catalog.json"
-            doc_library_path = docs_dir / "doc-library.md"
-            doc_index_path = docs_dir / "doc-index.md"
-            runtime_dir = base_staging.parent if base_staging.parent else (project_root_path / ".gpt-creator")
-
-            def _shorten(text: str, limit: int = 200) -> str:
-                snippet = (text or "").strip()
-                if len(snippet) > limit:
-                    snippet = snippet[: limit - 1].rstrip() + "…"
-                return snippet
-
-            catalog_cmd: List[str]
-            if doc_catalog_helper:
-                catalog_cmd = [
-                    python_bin,
-                    doc_catalog_helper,
-                    "--project-root",
-                    str(project_root_path),
-                    "--staging-dir",
-                    str(base_staging),
-                    "--out-json",
-                    str(doc_catalog_json_path),
-                    "--out-library",
-                    str(doc_library_path),
-                    "--out-index",
-                    str(doc_index_path),
-                ]
-            else:
-                catalog_cmd = [
-                    python_bin,
-                    "-m",
-                    "lib.doc_catalog",
-                    "--project-root",
-                    str(project_root_path),
-                    "--staging-dir",
-                    str(base_staging),
-                    "--out-json",
-                    str(doc_catalog_json_path),
-                    "--out-library",
-                    str(doc_library_path),
-                    "--out-index",
-                    str(doc_index_path),
-                ]
-            try:
-                catalog_proc = subprocess.run(
-                    catalog_cmd,
-                    cwd=str(project_root_path),
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    check=False,
-                )
-            except OSError as exc:
-                notes.append(
-                    _format_action_result(
-                        "doc-catalog-refresh",
-                        f"warning — unable to refresh documentation catalog ({exc})",
-                    )
-                )
-                return notes
-            if catalog_proc.returncode != 0:
-                diagnostics = catalog_proc.stderr.strip() or catalog_proc.stdout.strip()
-                notes.append(
-                    _format_action_result(
-                        "doc-catalog-refresh",
-                        f"warning — doc catalog refresh failed (exit {catalog_proc.returncode}); {_shorten(diagnostics)}",
-                    )
-                )
-                return notes
-            preview = ", ".join(normalized_candidates[:3])
-            if len(normalized_candidates) > 3:
-                preview += ", …"
-            count_label = f"{len(normalized_candidates)} doc{'s' if len(normalized_candidates) != 1 else ''}"
-            display = preview or count_label
-            notes.append(
-                _format_action_result(
-                    "doc-catalog-refresh",
-                    f"ok — refreshed documentation catalog ({display})",
-                )
-            )
-
-            doc_ids_for_index: Set[str] = set()
-            try:
-                if doc_catalog_json_path.exists():
-                    catalog_raw = doc_catalog_json_path.read_text(encoding="utf-8")
-                    catalog_payload = json.loads(catalog_raw) if catalog_raw.strip() else {}
-                else:
-                    catalog_payload = {}
-            except Exception:
-                catalog_payload = {}
-            documents_section = catalog_payload.get("documents") if isinstance(catalog_payload, dict) else {}
-            normalized_lower = [item.lower() for item in normalized_candidates]
-            if isinstance(documents_section, dict):
-                for doc_id, payload in documents_section.items():
-                    rel_path = str(payload.get("rel_path") or "").replace("\\", "/").lstrip("./").lower()
-                    abs_path = str(payload.get("path") or "").replace("\\", "/").lower()
-                    for candidate in normalized_lower:
-                        if rel_path and rel_path == candidate:
-                            doc_ids_for_index.add(doc_id)
-                            break
-                        if abs_path and abs_path.endswith(candidate):
-                            doc_ids_for_index.add(doc_id)
-                            break
-
-            pipeline_cmd = [
-                python_bin,
-                "-m",
-                "lib.doc_pipeline",
-                "--project-root",
-                str(project_root_path),
-                "--runtime-dir",
-                str(runtime_dir),
-            ]
-            try:
-                pipeline_proc = subprocess.run(
-                    pipeline_cmd,
-                    cwd=str(project_root_path),
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    check=False,
-                )
-            except OSError as exc:
-                notes.append(
-                    _format_action_result(
-                        "doc-pipeline-refresh",
-                        f"warning — unable to refresh documentation summaries ({exc})",
-                    )
-                )
-                pipeline_proc = None
-            if pipeline_proc:
-                if pipeline_proc.returncode == 0:
-                    notes.append(
-                        _format_action_result(
-                            "doc-pipeline-refresh",
-                            "ok — regenerated documentation summaries/excerpts",
-                        )
-                    )
-                else:
-                    diagnostics = pipeline_proc.stderr.strip() or pipeline_proc.stdout.strip()
-                    notes.append(
-                        _format_action_result(
-                            "doc-pipeline-refresh",
-                            f"warning — documentation pipeline failed (exit {pipeline_proc.returncode}); {_shorten(diagnostics)}",
-                        )
-                    )
-
-            indexer_cmd: List[str]
-            if doc_indexer_helper:
-                indexer_cmd = [
-                    python_bin,
-                    doc_indexer_helper,
-                    "--runtime-dir",
-                    str(runtime_dir),
-                ]
-            else:
-                indexer_cmd = [
-                    python_bin,
-                    "-m",
-                    "lib.doc_indexer",
-                    "--runtime-dir",
-                    str(runtime_dir),
-                ]
-            for doc_id in sorted(doc_ids_for_index):
-                indexer_cmd.extend(["--doc-id", doc_id])
-            try:
-                indexer_proc = subprocess.run(
-                    indexer_cmd,
-                    cwd=str(project_root_path),
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    check=False,
-                )
-            except OSError as exc:
-                notes.append(
-                    _format_action_result(
-                        "doc-index-refresh",
-                        f"warning — unable to rebuild documentation indexes ({exc})",
-                    )
-                )
-                return notes
-            if indexer_proc.returncode == 0:
-                index_scope = f"{len(doc_ids_for_index) or 'all'} doc{'s' if len(doc_ids_for_index) not in (0, 1) else ''}"
-                notes.append(
-                    _format_action_result(
-                        "doc-index-refresh",
-                        f"ok — rebuilt documentation search/vector indexes ({index_scope})",
-                    )
-                )
-            else:
-                diagnostics = indexer_proc.stderr.strip() or indexer_proc.stdout.strip()
-                notes.append(
-                    _format_action_result(
-                        "doc-index-refresh",
-                        f"warning — documentation index rebuild failed (exit {indexer_proc.returncode}); {_shorten(diagnostics)}",
-                    )
-                )
-            return notes
 
         def _relative_path_for_prompt(path_obj: Path) -> str:
             for base in filter(None, [project_root_path, staging_root]):

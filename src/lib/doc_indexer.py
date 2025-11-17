@@ -16,6 +16,7 @@ import json
 import math
 import sqlite3
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -23,6 +24,11 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import argparse
 
 from .doc_registry import DocRegistry, SearchEntry
+
+
+def _log(message: str) -> None:
+    ts = _iso_ts_now()
+    print(f"[doc-indexer {ts}] {message}")
 
 
 def _iso_ts_now() -> str:
@@ -240,11 +246,24 @@ class DocIndexer:
         self.vector_index = vector_index or LocalVectorIndex(default_index_path)
         self.embedding_provider = embedding_provider or HashEmbeddingProvider()
         self.embedding_model = embedding_model or "hash://embedding"
+        max_workers_env = os.getenv("DOC_INDEXER_MAX_WORKERS", os.getenv("GC_DOC_INDEXER_MAX_WORKERS", "")).strip()
+        if max_workers_env:
+            try:
+                configured = int(max_workers_env)
+            except ValueError:
+                configured = 0
+        else:
+            configured = 0
+        cpu_total = os.cpu_count() or 1
+        default_workers = min(4, max(1, cpu_total // 2))
+        self.max_workers = max(1, configured) if configured > 0 else default_workers
 
     def rebuild_full_text(self, doc_ids: Optional[Sequence[str]] = None) -> None:
         docs, summaries, excerpts = self._load_catalog_rows(doc_ids)
+        _log(f"Rebuilding full-text index for {len(docs)} document(s).")
         entries_map: Dict[str, List[SearchEntry]] = {}
         metadata_map: Dict[str, Dict[str, object]] = {}
+        _log(f"Rebuilding full-text index for {len(docs)} document(s).")
 
         for doc_id, doc in docs.items():
             summary = summaries.get(doc_id)
@@ -342,6 +361,10 @@ class DocIndexer:
                     "fts",
                     metadata=meta,
                 )
+            entry_total = sum(len(entries) for entries in entries_map.values())
+            _log(f"Full-text index refreshed ({len(entries_map)} doc(s), {entry_total} entry surface(s)).")
+        else:
+            _log("Full-text index refresh skipped (no entries produced).")
 
     def rebuild_vector_index(
         self,
@@ -412,31 +435,80 @@ class DocIndexer:
                 if self._needs_embedding(task):
                     tasks.append(task)
 
-        new_vectors: List[VectorRecord] = []
-        for chunk_start in range(0, len(tasks), batch_size):
-            chunk = tasks[chunk_start : chunk_start + batch_size]
-            embeddings = self.embedding_provider.embed(
-                [task.text for task in chunk],
-                model=self.embedding_model,
-            )
-            for task, vector in zip(chunk, embeddings):
-                metadata = dict(task.metadata)
-                metadata["text_hash"] = _hash_text(task.text)
-                metadata["token_estimate"] = _estimate_tokens(task.text)
-                new_vectors.append(
-                    VectorRecord(
-                        embedding_id=task.embedding_id,
-                        doc_id=task.doc_id,
-                        section_id=task.section_id,
-                        surface=task.surface,
-                        vector=vector,
-                        source_version=task.source_version,
-                        metadata=metadata,
-                    )
-                )
+        _log(
+            f"Preparing vector embeddings for {len(tasks)} surface(s) across {len(docs)} document(s) "
+            f"(batch size {batch_size}, max workers {self.max_workers})."
+        )
+        if not tasks:
+            _log("Vector embedding refresh skipped (no surfaces required new embeddings).")
+            pending_vectors: List[VectorRecord] = []
+            processed = 0
+        else:
+            pending_vectors = []
+            processed = 0
 
-        if new_vectors:
-            self.vector_index.upsert(new_vectors)
+        chunks: List[List[VectorTask]] = [
+            tasks[idx : idx + batch_size] for idx in range(0, len(tasks), batch_size)
+        ]
+
+        def _embed_chunk(chunk_tasks: List[VectorTask]) -> Sequence[Sequence[float]]:
+            texts = [task.text for task in chunk_tasks]
+            return self.embedding_provider.embed(texts, model=self.embedding_model)
+
+        if chunks:
+            worker_count = min(self.max_workers, len(chunks))
+            if worker_count > 1:
+                _log(f"Embedding {len(chunks)} chunk(s) with {worker_count} parallel worker(s).")
+                with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                    futures = {executor.submit(_embed_chunk, chunk): idx for idx, chunk in enumerate(chunks)}
+                    for future in as_completed(futures):
+                        chunk_index = futures[future]
+                        chunk = chunks[chunk_index]
+                        embeddings = future.result()
+                        for task, vector in zip(chunk, embeddings):
+                            metadata = dict(task.metadata)
+                            metadata["text_hash"] = _hash_text(task.text)
+                            metadata["token_estimate"] = _estimate_tokens(task.text)
+                            pending_vectors.append(
+                                VectorRecord(
+                                    embedding_id=task.embedding_id,
+                                    doc_id=task.doc_id,
+                                    section_id=task.section_id,
+                                    surface=task.surface,
+                                    vector=vector,
+                                    source_version=task.source_version,
+                                    metadata=metadata,
+                                )
+                            )
+                        if pending_vectors:
+                            self.vector_index.upsert(pending_vectors)
+                            pending_vectors.clear()
+                        processed += len(chunk)
+                        _log(f"Embedded {processed}/{len(tasks)} surfaces.")
+            else:
+                _log("Embedding chunks sequentially (single-worker mode).")
+                for chunk in chunks:
+                    embeddings = _embed_chunk(chunk)
+                    for task, vector in zip(chunk, embeddings):
+                        metadata = dict(task.metadata)
+                        metadata["text_hash"] = _hash_text(task.text)
+                        metadata["token_estimate"] = _estimate_tokens(task.text)
+                        pending_vectors.append(
+                            VectorRecord(
+                                embedding_id=task.embedding_id,
+                                doc_id=task.doc_id,
+                                section_id=task.section_id,
+                                surface=task.surface,
+                                vector=vector,
+                                source_version=task.source_version,
+                                metadata=metadata,
+                            )
+                        )
+                    if pending_vectors:
+                        self.vector_index.upsert(pending_vectors)
+                        pending_vectors.clear()
+                    processed += len(chunk)
+                    _log(f"Embedded {processed}/{len(tasks)} surfaces.")
 
         if summary_updates or excerpt_updates:
             with sqlite3.connect(str(self.db_path)) as conn:
@@ -465,6 +537,7 @@ class DocIndexer:
                 "vector",
                 metadata=metadata,
             )
+        _log("Vector index refresh complete.")
 
     def _needs_embedding(self, task: VectorTask) -> bool:
         existing = self.vector_index.get(task.embedding_id)
@@ -618,12 +691,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     runtime_dir = Path(args.runtime_dir).resolve()
     db_path = _runtime_db_path(runtime_dir)
+    _log(f"Starting doc indexer using catalog DB {db_path}")
     indexer = DocIndexer(db_path)
     doc_ids = args.doc_id if args.doc_id else None
     if not args.skip_full_text:
         indexer.rebuild_full_text(doc_ids)
+    else:
+        _log("Skipping full-text rebuild per CLI arguments.")
     if not args.skip_vector:
         indexer.rebuild_vector_index(doc_ids)
+    else:
+        _log("Skipping vector embed rebuild per CLI arguments.")
+    _log("Doc indexer run complete.")
     return 0
 
 

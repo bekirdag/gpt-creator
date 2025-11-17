@@ -5862,6 +5862,8 @@ def main():
                     joined = ", ".join(missing_helpers)
                     lines.append(f"- (Documentation helpers missing: {joined}. Re-run `gpt-creator install` or `gpt-creator scan` to refresh shims before invoking catalog commands.)")
 
+        instruction_insert_index = len(lines)
+
         lines.append("")
 
         if documentation_asset_lines:
@@ -7232,8 +7234,13 @@ def main():
         if instruction_section_lines:
             while instruction_section_lines and instruction_section_lines[-1] == "":
                 instruction_section_lines.pop()
-            instruction_section_lines.append("")
-            lines = instruction_section_lines + lines
+            while instruction_section_lines and instruction_section_lines[0] == "":
+                instruction_section_lines.pop(0)
+            if instruction_section_lines:
+                if instruction_insert_index > 0 and lines[instruction_insert_index - 1] != "":
+                    instruction_section_lines.insert(0, "")
+                instruction_section_lines.append("")
+                lines[instruction_insert_index:instruction_insert_index] = instruction_section_lines
 
         if CONTEXT_TAIL_PATH:
             context_path = Path(CONTEXT_TAIL_PATH)

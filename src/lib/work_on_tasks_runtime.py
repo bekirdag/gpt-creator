@@ -770,11 +770,32 @@ def main():
                 body = '\n'.join(clipped)
             return f"{label}:\n{body}"
 
+        command_archive_dir: Optional[Path] = None
+        command_archive_counter = 0
+        truncated_command_cache: Dict[str, str] = {}
+
         def _truncate_command_text(command: str, limit: int = COMMAND_LABEL_LIMIT) -> str:
+            nonlocal command_archive_dir, command_archive_counter
             snippet = command.strip()
             if len(snippet) <= limit:
                 return snippet
-            return snippet[:limit - 1] + '…'
+            cached = truncated_command_cache.get(snippet)
+            if cached:
+                return cached
+            if command_archive_dir is None:
+                command_archive_dir = project_root / "logs" / "notes"
+                command_archive_dir.mkdir(parents=True, exist_ok=True)
+            command_archive_counter += 1
+            timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+            filename = f"command_{timestamp}_{command_archive_counter:02d}.txt"
+            archive_path = command_archive_dir / filename
+            archive_path.write_text(snippet + "\n", encoding='utf-8')
+            try:
+                rendered = str(archive_path.relative_to(project_root))
+            except Exception:
+                rendered = str(archive_path)
+            truncated_command_cache[snippet] = rendered
+            return rendered
 
         def _format_action_result(action: str, result: str) -> str:
             return f"Action: {action.strip()} | Result: {result.strip()}"
@@ -4550,6 +4571,12 @@ def main():
         ):
             canonical_status = 'COMPLETED-NO-CHANGES'
             legacy_status = 'noop'
+            manual_notes.append(
+                _format_action_result(
+                    "documentation-only-status",
+                    "info — verification-only session detected; marking task completed-no-changes so QA/CR can reopen if needed."
+                )
+            )
 
         if canonical_status == 'COMPLETED':
             _merge_branch_into_base_if_complete(canonical_status)

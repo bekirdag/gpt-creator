@@ -5765,6 +5765,15 @@ def main():
                 agent_header_lines = []
 
         lines: List[str] = []
+        instruction_section_lines: List[str] = []
+
+        def append_instruction_lines(new_lines: List[str]) -> None:
+            if not new_lines:
+                return
+            if instruction_section_lines and instruction_section_lines[-1] != "":
+                instruction_section_lines.append("")
+            instruction_section_lines.extend(new_lines)
+
         if agent_header_lines:
             lines.extend(agent_header_lines)
             if agent_header_lines[-1].strip():
@@ -7136,33 +7145,34 @@ def main():
                     lines.append(f"  -> Reopen via `{command_hint}`")
 
         if guard_entries:
-            lines.append("")
-            lines.append("## Command Guard Alerts")
-            lines.append("Resolve these issues before rerunning commands that have already failed; focus on remediation instead of immediate retries.")
+            block_lines = [
+                "## Command Guard Alerts",
+                "Resolve these issues before rerunning commands that have already failed; focus on remediation instead of immediate retries.",
+            ]
             for entry in guard_entries[:4]:
                 command_label = (entry.get("command") or "pnpm").strip() or "pnpm"
                 issues = entry.get("issues") or []
                 summary = "; ".join(issues) if issues else "Pre-check violation detected."
-                lines.append(f"- {command_label} — {summary}")
+                block_lines.append(f"- {command_label} — {summary}")
+            append_instruction_lines(block_lines)
 
-        lines.append("")
-        lines.append("## Helper Checklist (before exploring code or docs)")
-        lines.append("- Map the repo once via `python3 scripts/python/repo_outline.py --max-depth 1 --focus apps/api` instead of issuing repetitive `ls` commands.")
-        lines.append("- When you need to inspect code, run `python3 scripts/python/targeted_search.py --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.")
-        lines.append("- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.")
+        append_instruction_lines(
+            [
+                "## Helper Checklist (before exploring code or docs)",
+                "- Map the repo once via `python3 scripts/python/repo_outline.py --max-depth 1 --focus apps/api` instead of issuing repetitive `ls` commands.",
+                "- When you need to inspect code, run `python3 scripts/python/targeted_search.py --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
+                "- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.",
+            ]
+        )
 
         if instruction_prompts:
             for prompt_label, prompt_lines in instruction_prompts:
                 if not prompt_lines:
                     continue
-                if lines and lines[-1] != "":
-                    lines.append("")
-                lines.extend(prompt_lines)
-            if lines and lines[-1] != "":
-                lines.append("")
+                append_instruction_lines(prompt_lines)
 
-        lines.append("## Instructions")
-        response_guidance = [
+        guidance_lines = [
+            "## Instructions",
             "### Response Format",
             "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
             "- Write each heading exactly as shown (e.g., `Plan` on its own line) with no surrounding Markdown styling or punctuation.",
@@ -7186,34 +7196,44 @@ def main():
             "- Need a quick Python helper? Create `/tmp/snippet.py` via heredoc and run `python3 scripts/python/run_snippet.py /tmp/snippet.py` to avoid placeholder heredocs (`assets/templates/help/run_snippet_usage.txt`).",
             "- End the `Notes` section with `STATUS: completed`, `STATUS: needs-retry`, or `STATUS: failed` so automation can classify the run.",
         ]
-        lines.extend(response_guidance)
 
         if compact_mode:
-            lines.append("- Prefer pnpm for scripts; mention commands that cannot run because of network limits.")
-            lines.append("- When you need documentation context, query the catalog (search/show) with precise section names like `\"SDS 7.3\"`; do not read doc files from the repo.")
-            lines.append("- Avoid repo-wide listings/searches; open only the code files you intend to edit and keep `sed`/`cat` ranges tight.")
-            lines.append("- Track file views; if you begin paging sequential ranges, pause and confirm the slice truly supports the active step.")
+            guidance_lines.extend(
+                [
+                    "- Prefer pnpm for scripts; mention commands that cannot run because of network limits.",
+                    '- When you need documentation context, query the catalog (search/show) with precise section names like `"SDS 7.3"`; do not read doc files from the repo.',
+                    "- Avoid repo-wide listings/searches; open only the code files you intend to edit and keep `sed`/`cat` ranges tight.",
+                    "- Track file views; if you begin paging sequential ranges, pause and confirm the slice truly supports the active step.",
+                ]
+            )
         else:
-            lines.append("- Prefer pnpm for scripts; note commands that cannot run because of network limits.")
-            lines.append("- Route all documentation lookups through the catalog search/show helpers; never crawl SDS/PDR files directly.")
-            lines.append("- Avoid broad repo sweeps; open only the code files tied to your current plan steps and keep the slices minimal.")
+            guidance_lines.extend(
+                [
+                    "- Prefer pnpm for scripts; note commands that cannot run because of network limits.",
+                    "- Route all documentation lookups through the catalog search/show helpers; never crawl SDS/PDR files directly.",
+                    "- Avoid broad repo sweeps; open only the code files tied to your current plan steps and keep the slices minimal.",
+                ]
+            )
 
-        lines.append("")
-        lines.append("## Guardrails")
-        lines.append("- Stay within this task's scope; avoid spinning up unrelated plans or subprojects.")
-        lines.append("- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.")
-        lines.append("- Keep command usage lean and focused on assets needed for the acceptance criteria.")
-        lines.append("- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.")
-        lines.append(
-            "- Tackle documentation edits only after the related code changes land, and only when the documentation would be inaccurate without the update."
+        append_instruction_lines(guidance_lines)
+
+        append_instruction_lines(
+            [
+                "## Guardrails",
+                "- Stay within this task's scope; avoid spinning up unrelated plans or subprojects.",
+                "- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.",
+                "- Keep command usage lean and focused on assets needed for the acceptance criteria.",
+                "- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.",
+                "- Tackle documentation edits only after the related code changes land, and only when the documentation would be inaccurate without the update.",
+                "- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.",
+            ]
         )
-        lines.append("- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.")
-        if instruction_prompts:
-            lines.append("")
-            lines.append("### Supplemental Instructions (pointers only)")
-            pointer_target = doc_catalog_pointer or fallback_catalog_literal
-            lines.append(f"See JSON catalog at: `{pointer_target}`")
-            lines.append("Use the catalog + FTS search to pull only the slices you need; do not inline entire instruction prompts.")
+
+        if instruction_section_lines:
+            while instruction_section_lines and instruction_section_lines[-1] == "":
+                instruction_section_lines.pop()
+            instruction_section_lines.append("")
+            lines = instruction_section_lines + lines
 
         if CONTEXT_TAIL_PATH:
             context_path = Path(CONTEXT_TAIL_PATH)

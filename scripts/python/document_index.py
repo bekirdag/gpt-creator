@@ -1931,6 +1931,14 @@ compact_mode = os.getenv("GC_PROMPT_COMPACT", "").strip().lower() not in {"", "0
 truncated_sections: Dict[str, Dict[str, int]] = {}
 
 lines = []
+instruction_section_lines: List[str] = []
+
+def append_instruction_lines(new_lines: List[str]) -> None:
+    if not new_lines:
+        return
+    if instruction_section_lines and instruction_section_lines[-1] != "":
+        instruction_section_lines.append("")
+    instruction_section_lines.extend(new_lines)
 lines.append(f"# You are Codex (model: {MODEL_NAME})")
 lines.append("")
 lines.append(f"You are assisting the {project_display} delivery team. Implement the task precisely using the repository at: {repo_path}")
@@ -3203,27 +3211,34 @@ if file_entries:
             )
 
 if guard_entries:
-    lines.append("")
-    lines.append("## Command Guard Alerts")
-    lines.append("Resolve these issues before rerunning commands that have already failed; focus on remediation instead of immediate retries.")
+    block_lines = [
+        "## Command Guard Alerts",
+        "Resolve these issues before rerunning commands that have already failed; focus on remediation instead of immediate retries.",
+    ]
     for entry in guard_entries[:4]:
         command_label = (entry.get("command") or "pnpm").strip() or "pnpm"
         issues = entry.get("issues") or []
         summary = "; ".join(issues) if issues else "Pre-check violation detected."
-        lines.append(f"- {command_label} — {summary}")
+        block_lines.append(f"- {command_label} — {summary}")
+    append_instruction_lines(block_lines)
+
+append_instruction_lines(
+    [
+        "## Helper Checklist (before exploring code or docs)",
+        "- Map the repo once via `python3 scripts/python/repo_outline.py --max-depth 1 --focus apps/api` instead of issuing repetitive `ls` commands.",
+        "- When you need to inspect code, run `python3 scripts/python/targeted_search.py --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
+        "- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.",
+    ]
+)
 
 if instruction_prompts:
     for prompt_label, prompt_lines in instruction_prompts:
         if not prompt_lines:
             continue
-        if lines and lines[-1] != "":
-            lines.append("")
-        lines.extend(prompt_lines)
-    if lines and lines[-1] != "":
-        lines.append("")
+        append_instruction_lines(prompt_lines)
 
-lines.append("## Instructions")
-response_guidance = [
+guidance_lines = [
+    "## Instructions",
     "### Response Format",
     "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
     "- Keep each section terse—short bullet items or single sentences—without JSON wrappers or closing summaries.",
@@ -3237,30 +3252,52 @@ response_guidance = [
     "- Use the documentation catalog (`python3 \"$GC_DOC_CATALOG_PY\" search/show --db \"$GC_DOCUMENTATION_DB_PATH\" ...`) for SDS/PDR lookups instead of opening doc files directly.",
     "- End the `Notes` section with `STATUS: completed`, `STATUS: needs-retry`, or `STATUS: failed` so automation can classify the run.",
 ]
-lines.extend(response_guidance)
 
 if compact_mode:
-    lines.append("- Prefer pnpm for scripts; note any commands that cannot run because of network limits.")
-    lines.append("- When you need documentation context, query the catalog search/show helpers with precise section names; do not read doc files from the repository.")
-    lines.append("- Avoid repo-wide listings/searches; open only the code files you intend to edit and keep `sed`/`cat` ranges tight.")
+    guidance_lines.extend(
+        [
+            "- Prefer pnpm for scripts; note any commands that cannot run because of network limits.",
+            "- When you need documentation context, query the catalog search/show helpers with precise section names; do not read doc files from the repository.",
+            "- Avoid repo-wide listings/searches; open only the code files you intend to edit and keep `sed`/`cat` ranges tight.",
+        ]
+    )
 else:
-    lines.append("- Use pnpm for installs unless the task requires something else; flag unavailable commands.")
-    lines.append("- Skip broad repository listings; open only the code files tied to your active plan and keep the slices minimal.")
+    guidance_lines.extend(
+        [
+            "- Use pnpm for installs unless the task requires something else; flag unavailable commands.",
+            "- Skip broad repository listings; open only the code files tied to your active plan and keep the slices minimal.",
+        ]
+    )
 
-lines.append("")
-lines.append("## Guardrails")
-lines.append("- Stay within this task's scope; avoid unrelated plans or subprojects.")
-lines.append("- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.")
-lines.append("- Keep command usage lean and focused on assets needed for the acceptance criteria.")
-lines.append("- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.")
-lines.append("- Tackle documentation edits only after the related code changes land, and only when the documentation would be inaccurate without the update.")
-lines.append("- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.")
+append_instruction_lines(guidance_lines)
+
+append_instruction_lines(
+    [
+        "## Guardrails",
+        "- Stay within this task's scope; avoid unrelated plans or subprojects.",
+        "- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.",
+        "- Keep command usage lean and focused on assets needed for the acceptance criteria.",
+        "- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.",
+        "- Tackle documentation edits only after the related code changes land, and only when the documentation would be inaccurate without the update.",
+        "- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.",
+    ]
+)
+
 if instruction_prompts:
-    lines.append("")
-    lines.append("### Supplemental Instructions (pointers only)")
     pointer_target = doc_catalog_pointer or ".gpt-creator/staging/plan/work/doc-catalog.json"
-    lines.append(f"See JSON catalog at: `{pointer_target}`")
-    lines.append("Use the catalog + FTS search to pull only the slices you need; do not inline entire instruction prompts.")
+    append_instruction_lines(
+        [
+            "### Supplemental Instructions (pointers only)",
+            f"See JSON catalog at: `{pointer_target}`",
+            "Use the catalog + FTS search to pull only the slices you need; do not inline entire instruction prompts.",
+        ]
+    )
+
+if instruction_section_lines:
+    while instruction_section_lines and instruction_section_lines[-1] == "":
+        instruction_section_lines.pop()
+    instruction_section_lines.append("")
+    lines = instruction_section_lines + lines
 
 if CONTEXT_TAIL_PATH:
     context_path = Path(CONTEXT_TAIL_PATH)

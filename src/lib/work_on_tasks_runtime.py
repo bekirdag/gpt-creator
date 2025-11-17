@@ -3461,6 +3461,18 @@ def main():
                 return set()
             return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
+        def _configure_prisma_override_env() -> None:
+            override_root = project_root / '.gpt-creator' / 'prisma-engines'
+            override_tmp = override_root / 'tmp'
+            try:
+                override_tmp.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                return
+            os.environ.setdefault('PRISMA_ENGINES_OVERRIDE', str(override_root))
+            os.environ.setdefault('TMPDIR', str(override_tmp))
+
+        _configure_prisma_override_env()
+
         def _git_changes_since_task_branch(root: Path) -> Optional[int]:
             base_file = root / ".gpt-creator" / "state" / "base-sha"
             if not base_file.exists():
@@ -3817,6 +3829,34 @@ def main():
 
         command_failure_detected = False
         branch_merge_completed = False
+
+        if command_entries and not skip_command_processing:
+            placeholder_commands = [
+                cmd for cmd in command_entries
+                if isinstance(cmd, str) and ('...' in cmd or '…' in cmd)
+            ]
+        else:
+            placeholder_commands = []
+        if placeholder_commands:
+            sample = _truncate_command_text(placeholder_commands[0]) if placeholder_commands else "..."
+            manual_notes.append(
+                _format_action_result(
+                    "commands-fill-placeholders",
+                    f"blocked — {len(placeholder_commands)} command(s) still contain placeholder ellipses (first: {sample})"
+                )
+            )
+            manual_notes.append(
+                _format_action_result(
+                    "commands-remediation",
+                    "replace `...` placeholders with the exact commands you intend to run before retrying"
+                )
+            )
+            skip_command_processing = True
+            command_entries = []
+            command_failure_detected = True
+            if not forced_canonical_status:
+                forced_canonical_status = 'RETRYABLE'
+                forced_legacy_status = 'retryable'
 
         def _working_tree_clean() -> bool:
             status = _run_git_command(['status', '--porcelain'])

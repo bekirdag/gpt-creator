@@ -167,7 +167,7 @@ for schema_path in "${schema_paths[@]}"; do
       if declare -F gc_clone_python_tool >/dev/null 2>&1; then
         ENV_FILE_ABS_HELPER="$(gc_clone_python_tool "resolve_env_file_path.py" "${PROJECT_ROOT:-$PWD}")" || return 1
       fi
-      if [[ -z "$ENV_FILE_ABS_HELPER" ]]; then
+      if [[ -z "${ENV_FILE_ABS_HELPER:-}" ]]; then
         ENV_FILE_ABS_HELPER="${SCRIPT_DIR}/python/resolve_env_file_path.py"
       fi
     fi

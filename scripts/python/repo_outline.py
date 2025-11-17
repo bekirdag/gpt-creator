@@ -198,23 +198,25 @@ def main() -> None:
     args = parse_args()
     root = Path(args.root).resolve()
     ignore = DEFAULT_IGNORE | set(args.ignore or [])
-    if args.focus:
-        for focus in args.focus:
+    focus_paths = args.focus or []
+    if focus_paths:
+        for focus in focus_paths:
             print(f"[focus-request] {focus}")
         print()
 
-    for line in walk_tree(
-        root,
-        depth=0,
-        max_depth=max(0, args.max_depth),
-        files_per_dir=args.files_per_dir,
-        include_hidden=args.include_hidden,
-        ignore=ignore,
-        max_items=max(1, args.max_items),
-    ):
-        print(line)
+    if not focus_paths:
+        for line in walk_tree(
+            root,
+            depth=0,
+            max_depth=max(0, args.max_depth),
+            files_per_dir=args.files_per_dir,
+            include_hidden=args.include_hidden,
+            ignore=ignore,
+            max_items=max(1, args.max_items),
+        ):
+            print(line)
 
-    for focus in args.focus:
+    for focus in focus_paths:
         print()
         for line in describe_focus(
             root,

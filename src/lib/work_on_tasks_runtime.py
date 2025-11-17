@@ -483,6 +483,15 @@ def main():
             normalized = text.strip()
             if not normalized:
                 return normalized
+            bullet_prefixes = ('- ', '* ', '• ', '— ', '– ', '+ ')
+            for prefix in bullet_prefixes:
+                if normalized.startswith(prefix):
+                    normalized = normalized[len(prefix):].lstrip()
+                    break
+            else:
+                bullet_match = re.match(r'^(?:\d+\.|\d+\)|[A-Za-z]\)|[ivxlcdm]+\.)\s+', normalized, flags=re.IGNORECASE)
+                if bullet_match:
+                    normalized = normalized[bullet_match.end():].lstrip()
             if normalized.startswith('`'):
                 closing = normalized.find('`', 1)
                 if closing != -1:

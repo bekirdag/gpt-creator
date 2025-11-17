@@ -1572,6 +1572,7 @@ def format_duration(seconds_value):
     return " ".join(parts)
 
 
+DEFAULT_WORK_PROMPT_LABEL = "builtin/work_on_tasks.prompt.md"
 DEFAULT_WORK_PROMPT = """## work-on-tasks Prompt
 - Load the task details and acceptance criteria from the context section.
 - Consult the documentation catalog or search hits before modifying files.
@@ -1798,7 +1799,10 @@ if not instruction_prompts:
             instruction_prompts = [(rel_label, prompt_text.strip().splitlines())]
             break
     else:
-        instruction_prompts = [("builtin/work_on_tasks.prompt.md", DEFAULT_WORK_PROMPT.strip().splitlines())]
+        instruction_prompts = [(DEFAULT_WORK_PROMPT_LABEL, DEFAULT_WORK_PROMPT.strip().splitlines())]
+else:
+    if not any(label == DEFAULT_WORK_PROMPT_LABEL for label, _ in instruction_prompts):
+        instruction_prompts.append((DEFAULT_WORK_PROMPT_LABEL, DEFAULT_WORK_PROMPT.strip().splitlines()))
 
 def build_log_excerpt(path_obj: Path, max_lines: int = 40, max_chars: int = 160) -> list[str]:
     try:

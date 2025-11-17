@@ -1443,6 +1443,34 @@ def main():
             except sqlite3.Error:
                 pass
 
+        def _record_task_artifact(task_row_id: Optional[str], artifact_type: str, artifact_path_text: str) -> None:
+            if not task_row_id or not artifact_path_text or tasks_db_path is None:
+                return
+            try:
+                if not tasks_db_path.exists():
+                    return
+            except Exception:
+                return
+            try:
+                with sqlite3.connect(str(tasks_db_path)) as artifact_conn:
+                    artifact_conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS task_artifacts (
+                            task_id TEXT NOT NULL,
+                            artifact_type TEXT NOT NULL,
+                            artifact_path TEXT NOT NULL,
+                            recorded_at TEXT DEFAULT CURRENT_TIMESTAMP
+                        )
+                        """
+                    )
+                    artifact_conn.execute(
+                        "INSERT INTO task_artifacts (task_id, artifact_type, artifact_path) VALUES (?, ?, ?)",
+                        (task_row_id, artifact_type, artifact_path_text),
+                    )
+                    artifact_conn.commit()
+            except sqlite3.Error:
+                pass
+
         def _ensure_dev_branch_exists() -> Tuple[bool, List[str]]:
             notes: List[str] = []
             if _local_branch_exists(dev_branch_name):
@@ -2099,9 +2127,45 @@ def main():
             raw_body = raw_text if raw_text.endswith("\n") else raw_text + ("\n" if raw_text else "\n")
             try:
                 history_dir.mkdir(parents=True, exist_ok=True)
+                def _render_section_content(entries: Sequence[str], *, preserve_indent: bool = False) -> str:
+                    lines: List[str] = []
+                    if entries:
+                        for item in entries:
+                            text = str(item)
+                            text = text.rstrip()
+                            if not preserve_indent:
+                                text = text.strip()
+                            lines.append(f"- {text}")
+                    else:
+                        lines.append("- (none)")
+                    lines.append("")
+                    body = "\n".join(lines)
+                    return body if body.endswith("\n") else body + "\n"
+
+                artifact_task_id = task_id or task_db_id
+
+                def _store_section_artifact(label: str, entries: Sequence[str], *, preserve_indent: bool = False) -> None:
+                    file_stub = f"{label.lower()}_{suffix}.md"
+                    section_path = history_dir / file_stub
+                    latest_section_path = history_dir / f"latest.{label.lower()}.md"
+                    content = _render_section_content(entries, preserve_indent=preserve_indent)
+                    _atomic_write_history(section_path, content)
+                    _atomic_write_history(latest_section_path, content)
+                    rel_section = _relativize_path(section_path)
+                    if artifact_task_id:
+                        _record_task_artifact(artifact_task_id, label.lower(), rel_section)
+
+                _store_section_artifact("Plan", plan_list)
+                _store_section_artifact("Focus", focus_list)
+                _store_section_artifact("Commands", command_list, preserve_indent=True)
+                _store_section_artifact("Notes", note_list)
                 _atomic_write_history(summary_path, summary_text)
+                if artifact_task_id:
+                    _record_task_artifact(artifact_task_id, "summary", _relativize_path(summary_path))
                 _atomic_write_history(history_dir / "latest.summary.md", summary_text)
                 _atomic_write_history(raw_path, raw_body)
+                if artifact_task_id:
+                    _record_task_artifact(artifact_task_id, "output", _relativize_path(raw_path))
                 _atomic_write_history(history_dir / "latest.output.md", raw_body)
                 meta_lines = [
                     f"recorded_at: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}",
@@ -2129,6 +2193,8 @@ def main():
                 _append_plain_section("notes", note_list)
                 meta_text = "\n".join(meta_lines).rstrip() + "\n"
                 _atomic_write_history(meta_path, meta_text)
+                if artifact_task_id:
+                    _record_task_artifact(artifact_task_id, "summary-meta", _relativize_path(meta_path))
                 _atomic_write_history(history_dir / "latest.summary.txt", meta_text)
                 rel_summary = _relativize_path(summary_path)
                 manual_notes.append(
@@ -4263,7 +4329,6 @@ def main():
                             )
                         )
                         continue
-                    command_failure_detected = True
                     commands_to_report.add(command)
                     note = _format_action_result(
                         _truncate_command_text(command),
@@ -4619,6 +4684,13 @@ def main():
             "report": _relativize_path(final_report_path),
             "status": _relativize_path(status_json_path),
         }
+        artifact_task_id = task_db_id or active_task_id
+        if artifact_task_id:
+            for label, rel_path in log_paths.items():
+                if not rel_path:
+                    continue
+                artifact_label = "logs-directory" if label == "directory" else f"log-{label}"
+                _record_task_artifact(artifact_task_id, artifact_label, rel_path)
         end_report_note, end_report_file = _compose_end_report(
             canonical_status,
             report_commands,

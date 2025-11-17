@@ -3208,7 +3208,16 @@ if guard_entries:
         summary = "; ".join(issues) if issues else "Pre-check violation detected."
         lines.append(f"- {command_label} — {summary}")
 
-lines.append("")
+if instruction_prompts:
+    for prompt_label, prompt_lines in instruction_prompts:
+        if not prompt_lines:
+            continue
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.extend(prompt_lines)
+    if lines and lines[-1] != "":
+        lines.append("")
+
 lines.append("## Instructions")
 response_guidance = [
     "### Response Format",

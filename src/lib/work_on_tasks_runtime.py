@@ -7140,7 +7140,16 @@ def main():
         lines.append("- When you need to inspect code, run `python3 scripts/python/targeted_search.py --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.")
         lines.append("- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.")
 
-        lines.append("")
+        if instruction_prompts:
+            for prompt_label, prompt_lines in instruction_prompts:
+                if not prompt_lines:
+                    continue
+                if lines and lines[-1] != "":
+                    lines.append("")
+                lines.extend(prompt_lines)
+            if lines and lines[-1] != "":
+                lines.append("")
+
         lines.append("## Instructions")
         response_guidance = [
             "### Response Format",

@@ -6944,6 +6944,35 @@ gc_apply_codex_changes() {
   printf '%s\n' "$apply_output"
 }
 
+gc_refresh_work_prompt() {
+  local base_path="${1:-}"
+  local prompt_path="${2:-}"
+  local contract_guard="${3:-0}"
+  local diff_guard="${4:-0}"
+  local json_guard="${5:-0}"
+
+  [[ -n "$base_path" && -f "$base_path" && -n "$prompt_path" ]] || return 0
+
+  if ! cp -f "$base_path" "$prompt_path"; then
+    warn "  Failed to refresh work-on-tasks prompt from ${base_path}; continuing with existing prompt."
+    return 1
+  fi
+
+  if (( contract_guard )); then
+    printf '\n' >>"$prompt_path"
+    gc_render_template "prompts/work_on_tasks_contract_guard.md" >>"$prompt_path"
+  fi
+  if (( diff_guard )); then
+    printf '\n' >>"$prompt_path"
+    gc_render_template "prompts/work_on_tasks_diff_reminder.md" >>"$prompt_path"
+  fi
+  if (( json_guard )); then
+    printf '\n' >>"$prompt_path"
+    gc_render_template "prompts/work_on_tasks_json_reminder.md" >>"$prompt_path"
+  fi
+  return 0
+}
+
 cmd_create_jira_tasks() {
   local args=()
   while [[ $# -gt 0 ]]; do
@@ -10783,6 +10812,7 @@ print(error)'
       printf -v task_number "%03d" $((task_index + 1))
       local prompt_path="${story_run_dir}/prompts/task_${task_number}.prompt.md"
       local output_path="${story_run_dir}/out/task_${task_number}.out.md"
+      local prompt_base_path="${prompt_path}.base"
       local stage_baseline_retrieve="${GC_BUDGET_STAGE_TOTAL_RETRIEVE:-0}"
       local stage_baseline_plan="${GC_BUDGET_STAGE_TOTAL_PLAN:-0}"
       local stage_baseline_patch="${GC_BUDGET_STAGE_TOTAL_PATCH:-0}"
@@ -10800,6 +10830,9 @@ print(error)'
         prompt_slim_helper="$(gc_clone_python_tool "wot_slim_prompt.py" "${PROJECT_ROOT:-$PWD}")" || return 1
       fi
       "$python_bin" "$prompt_slim_helper" "$prompt_path"
+      if ! cp -f "$prompt_path" "$prompt_base_path"; then
+        warn "  Unable to cache base prompt for task ${task_number}; retries may miss helper instructions."
+      fi
 
       local prompt_est_tokens_raw
       prompt_est_tokens_raw="$(gc_estimate_tokens_from_bytes "$prompt_path")"
@@ -10828,7 +10861,7 @@ print(error)'
         fi
         if (( matches_filter == 0 )); then
           if (( keep_artifacts == 0 )); then
-            rm -f "$prompt_path" "$output_path" "$prompt_meta_path"
+            rm -f "$prompt_path" "$output_path" "$prompt_meta_path" "$prompt_base_path"
           fi
           continue
         fi
@@ -11019,7 +11052,7 @@ print(error)'
           gc_budget_set_stage_limit "retrieve" "$new_retrieve_cap"
           task_notes+=("Retrieve stage exceeded budget limit (${retrieve_tokens}/${retrieve_limit_value}); raised cap to ${new_retrieve_cap} tokens and retrying prompt build.")
           gc_budget_reset_stage_tracking
-          rm -f "$prompt_path" "$output_path"
+          rm -f "$prompt_path" "$output_path" "$prompt_base_path"
           if (( attempt > 0 )); then
             (( attempt-- ))
           fi
@@ -11102,7 +11135,7 @@ print(error)'
           GC_TASK_TOKEN_HARD_LIMIT="$new_prompt_cap"
           gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_HARD_CAP "$new_prompt_cap"
           gc_budget_reset_stage_tracking
-          rm -f "$prompt_path" "$output_path"
+          rm -f "$prompt_path" "$output_path" "$prompt_base_path"
           if (( attempt > 0 )); then
             (( attempt-- ))
           fi
@@ -11140,7 +11173,7 @@ print(error)'
             GC_TASK_TOKEN_HARD_LIMIT="$new_prompt_cap"
             gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_HARD_CAP "$new_prompt_cap"
             gc_budget_reset_stage_tracking
-            rm -f "$prompt_path" "$output_path"
+            rm -f "$prompt_path" "$output_path" "$prompt_base_path"
             if (( attempt > 0 )); then
               (( attempt-- ))
             fi
@@ -11187,7 +11220,7 @@ print(error)'
           GC_TASK_TOKEN_HARD_LIMIT="$new_prompt_cap"
           gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_HARD_CAP "$new_prompt_cap"
           gc_budget_reset_stage_tracking
-          rm -f "$prompt_path" "$output_path"
+          rm -f "$prompt_path" "$output_path" "$prompt_base_path"
           if (( attempt > 0 )); then
             (( attempt-- ))
           fi
@@ -11234,6 +11267,10 @@ print(error)'
       while (( attempt < max_attempts )); do
         (( ++attempt ))
         (( ++diff_guard_global_attempt ))
+        if [[ -f "$prompt_base_path" ]]; then
+          gc_refresh_work_prompt "$prompt_base_path" "$prompt_path" \
+            "$contract_guard_injected" "$delta_prompt_injected" "$prompt_augmented" || true
+        fi
         if ((${#task_notes[@]} > 0)); then
           local -a _task_notes_without_status=()
           local _task_note_line=""
@@ -11885,7 +11922,7 @@ print(flag("notes_contains_already_satisfied"))'
           fi
 
           if (( keep_output == 0 )); then
-            rm -f "$prompt_path" "$output_path"
+            rm -f "$prompt_path" "$output_path" "$prompt_base_path"
           fi
           codex_ok=1
         else

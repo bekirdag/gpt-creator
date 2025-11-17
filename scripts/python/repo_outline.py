@@ -198,6 +198,11 @@ def main() -> None:
     args = parse_args()
     root = Path(args.root).resolve()
     ignore = DEFAULT_IGNORE | set(args.ignore or [])
+    if args.focus:
+        for focus in args.focus:
+            print(f"[focus-request] {focus}")
+        print()
+
     for line in walk_tree(
         root,
         depth=0,

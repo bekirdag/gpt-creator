@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Sequence
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(os.environ.get("GC_PROJECT_ROOT", os.getcwd())).resolve()
 DEFAULT_END = 160
 MAX_SUGGESTIONS = 40
 

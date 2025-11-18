@@ -276,6 +276,11 @@
       "kind": "sql"
     },
     {
+      "name": "task_artifacts",
+      "file": "src/lib/work_on_tasks_runtime.py",
+      "kind": "sql"
+    },
+    {
       "name": "agents",
       "file": "test/python/test_agents_repository.py",
       "kind": "sql"
@@ -573,6 +578,7 @@
     "src/lib/create-jira-tasks/upsert_story_into_db.py",
     "src/lib/doc_indexer.py",
     "src/lib/doc_registry.py",
+    "src/lib/work_on_tasks_runtime.py",
     "test/python/test_agents_repository.py",
     "test/python/test_estimate_and_backlog.py",
     "test/python/test_progress_migration.py",

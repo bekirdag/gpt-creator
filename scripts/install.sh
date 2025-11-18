@@ -652,7 +652,7 @@ install_files() {
 }
 
 install_docdexd() {
-  local builder_script="$APP_DIR/scripts/docdex/build.sh"
+  local builder_script="$REPO_DIR/scripts/docdex/build.sh"
   if [[ ! -f "$builder_script" ]]; then
     return
   fi
@@ -661,12 +661,24 @@ install_docdexd() {
     return
   fi
   echo "› Building docdex daemon (docdexd)…"
-  local env_path="$PATH"
-  local env_home="$HOME"
-  if as_root "$INSTALL_PREFIX" env PATH="$env_path" HOME="$env_home" bash -c "cd \"$APP_DIR\" && bash \"$builder_script\""; then
-    echo "✔ docdexd built and installed under $APP_DIR/.gpt-creator/bin/docdexd"
+  if ! (cd "$REPO_DIR" && bash "$builder_script"); then
+    record_warning "docdexd build failed; rerun '$builder_script' inside $REPO_DIR after installing Rust/libzstd."
+    return
+  fi
+  local built_binary="$REPO_DIR/.gpt-creator/bin/docdexd"
+  if [[ ! -f "$built_binary" ]]; then
+    record_warning "docdexd build completed but ${built_binary} is missing."
+    return
+  fi
+  if [[ "$REPO_DIR" == "$APP_DIR" ]]; then
+    echo "✔ docdexd built and installed under $built_binary"
+    return
+  fi
+  local target_dir="$APP_DIR/.gpt-creator/bin"
+  if as_root "$APP_DIR" mkdir -p "$target_dir" && as_root "$APP_DIR" install -m 0755 "$built_binary" "$target_dir/docdexd"; then
+    echo "✔ docdexd built and installed under $target_dir/docdexd"
   else
-    record_warning "docdexd build failed; rerun '$builder_script' inside $APP_DIR after installing Rust."
+    record_warning "Unable to install docdexd into $target_dir. Run 'sudo cp ${built_binary} ${target_dir}/docdexd' manually."
   fi
 }
 

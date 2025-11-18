@@ -36,6 +36,7 @@ if _EXTRA_HELPER_DIR:
 def _load_docdex_client() -> bool:
     global docdex_client, _docdex_logged_success
     if docdex_client is not None:
+        print("[work_on_tasks] docdex_client already loaded", file=sys.stderr)
         return True
     try:
         docdex_client = importlib.import_module("docdex_client")  # type: ignore
@@ -7043,6 +7044,7 @@ def main():
         )
         doc_search_hits: List[Dict[str, object]] = []
         docdex_ready = _docdex_available()
+        print(f"[work_on_tasks] docdex_ready={docdex_ready} (search terms present? {bool(search_terms)})", file=sys.stderr)
         if docdex_ready:
             _ensure_docdex_daemon_running()
         if search_terms:
@@ -7061,6 +7063,7 @@ def main():
                     doc_search_hits.append(hit)
                     seen_doc_ids.add(doc_id)
             else:
+                print("[work_on_tasks] docdex unavailable; falling back to FTS/vector retrieval", file=sys.stderr)
                 db_path_obj: Optional[Path] = None
                 if documentation_db_path:
                     try:

@@ -38,7 +38,7 @@ struct SearchParams {
 
 #[derive(Serialize)]
 pub struct SearchResponse {
-    hits: Vec<Hit>,
+    pub hits: Vec<Hit>,
 }
 
 pub async fn run_query(indexer: &Indexer, query: &str, limit: usize) -> Result<SearchResponse> {
@@ -61,11 +61,7 @@ async fn search_handler(
                 limit,
                 "search handler failed"
             );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                err.to_string(),
-            )
-                .into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
         }
     }
 }
@@ -116,7 +112,11 @@ async fn snippet_handler(
             })
             .into_response()
         }
-        Ok(None) => Json(SnippetResponse { doc: None, snippet: None }).into_response(),
+        Ok(None) => Json(SnippetResponse {
+            doc: None,
+            snippet: None,
+        })
+        .into_response(),
         Err(err) => {
             warn!(
                 target: "docdexd",
@@ -125,11 +125,7 @@ async fn snippet_handler(
                 window,
                 "snippet handler failed"
             );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                err.to_string(),
-            )
-                .into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
         }
     }
 }

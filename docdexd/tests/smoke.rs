@@ -86,11 +86,7 @@ fn cli_index_and_query_smoke() -> Result<(), Box<dyn Error>> {
     let repo = setup_repo()?;
     let repo_str = repo.path().to_string_lossy().to_string();
 
-    run_docdex([
-        "index",
-        "--repo",
-        repo_str.as_str(),
-    ])?;
+    run_docdex(["index", "--repo", repo_str.as_str()])?;
 
     let stdout = run_docdex([
         "query",
@@ -147,11 +143,7 @@ fn spawn_server(repo_root: &Path, host: &str, port: u16) -> Result<Child, Box<dy
 fn http_server_smoke() -> Result<(), Box<dyn Error>> {
     let repo = setup_repo()?;
     let repo_str = repo.path().to_string_lossy().to_string();
-    run_docdex([
-        "index",
-        "--repo",
-        repo_str.as_str(),
-    ])?;
+    run_docdex(["index", "--repo", repo_str.as_str()])?;
 
     let port = pick_free_port();
     let host = "127.0.0.1";

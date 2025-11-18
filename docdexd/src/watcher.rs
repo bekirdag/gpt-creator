@@ -36,10 +36,7 @@ pub fn spawn(repo_root: PathBuf, indexer: Arc<Indexer>) -> Result<()> {
     Ok(())
 }
 
-fn start_blocking_watcher(
-    repo_root: PathBuf,
-    tx: mpsc::UnboundedSender<PathBuf>,
-) -> Result<()> {
+fn start_blocking_watcher(repo_root: PathBuf, tx: mpsc::UnboundedSender<PathBuf>) -> Result<()> {
     std::thread::Builder::new()
         .name("docdexd-watcher".into())
         .spawn(move || {
@@ -62,7 +59,8 @@ fn start_blocking_watcher(
                     return;
                 }
             };
-            let _ = watcher.configure(Config::default().with_poll_interval(std::time::Duration::from_secs(2)));
+            let _ = watcher
+                .configure(Config::default().with_poll_interval(std::time::Duration::from_secs(2)));
             if let Err(err) = watcher.watch(&repo_root, RecursiveMode::Recursive) {
                 warn!(
                     target: "docdexd",
@@ -105,10 +103,7 @@ fn start_blocking_watcher(
 }
 
 fn is_relevant_event(event: &Event) -> bool {
-    matches!(
-        event.kind,
-        EventKind::Create(_) | EventKind::Modify(_)
-    )
+    matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_))
 }
 
 fn should_track_path(path: &Path, repo_root: &Path) -> bool {

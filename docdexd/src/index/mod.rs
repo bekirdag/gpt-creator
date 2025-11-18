@@ -9,7 +9,9 @@ use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{Schema, FAST, STORED, TEXT};
-use tantivy::{doc, Document, Index, IndexReader, IndexWriter, ReloadPolicy, SnippetGenerator, Term};
+use tantivy::{
+    doc, Document, Index, IndexReader, IndexWriter, ReloadPolicy, SnippetGenerator, Term,
+};
 use tracing::warn;
 use walkdir::WalkDir;
 
@@ -23,7 +25,6 @@ const FALLBACK_PREVIEW_LINES: usize = 60;
 #[derive(Clone)]
 pub struct Indexer {
     repo_root: PathBuf,
-    schema: Schema,
     index: Index,
     reader: IndexReader,
     doc_id_field: tantivy::schema::Field,
@@ -72,13 +73,19 @@ impl Indexer {
         let repo_root = repo_root.canonicalize().context("resolve repo root")?;
         let index_dir = repo_root.join(".gpt-creator").join("docdex").join("index");
         fs::create_dir_all(&index_dir)?;
-        let (schema, doc_id_field, path_field, body_field, summary_field, token_field) = build_schema();
-        let index = Index::open_or_create(tantivy::directory::MmapDirectory::open(&index_dir)?, schema.clone())?;
-        let reader = index.reader_builder().reload_policy(ReloadPolicy::OnCommit).try_into()?;
+        let (schema, doc_id_field, path_field, body_field, summary_field, token_field) =
+            build_schema();
+        let index = Index::open_or_create(
+            tantivy::directory::MmapDirectory::open(&index_dir)?,
+            schema.clone(),
+        )?;
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommit)
+            .try_into()?;
         let writer = index.writer(MAX_INDEX_RAM_BYTES)?;
         Ok(Self {
             repo_root,
-            schema,
             index,
             reader,
             doc_id_field,
@@ -186,13 +193,6 @@ impl Indexer {
         Ok(results)
     }
 
-    pub fn snapshot(&self, doc_id: &str) -> Result<Option<DocSnapshot>> {
-        if let Some(doc) = self.fetch_document(doc_id)? {
-            return Ok(Some(self.snapshot_from_document(doc_id, &doc)));
-        }
-        Ok(None)
-    }
-
     fn fetch_document(&self, doc_id: &str) -> Result<Option<Document>> {
         let searcher = self.reader.searcher();
         let term = Term::from_field_text(self.doc_id_field, doc_id);
@@ -206,7 +206,11 @@ impl Indexer {
         Ok(None)
     }
 
-    pub fn preview_snippet(&self, rel_path: &str, max_lines: usize) -> Result<Option<(String, bool)>> {
+    pub fn preview_snippet(
+        &self,
+        rel_path: &str,
+        max_lines: usize,
+    ) -> Result<Option<(String, bool)>> {
         if max_lines == 0 {
             return Ok(None);
         }
@@ -251,19 +255,6 @@ impl Indexer {
         &self.repo_root
     }
 
-    pub fn snippet_for_doc(
-        &self,
-        doc_id: &str,
-        rel_path_hint: Option<&str>,
-        query: Option<&str>,
-        fallback_lines: usize,
-    ) -> Result<Option<SnippetResult>> {
-        let Some(doc) = self.fetch_document(doc_id)? else {
-            return Ok(None);
-        };
-        self.snippet_from_document(&doc, rel_path_hint, query, fallback_lines)
-    }
-
     pub fn snapshot_with_snippet(
         &self,
         doc_id: &str,
@@ -284,13 +275,13 @@ impl Indexer {
         let content = fs::read_to_string(path).unwrap_or_default();
         let summary = summarize(&content);
         let tokens = estimate_tokens(&content);
-        let _ = writer.add_document(doc!(
+        writer.add_document(doc!(
             self.doc_id_field => rel.clone(),
             self.path_field => rel,
             self.body_field => content,
             self.summary_field => summary,
             self.token_field => tokens,
-        ));
+        ))?;
         Ok(())
     }
 
@@ -302,18 +293,18 @@ impl Indexer {
     }
 
     fn snapshot_from_document(&self, doc_id: &str, doc: &Document) -> DocSnapshot {
-            let rel_path = doc
-                .get_first(self.path_field)
-                .and_then(|v| v.as_text().map(|s| s.to_string()))
-                .unwrap_or_default();
-            let summary = doc
-                .get_first(self.summary_field)
-                .and_then(|v| v.as_text().map(|s| s.to_string()))
-                .unwrap_or_default();
-            let token_estimate = doc
-                .get_first(self.token_field)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+        let rel_path = doc
+            .get_first(self.path_field)
+            .and_then(|v| v.as_text().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let summary = doc
+            .get_first(self.summary_field)
+            .and_then(|v| v.as_text().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let token_estimate = doc
+            .get_first(self.token_field)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         DocSnapshot {
             doc_id: doc_id.to_string(),
             rel_path,
@@ -377,7 +368,14 @@ impl Indexer {
     }
 }
 
-fn build_schema() -> (Schema, tantivy::schema::Field, tantivy::schema::Field, tantivy::schema::Field, tantivy::schema::Field, tantivy::schema::Field) {
+fn build_schema() -> (
+    Schema,
+    tantivy::schema::Field,
+    tantivy::schema::Field,
+    tantivy::schema::Field,
+    tantivy::schema::Field,
+    tantivy::schema::Field,
+) {
     let mut builder = Schema::builder();
     let doc_id_field = builder.add_text_field("doc_id", TEXT | STORED);
     let path_field = builder.add_text_field("rel_path", TEXT | STORED);
@@ -385,7 +383,14 @@ fn build_schema() -> (Schema, tantivy::schema::Field, tantivy::schema::Field, ta
     let summary_field = builder.add_text_field("summary", TEXT | STORED);
     let token_field = builder.add_u64_field("token_estimate", FAST | STORED);
     let schema = builder.build();
-    (schema, doc_id_field, path_field, body_field, summary_field, token_field)
+    (
+        schema,
+        doc_id_field,
+        path_field,
+        body_field,
+        summary_field,
+        token_field,
+    )
 }
 
 pub(crate) fn should_index(path: &Path) -> bool {
@@ -619,7 +624,12 @@ fn truncate_to_limit(text: &str, max_chars: usize) -> (String, bool) {
         }
         truncated.push(ch);
     }
-    while truncated.chars().last().map(|c| c.is_whitespace()).unwrap_or(false) {
+    while truncated
+        .chars()
+        .last()
+        .map(|c| c.is_whitespace())
+        .unwrap_or(false)
+    {
         truncated.pop();
     }
     truncated.push('…');
@@ -672,7 +682,8 @@ fn is_safe_rel_path(rel_path: &str) -> bool {
     if path.is_absolute() {
         return false;
     }
-    path.components().all(|component| matches!(component, Component::CurDir | Component::Normal(_)))
+    path.components()
+        .all(|component| matches!(component, Component::CurDir | Component::Normal(_)))
 }
 
 fn estimate_tokens(text: &str) -> u64 {

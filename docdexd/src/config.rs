@@ -10,6 +10,8 @@ pub struct RepoArgs {
 
 impl RepoArgs {
     pub fn repo_root(&self) -> PathBuf {
-        self.repo.canonicalize().unwrap_or_else(|_| self.repo.clone())
+        self.repo
+            .canonicalize()
+            .unwrap_or_else(|_| self.repo.clone())
     }
 }

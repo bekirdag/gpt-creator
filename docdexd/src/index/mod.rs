@@ -17,6 +17,35 @@ use walkdir::WalkDir;
 
 const MAX_INDEX_RAM_BYTES: usize = 50 * 1024 * 1024;
 const DEFAULT_EXTENSIONS: &[&str] = &[".md", ".markdown", ".mdx", ".txt"];
+const EXCLUDED_DIR_NAMES: &[&str] = &[
+    "node_modules",
+    ".pnpm-store",
+    ".yarn",
+    ".yarn-cache",
+    ".npm",
+    ".cache",
+    ".git",
+    ".idea",
+    ".vscode",
+    "dist",
+    "build",
+    "coverage",
+    ".vite",
+    "tmp",
+    "temp",
+    "__pycache__",
+    ".docker",
+    "docker-data",
+    "target",
+];
+const EXCLUDED_RELATIVE_PREFIXES: &[&str] = &[
+    "logs/",
+    ".gpt-creator/logs/",
+    ".gpt-creator/tmp/",
+    "docker/.data/",
+    "docker-data/",
+    ".docker/",
+];
 const MAX_SUMMARY_CHARS: usize = 360;
 const MAX_SUMMARY_SEGMENTS: usize = 4;
 const MAX_SNIPPET_CHARS: usize = 420;
@@ -106,7 +135,7 @@ impl Indexer {
             .filter(|e| e.file_type().is_file())
         {
             let path = entry.path();
-            if !should_index(path) {
+            if !should_index(path, &self.repo_root) {
                 continue;
             }
             self.add_document(&mut writer, path)?;
@@ -118,7 +147,7 @@ impl Indexer {
 
     pub async fn ingest_file(&self, file: PathBuf) -> Result<()> {
         let path = file.canonicalize().context("resolve file")?;
-        if !should_index(&path) {
+        if !should_index(&path, &self.repo_root) {
             return Ok(());
         }
         let rel = self.rel_path(&path)?;
@@ -393,7 +422,28 @@ fn build_schema() -> (
     )
 }
 
-pub(crate) fn should_index(path: &Path) -> bool {
+pub(crate) fn should_index(path: &Path, repo_root: &Path) -> bool {
+    let relative = path.strip_prefix(repo_root).unwrap_or(path);
+    let normalized = relative
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_start_matches('/')
+        .to_string()
+        .to_lowercase();
+    if EXCLUDED_RELATIVE_PREFIXES
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+    {
+        return false;
+    }
+    for component in relative.components() {
+        if let Component::Normal(name) = component {
+            let name_lower = name.to_string_lossy().to_lowercase();
+            if EXCLUDED_DIR_NAMES.contains(&name_lower.as_str()) {
+                return false;
+            }
+        }
+    }
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };

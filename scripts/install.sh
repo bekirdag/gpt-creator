@@ -660,9 +660,20 @@ install_docdexd() {
     record_warning "Rust toolchain (cargo) not found; skipping docdexd build. Install Rust and run '$builder_script' later to enable doc indexing."
     return
   fi
+  local target_user="${SUDO_USER:-$USER}"
+  local target_home
+  if ! target_home="$(eval "echo ~${target_user}" 2>/dev/null)"; then
+    target_home="$HOME"
+  fi
+  local cargo_bin="${target_home}/.cargo/bin"
+  local user_path="$PATH"
+  if [[ -d "$cargo_bin" && ":$user_path:" != *":$cargo_bin:"* ]]; then
+    user_path="${cargo_bin}:$user_path"
+  fi
   echo "› Building docdex daemon (docdexd)…"
-  if ! (cd "$REPO_DIR" && bash "$builder_script"); then
-    record_warning "docdexd build failed; rerun '$builder_script' inside $REPO_DIR after installing Rust/libzstd."
+  local build_cmd="cd \"$REPO_DIR\" && bash \"$builder_script\""
+  if ! run_as_user "$target_user" env HOME="$target_home" PATH="$user_path" bash -c "$build_cmd"; then
+    record_warning "docdexd build failed; rerun '$builder_script' inside $REPO_DIR after installing Rust/libzstd (ensure ${target_home}/.cargo is writable)."
     return
   fi
   local built_binary="$REPO_DIR/.gpt-creator/bin/docdexd"

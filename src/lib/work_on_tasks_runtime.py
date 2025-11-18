@@ -11,10 +11,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional, List
 
-try:
-    import docdex_client  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
-    docdex_client = None  # type: ignore
+docdex_client = None  # type: ignore
 
 LAST_PENDING_CHANGES: Dict[str, Tuple[str, ...]] = {}
 
@@ -33,6 +30,12 @@ if _EXTRA_HELPER_DIR:
             sys.path.insert(0, extra_str)
     except Exception:
         pass
+
+if docdex_client is None:
+    try:
+        import docdex_client  # type: ignore
+    except Exception:  # pragma: no cover - optional dependency
+        docdex_client = None  # type: ignore
 
 
 def _silence_prompt_logs() -> None:

@@ -556,6 +556,8 @@ install_files() {
     --no-perms
     --no-owner
     --no-group
+    --include '/Cargo.toml'
+    --include '/Cargo.lock'
     --include '/bin/' --include '/bin/*'
     --include '/render_gpt_creator.sh'
     --include '/templates/***'
@@ -563,6 +565,7 @@ install_files() {
     --include '/config/' --include '/config/***'
     --include '/src/***'
     --include '/scripts/***'
+    --include '/docdexd/***'
     --include '/.gpt-creator/'
     --include '/.gpt-creator/***'
     --include '/tui/***'

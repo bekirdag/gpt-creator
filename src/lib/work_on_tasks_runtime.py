@@ -6761,6 +6761,15 @@ def main():
             except Exception:
                 return base
 
+        def _ensure_docdex_daemon_running() -> None:
+            if not _docdex_available():
+                return
+            repo_root = _docdex_repo_root()
+            try:
+                docdex_client.ensure_daemon(repo_root=repo_root)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
         def _run_docdex_search(terms: Sequence[str], limit: int) -> List[Dict[str, object]]:
             if not _docdex_available() or not terms or limit <= 0:
                 return []
@@ -6788,6 +6797,8 @@ def main():
                     }
                 )
             return hits
+
+        _ensure_docdex_daemon_running()
 
         def append_sample_section(title: str, value: str):
             if not value:

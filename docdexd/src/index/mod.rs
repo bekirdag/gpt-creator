@@ -284,7 +284,7 @@ impl Indexer {
         let content = fs::read_to_string(path).unwrap_or_default();
         let summary = summarize(&content);
         let tokens = estimate_tokens(&content);
-        writer.add_document(doc!(
+        let _ = writer.add_document(doc!(
             self.doc_id_field => rel.clone(),
             self.path_field => rel,
             self.body_field => content,
@@ -567,7 +567,7 @@ fn normalize_line(line: &str) -> Option<(String, bool)> {
 }
 
 fn strip_list_prefix(text: &str) -> &str {
-    let mut working = text.trim_start();
+    let working = text.trim_start();
     for prefix in &["- [ ]", "- [x]", "- [X]", "* [ ]", "* [x]", "* [X]"] {
         if starts_with_case_insensitive(working, prefix) {
             let (_, rest) = working.split_at(prefix.len());

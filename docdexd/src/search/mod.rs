@@ -37,7 +37,7 @@ struct SearchParams {
 }
 
 #[derive(Serialize)]
-struct SearchResponse {
+pub struct SearchResponse {
     hits: Vec<Hit>,
 }
 

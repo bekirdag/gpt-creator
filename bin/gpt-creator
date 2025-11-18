@@ -11467,7 +11467,7 @@ print(error)'
                 info "    Wrote ${written_path}"
                 (( any_changes |= 1 ))
                 task_changes_applied=1
-                ((task_change_operations++))
+                ((++task_change_operations))
                 task_written_paths+=("$written_path")
                 task_auto_push_records+=("M\t${written_path}")
                 ;;
@@ -11476,7 +11476,7 @@ print(error)'
                 info "    Patched ${patched_path}"
                 (( any_changes |= 1 ))
                 task_changes_applied=1
-                ((task_change_operations++))
+                ((++task_change_operations))
                 task_patched_paths+=("$patched_path")
                 task_auto_push_records+=("M\t${patched_path}")
                 ;;
@@ -11485,7 +11485,7 @@ print(error)'
                 info "    Deleted ${deleted_path}"
                 (( any_changes |= 1 ))
                 task_changes_applied=1
-                ((task_change_operations++))
+                ((++task_change_operations))
                 task_auto_push_records+=("D\t${deleted_path}")
                 ;;
               RENAME\ *)
@@ -11493,7 +11493,7 @@ print(error)'
                 info "    Renamed ${rename_entry}"
                 (( any_changes |= 1 ))
                 task_changes_applied=1
-                ((task_change_operations++))
+                ((++task_change_operations))
                 task_auto_push_records+=("R\t${rename_entry}")
                 ;;
               MOVE\ *)
@@ -11501,7 +11501,7 @@ print(error)'
                 info "    Moved ${move_entry}"
                 (( any_changes |= 1 ))
                 task_changes_applied=1
-                ((task_change_operations++))
+                ((++task_change_operations))
                 task_auto_push_records+=("R\t${move_entry}")
                 ;;
               ARTIFACT\ *)

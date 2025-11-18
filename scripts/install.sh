@@ -71,6 +71,20 @@ as_root() {
   fi
 }
 
+run_as_user() {
+  local user="$1"
+  shift
+  if [[ "$(id -u)" -eq 0 && "$user" != "root" ]]; then
+    if command -v sudo >/dev/null 2>&1; then
+      sudo -u "$user" -- "$@"
+    else
+      su - "$user" -c "$(printf '%q ' "$@")"
+    fi
+  else
+    "$@"
+  fi
+}
+
 ver_major() { echo "${1#v}" | awk -F. '{print $1}'; }
 
 INSTALL_WARNINGS=()
@@ -78,6 +92,7 @@ NODE_REQUIRED_MAJOR=20
 NODE_CURRENT_VERSION=""
 APT_UPDATED=0
 NVM_INSTALL_URL="${GC_NVM_INSTALL_URL:-https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh}"
+RUSTUP_INSTALL_URL="${GC_RUSTUP_INSTALL_URL:-https://sh.rustup.rs}"
 
 log_info() { echo "› $1"; }
 log_warn() { echo "⚠ $1" >&2; }
@@ -395,6 +410,51 @@ ensure_pnpm() {
   record_warning "pnpm could not be installed automatically. Install it manually via corepack or npm (https://pnpm.io/installation)."
 }
 
+ensure_rust() {
+  if need_cmd cargo; then
+    echo "✔ Rust toolchain $(cargo --version 2>/dev/null || true) detected."
+    return 0
+  fi
+
+  log_info "Rust toolchain not found; attempting installation via rustup…"
+  if ! need_cmd curl; then
+    record_warning "Rust toolchain missing and curl unavailable to download rustup. Install Rust manually via https://rustup.rs/."
+    return 1
+  fi
+  local installer
+  if ! installer="$(mktemp)"; then
+    record_warning "Failed to create temporary file for rustup installer."
+    return 1
+  fi
+  if ! curl -fsSL "$RUSTUP_INSTALL_URL" -o "$installer"; then
+    rm -f "$installer"
+    record_warning "Unable to download rustup installer."
+    return 1
+  fi
+  local target_user="${SUDO_USER:-$USER}"
+  local target_home
+  target_home="$(eval "echo ~${target_user}" 2>/dev/null || echo "$HOME")"
+  local -a install_cmd=(bash "$installer" -y --no-modify-path)
+  if ! run_as_user "$target_user" "${install_cmd[@]}"; then
+    rm -f "$installer"
+    record_warning "rustup installer exited with an error."
+    return 1
+  fi
+  rm -f "$installer"
+  local cargo_env="${target_home}/.cargo/env"
+  if [[ -f "$cargo_env" ]]; then
+    # shellcheck disable=SC1090
+    source "$cargo_env"
+  fi
+  hash -r
+  if need_cmd cargo; then
+    echo "✔ Rust toolchain $(cargo --version 2>/dev/null || true) installed."
+    return 0
+  fi
+  record_warning "Rust installation completed but cargo is still unavailable. Ensure ${target_home}/.cargo/bin is on PATH."
+  return 1
+}
+
 ensure_mysql_client() {
   if need_cmd mysql; then
     echo "✔ MySQL client $(mysql --version 2>/dev/null || true) detected."
@@ -470,6 +530,7 @@ preflight() {
   ensure_docker
   ensure_node
   ensure_pnpm
+  ensure_rust
   ensure_mysql_client
   ensure_codex
   ensure_openai_api_key

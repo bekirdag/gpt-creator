@@ -10,8 +10,10 @@ import sys
 import json
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional, List
+import importlib
 
 docdex_client = None  # type: ignore
+_docdex_logged_success = False
 
 LAST_PENDING_CHANGES: Dict[str, Tuple[str, ...]] = {}
 
@@ -31,13 +33,23 @@ if _EXTRA_HELPER_DIR:
     except Exception:
         pass
 
-if docdex_client is None:
+def _load_docdex_client() -> bool:
+    global docdex_client, _docdex_logged_success
+    if docdex_client is not None:
+        return True
     try:
-        import docdex_client  # type: ignore
-        print("[work_on_tasks] docdex_client import succeeded", file=sys.stderr)
+        docdex_client = importlib.import_module("docdex_client")  # type: ignore
+        if not _docdex_logged_success:
+            print("[work_on_tasks] docdex_client import succeeded", file=sys.stderr)
+            _docdex_logged_success = True
+        return True
     except Exception as err:  # pragma: no cover - optional dependency
         print(f"[work_on_tasks] docdex_client import failed: {err}", file=sys.stderr)
         docdex_client = None  # type: ignore
+        return False
+
+
+_load_docdex_client()
 
 
 def _silence_prompt_logs() -> None:
@@ -6754,7 +6766,7 @@ def main():
             return summary
 
         def _docdex_available() -> bool:
-            return docdex_client is not None
+            return _load_docdex_client()
 
         def _docdex_repo_root() -> Path:
             base = project_root_path or Path.cwd()

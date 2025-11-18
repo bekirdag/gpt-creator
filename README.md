@@ -49,14 +49,12 @@ These helpers are mandatory during `work-on-tasks` sessions: mention them in you
 ### Build & Serve
 
 ```bash
-# Build once (installs to .gpt-creator/bin/docdexd)
-scripts/docdex/build.sh
-# Or use Cargo directly
-cargo build --release -p docdexd
+# Build docdexd (requires Rust/cargo)
+gpt-creator docdex build
 
 # Rebuild the index and serve the HTTP API
-./.gpt-creator/bin/docdexd index --repo /path/to/project
-./.gpt-creator/bin/docdexd serve --repo /path/to/project --host 127.0.0.1 --port 46137
+gpt-creator docdex index --project /path/to/project
+gpt-creator docdex serve --project /path/to/project --host 127.0.0.1 --port 46137
 ```
 
 `docdex_client.py` auto-starts the daemon, but you can override defaults with:
@@ -77,9 +75,9 @@ If you need the legacy path (e.g., testing without Rust/Cargo), unset `GC_DOCDEX
 
 The index lives under `.gpt-creator/docdex/index`. When the schema or stored fields change:
 
-1. Stop the daemon (`pkill docdexd` or delete `.gpt-creator/run/docdexd.pid`).
-2. Remove the index directory or run `docdexd index --repo …` to rebuild it.
-3. Restart `docdexd serve` (manually or via the Python client) so the new schema is served.
+1. Stop the daemon (`pkill docdexd` or cancel the `gpt-creator docdex serve …` process).
+2. Remove `.gpt-creator/docdex/index` or run `gpt-creator docdex index --project …` to rebuild it.
+3. Restart `gpt-creator docdex serve …` (or let the Python client auto-start it) so the new schema is served.
 
 Old indexes may fail to load summaries/snippets correctly, so always rebuild after pulling docdex-related updates.
 

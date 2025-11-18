@@ -526,6 +526,23 @@ install_files() {
   as_root "$INSTALL_PREFIX" install -m 0755 "$REPO_DIR/bin/gpt-creator" "$APP_BIN"
 }
 
+install_docdexd() {
+  local builder_script="$APP_DIR/scripts/docdex/build.sh"
+  if [[ ! -f "$builder_script" ]]; then
+    return
+  fi
+  if ! need_cmd cargo; then
+    record_warning "Rust toolchain (cargo) not found; skipping docdexd build. Install Rust and run '$builder_script' later to enable doc indexing."
+    return
+  fi
+  echo "› Building docdex daemon (docdexd)…"
+  if (cd "$APP_DIR" && bash "$builder_script"); then
+    echo "✔ docdexd built and installed under $APP_DIR/.gpt-creator/bin/docdexd"
+  else
+    record_warning "docdexd build failed; rerun '$builder_script' inside $APP_DIR after installing Rust."
+  fi
+}
+
 ensure_runtime_permissions() {
   local target_user="${SUDO_USER:-$USER}"
   local target_home
@@ -611,6 +628,7 @@ install_completions() {
 main() {
   [[ $SKIP_PREFLIGHT -eq 1 ]] || preflight
 install_files
+install_docdexd
 ensure_runtime_permissions
 install_link
 install_completions

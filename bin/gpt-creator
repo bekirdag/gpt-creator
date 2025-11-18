@@ -8420,6 +8420,141 @@ cmd_refine_tasks() {
   ok "Task refinement complete"
 }
 
+gc_docdex_bin() {
+  local default_bin="${CLI_ROOT}/.gpt-creator/bin/docdexd"
+  printf '%s' "${GC_DOCDEX_BIN:-$default_bin}"
+}
+
+gc_docdex_builder_script() {
+  printf '%s' "${CLI_ROOT}/scripts/docdex/build.sh"
+}
+
+gc_docdex_build() {
+  local script
+  script="$(gc_docdex_builder_script)"
+  [[ -f "$script" ]] || die "docdex builder not found at ${script}"
+  info "Building docdex daemon…"
+  if (cd "$CLI_ROOT" && bash "$script"); then
+    ok "docdexd built at $(gc_docdex_bin)"
+  else
+    die "docdex build failed. Install Rust/cargo and rerun ${script}."
+  fi
+}
+
+gc_docdex_require_bin() {
+  local bin
+  bin="$(gc_docdex_bin)"
+  if [[ ! -x "$bin" ]]; then
+    info "docdexd binary missing at ${bin}; attempting to build…"
+    gc_docdex_build
+  fi
+  [[ -x "$bin" ]] || die "docdexd binary not found at ${bin}. Set GC_DOCDEX_BIN or run $(gc_docdex_builder_script)."
+}
+
+gc_docdex_usage() {
+  cat <<'EOF'
+Usage: gpt-creator docdex <build|index|serve> [options]
+
+  gpt-creator docdex build
+      Build the docdexd binary (requires Rust/cargo).
+
+  gpt-creator docdex index --project /path/to/repo
+      Rebuild the documentation index for the project.
+
+  gpt-creator docdex serve --project /path/to/repo [--host 127.0.0.1] [--port 46137]
+      Serve the docdex HTTP API (includes filesystem watcher for incremental updates).
+EOF
+}
+
+cmd_docdex_index() {
+  local root=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project|-p|--repo)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      -h|--help)
+        gc_docdex_usage
+        return 0
+        ;;
+      *)
+        die "Unknown argument for docdex index: $1"
+        ;;
+    esac
+  done
+  if [[ -z "$root" ]]; then
+    if [[ -n "${PROJECT_ROOT:-}" ]]; then
+      root="$PROJECT_ROOT"
+    else
+      die "--project is required for docdex index"
+    fi
+  fi
+  gc_docdex_require_bin
+  "$(gc_docdex_bin)" index --repo "$root"
+}
+
+cmd_docdex_serve() {
+  local root=""
+  local host="${GC_DOCDEX_HOST:-127.0.0.1}"
+  local port="${GC_DOCDEX_PORT:-46137}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project|-p|--repo)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      --host)
+        host="$2"
+        shift 2
+        ;;
+      --port)
+        port="$2"
+        shift 2
+        ;;
+      -h|--help)
+        gc_docdex_usage
+        return 0
+        ;;
+      *)
+        die "Unknown argument for docdex serve: $1"
+        ;;
+    esac
+  done
+  if [[ -z "$root" ]]; then
+    if [[ -n "${PROJECT_ROOT:-}" ]]; then
+      root="$PROJECT_ROOT"
+    else
+      die "--project is required for docdex serve"
+    fi
+  fi
+  gc_docdex_require_bin
+  info "Starting docdexd for ${root} on ${host}:${port}…"
+  exec "$(gc_docdex_bin)" serve --repo "$root" --host "$host" --port "$port"
+}
+
+cmd_docdex() {
+  local action="${1:-help}"
+  shift || true
+  case "$action" in
+    build)
+      gc_docdex_build "$@"
+      ;;
+    index)
+      cmd_docdex_index "$@"
+      ;;
+    serve)
+      cmd_docdex_serve "$@"
+      ;;
+    help|-h|--help|"")
+      gc_docdex_usage
+      ;;
+    *)
+      die "Unknown docdex action: ${action}"
+      ;;
+  esac
+}
+
 gc_write_task_prompt() {
   local db_path="${1:?tasks db path required}"
   local story_slug="${2:?story slug required}"
@@ -14838,6 +14973,7 @@ main() {
     create-pdr)     "$shell_bin" "$CLI_ROOT/src/cli/create-pdr.sh" "$@" ;;
     create-jira-tasks) "$CLI_ROOT/src/cli/create-jira-tasks.sh" "$@" ;;
     create-db-dump) "$shell_bin" "$CLI_ROOT/src/cli/create-db-dump.sh" "$@" ;;
+    docdex)         cmd_docdex "$@" ;;
     create-tasks)   cmd_create_tasks "$@" ;;
     create-agent)   cmd_create_agent "$@" ;;
     list-agents)    cmd_list_agents "$@" ;;

@@ -6258,6 +6258,7 @@ def main():
             lines.append('- List recent docs: bash -lc \'python3 "$GC_DOC_CATALOG_PY" list --db "$GC_DOCUMENTATION_DB_PATH" --limit 10\'')
             lines.append('- Full-text search: bash -lc \'python3 "$GC_DOC_CATALOG_PY" search --db "$GC_DOCUMENTATION_DB_PATH" --query "lockout" --limit 15\'')
             lines.append('- Show document by id: bash -lc \'python3 "$GC_DOC_CATALOG_PY" show --db "$GC_DOCUMENTATION_DB_PATH" --doc-id <id>\'')
+            lines.append("- Docdex-powered search/snippets: the doc catalog helper automatically talks to the running docdex daemon—use the commands above instead of `rg`/`cat` when you need to locate docs or quote a snippet.")
             lines.append('- Rebuild semantic index: bash -lc \'python3 "$GC_DOC_INDEXER_PY" rebuild --db "$GC_DOCUMENTATION_DB_PATH" --out "$GC_DOC_VECTOR_INDEX_PATH"\'')
             lines.append('- Register or sync discovery TSV: bash -lc \'python3 "$GC_DOC_REGISTRY_PY" register --db "$GC_DOCUMENTATION_DB_PATH" --tsv ".gpt-creator/manifests/<latest>.tsv"\'')
             lines.append("- SQL samples (helpful when Python helpers are unavailable):")
@@ -6291,6 +6292,7 @@ def main():
             lines.append('    "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"')
             lines.append("- Schema quick look:")
             lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables"')
+            lines.append("- When the docdex daemon is running, `python3 \"$GC_DOC_CATALOG_PY\" search/show ...` routes through it—prefer that helper over ad-hoc `rg` or `cat` when you need doc snippets.")
             if not documentation_db_available:
                 lines.append("- (Documentation catalog helpers unavailable without the SQLite database; regenerate with `gpt-creator scan` before running catalog commands.)")
             else:
@@ -6313,6 +6315,7 @@ def main():
             lines.extend(documentation_asset_lines)
         else:
             lines.append("- (No documentation assets detected; ensure doc-library and doc-index are generated before editing.)")
+        lines.append("- For focused file searches, run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern <needle> --paths <dir>` or `python3 \"$GC_REPO_OUTLINE_PY\"` instead of ad-hoc `rg`/`ls` loops; these helpers keep transcripts lean and deterministic.")
 
         lines.append("")
         lines.append("## Story")

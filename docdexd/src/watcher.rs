@@ -123,7 +123,7 @@ fn should_track_path(path: &Path, repo_root: &Path) -> bool {
             }
         }
     }
-    if !index::should_index(path) {
+    if !index::should_index(path, repo_root) {
         return false;
     }
     true

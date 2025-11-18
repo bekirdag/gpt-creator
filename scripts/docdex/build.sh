@@ -13,10 +13,10 @@ fi
 
 echo "Building docdexd (release)..."
 export ZSTD_SYS_USE_PKG_CONFIG=0
-export LIBZSTD_NO_PKG_CONFIG=1
+export ZSTD_SYS_ZSTD_SOURCE=bundled
 (
   cd "${CRATE_DIR}"
-  cargo build --release
+  cargo build --release --locked
 )
 
 if [[ ! -f "${TARGET}" ]]; then

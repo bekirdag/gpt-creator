@@ -279,6 +279,10 @@ mkdir -p "${CLI_SHIM_BIN}" 2>/dev/null || true
 export PATH="${CLI_SHIM_BIN}:${CLI_ROOT}/bin:${PATH}"
 GC_LAST_RENDER_TASK_FOOTER=""
 
+# Ensure docdex helpers default to the CLI-managed binary so docdex_client can auto-start the daemon.
+: "${GC_DOCDEX_BIN:=${CLI_ROOT}/.gpt-creator/bin/docdexd}"
+export GC_DOCDEX_BIN
+
 gc_template_path() {
   local name="${1:?template name required}"
   printf '%s/%s' "$GC_TEMPLATE_DIR" "$name"

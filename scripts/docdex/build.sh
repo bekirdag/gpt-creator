@@ -14,6 +14,7 @@ fi
 echo "Building docdexd (release)..."
 export ZSTD_SYS_USE_PKG_CONFIG=0
 export ZSTD_SYS_ZSTD_SOURCE=bundled
+export LIBZSTD_NO_PKG_CONFIG=1
 (
   cd "${CRATE_DIR}"
   if [[ -f "Cargo.lock" ]]; then

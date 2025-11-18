@@ -6818,8 +6818,6 @@ def main():
                 )
             return hits
 
-        _ensure_docdex_daemon_running()
-
         def append_sample_section(title: str, value: str):
             if not value:
                 return
@@ -7044,6 +7042,9 @@ def main():
             story_title,
         )
         doc_search_hits: List[Dict[str, object]] = []
+        docdex_ready = _docdex_available()
+        if docdex_ready:
+            _ensure_docdex_daemon_running()
         if search_terms:
             seen_doc_ids: Set[str] = {
                 entry.get("doc_id", "").strip()
@@ -7051,7 +7052,7 @@ def main():
                 if entry.get("doc_id")
             }
             seen_doc_ids.discard("")
-            if _docdex_available():
+            if docdex_ready:
                 docdex_hits = _run_docdex_search(search_terms, 12)
                 for hit in docdex_hits:
                     doc_id = (hit.get("doc_id") or "").strip()

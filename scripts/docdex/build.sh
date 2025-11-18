@@ -14,7 +14,6 @@ fi
 echo "Building docdexd (release)..."
 (
   cd "${CRATE_DIR}"
-  export CARGO_NET_OFFLINE=true
   if [[ -f "Cargo.lock" ]]; then
     cargo build --release --locked
   else

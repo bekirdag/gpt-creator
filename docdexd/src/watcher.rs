@@ -44,8 +44,12 @@ fn start_blocking_watcher(
         .name("docdexd-watcher".into())
         .spawn(move || {
             let (event_tx, event_rx) = std::sync::mpsc::channel();
-            let watcher_builder =
-                RecommendedWatcher::new(move |res| { let _ = event_tx.send(res); });
+            let watcher_builder = RecommendedWatcher::new(
+                move |res| {
+                    let _ = event_tx.send(res);
+                },
+                Config::default(),
+            );
             let mut watcher = match watcher_builder {
                 Ok(w) => w,
                 Err(err) => {

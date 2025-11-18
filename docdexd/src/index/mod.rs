@@ -9,8 +9,7 @@ use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::{Schema, FAST, STORED, TEXT};
-use tantivy::snippet::SnippetGenerator;
-use tantivy::{doc, Document, Index, IndexReader, IndexWriter, ReloadPolicy, Term};
+use tantivy::{doc, Document, Index, IndexReader, IndexWriter, ReloadPolicy, SnippetGenerator, Term};
 use tracing::warn;
 use walkdir::WalkDir;
 
@@ -143,22 +142,19 @@ impl Indexer {
             let retrieved = searcher.doc(addr)?;
             let doc_id = retrieved
                 .get_first(self.doc_id_field)
-                .and_then(|v| v.text())
-                .unwrap_or_default()
-                .to_string();
+                .and_then(|v| v.as_text().map(|s| s.to_string()))
+                .unwrap_or_default();
             let rel_path = retrieved
                 .get_first(self.path_field)
-                .and_then(|v| v.text())
-                .unwrap_or_default()
-                .to_string();
+                .and_then(|v| v.as_text().map(|s| s.to_string()))
+                .unwrap_or_default();
             let summary = retrieved
                 .get_first(self.summary_field)
-                .and_then(|v| v.text())
-                .unwrap_or_default()
-                .to_string();
+                .and_then(|v| v.as_text().map(|s| s.to_string()))
+                .unwrap_or_default();
             let token_estimate = retrieved
                 .get_first(self.token_field)
-                .and_then(|v| v.u64_value())
+                .and_then(|v| v.as_u64())
                 .unwrap_or(0);
             let snippet = snippet_generator
                 .as_ref()
@@ -306,20 +302,18 @@ impl Indexer {
     }
 
     fn snapshot_from_document(&self, doc_id: &str, doc: &Document) -> DocSnapshot {
-        let rel_path = doc
-            .get_first(self.path_field)
-            .and_then(|v| v.text())
-            .unwrap_or_default()
-            .to_string();
-        let summary = doc
-            .get_first(self.summary_field)
-            .and_then(|v| v.text())
-            .unwrap_or_default()
-            .to_string();
-        let token_estimate = doc
-            .get_first(self.token_field)
-            .and_then(|v| v.u64_value())
-            .unwrap_or(0);
+            let rel_path = doc
+                .get_first(self.path_field)
+                .and_then(|v| v.as_text().map(|s| s.to_string()))
+                .unwrap_or_default();
+            let summary = doc
+                .get_first(self.summary_field)
+                .and_then(|v| v.as_text().map(|s| s.to_string()))
+                .unwrap_or_default();
+            let token_estimate = doc
+                .get_first(self.token_field)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
         DocSnapshot {
             doc_id: doc_id.to_string(),
             rel_path,
@@ -366,7 +360,7 @@ impl Indexer {
 
         let rel_path = rel_path_hint.map(|p| p.to_string()).or_else(|| {
             doc.get_first(self.path_field)
-                .and_then(|v| v.text())
+                .and_then(|v| v.as_text().map(|s| s.to_string()))
                 .map(|text| text.to_string())
         });
         if let Some(rel_path) = rel_path {

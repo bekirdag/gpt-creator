@@ -1,7 +1,6 @@
 mod config;
 mod daemon;
 mod index;
-mod ingest;
 mod search;
 mod watcher;
 mod util;
@@ -9,7 +8,7 @@ mod util;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(name = "docdexd", version, about = "Documentation index/search daemon")]

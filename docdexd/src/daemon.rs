@@ -5,6 +5,7 @@ use anyhow::Result;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::net::TcpListener;
 use tracing::{error, info};
 
 pub async fn serve(repo: PathBuf, host: String, port: u16) -> Result<()> {
@@ -28,9 +29,8 @@ pub async fn serve(repo: PathBuf, host: String, port: u16) -> Result<()> {
         port,
         "listening on {addr}"
     );
-    let result = axum::Server::bind(&addr)
-        .serve(router.into_make_service())
-        .await;
+    let listener = TcpListener::bind(&addr).await?;
+    let result = axum::serve(listener, router.into_make_service()).await;
     match result {
         Ok(()) => {
             info!(

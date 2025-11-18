@@ -23,7 +23,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_PORT = int(os.environ.get("GC_DOCDEX_PORT", "46137"))
 DEFAULT_HOST = os.environ.get("GC_DOCDEX_HOST", "127.0.0.1")
-DEFAULT_BIN = os.environ.get("GC_DOCDEX_BIN", ".gpt-creator/bin/docdexd")
+CLI_ROOT = Path(__file__).resolve().parents[2]
 RUN_DIR = Path(".gpt-creator/run")
 LOG_DIR = Path(".gpt-creator/logs")
 PID_FILE = RUN_DIR / "docdexd.pid"
@@ -47,13 +47,21 @@ def _format_target(host: str, port: int, repo: Optional[Path] = None) -> str:
     return f"host={host}, port={port}{repo_part}"
 
 
-def _binary_path() -> Path:
-    path = Path(DEFAULT_BIN).expanduser()
-    if path.exists():
-        return path
+def _binary_path(repo_root: Path) -> Path:
+    candidates: list[Path] = []
+    env_bin = os.environ.get("GC_DOCDEX_BIN")
+    if env_bin:
+        candidates.append(Path(env_bin).expanduser())
+    candidates.append(CLI_ROOT / ".gpt-creator/bin/docdexd")
+    candidates.append(repo_root / ".gpt-creator/bin/docdexd")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    search_list = ", ".join(str(p) for p in candidates)
     raise DocDexError(
-        f"docdexd binary not found at {path}. "
-        "Run `cargo build --release -p docdexd` or set GC_DOCDEX_BIN."
+        "docdexd binary not found. "
+        f"Expected at: {search_list}. Run `gpt-creator docdex build` "
+        "or set GC_DOCDEX_BIN to a valid docdexd binary."
     )
 
 
@@ -95,7 +103,7 @@ def _write_pid(pid: int) -> None:
 
 
 def _start_daemon(repo_root: Path, host: str, port: int) -> None:
-    binary = _binary_path()
+    binary = _binary_path(repo_root)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_handle = open(LOG_FILE, "ab")
     cmd = [
@@ -166,7 +174,7 @@ def _http_get(
 
 
 def _run_cli(args: Iterable[str], repo_root: Path) -> None:
-    binary = _binary_path()
+    binary = _binary_path(repo_root)
     cmd = [str(binary), *args]
     proc = subprocess.run(cmd, cwd=str(repo_root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if proc.returncode != 0:

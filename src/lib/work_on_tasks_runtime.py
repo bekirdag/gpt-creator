@@ -6767,8 +6767,8 @@ def main():
             repo_root = _docdex_repo_root()
             try:
                 docdex_client.ensure_daemon(repo_root=repo_root)  # type: ignore[attr-defined]
-            except Exception:
-                pass
+            except Exception as err:
+                print(f"⚠ docdex daemon unavailable: {err}", file=sys.stderr)
 
         def _run_docdex_search(terms: Sequence[str], limit: int) -> List[Dict[str, object]]:
             if not _docdex_available() or not terms or limit <= 0:

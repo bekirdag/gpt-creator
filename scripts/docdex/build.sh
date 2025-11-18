@@ -12,8 +12,6 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 echo "Building docdexd (release)..."
-export ZSTD_SYS_USE_PKG_CONFIG=0
-export ZSTD_SYS_BUNDLED_LIBZSTD=1
 (
   cd "${CRATE_DIR}"
   if [[ -f "Cargo.lock" ]]; then

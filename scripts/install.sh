@@ -600,7 +600,7 @@ install_docdexd() {
     return
   fi
   echo "› Building docdex daemon (docdexd)…"
-  if (cd "$APP_DIR" && bash "$builder_script"); then
+  if as_root "$INSTALL_PREFIX" bash -c "cd \"$APP_DIR\" && bash \"$builder_script\""; then
     echo "✔ docdexd built and installed under $APP_DIR/.gpt-creator/bin/docdexd"
   else
     record_warning "docdexd build failed; rerun '$builder_script' inside $APP_DIR after installing Rust."

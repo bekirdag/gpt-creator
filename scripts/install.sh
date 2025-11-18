@@ -530,12 +530,68 @@ ensure_openai_api_key() {
   record_warning "OPENAI_API_KEY is not set. Set it before running Codex-powered commands."
 }
 
+ensure_pkg_config() {
+  if need_cmd pkg-config; then
+    return 0
+  fi
+  log_info "pkg-config not found; attempting installation…"
+  case "$INSTALL_MODE" in
+    macos)
+      if brew_install pkg-config; then
+        echo "✔ pkg-config installed via Homebrew."
+        return 0
+      fi
+      ;;
+    linux)
+      if apt_get_install pkg-config; then
+        echo "✔ pkg-config installed via apt."
+        return 0
+      elif dnf_install pkgconf; then
+        echo "✔ pkg-config (pkgconf) installed via dnf."
+        return 0
+      fi
+      ;;
+  esac
+  record_warning "pkg-config is required for native builds. Install it manually (package name: pkg-config or pkgconf)."
+  return 1
+}
+
+ensure_zstd_dev() {
+  if need_cmd pkg-config && pkg-config --exists libzstd; then
+    echo "✔ libzstd development headers detected."
+    return 0
+  fi
+  log_info "libzstd development headers not found; attempting installation…"
+  case "$INSTALL_MODE" in
+    macos)
+      if brew_install zstd; then
+        hash -r
+      fi
+      ;;
+    linux)
+      if apt_get_install zstd libzstd-dev; then
+        :
+      elif dnf_install zstd-devel; then
+        :
+      fi
+      ;;
+  esac
+  if need_cmd pkg-config && pkg-config --exists libzstd; then
+    echo "✔ libzstd development headers installed."
+    return 0
+  fi
+  record_warning "libzstd development package not detected. Install `libzstd-dev` (Debian/Ubuntu) or `zstd-devel` (RHEL/Fedora) so docdex can build."
+  return 1
+}
+
 preflight() {
   echo "› Preflight…"
   ensure_docker
   ensure_node
   ensure_pnpm
   ensure_rust
+   ensure_pkg_config
+   ensure_zstd_dev
   ensure_mysql_client
   ensure_codex
   ensure_openai_api_key

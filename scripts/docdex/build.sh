@@ -16,7 +16,11 @@ export ZSTD_SYS_USE_PKG_CONFIG=0
 export ZSTD_SYS_ZSTD_SOURCE=bundled
 (
   cd "${CRATE_DIR}"
-  cargo build --release --locked
+  if [[ -f "Cargo.lock" ]]; then
+    cargo build --release --locked
+  else
+    cargo build --release
+  fi
 )
 
 if [[ ! -f "${TARGET}" ]]; then

@@ -2,7 +2,8 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TARGET="${REPO_ROOT}/target/release/docdexd"
+CRATE_DIR="${REPO_ROOT}/docdexd"
+TARGET="${CRATE_DIR}/target/release/docdexd"
 INSTALL_DIR="${REPO_ROOT}/.gpt-creator/bin"
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -12,8 +13,8 @@ fi
 
 echo "Building docdexd (release)..."
 (
-  cd "${REPO_ROOT}"
-  cargo build --release -p docdexd
+  cd "${CRATE_DIR}"
+  cargo build --release
 )
 
 if [[ ! -f "${TARGET}" ]]; then

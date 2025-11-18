@@ -446,6 +446,11 @@ ensure_rust() {
     # shellcheck disable=SC1090
     source "$cargo_env"
   fi
+  local cargo_bin="${target_home}/.cargo/bin"
+  if [[ -d "$cargo_bin" ]]; then
+    PATH="$cargo_bin:$PATH"
+    export PATH
+  fi
   hash -r
   if need_cmd cargo; then
     echo "✔ Rust toolchain $(cargo --version 2>/dev/null || true) installed."
@@ -600,7 +605,9 @@ install_docdexd() {
     return
   fi
   echo "› Building docdex daemon (docdexd)…"
-  if as_root "$INSTALL_PREFIX" bash -c "cd \"$APP_DIR\" && bash \"$builder_script\""; then
+  local env_path="$PATH"
+  local env_home="$HOME"
+  if as_root "$INSTALL_PREFIX" env PATH="$env_path" HOME="$env_home" bash -c "cd \"$APP_DIR\" && bash \"$builder_script\""; then
     echo "✔ docdexd built and installed under $APP_DIR/.gpt-creator/bin/docdexd"
   else
     record_warning "docdexd build failed; rerun '$builder_script' inside $APP_DIR after installing Rust."

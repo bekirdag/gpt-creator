@@ -6,16 +6,28 @@ present in local worktrees, which caused helper invocations to stall for 10–30
 seconds before timing out. This replacement keeps the same command surface
 (`list`, `search`, `show`) but gracefully falls back to scanning the repository
 when the database is unavailable.
+
+When the Rust-powered docdex daemon is available we now delegate search/snippet
+lookups to it, which keeps catalog commands fast even when the SQLite catalog
+is missing or outdated.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator, Optional, Sequence
+from typing import Iterable, Iterator, Optional, Sequence, Tuple
+
+try:
+    import docdex_client  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    docdex_client = None
+
+DocDexError = getattr(docdex_client, "DocDexError", RuntimeError) if docdex_client else RuntimeError
 
 
 DEFAULT_DIRECTORIES = ("docs",)
@@ -41,6 +53,8 @@ class Document:
     rel_path: Optional[Path] = None
     title: Optional[str] = None
     snippet: Optional[str] = None
+    score: Optional[float] = None
+    source: str = "catalog"
 
 
 def _candidate_paths(doc: Document) -> Iterator[Path]:
@@ -75,6 +89,106 @@ def _display_path(doc: Document) -> str:
         if candidate is not None:
             return str(candidate)
     return doc.doc_id
+
+
+def _docdex_available() -> bool:
+    return docdex_client is not None
+
+
+def _resolve_repo_root(raw: Optional[str]) -> Path:
+    if raw:
+        candidate = Path(raw).expanduser()
+    else:
+        env_candidate = os.getenv("GC_PROJECT_ROOT")
+        if env_candidate:
+            candidate = Path(env_candidate).expanduser()
+        else:
+            candidate = Path.cwd()
+    try:
+        return candidate.resolve()
+    except OSError:
+        return candidate
+
+
+def _docdex_hit_to_document(hit: dict, repo_root: Path) -> Optional[Document]:
+    doc_id = (hit.get("doc_id") or "").strip()
+    rel_path_value = (hit.get("rel_path") or doc_id).strip()
+    if not doc_id and not rel_path_value:
+        return None
+    rel_path = Path(rel_path_value) if rel_path_value else None
+    absolute_path = repo_root / rel_path_value if rel_path_value else None
+    summary = (hit.get("summary") or "").strip()
+    snippet_text = (hit.get("snippet") or summary or "").strip()
+    score_value = hit.get("score")
+    try:
+        score = float(score_value) if score_value is not None else None
+    except (TypeError, ValueError):
+        score = None
+    document = Document(
+        doc_id=doc_id or rel_path_value,
+        path=absolute_path,
+        rel_path=rel_path,
+        title=summary or rel_path_value or doc_id,
+        snippet=snippet_text or None,
+        score=score,
+        source="docdex",
+    )
+    return document
+
+
+def _docdex_search(query: str, limit: Optional[int], repo_root: Path) -> list[Document]:
+    if not _docdex_available():
+        return []
+    sanitized = (query or "").strip()
+    if not sanitized:
+        return []
+    max_hits = limit or 10
+    try:
+        payload = docdex_client.search_docs(  # type: ignore[attr-defined]
+            sanitized,
+            limit=max_hits,
+            repo_root=repo_root,
+        )
+    except Exception:
+        return []
+    docs: list[Document] = []
+    for hit in payload.get("hits", []):
+        doc = _docdex_hit_to_document(hit, repo_root)
+        if not doc:
+            continue
+        docs.append(doc)
+    return docs
+
+
+def _docdex_fetch_document(doc_id: str, repo_root: Path) -> Optional[Tuple[Document, Optional[str]]]:
+    if not _docdex_available():
+        return None
+    if not doc_id:
+        return None
+    try:
+        payload = docdex_client.fetch_snippet(  # type: ignore[attr-defined]
+            doc_id,
+            repo_root=repo_root,
+            window=200,
+        )
+    except Exception:
+        return None
+    doc_meta = payload.get("doc") or {}
+    rel_path_value = (doc_meta.get("rel_path") or doc_meta.get("doc_id") or "").strip()
+    rel_path = Path(rel_path_value) if rel_path_value else None
+    absolute_path = repo_root / rel_path_value if rel_path_value else None
+    summary = (doc_meta.get("summary") or "").strip()
+    snippet_info = payload.get("snippet") or {}
+    snippet_text = (snippet_info.get("text") or summary or "").strip() or None
+    resolved_doc = Document(
+        doc_id=doc_meta.get("doc_id") or doc_id,
+        path=absolute_path,
+        rel_path=rel_path,
+        title=summary or rel_path_value or doc_id,
+        snippet=snippet_text,
+        source="docdex",
+    )
+    return resolved_doc, snippet_text
 
 
 def hash_id(text: str) -> str:
@@ -240,6 +354,14 @@ def cmd_search(args: argparse.Namespace) -> int:
     db_path = resolve_db_path(args)
     limit = args.limit
     query_text = args.query
+    repo_root = _resolve_repo_root(getattr(args, "repo", None))
+    docdex_hits = _docdex_search(query_text, limit, repo_root)
+    if docdex_hits:
+        for doc in docdex_hits:
+            snippet = f" — {doc.snippet}" if doc.snippet else ""
+            score = f" [score={doc.score:.3f}]" if doc.score is not None else ""
+            print(f"{doc.doc_id}\t{_display_path(doc)}{score}{snippet}")
+        return 0
     tokens = tokenize_query(query_text)
     base_docs = safe_load_from_sqlite(db_path)
     if not base_docs:
@@ -272,15 +394,10 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_show(args: argparse.Namespace) -> int:
-    db_path = resolve_db_path(args)
-    doc_id = args.doc_id
-    start = args.start or 1
-    end = args.end
+def _lookup_document_by_id(doc_id: str, db_path: Optional[Path]) -> Optional[Document]:
     docs = safe_load_from_sqlite(db_path)
     if not docs:
         docs = load_from_fs()
-    target = None
     for doc in docs:
         candidates = {doc.doc_id}
         if doc.path:
@@ -288,16 +405,35 @@ def cmd_show(args: argparse.Namespace) -> int:
         if doc.rel_path:
             candidates.add(str(doc.rel_path))
         if doc_id in candidates:
-            target = doc
-            break
+            return doc
+    return None
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    db_path = resolve_db_path(args)
+    doc_id = args.doc_id
+    start = args.start or 1
+    end = args.end
+    repo_root = _resolve_repo_root(getattr(args, "repo", None))
+    docdex_result = _docdex_fetch_document(doc_id, repo_root)
+    docdex_preview: Optional[str] = None
+    target: Optional[Document] = None
+    if docdex_result:
+        target, docdex_preview = docdex_result
+    if target is None:
+        target = _lookup_document_by_id(doc_id, db_path)
     if target is None:
         print(f"Document '{doc_id}' not found.", file=sys.stderr)
         return 2
     path = _resolve_existing_path(target)
     if not path:
+        fallback_preview = docdex_preview or target.snippet
+        if fallback_preview:
+            print(f"(docdex preview)\n{fallback_preview}")
+            return 0
         print(
             f"Document '{doc_id}' path '{_display_path(target)}' is unavailable locally. "
-            "Run 'gpt-creator scan' to refresh the catalog.",
+            "Run 'gpt-creator scan' to refresh the catalog or pass --repo to point at the project root.",
             file=sys.stderr,
         )
         return 3
@@ -319,6 +455,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--db",
         metavar="PATH",
         help="Optional path to the SQLite catalog (falls back to docs/ scan).",
+    )
+    common.add_argument(
+        "--repo",
+        metavar="ROOT",
+        help="Repository root for docdex lookups (defaults to $GC_PROJECT_ROOT or CWD).",
     )
 
     parser = argparse.ArgumentParser(

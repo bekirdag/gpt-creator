@@ -42,6 +42,49 @@ These helpers are mandatory during `work-on-tasks` sessions: mention them in you
 
 ---
 
+## Docdex (Documentation Search) Guide
+
+`docdexd` is a lightweight Rust daemon that indexes staged docs for fast summaries/snippets. Both `doc_catalog.py` and the `work-on-tasks` runtime prefer it when available.
+
+### Build & Serve
+
+```bash
+# Build once (installs to .gpt-creator/bin/docdexd)
+scripts/docdex/build.sh
+# Or use Cargo directly
+cargo build --release -p docdexd
+
+# Rebuild the index and serve the HTTP API
+./.gpt-creator/bin/docdexd index --repo /path/to/project
+./.gpt-creator/bin/docdexd serve --repo /path/to/project --host 127.0.0.1 --port 46137
+```
+
+`docdex_client.py` auto-starts the daemon, but you can override defaults with:
+
+- `GC_DOCDEX_BIN` – absolute path to the `docdexd` binary (defaults to `.gpt-creator/bin/docdexd`).
+- `GC_DOCDEX_HOST` / `GC_DOCDEX_PORT` – host/port the client and daemon use (defaults `127.0.0.1:46137`).
+- `GC_DOCDEX_LOG` – log level passed to `docdexd serve`.
+- `GC_PROJECT_ROOT` – repo root resolved by `docdex_client` when `--repo` is omitted.
+
+### Wiring the Helpers
+
+- `scripts/python/doc_catalog.py` now calls `docdex_client.search_docs` and `fetch_snippet` whenever the daemon responds, falling back to the legacy SQLite scan otherwise.
+- `work_on_tasks_runtime.py` uses docdex for documentation hits/snippets so backlog runs stay responsive even without the SQLite catalog.
+
+If you need the legacy path (e.g., testing without Rust/Cargo), unset `GC_DOCDEX_BIN` or point `GC_DOCDEX_PORT` at an unused port so `_port_open` fails and the client skips auto-starting docdexd.
+
+### Rebuilding the Tantivy Index
+
+The index lives under `.gpt-creator/docdex/index`. When the schema or stored fields change:
+
+1. Stop the daemon (`pkill docdexd` or delete `.gpt-creator/run/docdexd.pid`).
+2. Remove the index directory or run `docdexd index --repo …` to rebuild it.
+3. Restart `docdexd serve` (manually or via the Python client) so the new schema is served.
+
+Old indexes may fail to load summaries/snippets correctly, so always rebuild after pulling docdex-related updates.
+
+---
+
 ## Prerequisites
 
 | Requirement | Notes |

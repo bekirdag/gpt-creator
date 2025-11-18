@@ -11,6 +11,11 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional, List
 
+try:
+    import docdex_client  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    docdex_client = None  # type: ignore
+
 LAST_PENDING_CHANGES: Dict[str, Tuple[str, ...]] = {}
 
 _HELPER_DIR = Path(__file__).resolve().parents[2] / "scripts" / "python"
@@ -6740,6 +6745,44 @@ def main():
                 summary = summary[:max_chars].rstrip() + "…"
             return summary
 
+        def _docdex_available() -> bool:
+            return docdex_client is not None
+
+        def _docdex_repo_root() -> Path:
+            base = project_root_path or Path.cwd()
+            try:
+                return base.resolve()
+            except Exception:
+                return base
+
+        def _run_docdex_search(terms: Sequence[str], limit: int) -> List[Dict[str, object]]:
+            if not _docdex_available() or not terms or limit <= 0:
+                return []
+            query_text = " ".join(terms[:12]).strip()
+            if not query_text:
+                return []
+            repo_root = _docdex_repo_root()
+            try:
+                payload = docdex_client.search_docs(query_text, limit=limit, repo_root=repo_root)  # type: ignore[attr-defined]
+            except Exception:
+                return []
+            hits: List[Dict[str, object]] = []
+            for hit in payload.get("hits", []):
+                doc_id = (hit.get("doc_id") or "").strip()
+                if not doc_id:
+                    continue
+                snippet_text = _normalise_space(hit.get("snippet") or hit.get("summary") or "")
+                rel_path = (hit.get("rel_path") or doc_id).strip()
+                hits.append(
+                    {
+                        "doc_id": doc_id,
+                        "method": "docdex",
+                        "rel_path": rel_path,
+                        "snippet": snippet_text[:500],
+                    }
+                )
+            return hits
+
         def append_sample_section(title: str, value: str):
             if not value:
                 return
@@ -6971,29 +7014,38 @@ def main():
                 if entry.get("doc_id")
             }
             seen_doc_ids.discard("")
-            db_path_obj: Optional[Path] = None
-            if documentation_db_path:
-                try:
-                    candidate_path = Path(documentation_db_path)
-                    if candidate_path.exists():
-                        db_path_obj = candidate_path.resolve()
-                    else:
-                        db_path_obj = None
-                except Exception:
-                    db_path_obj = Path(documentation_db_path)
-            doc_search_hits.extend(_run_fts_search(db_path_obj, search_terms, 12))
-            for hit in list(doc_search_hits):
-                doc_id = (hit.get("doc_id") or "").strip()
-                if not doc_id:
-                    doc_search_hits.remove(hit)
-                    continue
-                seen_doc_ids.add(doc_id)
-            remaining_hits = 12 - len(doc_search_hits)
-            if remaining_hits > 0:
-                doc_search_hits.extend(_run_vector_search(vector_index_path, search_terms, remaining_hits, seen_doc_ids))
-            remaining_hits = 12 - len(doc_search_hits)
-            if remaining_hits > 0:
-                doc_search_hits.extend(_run_ripgrep_search(project_root_path, search_terms, remaining_hits, seen_doc_ids))
+            if _docdex_available():
+                docdex_hits = _run_docdex_search(search_terms, 12)
+                for hit in docdex_hits:
+                    doc_id = (hit.get("doc_id") or "").strip()
+                    if not doc_id or doc_id in seen_doc_ids:
+                        continue
+                    doc_search_hits.append(hit)
+                    seen_doc_ids.add(doc_id)
+            else:
+                db_path_obj: Optional[Path] = None
+                if documentation_db_path:
+                    try:
+                        candidate_path = Path(documentation_db_path)
+                        if candidate_path.exists():
+                            db_path_obj = candidate_path.resolve()
+                        else:
+                            db_path_obj = None
+                    except Exception:
+                        db_path_obj = Path(documentation_db_path)
+                doc_search_hits.extend(_run_fts_search(db_path_obj, search_terms, 12))
+                for hit in list(doc_search_hits):
+                    doc_id = (hit.get("doc_id") or "").strip()
+                    if not doc_id:
+                        doc_search_hits.remove(hit)
+                        continue
+                    seen_doc_ids.add(doc_id)
+                remaining_hits = 12 - len(doc_search_hits)
+                if remaining_hits > 0:
+                    doc_search_hits.extend(_run_vector_search(vector_index_path, search_terms, remaining_hits, seen_doc_ids))
+                remaining_hits = 12 - len(doc_search_hits)
+                if remaining_hits > 0:
+                    doc_search_hits.extend(_run_ripgrep_search(project_root_path, search_terms, remaining_hits, seen_doc_ids))
 
         search_summary_payload: List[Dict[str, object]] = []
         if doc_search_hits:

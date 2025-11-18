@@ -36,6 +36,10 @@ class DocDexError(RuntimeError):
     """Base exception for docdex client errors."""
 
 
+def _log(message: str) -> None:
+    print(f"[docdex_client] {message}", file=sys.stderr)
+
+
 def _resolve_repo_root(repo_root: Optional[Path] = None) -> Path:
     if repo_root:
         return repo_root
@@ -51,11 +55,14 @@ def _binary_path(repo_root: Path) -> Path:
     candidates: list[Path] = []
     env_bin = os.environ.get("GC_DOCDEX_BIN")
     if env_bin:
-        candidates.append(Path(env_bin).expanduser())
-    candidates.append(CLI_ROOT / ".gpt-creator/bin/docdexd")
-    candidates.append(repo_root / ".gpt-creator/bin/docdexd")
+        path = Path(env_bin).expanduser()
+        candidates.append(path)
+    cli_candidate = CLI_ROOT / ".gpt-creator/bin/docdexd"
+    repo_candidate = repo_root / ".gpt-creator/bin/docdexd"
+    candidates.extend([cli_candidate, repo_candidate])
     for candidate in candidates:
         if candidate.exists():
+            _log(f"using docdexd binary at {candidate}")
             return candidate
     search_list = ", ".join(str(p) for p in candidates)
     raise DocDexError(
@@ -70,6 +77,7 @@ def _port_open(host: str, port: int) -> bool:
         sock.settimeout(0.2)
         try:
             sock.connect((host, port))
+            _log(f"port {host}:{port} already open")
             return True
         except OSError:
             return False
@@ -104,6 +112,7 @@ def _write_pid(pid: int) -> None:
 
 def _start_daemon(repo_root: Path, host: str, port: int) -> None:
     binary = _binary_path(repo_root)
+    _log(f"starting docdexd via {binary} for repo {repo_root}")
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_handle = open(LOG_FILE, "ab")
     cmd = [
@@ -125,6 +134,7 @@ def _start_daemon(repo_root: Path, host: str, port: int) -> None:
         cwd=str(repo_root),
     )
     _write_pid(proc.pid)
+    _log(f"launched docdexd pid={proc.pid} host={host} port={port}")
     if not _wait_for_health(host, port):
         raise DocDexError(
             f"docdexd failed to start for repo '{repo_root}' on {host}:{port}; "
@@ -141,7 +151,9 @@ def ensure_daemon(
     """Start the docdex daemon if it is not already running."""
     repo = _resolve_repo_root(repo_root)
     if _port_open(host, port):
+        _log(f"docdexd already responding on {host}:{port}")
         return
+    _log(f"docdexd unavailable on {host}:{port}; attempting to start")
     _start_daemon(repo, host, port)
 
 
@@ -210,6 +222,7 @@ def search_docs(
     port: int = DEFAULT_PORT,
 ) -> Dict[str, Any]:
     repo = _resolve_repo_root(repo_root)
+    _log(f"search_docs(query='{query[:40]}', limit={limit}, repo={repo})")
     ensure_daemon(repo, host=host, port=port)
     payload = _http_get(
         "/search",

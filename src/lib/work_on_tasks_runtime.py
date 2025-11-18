@@ -34,7 +34,9 @@ if _EXTRA_HELPER_DIR:
 if docdex_client is None:
     try:
         import docdex_client  # type: ignore
-    except Exception:  # pragma: no cover - optional dependency
+        print("[work_on_tasks] docdex_client import succeeded", file=sys.stderr)
+    except Exception as err:  # pragma: no cover - optional dependency
+        print(f"[work_on_tasks] docdex_client import failed: {err}", file=sys.stderr)
         docdex_client = None  # type: ignore
 
 
@@ -6763,23 +6765,29 @@ def main():
 
         def _ensure_docdex_daemon_running() -> None:
             if not _docdex_available():
+                print("[work_on_tasks] docdex_client unavailable; skipping daemon ensure", file=sys.stderr)
                 return
             repo_root = _docdex_repo_root()
             try:
+                print(f"[work_on_tasks] ensuring docdex daemon for repo {repo_root}", file=sys.stderr)
                 docdex_client.ensure_daemon(repo_root=repo_root)  # type: ignore[attr-defined]
+                print("[work_on_tasks] docdex daemon ensure completed", file=sys.stderr)
             except Exception as err:
                 print(f"⚠ docdex daemon unavailable: {err}", file=sys.stderr)
 
         def _run_docdex_search(terms: Sequence[str], limit: int) -> List[Dict[str, object]]:
             if not _docdex_available() or not terms or limit <= 0:
+                print("[work_on_tasks] docdex search skipped (unavailable or no terms)", file=sys.stderr)
                 return []
             query_text = " ".join(terms[:12]).strip()
             if not query_text:
                 return []
             repo_root = _docdex_repo_root()
             try:
+                print(f"[work_on_tasks] running docdex search '{query_text}' limit={limit}", file=sys.stderr)
                 payload = docdex_client.search_docs(query_text, limit=limit, repo_root=repo_root)  # type: ignore[attr-defined]
             except Exception:
+                print("[work_on_tasks] docdex search failed; returning no hits", file=sys.stderr)
                 return []
             hits: List[Dict[str, object]] = []
             for hit in payload.get("hits", []):

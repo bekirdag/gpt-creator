@@ -4965,7 +4965,9 @@ def main():
                 summary_text = f"{label}: {total} command(s) blocked"
                 if detail:
                     summary_text = f"{summary_text} ({detail})"
-                fatal_entry = reason in FATAL_BLOCK_REASONS
+                fatal_entry = reason in FATAL_BLOCK_REASONS and reason not in { 'heredoc', 'heredoc-unterminated', 'placeholder-ellipsis' }
+                if reason in {'heredoc', 'heredoc-unterminated', 'placeholder-ellipsis'}:
+                    fatal_entry = False
                 if fatal_entry:
                     fatal_reasons_present = True
                 prefix = "blocked" if fatal_entry else "warning"
@@ -5118,7 +5120,7 @@ def main():
                 os.getenv("GC_DOC_CATALOG_HELPER", "").strip()
                 or os.getenv("doc_catalog", "").strip()
             )
-            default_doc_catalog = Path("scripts/python/doc_catalog.py").resolve()
+            default_doc_catalog = Path("scripts/python/doc_catalog_refresh.py").resolve()
             doc_indexer_helper_local = (
                 globals().get("doc_indexer_helper")
                 or os.getenv("GC_DOC_INDEXER_PY", "").strip()

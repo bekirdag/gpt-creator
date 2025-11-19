@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import importlib
 from pathlib import Path
 from typing import Optional, List, Tuple, Set, Dict, Sequence, Any
 
@@ -25,6 +26,31 @@ if _helpers_dir_env:
         _helpers_dir_str = ""
 else:
     _helpers_dir_str = ""
+
+docdex_client = None  # type: ignore
+_DOCDEX_LOGGED_SUCCESS = False
+_DOCDEX_LOGGED_FAILURE = False
+
+
+def _load_docdex_client() -> bool:
+    global docdex_client, _DOCDEX_LOGGED_SUCCESS, _DOCDEX_LOGGED_FAILURE
+    if docdex_client is not None:
+        if not _DOCDEX_LOGGED_SUCCESS:
+            emit_progress("docdex client already loaded")
+            _DOCDEX_LOGGED_SUCCESS = True
+        return True
+    try:
+        docdex_client = importlib.import_module("docdex_client")  # type: ignore
+    except Exception as err:
+        if not _DOCDEX_LOGGED_FAILURE:
+            emit_progress(f"docdex client unavailable ({err}); using legacy catalog search")
+            _DOCDEX_LOGGED_FAILURE = True
+        docdex_client = None  # type: ignore
+        return False
+    if not _DOCDEX_LOGGED_SUCCESS:
+        emit_progress("docdex client import succeeded")
+        _DOCDEX_LOGGED_SUCCESS = True
+    return True
 
 try:
     from prompt_safeguard import slim_prompt_markdown  # type: ignore
@@ -141,6 +167,92 @@ def _dedupe_doc_refs(entries: Sequence[Dict[str, Any]], limit: int) -> List[Dict
         if limit and len(deduped) >= limit:
             break
     return deduped
+
+
+def _docdex_repo_root(project_root: Optional[Path]) -> Path:
+    base = project_root or Path.cwd()
+    try:
+        return base.resolve()
+    except Exception:
+        return base
+
+
+def _ensure_docdex_daemon_running(project_root: Optional[Path]) -> bool:
+    if not _load_docdex_client():
+        return False
+    repo_root = _docdex_repo_root(project_root)
+    try:
+        docdex_client.ensure_daemon(repo_root=repo_root)  # type: ignore[attr-defined]
+    except Exception as err:
+        emit_progress(f"docdex daemon unavailable ({err}); legacy catalog fallback enabled")
+        return False
+    emit_progress(f"docdex daemon ready for {repo_root}")
+    return True
+
+
+def _run_docdex_search(terms: Sequence[str], limit: int, project_root: Optional[Path]) -> List[Dict[str, Any]]:
+    if not terms or limit <= 0 or not _load_docdex_client():
+        return []
+    query_text = " ".join(terms[:12]).strip()
+    if not query_text:
+        return []
+    repo_root = _docdex_repo_root(project_root)
+    try:
+        payload = docdex_client.search_docs(query_text, limit=limit, repo_root=repo_root)  # type: ignore[attr-defined]
+    except Exception as err:
+        emit_progress(f"docdex search failed ({err}); using legacy catalog search")
+        return []
+    hits: List[Dict[str, Any]] = []
+    for hit in payload.get("hits", []):
+        doc_id = (hit.get("doc_id") or "").strip()
+        if not doc_id:
+            continue
+        rel_path = (hit.get("rel_path") or doc_id).strip()
+        snippet_raw = str(hit.get("snippet") or hit.get("summary") or "").strip()
+        snippet_text = re.sub(r"\s+", " ", snippet_raw)
+        if snippet_text and len(snippet_text) > SEARCH_SNIPPET_MAX_CHARS:
+            snippet_text = snippet_text[:SEARCH_SNIPPET_MAX_CHARS].rstrip() + "…"
+        hits.append(
+            {
+                "doc_id": doc_id,
+                "method": "docdex",
+                "rel_path": rel_path,
+                "snippet": snippet_text,
+            }
+        )
+    return hits
+
+
+def _augment_with_legacy_hits(
+    doc_search_hits: List[Dict[str, object]],
+    seen_doc_ids: Set[str],
+    db_path_obj: Optional[Path],
+    search_terms: Sequence[str],
+    max_results: int,
+    vector_index_path: Optional[Path],
+    project_root_path: Optional[Path],
+) -> None:
+    remaining_hits = max_results - len(doc_search_hits)
+    if remaining_hits <= 0:
+        return
+    initial_len = len(doc_search_hits)
+    doc_search_hits.extend(_run_fts_search(db_path_obj, search_terms, remaining_hits))
+    new_hits = doc_search_hits[initial_len:]
+    for hit in list(new_hits):
+        doc_id = (hit.get("doc_id") or "").strip()
+        if not doc_id:
+            try:
+                doc_search_hits.remove(hit)
+            except ValueError:
+                pass
+            continue
+        seen_doc_ids.add(doc_id)
+    remaining_hits = max_results - len(doc_search_hits)
+    if remaining_hits > 0:
+        doc_search_hits.extend(_run_vector_search(vector_index_path, search_terms, remaining_hits, seen_doc_ids))
+    remaining_hits = max_results - len(doc_search_hits)
+    if remaining_hits > 0:
+        doc_search_hits.extend(_run_ripgrep_search(project_root_path, search_terms, remaining_hits, seen_doc_ids))
 SEGMENT_TYPE_PRIORITY: Dict[str, Tuple[int, bool]] = {
     "lead-in": (100, True),
     "documentation-assets": (98, True),
@@ -2837,7 +2949,11 @@ if binder_hit and binder_doc_refs:
         doc_catalog_changed["value"] = True
 else:
     if search_terms:
-        emit_progress("Running documentation search")
+        docdex_ready = _ensure_docdex_daemon_running(project_root_path)
+        if docdex_ready:
+            emit_progress("Running documentation search via docdex")
+        else:
+            emit_progress("Running documentation search")
         seen_doc_ids: Set[str] = {
             entry.get("doc_id", "").strip()
             for entry in doc_catalog_entries
@@ -2854,19 +2970,23 @@ else:
                     db_path_obj = None
             except Exception:
                 db_path_obj = Path(documentation_db_path)
-        doc_search_hits.extend(_run_fts_search(db_path_obj, search_terms, DOC_SEARCH_MAX_RESULTS))
-        for hit in list(doc_search_hits):
-            doc_id = (hit.get("doc_id") or "").strip()
-            if not doc_id:
-                doc_search_hits.remove(hit)
-                continue
-            seen_doc_ids.add(doc_id)
-        remaining_hits = DOC_SEARCH_MAX_RESULTS - len(doc_search_hits)
-        if remaining_hits > 0:
-            doc_search_hits.extend(_run_vector_search(vector_index_path, search_terms, remaining_hits, seen_doc_ids))
-        remaining_hits = DOC_SEARCH_MAX_RESULTS - len(doc_search_hits)
-        if remaining_hits > 0:
-            doc_search_hits.extend(_run_ripgrep_search(project_root_path, search_terms, remaining_hits, seen_doc_ids))
+        if docdex_ready:
+            docdex_hits = _run_docdex_search(search_terms, DOC_SEARCH_MAX_RESULTS, project_root_path)
+            for hit in docdex_hits:
+                doc_id = (hit.get("doc_id") or "").strip()
+                if not doc_id or doc_id in seen_doc_ids:
+                    continue
+                doc_search_hits.append(hit)
+                seen_doc_ids.add(doc_id)
+        _augment_with_legacy_hits(
+            doc_search_hits,
+            seen_doc_ids,
+            db_path_obj,
+            search_terms,
+            DOC_SEARCH_MAX_RESULTS,
+            vector_index_path,
+            project_root_path,
+        )
 
 if doc_search_hits:
     doc_search_hits = _dedupe_doc_refs(doc_search_hits, DOC_SEARCH_MAX_RESULTS)

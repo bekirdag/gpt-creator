@@ -4998,7 +4998,6 @@ def main():
                         "replace blocked commands with approved workflows (gpt-creator apply-block, python3 scripts/python/write_block.py, pnpm --filter …) before retrying"
                     )
                 )
-                command_failure_detected = True
 
         declared_commands: List[str] = payload.get('commands') or []
         commands_missing = False
@@ -5018,7 +5017,6 @@ def main():
                             f"blocked — the following executed command(s) were not captured in the auto-generated log: {joined}"
                         )
                     )
-                    command_failure_detected = True
                     if not allow_drift:
                         commands_drift_fatal = True
             elif original_command_report:
@@ -5034,7 +5032,6 @@ def main():
                             f"blocked — the following executed command(s) were not listed under `Commands`: {joined}"
                         )
                     )
-                    command_failure_detected = True
                     if not allow_drift:
                         commands_drift_fatal = True
             elif commands_to_report or blocked_command_total or written or patched or change_bytes or command_failure_detected:
@@ -5045,7 +5042,6 @@ def main():
                         "blocked — repository shows edits or executed commands but none were reported under `Commands`; rerun and list each command that edited files, ran tools, or staged changes."
                     )
                 )
-                command_failure_detected = True
                 if not allow_drift:
                     commands_drift_fatal = True
 

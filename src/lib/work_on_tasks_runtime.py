@@ -6802,7 +6802,7 @@ def main():
             else:
                 missing_helpers: List[str] = []
                 if not has_doc_catalog_helper:
-                    missing_helpers.append("$GC_DOC_CATALOG_PY")
+                    missing_helpers.append('doc_catalog_refresh.py or GC_DOC_CATALOG_HELPER')
                 if not has_doc_registry_helper:
                     missing_helpers.append("$GC_DOC_REGISTRY_PY")
                 if not has_doc_indexer_helper:

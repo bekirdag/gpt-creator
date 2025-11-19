@@ -1384,6 +1384,43 @@ def main():
                 extracted.extend(_normalize_focus(parts))
             return extracted
 
+        def _extract_commands_from_text(text):
+            commands: List[str] = []
+            if not isinstance(text, str):
+                return commands
+            in_fence = False
+            for raw_line in text.splitlines():
+                stripped = raw_line.strip()
+                if stripped.startswith("```"):
+                    in_fence = not in_fence
+                    continue
+                candidate = stripped
+                if not candidate:
+                    continue
+                if candidate.startswith("`") and candidate.endswith("`") and len(candidate) > 2:
+                    candidate = candidate.strip("`")
+                candidate = re.sub(r'^[\-\*•]+\s*', '', candidate)
+                if COMMAND_WHITELIST_PATTERN.match(candidate):
+                    commands.append(candidate)
+                    continue
+                if in_fence and COMMAND_WHITELIST_PATTERN.match(candidate):
+                    commands.append(candidate)
+                    continue
+                inline_match = re.search(r"bash\s+-lc\s+\"[^\"]+\"", stripped)
+                if inline_match:
+                    commands.append(inline_match.group(0))
+            return commands
+
+        def _extract_plan_commands(entry):
+            commands: List[str] = []
+            if isinstance(entry, dict):
+                possible = entry.get('commands')
+                if isinstance(possible, list):
+                    commands.extend(item for item in possible if isinstance(item, str))
+            elif isinstance(entry, str):
+                commands.extend(_extract_commands_from_text(entry))
+            return commands
+
         focus_targets = payload.get('focus')
         focus_valid = False
         if isinstance(focus_targets, list):
@@ -1395,6 +1432,11 @@ def main():
                 focus_targets = []
                 focus_valid = True
 
+        plan_command_suggestions: List[str] = []
+        plan_entries = payload.get('plan')
+        if isinstance(plan_entries, list):
+            for entry in plan_entries:
+                plan_command_suggestions.extend(_extract_plan_commands(entry))
         if not focus_valid:
             inferred_focus = []
             plan_entries = payload.get('plan')
@@ -1468,6 +1510,33 @@ def main():
             focus_targets = []
             payload['focus'] = focus_targets
             focus_valid = True
+
+        if plan_command_suggestions:
+            deduped_commands: List[str] = []
+            seen_commands: Set[str] = set()
+            for cmd in plan_command_suggestions:
+                if not isinstance(cmd, str):
+                    continue
+                trimmed_cmd = cmd.strip()
+                if not trimmed_cmd:
+                    continue
+                if not COMMAND_WHITELIST_PATTERN.match(trimmed_cmd):
+                    continue
+                if trimmed_cmd in seen_commands:
+                    continue
+                seen_commands.add(trimmed_cmd)
+                deduped_commands.append(trimmed_cmd)
+            if deduped_commands:
+                existing_commands = payload.get('commands')
+                if isinstance(existing_commands, list):
+                    existing_commands.extend(cmd for cmd in deduped_commands if cmd not in existing_commands)
+                elif existing_commands is None:
+                    payload['commands'] = deduped_commands
+                elif isinstance(existing_commands, str):
+                    merged = [existing_commands] + [cmd for cmd in deduped_commands if cmd != existing_commands]
+                    payload['commands'] = merged
+                else:
+                    payload['commands'] = deduped_commands
 
         # Normalize change payloads so legacy formats (missing `type`, raw diff strings)
         # still apply cleanly without aborting the task workflow.
@@ -1587,6 +1656,19 @@ def main():
                 "branch",
                 f"warning — push of {branch} to {push_remote} failed ({context}): {stderr_text or 'see stderr'}"
             )
+
+        def _is_remote_access_error(stderr_text: str, stdout_text: str = "") -> bool:
+            haystack = f"{stderr_text}\n{stdout_text}".lower()
+            tokens = (
+                "error: user:",
+                "error: no healthy upstream",
+                "connection refused",
+                "connection reset",
+                "permission denied",
+                "could not read from remote repository",
+                "fatal: unable to access",
+            )
+            return any(token in haystack for token in tokens if token)
 
         def _is_missing_remote_ref_error(stderr_text: str) -> bool:
             lowered = (stderr_text or "").lower()
@@ -2309,6 +2391,41 @@ def main():
                     "detail": detail,
                 }
             )
+
+        HEREDOC_PLACEHOLDER_PATTERN = re.compile(r"<<-?\s*(?:'|\")?([A-Za-z0-9_+\-]+)(?:'|\")?")
+
+        def _find_unterminated_heredoc_marker(command: str) -> Optional[str]:
+            if not command or "<<" not in command:
+                return None
+            for match in HEREDOC_PLACEHOLDER_PATTERN.finditer(command):
+                label = match.group(1)
+                tail = command[match.end():]
+                closing_pattern = re.compile(rf"^\s*{re.escape(label)}\s*$", re.MULTILINE)
+                if not closing_pattern.search(tail):
+                    return label
+            return None
+
+        def _rewrite_command_placeholders(commands: Sequence[str]) -> Tuple[List[str], List[Tuple[str, str]]]:
+            updated: List[str] = []
+            placeholders: List[Tuple[str, str]] = []
+            for raw in commands:
+                if not isinstance(raw, str):
+                    updated.append(raw)
+                    continue
+                reason = None
+                if "..." in raw or "…" in raw:
+                    reason = "ellipsis"
+                else:
+                    label = _find_unterminated_heredoc_marker(raw)
+                    if label:
+                        reason = f"missing terminator for {label}"
+                if reason:
+                    snippet = _truncate_command_text(raw)
+                    updated.append(f"# TODO – replace placeholder ({reason}): {snippet}")
+                    placeholders.append((snippet, reason))
+                else:
+                    updated.append(raw)
+            return updated, placeholders
 
         def _append_section_block(
             buffer: List[str],
@@ -3305,6 +3422,30 @@ def main():
             push_proc = _run_git_command(['push', push_remote, branch_name])
             if push_proc.returncode != 0:
                 stderr_text = (push_proc.stderr or "").strip()
+                stdout_text = (push_proc.stdout or "").strip()
+                if _is_remote_access_error(stderr_text, stdout_text):
+                    summary = stderr_text or stdout_text or "see stderr"
+                    if len(summary) > 240:
+                        summary = summary[:237].rstrip() + "…"
+                    notes.append(
+                        _format_action_result(
+                            f"git push {push_remote} {branch_name}",
+                            f"skipped — remote {push_remote} unreachable ({summary}); commit remains local"
+                        )
+                    )
+                    notes.append(
+                        _format_action_result(
+                            "manual-push-reminder",
+                            f"once network/credentials are fixed, run `git push {push_remote} {branch_name}` manually."
+                        )
+                    )
+                    notes.append(
+                        _format_action_result(
+                            "retry-required",
+                            "marking run retryable so you can push once connectivity returns"
+                        )
+                    )
+                    return False, notes
                 notes.append(
                     _format_action_result(
                         f"git push {push_remote} {branch_name}",
@@ -3828,6 +3969,13 @@ def main():
         _remove_plan_artifacts("post-changes")
 
         commands_field = payload.get('commands')
+        command_placeholder_details: List[Tuple[str, str]] = []
+        if isinstance(commands_field, list) and commands_field:
+            updated_commands, placeholder_details = _rewrite_command_placeholders(commands_field)
+            if placeholder_details:
+                payload['commands'] = updated_commands
+                commands_field = updated_commands
+                command_placeholder_details = placeholder_details
         original_command_report: List[str] = []
         if isinstance(commands_field, list):
             original_command_report = [item for item in commands_field if isinstance(item, str)]
@@ -4301,10 +4449,13 @@ def main():
                     precheck_non_whitelisted.append(trimmed)
             if precheck_non_whitelisted:
                 sample = _truncate_command_text(precheck_non_whitelisted[0])
+                hint = ""
+                if any(cmd.strip().startswith("nl ") or " sed " in cmd or "| sed" in cmd for cmd in precheck_non_whitelisted):
+                    hint = " Use `python3 scripts/python/show_file_excerpt.py <path> --start 1 --end 120` instead of `nl|sed` pipelines."
                 manual_notes.append(
                     _format_action_result(
                         "command-precheck",
-                        f"blocked — filtered {len(precheck_non_whitelisted)} non-whitelisted command(s) (first: {sample})"
+                        f"blocked — filtered {len(precheck_non_whitelisted)} non-whitelisted command(s) (first: {sample}).{hint}"
                     )
                 )
                 manual_notes.append(
@@ -4320,26 +4471,14 @@ def main():
         command_failure_detected = False
         branch_merge_completed = False
 
-        if command_entries and not skip_command_processing:
-            placeholder_commands = [
-                cmd for cmd in command_entries
-                if isinstance(cmd, str) and ('...' in cmd or '…' in cmd)
-            ]
-        else:
-            placeholder_commands = []
-        if placeholder_commands:
-            sample = _truncate_command_text(placeholder_commands[0]) if placeholder_commands else "..."
-            manual_notes.append(
-                _format_action_result(
-                    "commands-fill-placeholders",
-                    f"blocked — {len(placeholder_commands)} command(s) still contain placeholder ellipses (first: {sample})"
-                )
-            )
-            manual_notes.append(
-                _format_action_result(
-                    "commands-remediation",
-                    "replace `...` placeholders with the exact commands you intend to run before retrying"
-                )
+        if command_placeholder_details:
+            first_snippet, first_reason = command_placeholder_details[0]
+            fix_hint = ""
+            if "missing terminator" in first_reason:
+                fix_hint = " Fix: end heredocs with the same label, e.g., run: cat <<'EOF' > file … EOF."
+            _append_guard_note(
+                "commands-placeholder-detected",
+                f"auto-replaced {len(command_placeholder_details)} placeholder command(s) with '# TODO' entries; first snippet: {first_snippet} ({first_reason}).{fix_hint}"
             )
             skip_command_processing = True
             command_entries = []
@@ -6626,9 +6765,9 @@ def main():
             lines.append('- Schema quick look: sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables" or ".schema documentation"')
             lines.append("- Vector DB ($GC_DOCUMENTATION_INDEX_PATH) table `vectors`: embeddings per surface (embedding_id PK, doc_id, section_id, vector_json, dims, metadata_json, updated_at).")
             lines.append("Common catalog commands (wrap inner commands in single quotes so the environment variables remain quoted):")
-            lines.append('- List recent docs: bash -lc \'python3 "$GC_DOC_CATALOG_PY" list --db "$GC_DOCUMENTATION_DB_PATH" --limit 10\'')
-            lines.append('- Full-text search: bash -lc \'python3 "$GC_DOC_CATALOG_PY" search --db "$GC_DOCUMENTATION_DB_PATH" --query "lockout" --limit 15\'')
-            lines.append('- Show document by id: bash -lc \'python3 "$GC_DOC_CATALOG_PY" show --db "$GC_DOCUMENTATION_DB_PATH" --doc-id <id>\'')
+            lines.append('- List recent docs: python3 scripts/python/doc_catalog_query.py list --limit 10')
+            lines.append('- Full-text search: python3 scripts/python/doc_catalog_query.py search --query "lockout" --limit 15')
+            lines.append('- Show document by id: python3 scripts/python/doc_catalog_query.py show DOC-1234ABCD --start 500 --end 540')
             lines.append("- Docdex-powered search/snippets: the doc catalog helper automatically talks to the running docdex daemon—use the commands above instead of `rg`/`cat` when you need to locate docs or quote a snippet.")
             lines.append('- Rebuild semantic index: bash -lc \'python3 "$GC_DOC_INDEXER_PY" rebuild --db "$GC_DOCUMENTATION_DB_PATH" --out "$GC_DOC_VECTOR_INDEX_PATH"\'')
             lines.append('- Register or sync discovery TSV: bash -lc \'python3 "$GC_DOC_REGISTRY_PY" register --db "$GC_DOCUMENTATION_DB_PATH" --tsv ".gpt-creator/manifests/<latest>.tsv"\'')
@@ -6663,7 +6802,7 @@ def main():
             lines.append('    "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"')
             lines.append("- Schema quick look:")
             lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables"')
-            lines.append("- When the docdex daemon is running, `python3 \"$GC_DOC_CATALOG_PY\" search/show ...` routes through it—prefer that helper over ad-hoc `rg` or `cat` when you need doc snippets.")
+            lines.append("- When the docdex daemon is running, `python3 scripts/python/doc_catalog_query.py search|show ...` routes through it—prefer that helper over ad-hoc `rg` or `cat` when you need doc snippets.")
             if not documentation_db_available:
                 lines.append("- (Documentation catalog helpers unavailable without the SQLite database; regenerate with `gpt-creator scan` before running catalog commands.)")
             else:
@@ -7491,7 +7630,7 @@ def main():
                 doc_id_token = shlex.quote(example_doc_id)
             lines.append(
                 "Use the catalog below to pick a section, then run "
-                f"`bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" show --db \"$GC_DOCUMENTATION_DB_PATH\" --doc-id {doc_id_token}'` for a narrow excerpt. "
+                f"`python3 scripts/python/doc_catalog_query.py show {doc_id_token} --start 1 --end 200` for a narrow excerpt. "
                 "Avoid reading the raw documentation files directly."
             )
             for entry in doc_catalog_entries[:6]:
@@ -7807,10 +7946,13 @@ def main():
                 "## Helper Checklist (before exploring code or docs)",
                 "- Map the repo once via `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus apps/api` (helper is auto-cloned under .gpt-creator/shims/python/) instead of issuing repetitive `ls` commands.",
                 "- When you need to inspect code, run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
-                "- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.",
+                "- For SDS/PDR context or migrations, run `python3 scripts/python/doc_catalog_query.py search --query \"<term>\" --limit 5` instead of opening doc files or grepping blindly.",
                 "- Validate REST endpoints via manifests and `python3 \"$GC_REST_CHECK_RUNNER_PY\" manifest.yaml` instead of crafting ad-hoc HTTP scripts.",
                 "- Preview file ranges safely using `python3 \"$GC_SAFE_SHOW_FILE_PY\" <path> --suggest` before `sed`/`cat`, so you avoid missing-file retries.",
+                "- Need a quick view of specific lines? Run `python3 scripts/python/show_file_excerpt.py <path> --start 1 --end 200` instead of `nl|sed` pipelines.",
                 "- Need a quick Python helper? Create /tmp/snippet.py and run `python3 \"$GC_RUN_SNIPPET_PY\" /tmp/snippet.py`; the script refuses placeholder-only heredocs and keeps commands deterministic.",
+                "- Building command entries? Run `python3 scripts/python/command_scaffold.py \"label\" 'cd apps/api' 'pnpm test'` to emit a ready-to-paste \\"bash -lc ...\\" block without ellipses.",
+                "- Monitoring guardrail hits? Run `python3 scripts/python/guardrails_report.py --json` (or `--fail-on-placeholder N`) to summarize events or fail CI when placeholders persist.",
             ]
         )
 
@@ -7822,8 +7964,10 @@ def main():
             "- Write each heading exactly as shown (e.g., `Plan` on its own line) with no surrounding Markdown styling or punctuation.",
             "- Keep each section to short bullet items or terse sentences; skip JSON, code fences, and closing summaries.",
             "- Do not include source code, config snippets, or test case bodies; describe changes and evidence at a high level only.",
-            "- Make repository edits by listing the exact shell commands you will run under `Commands` (use `bash` to write files when needed).",
-            "- Ensure the `Commands` section lists actionable shell commands; if none are required, include a single bullet `- (none)` beneath the heading.",
+                "- Make repository edits by listing the exact shell commands you will run under `Commands` (use `bash` to write files when needed).",
+                "  Example: `bash -lc "python3 scripts/python/summarize_note.py \"label\" <<'EOF' ... EOF"`",
+                "- Ensure the `Commands` section lists actionable shell commands; if none are required, include a single bullet `- (none)` beneath the heading.",
+                "- Placeholders (`...`, `…`, `cat <<'EOF'` without a closing `EOF`, etc.) immediately trigger the commands-fill-placeholders guard—fully expand every command before submitting.",
             "- Do not generate diffs or patches; apply edits directly through those shell commands.",
             "- Primary objective: ship the code required by the task acceptance criteria; avoid documentation rewrites or reorganizing prompts.",
             "- If an acceptance criterion demands heavy setup or environments the agent cannot access, acknowledge the gap and continue focusing on the core code changes.",
@@ -7832,7 +7976,7 @@ def main():
             "- Push your work once committed (e.g., `git push origin <branch>`), and include that command under `Commands` as well.",
             "- Capture blockers or follow-ups in `Notes`.",
             "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",
-            "- Use `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` (or the `show` variant) for SDS/PDR context instead of opening doc files directly.",
+            "- Use `python3 scripts/python/doc_catalog_query.py search --query \"<term>\" --limit 5` (or `show DOC-ID --start 500 --end 520`) for SDS/PDR context instead of opening doc files directly.",
             "- Need a repo overview? Run `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus <path>` (see `assets/templates/help/repo_outline_usage.txt`).",
             "- Searching for symbols? Run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern <needle> --paths <dirs> [--ext .ts]` instead of repo-wide `rg`/`python os.walk` loops (`assets/templates/help/targeted_search_usage.txt`).",
             "- Validating REST endpoints? Define a manifest and run `python3 \"$GC_REST_CHECK_RUNNER_PY\" <manifest.yaml>` (`assets/templates/help/rest_check_runner_usage.txt`).",

@@ -62,7 +62,10 @@ task completion rates high—we should implement the following improvements.
 - ✅ Guard events now register via `_record_guard_event` in
   `src/lib/work_on_tasks_runtime.py`, persist as JSONL under
   `logs/guardrails/events.jsonl`, and emit a `guard-telemetry` summary note per
-  run (with counts) for quick alerting.
+  run (with counts) for quick alerting. Use
+  `python3 scripts/python/guardrails_report.py --json` (and the
+  `--fail-on-placeholder` gate) to surface repeated placeholder hits in CI or
+  dashboards.
 
 ## 6. Training & Quick Reference Updates
 - Update the contributor quick-start guide with explicit Plan/Focus/Commands/Notes

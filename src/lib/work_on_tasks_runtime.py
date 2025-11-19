@@ -5126,21 +5126,21 @@ def main():
 
             catalog_cmd: List[str]
             doc_catalog_helper_local = (
-                globals().get("doc_catalog_helper")
-                or os.getenv("GC_DOC_CATALOG_PY", "").strip()
-                or os.getenv("GC_DOC_CATALOG_HELPER", "").strip()
+                os.getenv("GC_DOC_CATALOG_HELPER", "").strip()
                 or os.getenv("doc_catalog", "").strip()
             )
+            default_doc_catalog = Path("scripts/python/doc_catalog.py").resolve()
             doc_indexer_helper_local = (
                 globals().get("doc_indexer_helper")
                 or os.getenv("GC_DOC_INDEXER_PY", "").strip()
                 or os.getenv("GC_DOC_INDEXER_HELPER", "").strip()
                 or os.getenv("doc_indexer", "").strip()
             )
-            if doc_catalog_helper_local:
+            helper_path = doc_catalog_helper_local or (str(default_doc_catalog) if default_doc_catalog.exists() else "")
+            if helper_path:
                 catalog_cmd = [
                     python_bin,
-                    doc_catalog_helper_local,
+                    helper_path,
                     "--project-root",
                     str(project_root),
                     "--staging-dir",
@@ -5153,7 +5153,7 @@ def main():
                     str(doc_index_path),
                 ]
             else:
-                catalog_cmd = [
+                catalog_cmd = []
                     python_bin,
                     "-m",
                     "lib.doc_catalog",
@@ -5192,6 +5192,12 @@ def main():
                     _format_action_result(
                         "doc-catalog-refresh",
                         f"warning — doc catalog refresh failed (exit {catalog_proc.returncode}); {_shorten(diagnostics)}",
+                    )
+                )
+                notes.append(
+                    _format_action_result(
+                        "doc-catalog-refresh-remediation",
+                        "run `python3 scripts/python/doc_catalog_query.py list --limit 10` or `gpt-creator scan` to regenerate the catalog before retrying",
                     )
                 )
                 return notes
@@ -6368,7 +6374,7 @@ def main():
                 f"- JSON catalog (doc/snippet map) at `{doc_catalog_path_str}` keeps scripted lookups fast while prompts stay lean."
             )
             documentation_asset_lines.append(
-                "- Path is also exported as `$GC_DOC_CATALOG_PATH`; quick listing: `python3 -c \"import json, os; data=json.load(open(os.environ['GC_DOC_CATALOG_PATH'])); print('\\n'.join(sorted(data.get('documents', {}))))\"`"
+                "- Path is also exported as `$GC_DOC_CATALOG_PATH`; quick listing: `python3 scripts/python/doc_catalog_query.py list --limit 10` (falls back to repo scan when the SQLite DB is missing)."
             )
         else:
             documentation_asset_lines.append(
@@ -6424,7 +6430,7 @@ def main():
         _BUILTIN_WORK_PROMPT_FALLBACK_LINES: List[str] = [
             "## work-on-tasks Prompt",
             "- Load the task details and acceptance criteria from the context section.",
-            "- Consult the documentation catalog or search hits before modifying files.",
+                "- Consult the documentation catalog (`python3 scripts/python/doc_catalog_query.py search|show …`) before modifying files.",
             "- Outline a concise plan (<=3 bullets focused on actions), execute the required edits, and capture final status notes with clear pass/fail decisions.",
             "- Never create files named `PLAN.md` (or any case variant); summarize plans inline instead of emitting that artifact.",
             "- Apply changes by editing files directly via shell commands (no diff/patch output).",

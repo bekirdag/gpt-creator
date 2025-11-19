@@ -1641,6 +1641,10 @@ else:
         f"- JSON catalog (doc/snippet map) at `{doc_catalog_pointer}` keeps scripted lookups fast while prompts stay lean."
     )
 
+documentation_asset_lines.append(
+    "- Docdex-backed search/snippets are enabled by default; the helpers above query the docdex daemon first and fall back to SQLite/vector search (or the CLI JSON query) only when the daemon is unreachable."
+)
+
 if catalog_reference_docs:
     documentation_asset_lines.append(
         f"- Deep-dive docs: {', '.join(catalog_reference_docs)} explain indexing, metadata, and pipelines powering these caches."

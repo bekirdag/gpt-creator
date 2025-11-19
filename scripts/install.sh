@@ -693,6 +693,31 @@ install_docdexd() {
   fi
 }
 
+start_docdexd_service() {
+  local repo_root="$REPO_DIR"
+  if [[ ! -d "$repo_root" ]]; then
+    return
+  fi
+  local helper_path="$repo_root/scripts/python/docdex_client.py"
+  if [[ ! -f "$helper_path" && -f "$APP_DIR/scripts/python/docdex_client.py" ]]; then
+    helper_path="$APP_DIR/scripts/python/docdex_client.py"
+  fi
+  if [[ ! -f "$helper_path" ]]; then
+    record_warning "docdex client helper missing; skipping automatic docdex daemon start."
+    return
+  fi
+  if ! need_cmd python3; then
+    record_warning "python3 not available; skipping automatic docdex daemon start."
+    return
+  fi
+  echo "› Ensuring docdex daemon is running for $repo_root …"
+  if GC_PROJECT_ROOT="$repo_root" python3 "$helper_path" --repo "$repo_root" ensure >/dev/null 2>&1; then
+    echo "✔ docdexd ready for $repo_root"
+  else
+    record_warning "Unable to auto-start docdexd for $repo_root. Run 'gpt-creator docdex serve --project $repo_root &' manually if needed."
+  fi
+}
+
 ensure_runtime_permissions() {
   local target_user="${SUDO_USER:-$USER}"
   local target_home
@@ -779,6 +804,7 @@ main() {
   [[ $SKIP_PREFLIGHT -eq 1 ]] || preflight
 install_files
 install_docdexd
+start_docdexd_service
 ensure_runtime_permissions
 install_link
 install_completions

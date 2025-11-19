@@ -44,9 +44,12 @@ These helpers are mandatory during `work-on-tasks` sessions: mention them in you
 
 ## Docdex (Documentation Search) Guide
 
-`docdexd` is a lightweight Rust daemon that indexes staged docs for fast summaries/snippets. Both `doc_catalog.py` and the `work-on-tasks` runtime prefer it when available.
+`docdexd` is a lightweight Rust daemon that indexes staged docs for fast summaries/snippets. `scripts/install.sh` always builds/installs the daemon as part of the default flow, so every fresh `gpt-creator` install ships with a ready-to-run binary and the initial Tantivy index.
 
-### Build & Serve
+- During `work-on-tasks`, the runtime automatically talks to the local docdex daemon first, then falls back to the legacy SQLite/vector search (or the CLI JSON query) only when HTTP access is blocked.
+- The documented helpers below (`doc_catalog_query.py`, `work_on_tasks_runtime.py`) already route through docdex transparently, so agents get instant snippets without any extra setup.
+
+### Build & Serve (optional)
 
 ```bash
 # Build docdexd (requires Rust/cargo)
@@ -57,7 +60,7 @@ gpt-creator docdex index --project /path/to/project
 gpt-creator docdex serve --project /path/to/project --host 127.0.0.1 --port 46137
 ```
 
-`docdex_client.py` auto-starts the daemon, but you can override defaults with:
+`docdex_client.py` auto-starts the daemon by default, but you can override defaults with:
 
 - `GC_DOCDEX_BIN` – absolute path to the `docdexd` binary (defaults to `.gpt-creator/bin/docdexd`).
 - `GC_DOCDEX_HOST` / `GC_DOCDEX_PORT` – host/port the client and daemon use (defaults `127.0.0.1:46137`).
@@ -66,8 +69,8 @@ gpt-creator docdex serve --project /path/to/project --host 127.0.0.1 --port 4613
 
 ### Wiring the Helpers
 
-- `scripts/python/doc_catalog.py` now calls `docdex_client.search_docs` and `fetch_snippet` whenever the daemon responds, falling back to the legacy SQLite scan otherwise.
-- `work_on_tasks_runtime.py` uses docdex for documentation hits/snippets so backlog runs stay responsive even without the SQLite catalog.
+- `scripts/python/doc_catalog.py` now calls `docdex_client.search_docs` and `fetch_snippet` whenever the daemon responds, falling back to the legacy SQLite scan or CLI JSON query only when docdex isn’t reachable.
+- `work_on_tasks_runtime.py` (and every generated prompt) defaults to docdex for documentation hits/snippets so backlog runs stay responsive even without the SQLite catalog.
 
 If you need the legacy path (e.g., testing without Rust/Cargo), unset `GC_DOCDEX_BIN` or point `GC_DOCDEX_PORT` at an unused port so `_port_open` fails and the client skips auto-starting docdexd.
 
@@ -121,6 +124,8 @@ Installs:
 - Executable symlink: `/usr/local/bin/gpt-creator`
 - Library assets: `/usr/local/lib/gpt-creator`
 - Shell completions: zsh/bash/fish (if writable)
+
+During installation the script automatically builds the `docdexd` binary and seeds the repo’s `.gpt-creator/docdex/index` directory so documentation search is ready without extra commands.
 
 Use `--skip-preflight` to bypass dependency checks or `--force` to replace an existing symlink. The installer will try to provision missing tooling like Node.js, pnpm, and the MySQL client automatically; dependencies that need manual setup (Docker Desktop, Codex CLI, API keys) surface as warnings when the relevant commands run.
 

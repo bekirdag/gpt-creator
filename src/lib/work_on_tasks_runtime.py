@@ -6741,7 +6741,7 @@ def main():
             lines.append(vector_line)
             lines.append("")
             lines.append("## Documentation Catalog and Commands")
-            lines.append("We maintain a documentation catalog SQLite database and related assets to help you locate relevant information efficiently. Prefer querying the catalog instead of searching files directly.")
+            lines.append("We maintain a docdex-backed documentation catalog (with SQLite/vector fallbacks) so you can pull focused snippets without reopening large files. Prefer querying the catalog instead of searching files directly.")
             lines.append("Catalog structure and key tables:")
             lines.append(f"- Example query: sqlite3 \"$GC_DOCUMENTATION_DB_PATH\" \\")
             lines.append('  "SELECT doc_id,surface FROM documentation_search WHERE documentation_search MATCH \'lockout\' LIMIT 5;"')
@@ -6767,7 +6767,7 @@ def main():
             lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"')
 
         else:
-            lines.append("## Documentation Assets (sqlite3 fallback)")
+            lines.append("## Documentation Assets (docdex/SQLite fallback)")
             lines.append("")
             catalog_line = "- Catalog DB: $GC_DOCUMENTATION_DB_PATH"
             if documentation_db_display:
@@ -6792,7 +6792,7 @@ def main():
             lines.append('    "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"')
             lines.append("- Schema quick look:")
             lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables"')
-            lines.append("- When the docdex daemon is running, `python3 scripts/python/doc_catalog_query.py search|show ...` routes through it—prefer that helper over ad-hoc `rg` or `cat` when you need doc snippets.")
+            lines.append("- When docdex is available, `python3 scripts/python/doc_catalog_query.py search|show ...` still routes through it automatically; otherwise it falls back to the SQLite/vector index (or CLI JSON query). Use that helper instead of ad-hoc `rg`/`cat` when you need doc snippets.")
             if not documentation_db_available:
                 lines.append("- (Documentation catalog helpers unavailable without the SQLite database; regenerate with `gpt-creator scan` before running catalog commands.)")
             else:

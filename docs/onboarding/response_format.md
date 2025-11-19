@@ -63,4 +63,4 @@ write a report under `.gpt-creator/reports/task/<timestamp>/`. Review
   - `python3 scripts/python/doc_catalog_query.py list --limit 10`
   - `python3 scripts/python/doc_catalog_query.py search --query "lockout" --limit 15`
   - `python3 scripts/python/doc_catalog_query.py show DOC-1234ABCD --start 500 --end 540`
-- The helper wraps `doc_catalog.py` with the supported flags and falls back to scanning the repo (or docdex) when the SQLite catalog is unavailable, so you no longer need to memorize `$GC_DOC_CATALOG_PY` invocations.
+- The helper wraps `doc_catalog.py` with the supported flags, routes through the docdex daemon by default, and only falls back to SQLite/vector search (or the CLI JSON query) when docdex isn’t reachable—no need to memorize raw `$GC_DOC_CATALOG_PY` invocations.

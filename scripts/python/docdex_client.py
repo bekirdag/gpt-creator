@@ -176,6 +176,8 @@ def _http_get(
                 return json.loads(data.decode("utf-8"))
         except URLError as exc:
             last_error = exc
+            if isinstance(exc.reason, OSError) and exc.reason.errno == 1:
+                raise
             delay = HTTP_RETRY_BASE_DELAY * (2 ** attempt)
             time.sleep(min(delay, 2.5))
     target = _format_target(host, port, repo)
@@ -196,6 +198,32 @@ def _run_cli(args: Iterable[str], repo_root: Path) -> None:
             or proc.stdout.strip()
             or f"docdexd exited {proc.returncode} {context}"
         )
+
+
+def _run_cli_json(args: Iterable[str], repo_root: Path) -> Dict[str, Any]:
+    binary = _binary_path(repo_root)
+    cmd = [str(binary), *args]
+    proc = subprocess.run(
+        cmd,
+        cwd=str(repo_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if proc.returncode != 0:
+        context = f"(repo={repo_root})"
+        raise DocDexError(
+            proc.stderr.strip()
+            or proc.stdout.strip()
+            or f"docdexd exited {proc.returncode} {context}"
+        )
+    output = (proc.stdout or "").strip()
+    if not output:
+        return {}
+    try:
+        return json.loads(output)
+    except json.JSONDecodeError as err:  # pragma: no cover - unexpected
+        raise DocDexError(f"docdexd CLI returned invalid JSON: {err}: {output[:200]}") from err
 
 
 def ingest_file(path: Path, repo_root: Optional[Path] = None) -> None:
@@ -224,14 +252,26 @@ def search_docs(
     repo = _resolve_repo_root(repo_root)
     _log(f"search_docs(query='{query[:40]}', limit={limit}, repo={repo})")
     ensure_daemon(repo, host=host, port=port)
-    payload = _http_get(
-        "/search",
-        host=host,
-        port=port,
-        repo=repo,
-        params={"q": query, "limit": limit},
-    )
-    return payload
+    try:
+        return _http_get(
+            "/search",
+            host=host,
+            port=port,
+            repo=repo,
+            params={"q": query, "limit": limit},
+        )
+    except URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, OSError) and getattr(reason, "errno", None) == 1:
+            _log("permission error contacting docdexd; falling back to CLI query")
+            payload = _run_cli_json(
+                ["query", "--repo", str(repo), "--query", query, "--limit", str(limit)],
+                repo,
+            )
+            if "hits" not in payload:
+                payload = {"hits": payload.get("hits", [])}
+            return payload
+        raise
 
 
 def fetch_snippet(
@@ -248,13 +288,40 @@ def fetch_snippet(
     params: Dict[str, Any] = {"window": window}
     if query and query.strip():
         params["q"] = query
-    return _http_get(
-        f"/snippet/{doc_id}",
-        host=host,
-        port=port,
-        repo=repo,
-        params=params,
-    )
+    try:
+        return _http_get(
+            f"/snippet/{doc_id}",
+            host=host,
+            port=port,
+            repo=repo,
+            params=params,
+        )
+    except URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, OSError) and getattr(reason, "errno", None) == 1:
+            _log("permission error contacting docdexd; using CLI snippet fallback")
+            payload = _run_cli_json(
+                ["query", "--repo", str(repo), "--query", query or doc_id, "--limit", "12"],
+                repo,
+            )
+            hits = payload.get("hits", [])
+            match = next((hit for hit in hits if hit.get("doc_id") == doc_id), None)
+            if match is None and hits:
+                match = hits[0]
+            snippet_text = (match.get("snippet") if match else "") or (match.get("summary") if match else "") or ""
+            doc_meta = {
+                "doc_id": doc_id,
+                "rel_path": match.get("rel_path") if match else None,
+                "summary": match.get("summary") if match else None,
+            }
+            snippet_payload = {
+                "text": snippet_text,
+                "html": None,
+                "truncated": False,
+                "origin": "cli_fallback",
+            }
+            return {"doc": doc_meta, "snippet": snippet_payload}
+        raise
 
 
 if __name__ == "__main__":

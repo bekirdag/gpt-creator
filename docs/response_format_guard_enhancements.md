@@ -82,3 +82,8 @@ task completion rates high—we should implement the following improvements.
 Implementing the set above will streamline runs, eliminate format guard
 violations, and keep expensive tasks from repeating solely due to reporting
 errors.
+
+## 7. Docdex Usage & Catalog Helpers
+- Always pull SDS/PDR context via `python3 "$GC_DOC_CATALOG_PY" search|show …` (or `python3 scripts/python/doc_catalog_query.py …`) instead of grepping entire docs; the helper already routes through the docdex daemon and only falls back to SQLite/vector search or the CLI JSON query when docdex is unreachable.
+- Docdex hits/snippets satisfy the response-format guard automatically—cite the doc ID/path rather than pasting code blocks, and let the catalog helper fetch the exact slice.
+- When localhost HTTP access is blocked, the client transparently shells out to `docdexd query --json`, so it’s safe to rely on these helpers even in restricted environments (the fallback is noted in guard telemetry if it triggers).

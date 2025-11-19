@@ -196,6 +196,13 @@ for schema_path in "${schema_paths[@]}"; do
       --to-schema "$schema_path" \
       --exit-code 2>&1)"
     status=$?
+    if (( status != 0 )) && [[ "$prisma_output" == *"Unknown argument \"--to-schema\""* || "$prisma_output" == *"Did you mean '--to-schema-datamodel'"* ]]; then
+      prisma_output="$("${runner_parts[@]}" migrate diff \
+        --from-migrations "$migrations_dir" \
+        --to-schema-datamodel "$schema_path" \
+        --exit-code 2>&1)"
+      status=$?
+    fi
     set -e
     if (( status == 0 )); then
       schema_ok=1

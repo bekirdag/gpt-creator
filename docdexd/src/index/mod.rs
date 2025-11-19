@@ -7,7 +7,7 @@ use std::io::{self, BufRead, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{AllQuery, QueryParser};
 use tantivy::schema::{Schema, FAST, STORED, TEXT};
 use tantivy::{
     doc, Document, Index, IndexReader, IndexWriter, ReloadPolicy, SnippetGenerator, Term,
@@ -166,7 +166,41 @@ impl Indexer {
             &self.index,
             vec![self.body_field, self.summary_field, self.path_field],
         );
-        let tantivy_query = parser.parse_query(query)?;
+        let tantivy_query = match parser.parse_query(query) {
+            Ok(q) => q,
+            Err(err) => {
+                let sanitized = sanitize_query(query);
+                if sanitized.trim().is_empty() {
+                    warn!(
+                        target: "docdexd",
+                        error = ?err,
+                        "query parse failed; using AllQuery fallback"
+                    );
+                    Box::new(AllQuery)
+                } else {
+                    match parser.parse_query(&sanitized) {
+                        Ok(q) => {
+                            warn!(
+                                target: "docdexd",
+                                error = ?err,
+                                sanitized = %sanitized,
+                                "query parse failed; using sanitized query"
+                            );
+                            q
+                        }
+                        Err(err2) => {
+                            warn!(
+                                target: "docdexd",
+                                error = ?err2,
+                                sanitized = %sanitized,
+                                "sanitized query parse failed; using AllQuery fallback"
+                            );
+                            Box::new(AllQuery)
+                        }
+                    }
+                }
+            }
+        };
         let mut snippet_generator =
             SnippetGenerator::create(&searcher, tantivy_query.as_ref(), self.body_field).ok();
         if let Some(generator) = snippet_generator.as_mut() {
@@ -734,6 +768,24 @@ fn is_safe_rel_path(rel_path: &str) -> bool {
     }
     path.components()
         .all(|component| matches!(component, Component::CurDir | Component::Normal(_)))
+}
+
+fn sanitize_query(input: &str) -> String {
+    let cleaned: String = input
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() || c == '_' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    cleaned
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn estimate_tokens(text: &str) -> u64 {

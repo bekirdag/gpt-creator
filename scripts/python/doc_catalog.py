@@ -179,8 +179,16 @@ def _docdex_search(query: str, limit: Optional[int], repo_root: Path) -> list[Do
             repo_root=repo_root,
         )
     except Exception as err:
-        _note_docdex_fallback(f"search error: {err}")
-        return []
+        _log_docdex(f"docdex HTTP search failed ({err}); retrying via docdex CLI query")
+        try:
+            payload = docdex_client.search_docs_cli(  # type: ignore[attr-defined]
+                sanitized,
+                limit=max_hits,
+                repo_root=repo_root,
+            )
+        except Exception as err_cli:
+            _note_docdex_fallback(f"CLI search error: {err_cli}")
+            return []
     docs: list[Document] = []
     for hit in payload.get("hits", []):
         doc = _docdex_hit_to_document(hit, repo_root)
@@ -202,8 +210,15 @@ def _docdex_fetch_document(doc_id: str, repo_root: Path) -> Optional[Tuple[Docum
             window=200,
         )
     except Exception as err:
-        _note_docdex_fallback(f"snippet error: {err}")
-        return None
+        _log_docdex(f"docdex HTTP snippet failed ({err}); retrying via docdex CLI query")
+        try:
+            payload = docdex_client.fetch_snippet_cli(  # type: ignore[attr-defined]
+                doc_id,
+                repo_root=repo_root,
+            )
+        except Exception as err_cli:
+            _note_docdex_fallback(f"snippet CLI error: {err_cli}")
+            return None
     doc_meta = payload.get("doc") or {}
     rel_path_value = (doc_meta.get("rel_path") or doc_meta.get("doc_id") or "").strip()
     rel_path = Path(rel_path_value) if rel_path_value else None

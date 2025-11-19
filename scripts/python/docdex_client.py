@@ -9,6 +9,7 @@ query for documentation hits/snippets.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -21,13 +22,12 @@ from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-DEFAULT_PORT = int(os.environ.get("GC_DOCDEX_PORT", "46137"))
+ENV_DOCDEX_PORT = os.environ.get("GC_DOCDEX_PORT")
+BASE_DOCDEX_PORT = int(os.environ.get("GC_DOCDEX_PORT_BASE", "46100"))
+PORT_SPREAD = max(int(os.environ.get("GC_DOCDEX_PORT_SPREAD", "2000")), 1)
+DEFAULT_PORT = int(ENV_DOCDEX_PORT) if ENV_DOCDEX_PORT else None
 DEFAULT_HOST = os.environ.get("GC_DOCDEX_HOST", "127.0.0.1")
 CLI_ROOT = Path(__file__).resolve().parents[2]
-RUN_DIR = Path(".gpt-creator/run")
-LOG_DIR = Path(".gpt-creator/logs")
-PID_FILE = RUN_DIR / "docdexd.pid"
-LOG_FILE = LOG_DIR / "docdexd.log"
 HTTP_RETRY_ATTEMPTS = 4
 HTTP_RETRY_BASE_DELAY = 0.35
 
@@ -98,23 +98,48 @@ def _wait_for_health(host: str, port: int, timeout: float = 10.0) -> bool:
     return False
 
 
-def _read_pid() -> Optional[int]:
+def _runtime_dir(repo_root: Path) -> Path:
+    return repo_root / ".gpt-creator" / "docdex"
+
+
+def _pid_file(repo_root: Path) -> Path:
+    return _runtime_dir(repo_root) / "docdexd.pid"
+
+
+def _log_file(repo_root: Path) -> Path:
+    return _runtime_dir(repo_root) / "docdexd.log"
+
+
+def _read_pid(repo_root: Path) -> Optional[int]:
+    pid_path = _pid_file(repo_root)
     try:
-        return int(PID_FILE.read_text().strip())
+        return int(pid_path.read_text().strip())
     except (OSError, ValueError):
         return None
 
 
-def _write_pid(pid: int) -> None:
-    RUN_DIR.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(pid))
+def _write_pid(pid: int, repo_root: Path) -> None:
+    pid_path = _pid_file(repo_root)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text(str(pid))
+
+
+def _effective_port(port: Optional[int], repo: Path) -> int:
+    if port is not None:
+        return port
+    if ENV_DOCDEX_PORT:
+        return int(ENV_DOCDEX_PORT)
+    digest = hashlib.sha256(str(repo).encode("utf-8")).digest()
+    offset = int.from_bytes(digest[:2], "big") % PORT_SPREAD
+    return BASE_DOCDEX_PORT + offset
 
 
 def _start_daemon(repo_root: Path, host: str, port: int) -> None:
     binary = _binary_path(repo_root)
     _log(f"starting docdexd via {binary} for repo {repo_root}")
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    log_handle = open(LOG_FILE, "ab")
+    log_path = _log_file(repo_root)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = open(log_path, "ab")
     cmd = [
         str(binary),
         "serve",
@@ -133,7 +158,7 @@ def _start_daemon(repo_root: Path, host: str, port: int) -> None:
         stderr=subprocess.STDOUT,
         cwd=str(repo_root),
     )
-    _write_pid(proc.pid)
+    _write_pid(proc.pid, repo_root)
     _log(f"launched docdexd pid={proc.pid} host={host} port={port}")
     if not _wait_for_health(host, port):
         raise DocDexError(
@@ -146,10 +171,11 @@ def ensure_daemon(
     repo_root: Optional[Path] = None,
     *,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
 ) -> None:
     """Start the docdex daemon if it is not already running."""
     repo = _resolve_repo_root(repo_root)
+    port = _effective_port(port, repo)
     if _port_open(host, port):
         _log(f"docdexd already responding on {host}:{port}")
         return
@@ -176,7 +202,7 @@ def _http_get(
                 return json.loads(data.decode("utf-8"))
         except URLError as exc:
             last_error = exc
-            if isinstance(exc.reason, OSError) and exc.reason.errno == 1:
+            if _is_permission_urLError(exc):
                 raise
             delay = HTTP_RETRY_BASE_DELAY * (2 ** attempt)
             time.sleep(min(delay, 2.5))
@@ -226,6 +252,16 @@ def _run_cli_json(args: Iterable[str], repo_root: Path) -> Dict[str, Any]:
         raise DocDexError(f"docdexd CLI returned invalid JSON: {err}: {output[:200]}") from err
 
 
+def _is_permission_urLError(exc: URLError) -> bool:
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, OSError):
+        errno = getattr(reason, "errno", None)
+        if errno == 1:
+            return True
+    message = str(exc)
+    return "Operation not permitted" in message or "ERRNO 1" in message.upper()
+
+
 def ingest_file(path: Path, repo_root: Optional[Path] = None) -> None:
     """Trigger an incremental ingest for a single document."""
     repo = _resolve_repo_root(repo_root)
@@ -247,9 +283,10 @@ def search_docs(
     limit: int = 8,
     repo_root: Optional[Path] = None,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
 ) -> Dict[str, Any]:
     repo = _resolve_repo_root(repo_root)
+    port = _effective_port(port, repo)
     _log(f"search_docs(query='{query[:40]}', limit={limit}, repo={repo})")
     ensure_daemon(repo, host=host, port=port)
     try:
@@ -274,16 +311,33 @@ def search_docs(
         raise
 
 
+def search_docs_cli(
+    query: str,
+    *,
+    limit: int = 8,
+    repo_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    repo = _resolve_repo_root(repo_root)
+    payload = _run_cli_json(
+        ["query", "--repo", str(repo), "--query", query, "--limit", str(limit)],
+        repo,
+    )
+    if "hits" not in payload:
+        payload = {"hits": payload.get("hits", [])}
+    return payload
+
+
 def fetch_snippet(
     doc_id: str,
     *,
     query: Optional[str] = None,
     window: int = 60,
     host: str = DEFAULT_HOST,
-    port: int = DEFAULT_PORT,
+    port: Optional[int] = None,
     repo_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     repo = _resolve_repo_root(repo_root)
+    port = _effective_port(port, repo)
     ensure_daemon(repo, host=host, port=port)
     params: Dict[str, Any] = {"window": window}
     if query and query.strip():
@@ -324,13 +378,44 @@ def fetch_snippet(
         raise
 
 
+def fetch_snippet_cli(
+    doc_id: str,
+    *,
+    query: Optional[str] = None,
+    limit: int = 12,
+    repo_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    repo = _resolve_repo_root(repo_root)
+    payload = _run_cli_json(
+        ["query", "--repo", str(repo), "--query", query or doc_id, "--limit", str(limit)],
+        repo,
+    )
+    hits = payload.get("hits", [])
+    match = next((hit for hit in hits if hit.get("doc_id") == doc_id), None)
+    if match is None and hits:
+        match = hits[0]
+    snippet_text = (match.get("snippet") if match else "") or (match.get("summary") if match else "") or ""
+    doc_meta = {
+        "doc_id": doc_id,
+        "rel_path": match.get("rel_path") if match else None,
+        "summary": match.get("summary") if match else None,
+    }
+    snippet_payload = {
+        "text": snippet_text,
+        "html": None,
+        "truncated": False,
+        "origin": "cli_fallback",
+    }
+    return {"doc": doc_meta, "snippet": snippet_payload}
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Interact with docdexd daemon.")
     parser.add_argument("--repo", default=".", help="Repository root (default: current directory)")
     parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--port", type=int, default=None)
     sub = parser.add_subparsers(dest="command", required=True)
 
     ensure_cmd = sub.add_parser("ensure", help="Ensure the docdex daemon is running.")

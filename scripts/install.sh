@@ -656,6 +656,7 @@ install_docdexd() {
   if [[ ! -f "$builder_script" ]]; then
     return
   fi
+  stop_docdexd_service "$REPO_DIR"
   if ! need_cmd cargo; then
     record_warning "Rust toolchain (cargo) not found; skipping docdexd build. Install Rust and run '$builder_script' later to enable doc indexing."
     return
@@ -691,6 +692,46 @@ install_docdexd() {
   else
     record_warning "Unable to install docdexd into $target_dir. Run 'sudo cp ${built_binary} ${target_dir}/docdexd' manually."
   fi
+}
+
+stop_docdexd_service() {
+  local repo_root="${1:-$REPO_DIR}"
+  local runtime_dir="${repo_root}/.gpt-creator/docdex"
+  local pid_file="${runtime_dir}/docdexd.pid"
+  if [[ ! -f "$pid_file" ]]; then
+    return
+  fi
+  local pid
+  pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]]; then
+    rm -f "$pid_file"
+    return
+  fi
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    echo "› Stopping docdex daemon (pid=$pid) for $repo_root …"
+    if kill "$pid" >/dev/null 2>&1; then
+      local waited=0
+      while kill -0 "$pid" >/dev/null 2>&1 && (( waited < 25 )); do
+        sleep 0.2
+        waited=$((waited + 1))
+      done
+      if kill -0 "$pid" >/dev/null 2>&1; then
+        if kill -9 "$pid" >/dev/null 2>&1; then
+          echo "✔ docdexd force-stopped for $repo_root"
+        else
+          record_warning "Unable to stop docdexd (pid=$pid); process may still be running."
+        fi
+      else
+        echo "✔ docdexd stopped for $repo_root"
+      fi
+    else
+      if kill -0 "$pid" >/dev/null 2>&1; then
+        record_warning "Unable to stop docdexd (pid=$pid); skipping automatic restart."
+        return
+      fi
+    fi
+  fi
+  rm -f "$pid_file"
 }
 
 start_docdexd_service() {

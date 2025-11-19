@@ -591,6 +591,19 @@ def main():
             'redirection',
             'python-non3',
         }
+        SAFE_BLOCKED_COMMAND_REASONS = {'heredoc', 'heredoc-unterminated', 'placeholder-ellipsis'}
+        SCRIPT_PREFIX_CANDIDATES = (
+            "cat <<",
+            "tee <<",
+            "python <<",
+            "python3 <<",
+            "bash <<",
+            "sh <<",
+            "apply_patch <<",
+            "gpt-creator apply_block <<",
+        )
+        SCRIPT_FENCE_PATTERN = re.compile(r"```[a-z0-9_-]*", re.IGNORECASE)
+        SCRIPT_HEREDOC_PATTERN = re.compile(r"<<-?\s*(?:'|\")?[A-Za-z0-9_+\-]+(?:'|\")?", re.MULTILINE)
         REDIRECTION_PATTERN = re.compile(r'(?<!\\)(?:>>|>\||\$\(|<\()')
         SHELL_META_CHARS = set('|&;()<>*$`\\\n')
 
@@ -2138,6 +2151,87 @@ def main():
             except Exception:
                 return
 
+        script_archive_dir: Optional[Path] = None
+        script_archive_counter = 0
+        script_display_cache: Dict[str, str] = {}
+
+        def _looks_like_script_blob(value: str) -> bool:
+            if not isinstance(value, str):
+                return False
+            if "\n" not in value:
+                return False
+            stripped = value.lstrip()
+            lowered = stripped.lower()
+            if any(lowered.startswith(prefix) for prefix in SCRIPT_PREFIX_CANDIDATES):
+                return True
+            if stripped.startswith("#!") and "\n" in stripped:
+                return True
+            if stripped.startswith("```") or SCRIPT_FENCE_PATTERN.search(stripped):
+                return True
+            if SCRIPT_HEREDOC_PATTERN.search(value):
+                return True
+            return False
+
+        def _archive_script_blob(raw_text: str, *, section: str) -> Optional[str]:
+            nonlocal script_archive_dir, script_archive_counter
+            if not isinstance(raw_text, str) or not raw_text:
+                return None
+            cached = script_display_cache.get(raw_text)
+            if cached:
+                return cached
+            target_dir = project_root / "logs" / "scripts"
+            try:
+                target_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                return None
+            script_archive_dir = target_dir
+            script_archive_counter += 1
+            timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+            file_name = f"script_{timestamp}_{script_archive_counter:02d}.txt"
+            target_path = target_dir / file_name
+            payload_text = raw_text if raw_text.endswith("\n") else raw_text + "\n"
+            try:
+                target_path.write_text(payload_text, encoding="utf-8")
+            except Exception:
+                return None
+            rel_path = _relativize_path(target_path)
+            display_text = f"(script archived at {rel_path})"
+            script_display_cache[raw_text] = display_text
+            _append_guard_note(
+                "script-archived",
+                f"info — archived {section} script to {rel_path}; reference the logged file instead of embedding the code."
+            )
+            return display_text
+
+        def _sanitize_section_scripts(section_name: str) -> None:
+            entries = payload.get(section_name)
+            if not isinstance(entries, list):
+                return
+            updated_entries: List[object] = []
+            changed = False
+            for entry in entries:
+                if isinstance(entry, str) and _looks_like_script_blob(entry):
+                    archived_label = _archive_script_blob(entry, section=section_name)
+                    if archived_label:
+                        updated_entries.append(archived_label)
+                        changed = True
+                        continue
+                updated_entries.append(entry)
+            if changed:
+                payload[section_name] = updated_entries  # type: ignore[assignment]
+
+        def _display_safe_command(command: str) -> str:
+            if not isinstance(command, str):
+                return str(command)
+            cached = script_display_cache.get(command)
+            if cached:
+                return cached
+            if _looks_like_script_blob(command):
+                archived_label = _archive_script_blob(command, section="commands")
+                if archived_label:
+                    return archived_label
+            return command.replace("\n", "\\n")
+
         def _write_final_report(contents: str) -> None:
             targets: List[Path] = []
             if final_report_path is not None:
@@ -2843,6 +2937,13 @@ def main():
             for entry in existing_notes:
                 if not isinstance(entry, str):
                     continue
+                if _looks_like_script_blob(entry):
+                    archived_label = _archive_script_blob(entry, section="notes")
+                    if archived_label:
+                        cleaned_notes.append(
+                            _format_action_result("script-archive", f"logged under {archived_label}")
+                        )
+                        continue
                 text = entry.strip()
                 if not text:
                     continue
@@ -3985,6 +4086,7 @@ def main():
         seen_commands: Set[str] = set()
         blocked_command_counts: Dict[str, Dict[str, object]] = {}
         blocked_command_total = 0
+        blocked_command_requires_reporting = False
 
         REQUIRED_GITIGNORE_LINES = [
             "# gpt-creator",
@@ -4952,6 +5054,7 @@ def main():
 
         if blocked_command_total:
             fatal_reasons_present = False
+            safe_block_only = True
             for reason, data in blocked_command_counts.items():
                 total = int(data.get('total', 0))  # type: ignore[arg-type]
                 examples: List[str] = list(data.get('examples', []))  # type: ignore[assignment]
@@ -4965,9 +5068,9 @@ def main():
                 summary_text = f"{label}: {total} command(s) blocked"
                 if detail:
                     summary_text = f"{summary_text} ({detail})"
-                fatal_entry = reason in FATAL_BLOCK_REASONS and reason not in { 'heredoc', 'heredoc-unterminated', 'placeholder-ellipsis' }
-                if reason in {'heredoc', 'heredoc-unterminated', 'placeholder-ellipsis'}:
-                    fatal_entry = False
+                fatal_entry = reason in FATAL_BLOCK_REASONS and reason not in SAFE_BLOCKED_COMMAND_REASONS
+                if reason not in SAFE_BLOCKED_COMMAND_REASONS:
+                    safe_block_only = False
                 if fatal_entry:
                     fatal_reasons_present = True
                 prefix = "blocked" if fatal_entry else "warning"
@@ -4998,6 +5101,7 @@ def main():
                         "replace blocked commands with approved workflows (gpt-creator apply-block, python3 scripts/python/write_block.py, pnpm --filter …) before retrying"
                     )
                 )
+            blocked_command_requires_reporting = not safe_block_only
 
         declared_commands: List[str] = payload.get('commands') or []
         commands_missing = False
@@ -5034,7 +5138,7 @@ def main():
                     )
                     if not allow_drift:
                         commands_drift_fatal = True
-            elif commands_to_report or blocked_command_total or written or patched or change_bytes or command_failure_detected:
+            elif commands_to_report or blocked_command_requires_reporting or written or patched or change_bytes or command_failure_detected:
                 commands_missing = True
                 manual_notes.append(
                     _format_action_result(
@@ -5406,13 +5510,15 @@ def main():
             _merge_branch_into_base_if_complete(canonical_status)
             if branch_merge_completed:
                 _restore_base_branch_after_run()
+        for section_name in ("plan", "focus", "commands", "notes"):
+            _sanitize_section_scripts(section_name)
         raw_commands_field = payload.get('commands') or []
         summary_commands: List[str] = []
         if isinstance(raw_commands_field, list):
             for cmd in raw_commands_field:
                 if not isinstance(cmd, str):
                     continue
-                summary_commands.append(cmd.replace("\n", "\\n"))
+                summary_commands.append(_display_safe_command(cmd))
         _persist_agent_sections(
             payload.get('plan') or [],
             payload.get('focus') or [],
@@ -5433,7 +5539,15 @@ def main():
         status_note = f"STATUS: {canonical_status}"
         if status_note not in summary_notes:
             summary_notes.append(status_note)
-        report_commands = executed_commands if executed_commands else summary_commands
+        base_report_commands = executed_commands if executed_commands else raw_commands_field
+        display_report_commands: List[str] = []
+        if isinstance(base_report_commands, list):
+            for cmd in base_report_commands:
+                if not isinstance(cmd, str):
+                    continue
+                display_report_commands.append(_display_safe_command(cmd))
+        if not display_report_commands:
+            display_report_commands = summary_commands[:]
         logs_directory = report_rel_path
         log_paths = {
             "directory": logs_directory,
@@ -5454,7 +5568,7 @@ def main():
                 _record_task_artifact(artifact_task_id, artifact_label, rel_path)
         end_report_note, end_report_file = _compose_end_report(
             canonical_status,
-            report_commands,
+            display_report_commands,
             logs_directory,
             log_paths,
             acceptance_items,

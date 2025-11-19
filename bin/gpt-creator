@@ -8840,6 +8840,12 @@ cmd_work_on_tasks() {
   local prepare_prompts=1
   local agent_model_override=""
   local agent_selector=""
+  local wot_avg_tokens_per_sp=""
+  local wot_avg_tokens_samples=0
+  local wot_avg_tokens_points="0"
+  local wot_avg_tokens_total="0"
+  local wot_avg_recent_count=0
+  local wot_avg_recent_window=0
 
   unset GC_ACTIVE_AGENT_FILE GC_ACTIVE_AGENT_NAME GC_ACTIVE_AGENT_CLIENT GC_ACTIVE_AGENT_MODEL GC_ACTIVE_AGENT_ADAPTER GC_ACTIVE_AGENT_MAX_CONTEXT GC_ACTIVE_AGENT_MAX_OUTPUT GC_ACTIVE_AGENT_API_BASE GC_ACTIVE_AGENT_API_KEY_ENV GC_ACTIVE_AGENT_API_ORG_ENV
 
@@ -10144,6 +10150,24 @@ PY
   fi
   if ! gc_update_throughput_metrics "$tasks_db" "init" >/dev/null; then
     warn "Failed to start throughput metrics window."
+  fi
+
+  local token_expect_helper=""
+  if token_expect_helper="$(gc_clone_python_tool "token_expectation.py" "${PROJECT_ROOT:-$PWD}")"; then
+    gc_clone_python_tool "estimate_remaining_work.py" "${PROJECT_ROOT:-$PWD}" >/dev/null || true
+    local token_expect_output=""
+    if token_expect_output="$("$python_bin" "$token_expect_helper" "$tasks_db" 2>/dev/null)"; then
+      if [[ "$token_expect_output" == *"|"* ]]; then
+        IFS='|' read -r wot_avg_tokens_per_sp wot_avg_tokens_samples wot_avg_tokens_points wot_avg_tokens_total wot_avg_recent_count wot_avg_recent_window <<<"$token_expect_output"
+        IFS=$' \t\n'
+        wot_avg_tokens_per_sp="${wot_avg_tokens_per_sp//[[:space:]]/}"
+        wot_avg_tokens_samples="${wot_avg_tokens_samples//[[:space:]]/}"
+        wot_avg_tokens_points="${wot_avg_tokens_points//[[:space:]]/}"
+        wot_avg_tokens_total="${wot_avg_tokens_total//[[:space:]]/}"
+        wot_avg_recent_count="${wot_avg_recent_count//[[:space:]]/}"
+        wot_avg_recent_window="${wot_avg_recent_window//[[:space:]]/}"
+      fi
+    fi
   fi
 
   gc_align_task_story_slugs "$tasks_db"
@@ -12526,6 +12550,19 @@ print(flag("notes_contains_already_satisfied"))'
       task_tokens_display="$(gc_format_tokens_compact "$task_tokens_total")"
       local task_prompt_estimate_display
       task_prompt_estimate_display="$(gc_format_tokens_compact "$task_prompt_estimate")"
+      local task_estimated_tokens_value="$task_prompt_estimate"
+      local task_estimated_tokens_display="$task_prompt_estimate_display"
+      if [[ -n "$wot_avg_tokens_per_sp" && "$wot_avg_tokens_per_sp" != "0" && -n "$task_story_points" ]]; then
+        local sp_clean="${task_story_points//[[:space:]]/}"
+        if [[ "$sp_clean" =~ ^[0-9]+([.][0-9]+)?$ ]] && [[ "$wot_avg_tokens_per_sp" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+          local expected_tokens_calc
+          expected_tokens_calc="$(awk -v avg="$wot_avg_tokens_per_sp" -v sp="$sp_clean" 'BEGIN{if (avg+0<=0 || sp+0<=0){print ""} else {printf "%.0f", avg*sp}}' 2>/dev/null)"
+          if [[ "$expected_tokens_calc" =~ ^[0-9]+$ ]]; then
+            task_estimated_tokens_value="$expected_tokens_calc"
+            task_estimated_tokens_display="$(gc_format_tokens_compact "$task_estimated_tokens_value")"
+          fi
+        fi
+      fi
 
       task_notes+=("Terminal state: ${task_terminal_state}")
       if [[ "$task_failure_class" != "NONE" ]]; then
@@ -12936,9 +12973,9 @@ print(flag("notes_contains_already_satisfied"))'
         "$task_story_points_display" \
         "$task_story_points" \
         "$task_tokens_total" \
-        "$task_prompt_estimate" \
+        "$task_estimated_tokens_value" \
         "$task_tokens_display" \
-        "$task_prompt_estimate_display" \
+        "$task_estimated_tokens_display" \
         "$task_failure_class" \
         ""
       # Write JSON & run end scripts

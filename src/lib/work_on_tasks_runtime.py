@@ -4480,12 +4480,12 @@ def main():
                 "commands-placeholder-detected",
                 f"auto-replaced {len(command_placeholder_details)} placeholder command(s) with '# TODO' entries; first snippet: {first_snippet} ({first_reason}).{fix_hint}"
             )
-            skip_command_processing = True
-            command_entries = []
-            command_failure_detected = True
-            if not forced_canonical_status:
-                forced_canonical_status = 'RETRYABLE'
-                forced_legacy_status = 'retryable'
+            _append_guard_note(
+                'commands-placeholder-detected',
+                'warning — placeholder command(s) detected; TODO entries inserted but run will continue',
+            )
+            skip_command_processing = False
+            # Placeholder detection is informational; do not convert the run to retryable.
 
         def _working_tree_clean() -> bool:
             status = _run_git_command(['status', '--porcelain'])
@@ -5153,7 +5153,7 @@ def main():
                     str(doc_index_path),
                 ]
             else:
-                catalog_cmd = []
+                catalog_cmd = [
                     python_bin,
                     "-m",
                     "lib.doc_catalog",
@@ -5383,10 +5383,7 @@ def main():
             forced_canonical_status = 'BLOCKED'
             forced_legacy_status = workspace_block_reason or 'blocked-dirty-tree'
         elif strict_validation:
-            if 'placeholder-ellipsis' in blocked_command_counts:
-                forced_canonical_status = 'RETRYABLE'
-                forced_legacy_status = 'retryable'
-            elif command_failure_detected:
+            if command_failure_detected:
                 forced_canonical_status = 'RETRYABLE'
                 forced_legacy_status = 'retryable'
             elif commands_missing:
@@ -7957,22 +7954,22 @@ def main():
                 "- Preview file ranges safely using `python3 \"$GC_SAFE_SHOW_FILE_PY\" <path> --suggest` before `sed`/`cat`, so you avoid missing-file retries.",
                 "- Need a quick view of specific lines? Run `python3 scripts/python/show_file_excerpt.py <path> --start 1 --end 200` instead of `nl|sed` pipelines.",
                 "- Need a quick Python helper? Create /tmp/snippet.py and run `python3 \"$GC_RUN_SNIPPET_PY\" /tmp/snippet.py`; the script refuses placeholder-only heredocs and keeps commands deterministic.",
-                "- Building command entries? Run `python3 scripts/python/command_scaffold.py \"label\" 'cd apps/api' 'pnpm test'` to emit a ready-to-paste \\"bash -lc ...\\" block without ellipses.",
+                '- Building command entries? Run `python3 scripts/python/command_scaffold.py "label" \'cd apps/api\' \'pnpm test\'` to emit a ready-to-paste "bash -lc ..." block without ellipses.',
                 "- Monitoring guardrail hits? Run `python3 scripts/python/guardrails_report.py --json` (or `--fail-on-placeholder N`) to summarize events or fail CI when placeholders persist.",
             ]
         )
 
         guidance_lines = [
-                "## Instructions",
-                "### Response Format",
-                "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
-                "- Keep notes in Action/Result form; when narration is unavoidable, pipe it through `python3 scripts/python/summarize_note.py \"label\"` and paste the emitted summary pointer.",
+            "## Instructions",
+            "### Response Format",
+            "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
+            "- Keep notes in Action/Result form; when narration is unavoidable, pipe it through `python3 scripts/python/summarize_note.py \"label\"` and paste the emitted summary pointer.",
             "- Write each heading exactly as shown (e.g., `Plan` on its own line) with no surrounding Markdown styling or punctuation.",
             "- Keep each section to short bullet items or terse sentences; skip JSON, code fences, and closing summaries.",
             "- Do not include source code, config snippets, or test case bodies; describe changes and evidence at a high level only.",
-                "- Make repository edits by listing the exact shell commands you will run under `Commands` (use `bash` to write files when needed).",
-                "  Example: `bash -lc "python3 scripts/python/summarize_note.py \"label\" <<'EOF' ... EOF"`",
-                "- Ensure the `Commands` section lists actionable shell commands; if none are required, include a single bullet `- (none)` beneath the heading.",
+            "- Make repository edits by listing the exact shell commands you will run under `Commands` (use `bash` to write files when needed).",
+            '  Example: `bash -lc "python3 scripts/python/summarize_note.py "label" <<\'EOF\' ... EOF"`',
+            "- Ensure the `Commands` section lists actionable shell commands; if none are required, include a single bullet `- (none)` beneath the heading.",
                 "- Placeholders (`...`, `…`, `cat <<'EOF'` without a closing `EOF`, etc.) immediately trigger the commands-fill-placeholders guard—fully expand every command before submitting.",
             "- Do not generate diffs or patches; apply edits directly through those shell commands.",
             "- Primary objective: ship the code required by the task acceptance criteria; avoid documentation rewrites or reorganizing prompts.",

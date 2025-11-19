@@ -581,7 +581,6 @@ def main():
             'repeat-failure': 'repeated command failure',
         }
         FATAL_BLOCK_REASONS = {
-            'placeholder-ellipsis',
             'heredoc',
             'heredoc-unterminated',
             'missing-helper',
@@ -3439,13 +3438,7 @@ def main():
                             f"once network/credentials are fixed, run `git push {push_remote} {branch_name}` manually."
                         )
                     )
-                    notes.append(
-                        _format_action_result(
-                            "retry-required",
-                            "marking run retryable so you can push once connectivity returns"
-                        )
-                    )
-                    return False, notes
+                    return True, notes
                 notes.append(
                     _format_action_result(
                         f"git push {push_remote} {branch_name}",
@@ -4480,10 +4473,6 @@ def main():
                 "commands-placeholder-detected",
                 f"auto-replaced {len(command_placeholder_details)} placeholder command(s) with '# TODO' entries; first snippet: {first_snippet} ({first_reason}).{fix_hint}"
             )
-            _append_guard_note(
-                'commands-placeholder-detected',
-                'warning — placeholder command(s) detected; TODO entries inserted but run will continue',
-            )
             skip_command_processing = False
             # Placeholder detection is informational; do not convert the run to retryable.
 
@@ -4996,8 +4985,8 @@ def main():
             if 'placeholder-ellipsis' in blocked_command_counts:
                 manual_notes.append(
                     _format_action_result(
-                        "commands-fill-placeholders",
-                        "replace `...` placeholders with the exact commands you intend to run before retrying"
+                        "commands-placeholders",
+                        "warning — placeholder command(s) detected; TODO entries were inserted automatically; rerun guards once real commands are ready"
                     )
                 )
             if fatal_reasons_present:

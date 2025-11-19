@@ -193,7 +193,7 @@ for schema_path in "${schema_paths[@]}"; do
     prisma_output=""
     prisma_output="$("${runner_parts[@]}" migrate diff \
       --from-migrations "$migrations_dir" \
-      --to-schema-datamodel "$schema_path" \
+      --to-schema "$schema_path" \
       --exit-code 2>&1)"
     status=$?
     set -e

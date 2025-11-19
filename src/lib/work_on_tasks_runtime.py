@@ -8,14 +8,230 @@ import os
 import sqlite3
 import sys
 import json
+import re
 from pathlib import Path
-from typing import Any, Dict, Tuple, Optional, List
+from typing import Any, Dict, Tuple, Optional, List, Set
 import importlib
+try:  # pragma: no cover - POSIX-only helper
+    import pwd  # type: ignore
+except ImportError:  # pragma: no cover - Windows fallback
+    pwd = None  # type: ignore
 
 docdex_client = None  # type: ignore
 _docdex_logged_success = False
 
 LAST_PENDING_CHANGES: Dict[str, Tuple[str, ...]] = {}
+
+DEPENDENCY_DIR_BASENAMES = {
+    "node_modules",
+    "vendor",
+    "deps",
+    "packages",
+    "site-packages",
+    "venv",
+    ".venv",
+    "env",
+    "envs",
+    "virtualenv",
+    "dist",
+    "build",
+    "target",
+    "pods",
+    "third_party",
+    "buck-out",
+    "bazel-out",
+    "cmake-build-debug",
+    "cmake-build-release",
+    "deriveddata",
+    ".gradle",
+    ".m2",
+    ".cargo",
+    ".dart_tool",
+    "gopath",
+    "pkgcache",
+    "pkg-cache",
+    ".nuget",
+}
+
+DEPENDENCY_CLONE_SUFFIXES = (
+    ".orig",
+    ".backup",
+    ".bak",
+    ".copy",
+    ".tmp",
+    ".temp",
+    ".old",
+    ".hold",
+    "-orig",
+    "-backup",
+    "-bak",
+    "-copy",
+    "-tmp",
+    "-temp",
+    "-old",
+    "-hold",
+    "_orig",
+    "_backup",
+    "_bak",
+    "_copy",
+    "_tmp",
+    "_temp",
+    "_old",
+    "_hold",
+)
+
+DEPENDENCY_CLONE_PREFIXES = (
+    "copy_of_",
+    "copy-of-",
+    "copy_",
+    "copy-",
+    "backup_",
+    "backup-",
+    "tmp_",
+    "tmp-",
+    "temp_",
+    "temp-",
+    "old_",
+    "old-",
+    "zzz_",
+    "zzz-",
+    "save_",
+    "save-",
+    "snapshot_",
+    "snapshot-",
+)
+
+
+def _has_action_token(text: str) -> bool:
+    lowered = text.lower()
+    if any(token in lowered for token in ('action:', 'result:', 'command', 'next:', 'plan:', 'test:')):
+        return True
+    stripped = text.strip()
+    stripped_lower = stripped.lower()
+    if re.match(r'^(plan|focus|commands|notes)\b', stripped_lower):
+        return True
+    if not stripped:
+        return False
+    if stripped[0] in {'-', '*', '•'}:
+        return True
+    if stripped[:1].isdigit():
+        suffix = stripped[1:2]
+        if suffix in {'.', ')', ':'} or (suffix == ' ' and len(stripped) > 2):
+            return True
+    if ' -> ' in stripped:
+        return True
+    return False
+
+
+def _autoformat_note_entry(text: str) -> Tuple[str, bool]:
+    """Coerce narration into Action/Result format so guards are satisfied."""
+    stripped = text.strip()
+    if not stripped:
+        return text, False
+    if _has_action_token(stripped):
+        return text, False
+    normalized = re.sub(r"\s+", " ", stripped)
+    preview = normalized[:80].strip()
+    preview = preview.rstrip(".,;:·•-") or "note"
+    words = [w for w in re.split(r"[^a-z0-9]+", preview.lower()) if w]
+    slug = "-".join(words[:3]) if words else "note"
+    action_label = f"auto-note:{slug}" if slug else "auto-note"
+    formatted = f"Action: {action_label} | Result: {stripped}"
+    return formatted, True
+
+
+def _owner_name_for_uid(uid: int) -> str:
+    if pwd is None:  # pragma: no cover - Windows fallback
+        return f"uid {uid}"
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:  # pragma: no cover - best effort
+        return f"uid {uid}"
+
+
+def _friendly_relpath(path: Path, project_root: Path) -> str:
+    try:
+        return str(path.relative_to(project_root))
+    except ValueError:
+        return str(path)
+
+
+def _normalize_dependency_dir_name(entry_name: str) -> Tuple[Optional[str], bool]:
+    lowered = entry_name.strip().lower()
+    if not lowered:
+        return None, False
+    candidate = lowered
+    clone_detected = False
+    changed = True
+    while changed:
+        changed = False
+        for suffix in DEPENDENCY_CLONE_SUFFIXES:
+            if candidate.endswith(suffix) and len(candidate) > len(suffix):
+                candidate = candidate[: -len(suffix)]
+                clone_detected = True
+                changed = True
+                break
+        if changed:
+            continue
+        for prefix in DEPENDENCY_CLONE_PREFIXES:
+            if candidate.startswith(prefix) and len(candidate) > len(prefix):
+                candidate = candidate[len(prefix):]
+                clone_detected = True
+                changed = True
+                break
+    trimmed = candidate.strip("_-.")
+    if trimmed in DEPENDENCY_DIR_BASENAMES:
+        return trimmed, clone_detected
+    return None, False
+
+
+def _scan_dependency_directories(project_root: Path, *, max_depth: int = 5) -> Tuple[List[Path], List[Tuple[Path, str]]]:
+    suspicious_clones: List[Path] = []
+    ownership_issues: List[Tuple[Path, str]] = []
+    if not project_root.exists():
+        return suspicious_clones, ownership_issues
+    if not hasattr(os, "getuid"):
+        return suspicious_clones, ownership_issues
+    current_uid = os.getuid()
+    visited: Set[Path] = set()
+    stack: List[Tuple[Path, int]] = [(project_root, 0)]
+    skip_names = {".git", ".hg", ".svn", ".gpt-creator"}
+    while stack:
+        base, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        try:
+            entries = list(base.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if name in skip_names:
+                continue
+            try:
+                resolved = entry.resolve()
+            except OSError:
+                resolved = entry
+            if resolved in visited:
+                continue
+            visited.add(resolved)
+            normalized_name, clone_detected = _normalize_dependency_dir_name(name)
+            if normalized_name:
+                try:
+                    stat_result = entry.stat()
+                except OSError:
+                    stat_result = None
+                if clone_detected:
+                    suspicious_clones.append(entry)
+                if stat_result is not None and stat_result.st_uid != current_uid:
+                    owner_label = _owner_name_for_uid(stat_result.st_uid)
+                    ownership_issues.append((entry, owner_label))
+                continue
+            if depth + 1 <= max_depth:
+                stack.append((entry, depth + 1))
+    return suspicious_clones, ownership_issues
 
 _HELPER_DIR = Path(__file__).resolve().parents[2] / "scripts" / "python"
 if _HELPER_DIR.exists():
@@ -365,7 +581,6 @@ def main():
             'repeat-failure': 'repeated command failure',
         }
         FATAL_BLOCK_REASONS = {
-            'placeholder-ellipsis',
             'heredoc',
             'heredoc-unterminated',
             'missing-helper',
@@ -823,26 +1038,6 @@ def main():
         def _format_action_result(action: str, result: str) -> str:
             return f"Action: {action.strip()} | Result: {result.strip()}"
 
-        def _has_action_token(text: str) -> bool:
-            lowered = text.lower()
-            if any(token in lowered for token in ('action:', 'result:', 'command', 'next:', 'plan:', 'test:')):
-                return True
-            stripped = text.strip()
-            stripped_lower = stripped.lower()
-            if re.match(r'^(plan|focus|commands|notes)\b', stripped_lower):
-                return True
-            if not stripped:
-                return False
-            if stripped[0] in {'-', '*', '•'}:
-                return True
-            if stripped[:1].isdigit():
-                suffix = stripped[1:2]
-                if suffix in {'.', ')', ':'} or (suffix == ' ' and len(stripped) > 2):
-                    return True
-            if ' -> ' in stripped:
-                return True
-            return False
-
 
         apply_timeout_env = os.environ.get("GC_APPLY_PHASE_TIMEOUT_SECONDS", "1500")
         try:
@@ -861,6 +1056,7 @@ def main():
         except UnicodeDecodeError:
             raw_text_original = output_path.read_text(encoding='utf-8', errors='replace')
         raw = raw_text_original.strip()
+        canonical_response_text = raw_text_original
         if not raw:
             print("empty-output", flush=True)
             sys.exit(0)
@@ -989,8 +1185,10 @@ def main():
                 'notes': ["Recovered edits from apply_patch blocks in the response."],
             }
 
+        REQUIRED_RESPONSE_SECTIONS = ("plan", "focus", "commands", "notes")
+
         def _extract_section_lines(text: str):
-            headings = {"plan", "focus", "commands", "notes", "changes"}
+            headings = set(REQUIRED_RESPONSE_SECTIONS) | {"changes"}
             sections: Dict[str, List[str]] = {}
             current = None
             in_fence = False
@@ -1185,6 +1383,43 @@ def main():
                 extracted.extend(_normalize_focus(parts))
             return extracted
 
+        def _extract_commands_from_text(text):
+            commands: List[str] = []
+            if not isinstance(text, str):
+                return commands
+            in_fence = False
+            for raw_line in text.splitlines():
+                stripped = raw_line.strip()
+                if stripped.startswith("```"):
+                    in_fence = not in_fence
+                    continue
+                candidate = stripped
+                if not candidate:
+                    continue
+                if candidate.startswith("`") and candidate.endswith("`") and len(candidate) > 2:
+                    candidate = candidate.strip("`")
+                candidate = re.sub(r'^[\-\*•]+\s*', '', candidate)
+                if COMMAND_WHITELIST_PATTERN.match(candidate):
+                    commands.append(candidate)
+                    continue
+                if in_fence and COMMAND_WHITELIST_PATTERN.match(candidate):
+                    commands.append(candidate)
+                    continue
+                inline_match = re.search(r"bash\s+-lc\s+\"[^\"]+\"", stripped)
+                if inline_match:
+                    commands.append(inline_match.group(0))
+            return commands
+
+        def _extract_plan_commands(entry):
+            commands: List[str] = []
+            if isinstance(entry, dict):
+                possible = entry.get('commands')
+                if isinstance(possible, list):
+                    commands.extend(item for item in possible if isinstance(item, str))
+            elif isinstance(entry, str):
+                commands.extend(_extract_commands_from_text(entry))
+            return commands
+
         focus_targets = payload.get('focus')
         focus_valid = False
         if isinstance(focus_targets, list):
@@ -1196,6 +1431,11 @@ def main():
                 focus_targets = []
                 focus_valid = True
 
+        plan_command_suggestions: List[str] = []
+        plan_entries = payload.get('plan')
+        if isinstance(plan_entries, list):
+            for entry in plan_entries:
+                plan_command_suggestions.extend(_extract_plan_commands(entry))
         if not focus_valid:
             inferred_focus = []
             plan_entries = payload.get('plan')
@@ -1269,6 +1509,33 @@ def main():
             focus_targets = []
             payload['focus'] = focus_targets
             focus_valid = True
+
+        if plan_command_suggestions:
+            deduped_commands: List[str] = []
+            seen_commands: Set[str] = set()
+            for cmd in plan_command_suggestions:
+                if not isinstance(cmd, str):
+                    continue
+                trimmed_cmd = cmd.strip()
+                if not trimmed_cmd:
+                    continue
+                if not COMMAND_WHITELIST_PATTERN.match(trimmed_cmd):
+                    continue
+                if trimmed_cmd in seen_commands:
+                    continue
+                seen_commands.add(trimmed_cmd)
+                deduped_commands.append(trimmed_cmd)
+            if deduped_commands:
+                existing_commands = payload.get('commands')
+                if isinstance(existing_commands, list):
+                    existing_commands.extend(cmd for cmd in deduped_commands if cmd not in existing_commands)
+                elif existing_commands is None:
+                    payload['commands'] = deduped_commands
+                elif isinstance(existing_commands, str):
+                    merged = [existing_commands] + [cmd for cmd in deduped_commands if cmd != existing_commands]
+                    payload['commands'] = merged
+                else:
+                    payload['commands'] = deduped_commands
 
         # Normalize change payloads so legacy formats (missing `type`, raw diff strings)
         # still apply cleanly without aborting the task workflow.
@@ -1388,6 +1655,19 @@ def main():
                 "branch",
                 f"warning — push of {branch} to {push_remote} failed ({context}): {stderr_text or 'see stderr'}"
             )
+
+        def _is_remote_access_error(stderr_text: str, stdout_text: str = "") -> bool:
+            haystack = f"{stderr_text}\n{stdout_text}".lower()
+            tokens = (
+                "error: user:",
+                "error: no healthy upstream",
+                "connection refused",
+                "connection reset",
+                "permission denied",
+                "could not read from remote repository",
+                "fatal: unable to access",
+            )
+            return any(token in haystack for token in tokens if token)
 
         def _is_missing_remote_ref_error(stderr_text: str) -> bool:
             lowered = (stderr_text or "").lower()
@@ -1544,6 +1824,10 @@ def main():
         patched = []
         noop_entries = []
         manual_notes = []
+
+        def _append_guard_note(code: str, message: str) -> None:
+            manual_notes.append(_format_action_result(code, message))
+            _record_guard_event(code, message)
         error_records: List[str] = []
         required_scripts: List[str] = []
         reports_base = project_root / ".gpt-creator" / "reports"
@@ -2057,6 +2341,91 @@ def main():
                         normalized.append(str(entry))
             return normalized
 
+        def _has_structured_response_sections(text: str) -> bool:
+            if not text or not text.strip():
+                return False
+            sections = _extract_section_lines(text)
+            if not sections:
+                return False
+            for required in REQUIRED_RESPONSE_SECTIONS:
+                if required not in sections:
+                    return False
+            heading_order: List[int] = []
+            seen_labels: Set[str] = set()
+            for line in text.splitlines():
+                candidate = line.strip().rstrip(':').strip()
+                normalized = candidate.strip("*_# ").lower()
+                if normalized in REQUIRED_RESPONSE_SECTIONS and normalized not in seen_labels:
+                    seen_labels.add(normalized)
+                    heading_order.append(REQUIRED_RESPONSE_SECTIONS.index(normalized))
+            return heading_order[:len(REQUIRED_RESPONSE_SECTIONS)] == list(range(len(REQUIRED_RESPONSE_SECTIONS)))
+
+        def _render_structured_response(
+            plan_entries: Sequence[object],
+            focus_entries: Sequence[object],
+            command_entries: Sequence[object],
+            note_entries: Sequence[object],
+        ) -> str:
+            buffer: List[str] = []
+            _append_section_block(buffer, "Plan", _normalize_section_entries(plan_entries))
+            _append_section_block(buffer, "Focus", _normalize_section_entries(focus_entries))
+            _append_section_block(
+                buffer,
+                "Commands",
+                _normalize_section_entries(command_entries),
+                preserve_indent=True,
+            )
+            _append_section_block(buffer, "Notes", _normalize_section_entries(note_entries))
+            while buffer and buffer[-1] == "":
+                buffer.pop()
+            return ("\n".join(buffer).rstrip() + "\n") if buffer else ""
+
+        guard_events: List[Dict[str, str]] = []
+
+        def _record_guard_event(code: str, detail: str) -> None:
+            guard_events.append(
+                {
+                    "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "code": code,
+                    "detail": detail,
+                }
+            )
+
+        HEREDOC_PLACEHOLDER_PATTERN = re.compile(r"<<-?\s*(?:'|\")?([A-Za-z0-9_+\-]+)(?:'|\")?")
+
+        def _find_unterminated_heredoc_marker(command: str) -> Optional[str]:
+            if not command or "<<" not in command:
+                return None
+            for match in HEREDOC_PLACEHOLDER_PATTERN.finditer(command):
+                label = match.group(1)
+                tail = command[match.end():]
+                closing_pattern = re.compile(rf"^\s*{re.escape(label)}\s*$", re.MULTILINE)
+                if not closing_pattern.search(tail):
+                    return label
+            return None
+
+        def _rewrite_command_placeholders(commands: Sequence[str]) -> Tuple[List[str], List[Tuple[str, str]]]:
+            updated: List[str] = []
+            placeholders: List[Tuple[str, str]] = []
+            for raw in commands:
+                if not isinstance(raw, str):
+                    updated.append(raw)
+                    continue
+                reason = None
+                if "..." in raw or "…" in raw:
+                    reason = "ellipsis"
+                else:
+                    label = _find_unterminated_heredoc_marker(raw)
+                    if label:
+                        reason = f"missing terminator for {label}"
+                if reason:
+                    snippet = _truncate_command_text(raw)
+                    updated.append(f"# TODO – replace placeholder ({reason}): {snippet}")
+                    placeholders.append((snippet, reason))
+                else:
+                    updated.append(raw)
+            return updated, placeholders
+
         def _append_section_block(
             buffer: List[str],
             title: str,
@@ -2077,6 +2446,41 @@ def main():
             else:
                 buffer.append("- (none)")
             buffer.append("")
+
+        def _flush_guard_events() -> None:
+            if not guard_events:
+                return
+            guard_dir = project_root / "logs" / "guardrails"
+            try:
+                guard_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            events_path = guard_dir / "events.jsonl"
+            counts: Dict[str, int] = {}
+            try:
+                with events_path.open("a", encoding="utf-8") as handle:
+                    for event in guard_events:
+                        enriched = dict(event)
+                        enriched.update(
+                            {
+                                "task_id": active_task_id,
+                                "task_number": task_number,
+                                "story_slug": task_slug,
+                                "run": run_timestamp,
+                            }
+                        )
+                        handle.write(json.dumps(enriched, ensure_ascii=False) + "\n")
+                        counts[event["code"]] = counts.get(event["code"], 0) + 1
+            except Exception:
+                return
+            rel_path = _relativize_path(events_path)
+            summary = ", ".join(f"{code}={count}" for code, count in sorted(counts.items()))
+            manual_notes.append(
+                _format_action_result(
+                    "guard-telemetry",
+                    f"recorded {len(guard_events)} guard event(s): {summary}; see {rel_path}",
+                )
+            )
 
         def _persist_agent_sections(
             plan_entries: Sequence[object],
@@ -2415,18 +2819,14 @@ def main():
                     _append_required_script(candidate)
 
         if code_sample_detected:
-            manual_notes.append(
-                _format_action_result(
-                    "code-sample-detected",
-                    "warning — response contained source/test snippets; restate steps without including code"
-                )
+            _append_guard_note(
+                "code-sample-detected",
+                "warning — response contained source/test snippets; restate steps without including code"
             )
         if parse_failure_detected:
-            manual_notes.append(
-                _format_action_result(
-                    "agent-output-parse",
-                    "warning — response unparsable; skipped task instructions and continued to next item"
-                )
+            _append_guard_note(
+                "agent-output-parse",
+                "warning — response unparsable; skipped task instructions and continued to next item"
             )
 
         existing_notes = payload.get('notes')
@@ -2438,6 +2838,8 @@ def main():
             longform_flag = False
             non_action_streak = 0
             stop_prompt_sent = False
+            autoformatted_notes = 0
+            last_lint_remaining: Optional[int] = None
             for entry in existing_notes:
                 if not isinstance(entry, str):
                     continue
@@ -2446,6 +2848,11 @@ def main():
                     continue
                 reasoning_chars += len(text)
                 has_action = _has_action_token(text)
+                if not has_action:
+                    text, auto_fmt_applied = _autoformat_note_entry(text)
+                    if auto_fmt_applied:
+                        has_action = True
+                        autoformatted_notes += 1
                 if len(text) > NOTE_CHAR_LIMIT and not has_action:
                     longform_flag = True
                     full_text = text
@@ -2468,34 +2875,61 @@ def main():
                     non_action_streak = 0
                 else:
                     non_action_streak += 1
+                    remaining = max(0, MAX_CONSECUTIVE_NON_ACTION_NOTES - non_action_streak)
+                    if remaining <= 1 and last_lint_remaining != remaining:
+                        countdown = max(0, remaining)
+                        plural = '' if countdown == 1 else 's'
+                        warning_message = (
+                            "warning — "
+                            + ("only 1 narration note" if countdown == 1 else f"{countdown} narration note{plural}" if countdown > 1 else "next narration note")
+                            + " before the Plan/Focus/Commands/Notes guard triggers; switch back to Action/Result bullets now"
+                        )
+                        _append_guard_note(
+                            "notes-lint-warning",
+                            warning_message,
+                        )
+                        last_lint_remaining = countdown
                     if (
                         non_action_streak > MAX_CONSECUTIVE_NON_ACTION_NOTES
                         and not stop_prompt_sent
                     ):
-                        manual_notes.append(
-                            _format_action_result(
-                                "notes-stop-and-plan",
-                                "blocked — convert narration into actionable checklist tied to upcoming commands before continuing"
-                            )
+                        _append_guard_note(
+                            "notes-stop-and-plan",
+                            "blocked — convert narration into actionable checklist tied to upcoming commands before continuing"
                         )
                         stop_prompt_sent = True
             payload['notes'] = cleaned_notes
+            if autoformatted_notes:
+                suffix = "s" if autoformatted_notes > 1 else ""
+                _append_guard_note(
+                    "notes-autoformat",
+                    f"normalized {autoformatted_notes} narrative note{suffix} into Action/Result format to satisfy the response guard",
+                )
             if longform_flag:
-                manual_notes.append(
-                    _format_action_result(
-                        "notes-trim-longform",
-                        "blocked — detected long-form notes; saved full content under logs/notes/*.txt and kept note entries referencing those paths. Restate as Action/Result bullets pointing to the archived files."
-                    )
+                _append_guard_note(
+                    "notes-trim-longform",
+                    "blocked — detected long-form notes; saved full content under logs/notes/*.txt and kept note entries referencing those paths. Restate as Action/Result bullets pointing to the archived files."
                 )
             if reasoning_chars > NOTE_REASONING_BUDGET_CHARS:
-                manual_notes.append(
-                    _format_action_result(
-                        "notes-reasoning-budget",
-                        "warning — cumulative reasoning exceeded ~1.5k tokens; keep subsequent updates concise and command-linked"
-                    )
+                _append_guard_note(
+                    "notes-reasoning-budget",
+                    "warning — cumulative reasoning exceeded ~1.5k tokens; keep subsequent updates concise and command-linked"
                 )
         elif existing_notes is not None:
             payload['notes'] = []
+
+        if not _has_structured_response_sections(canonical_response_text):
+            canonical_response_text = _render_structured_response(
+                payload.get('plan') or [],
+                payload.get('focus') or [],
+                payload.get('commands') or [],
+                payload.get('notes') or [],
+            ) or canonical_response_text
+            if canonical_response_text != raw_text_original:
+                _append_guard_note(
+                    "response-autoformat",
+                    "info — original reply lacked Plan/Focus/Commands/Notes headings; generated canonical template automatically",
+                )
         actual_changes = 0
         documentation_only_run = False
         change_bytes = {}
@@ -2599,20 +3033,16 @@ def main():
                 except FileNotFoundError:
                     continue
                 except OSError as exc:
-                    manual_notes.append(
-                        _format_action_result(
-                            "plan-guard",
-                            f"warning — unable to remove forbidden {candidate_name}: {exc}"
-                        )
+                    _append_guard_note(
+                        "plan-guard",
+                        f"warning — unable to remove forbidden {candidate_name}: {exc}"
                     )
             if removed:
                 unique = ", ".join(sorted(set(removed)))
                 suffix = f" after {trigger_label}" if trigger_label else ""
-                manual_notes.append(
-                    _format_action_result(
-                        "plan-guard",
-                        f"auto-removed forbidden PLAN artifact(s): {unique}{suffix}"
-                    )
+                _append_guard_note(
+                    "plan-guard",
+                    f"auto-removed forbidden PLAN artifact(s): {unique}{suffix}"
                 )
 
         _remove_plan_artifacts("startup")
@@ -2991,6 +3421,24 @@ def main():
             push_proc = _run_git_command(['push', push_remote, branch_name])
             if push_proc.returncode != 0:
                 stderr_text = (push_proc.stderr or "").strip()
+                stdout_text = (push_proc.stdout or "").strip()
+                if _is_remote_access_error(stderr_text, stdout_text):
+                    summary = stderr_text or stdout_text or "see stderr"
+                    if len(summary) > 240:
+                        summary = summary[:237].rstrip() + "…"
+                    notes.append(
+                        _format_action_result(
+                            f"git push {push_remote} {branch_name}",
+                            f"skipped — remote {push_remote} unreachable ({summary}); commit remains local"
+                        )
+                    )
+                    notes.append(
+                        _format_action_result(
+                            "manual-push-reminder",
+                            f"once network/credentials are fixed, run `git push {push_remote} {branch_name}` manually."
+                        )
+                    )
+                    return True, notes
                 notes.append(
                     _format_action_result(
                         f"git push {push_remote} {branch_name}",
@@ -3514,6 +3962,13 @@ def main():
         _remove_plan_artifacts("post-changes")
 
         commands_field = payload.get('commands')
+        command_placeholder_details: List[Tuple[str, str]] = []
+        if isinstance(commands_field, list) and commands_field:
+            updated_commands, placeholder_details = _rewrite_command_placeholders(commands_field)
+            if placeholder_details:
+                payload['commands'] = updated_commands
+                commands_field = updated_commands
+                command_placeholder_details = placeholder_details
         original_command_report: List[str] = []
         if isinstance(commands_field, list):
             original_command_report = [item for item in commands_field if isinstance(item, str)]
@@ -3774,10 +4229,47 @@ def main():
         preexisting_pending_changes = False
         pending_changes_before: List[str] = []
         dirty_tree_blocked = False
+        workspace_block_reason: Optional[str] = None
         allow_dirty_tree = _env_flag("WORK_ON_TASKS_ALLOW_DIRTY", default=False)
         dirty_autofix_enabled = _env_flag("WORK_ON_TASKS_DIRTY_AUTOFIX", default=True)
         dirty_ignore_raw = os.environ.get("WORK_ON_TASKS_DIRTY_IGNORE", ".gpt-creator/**:.gitignore")
         dirty_ignore_patterns = [pattern for pattern in (segment.strip() for segment in dirty_ignore_raw.split(":")) if pattern]
+
+        dependency_clone_paths, dependency_owner_conflicts = _scan_dependency_directories(project_root)
+        if dependency_clone_paths:
+            sample = [
+                _friendly_relpath(path, project_root)
+                for path in dependency_clone_paths[:4]
+            ]
+            if len(dependency_clone_paths) > 4:
+                sample.append("…")
+            sample_text = ", ".join(sample) if sample else "repository root"
+            manual_notes.append(
+                _format_action_result(
+                    "dependency-clones",
+                    "blocked — remove manual copies/backups of dependency caches (node_modules/vendor/venv/etc). "
+                    f"Found: {sample_text}. Use the package manager instead of duplicating third-party directories."
+                )
+            )
+            dirty_tree_blocked = True
+            workspace_block_reason = workspace_block_reason or 'blocked-dependency-clones'
+        if dependency_owner_conflicts:
+            owner_samples = []
+            for path, owner in dependency_owner_conflicts[:4]:
+                owner_samples.append(f"{_friendly_relpath(path, project_root)} owned by {owner}")
+            if len(dependency_owner_conflicts) > 4:
+                owner_samples.append("…")
+            owner_text = "; ".join(owner_samples) if owner_samples else "unknown"
+            manual_notes.append(
+                _format_action_result(
+                    "dependency-ownership",
+                    "blocked — dependency cache ownership mismatch. Ensure gpt-creator and the agent run as the same unix user "
+                    f"(e.g., chown -R $(whoami) path). Offending paths: {owner_text}"
+                )
+            )
+            dirty_tree_blocked = True
+            if workspace_block_reason is None:
+                workspace_block_reason = 'blocked-dependency-ownership'
 
         def _should_ignore_dirty_entry(path_fragment: str) -> bool:
             if not dirty_ignore_patterns:
@@ -3841,6 +4333,8 @@ def main():
                     LAST_PENDING_CHANGES[cache_key] = snapshot
             else:
                 dirty_tree_blocked = True
+                if workspace_block_reason is None:
+                    workspace_block_reason = 'blocked-dirty-tree'
                 blocking_message = (
                     "blocked — working tree is dirty before running task commands; clean or stash local edits, "
                     "or set WORK_ON_TASKS_ALLOW_DIRTY=1 if you intentionally want to proceed. "
@@ -3948,10 +4442,13 @@ def main():
                     precheck_non_whitelisted.append(trimmed)
             if precheck_non_whitelisted:
                 sample = _truncate_command_text(precheck_non_whitelisted[0])
+                hint = ""
+                if any(cmd.strip().startswith("nl ") or " sed " in cmd or "| sed" in cmd for cmd in precheck_non_whitelisted):
+                    hint = " Use `python3 scripts/python/show_file_excerpt.py <path> --start 1 --end 120` instead of `nl|sed` pipelines."
                 manual_notes.append(
                     _format_action_result(
                         "command-precheck",
-                        f"blocked — filtered {len(precheck_non_whitelisted)} non-whitelisted command(s) (first: {sample})"
+                        f"blocked — filtered {len(precheck_non_whitelisted)} non-whitelisted command(s) (first: {sample}).{hint}"
                     )
                 )
                 manual_notes.append(
@@ -3967,33 +4464,17 @@ def main():
         command_failure_detected = False
         branch_merge_completed = False
 
-        if command_entries and not skip_command_processing:
-            placeholder_commands = [
-                cmd for cmd in command_entries
-                if isinstance(cmd, str) and ('...' in cmd or '…' in cmd)
-            ]
-        else:
-            placeholder_commands = []
-        if placeholder_commands:
-            sample = _truncate_command_text(placeholder_commands[0]) if placeholder_commands else "..."
-            manual_notes.append(
-                _format_action_result(
-                    "commands-fill-placeholders",
-                    f"blocked — {len(placeholder_commands)} command(s) still contain placeholder ellipses (first: {sample})"
-                )
+        if command_placeholder_details:
+            first_snippet, first_reason = command_placeholder_details[0]
+            fix_hint = ""
+            if "missing terminator" in first_reason:
+                fix_hint = " Fix: end heredocs with the same label, e.g., run: cat <<'EOF' > file … EOF."
+            _append_guard_note(
+                "commands-placeholder-detected",
+                f"auto-replaced {len(command_placeholder_details)} placeholder command(s) with '# TODO' entries; first snippet: {first_snippet} ({first_reason}).{fix_hint}"
             )
-            manual_notes.append(
-                _format_action_result(
-                    "commands-remediation",
-                    "replace `...` placeholders with the exact commands you intend to run before retrying"
-                )
-            )
-            skip_command_processing = True
-            command_entries = []
-            command_failure_detected = True
-            if not forced_canonical_status:
-                forced_canonical_status = 'RETRYABLE'
-                forced_legacy_status = 'retryable'
+            skip_command_processing = False
+            # Placeholder detection is informational; do not convert the run to retryable.
 
         def _working_tree_clean() -> bool:
             status = _run_git_command(['status', '--porcelain'])
@@ -4484,7 +4965,9 @@ def main():
                 summary_text = f"{label}: {total} command(s) blocked"
                 if detail:
                     summary_text = f"{summary_text} ({detail})"
-                fatal_entry = reason in FATAL_BLOCK_REASONS
+                fatal_entry = reason in FATAL_BLOCK_REASONS and reason not in { 'heredoc', 'heredoc-unterminated', 'placeholder-ellipsis' }
+                if reason in {'heredoc', 'heredoc-unterminated', 'placeholder-ellipsis'}:
+                    fatal_entry = False
                 if fatal_entry:
                     fatal_reasons_present = True
                 prefix = "blocked" if fatal_entry else "warning"
@@ -4504,8 +4987,8 @@ def main():
             if 'placeholder-ellipsis' in blocked_command_counts:
                 manual_notes.append(
                     _format_action_result(
-                        "commands-fill-placeholders",
-                        "replace `...` placeholders with the exact commands you intend to run before retrying"
+                        "commands-placeholders",
+                        "warning — placeholder command(s) detected; TODO entries were inserted automatically; rerun guards once real commands are ready"
                     )
                 )
             if fatal_reasons_present:
@@ -4515,7 +4998,6 @@ def main():
                         "replace blocked commands with approved workflows (gpt-creator apply-block, python3 scripts/python/write_block.py, pnpm --filter …) before retrying"
                     )
                 )
-                command_failure_detected = True
 
         declared_commands: List[str] = payload.get('commands') or []
         commands_missing = False
@@ -4535,7 +5017,6 @@ def main():
                             f"blocked — the following executed command(s) were not captured in the auto-generated log: {joined}"
                         )
                     )
-                    command_failure_detected = True
                     if not allow_drift:
                         commands_drift_fatal = True
             elif original_command_report:
@@ -4551,7 +5032,6 @@ def main():
                             f"blocked — the following executed command(s) were not listed under `Commands`: {joined}"
                         )
                     )
-                    command_failure_detected = True
                     if not allow_drift:
                         commands_drift_fatal = True
             elif commands_to_report or blocked_command_total or written or patched or change_bytes or command_failure_detected:
@@ -4562,7 +5042,6 @@ def main():
                         "blocked — repository shows edits or executed commands but none were reported under `Commands`; rerun and list each command that edited files, ran tools, or staged changes."
                     )
                 )
-                command_failure_detected = True
                 if not allow_drift:
                     commands_drift_fatal = True
 
@@ -4578,11 +5057,9 @@ def main():
                 snippet = text_pattern.replace("\n", "\\n")
                 if len(snippet) > 120:
                     snippet = snippet[:117] + "..."
-                manual_notes.append(
-                    _format_action_result(
-                        "regex-guard",
-                        f"warning — pattern {snippet!r} invalid; treated as literal match"
-                    )
+                _append_guard_note(
+                    "regex-guard",
+                    f"warning — pattern {snippet!r} invalid; treated as literal match"
                 )
 
         def _refresh_documentation_assets(doc_paths: Sequence[str]) -> List[str]:
@@ -4636,21 +5113,21 @@ def main():
 
             catalog_cmd: List[str]
             doc_catalog_helper_local = (
-                globals().get("doc_catalog_helper")
-                or os.getenv("GC_DOC_CATALOG_PY", "").strip()
-                or os.getenv("GC_DOC_CATALOG_HELPER", "").strip()
+                os.getenv("GC_DOC_CATALOG_HELPER", "").strip()
                 or os.getenv("doc_catalog", "").strip()
             )
+            default_doc_catalog = Path("scripts/python/doc_catalog_refresh.py").resolve()
             doc_indexer_helper_local = (
                 globals().get("doc_indexer_helper")
                 or os.getenv("GC_DOC_INDEXER_PY", "").strip()
                 or os.getenv("GC_DOC_INDEXER_HELPER", "").strip()
                 or os.getenv("doc_indexer", "").strip()
             )
-            if doc_catalog_helper_local:
+            helper_path = doc_catalog_helper_local or (str(default_doc_catalog) if default_doc_catalog.exists() else "")
+            if helper_path:
                 catalog_cmd = [
                     python_bin,
-                    doc_catalog_helper_local,
+                    helper_path,
                     "--project-root",
                     str(project_root),
                     "--staging-dir",
@@ -4702,6 +5179,12 @@ def main():
                     _format_action_result(
                         "doc-catalog-refresh",
                         f"warning — doc catalog refresh failed (exit {catalog_proc.returncode}); {_shorten(diagnostics)}",
+                    )
+                )
+                notes.append(
+                    _format_action_result(
+                        "doc-catalog-refresh-remediation",
+                        "run `python3 scripts/python/doc_catalog_query.py list --limit 10` or `gpt-creator scan` to regenerate the catalog before retrying",
                     )
                 )
                 return notes
@@ -4885,12 +5368,9 @@ def main():
         strict_validation = os.environ.get("WORK_ON_TASKS_STRICT_VALIDATION", "").strip().lower() in {"1", "true", "yes"}
         if dirty_tree_blocked:
             forced_canonical_status = 'BLOCKED'
-            forced_legacy_status = 'blocked-dirty-tree'
+            forced_legacy_status = workspace_block_reason or 'blocked-dirty-tree'
         elif strict_validation:
-            if 'placeholder-ellipsis' in blocked_command_counts:
-                forced_canonical_status = 'RETRYABLE'
-                forced_legacy_status = 'retryable'
-            elif command_failure_detected:
+            if command_failure_detected:
                 forced_canonical_status = 'RETRYABLE'
                 forced_legacy_status = 'retryable'
             elif commands_missing:
@@ -4938,9 +5418,11 @@ def main():
             payload.get('focus') or [],
             payload.get('commands') or [],
             payload.get('notes') or [],
-            raw_text_original,
+            canonical_response_text,
             canonical_status,
         )
+
+        _flush_guard_events()
 
         for entry in manual_notes:
             lowered_entry = entry.lower()
@@ -5876,7 +6358,7 @@ def main():
                 f"- JSON catalog (doc/snippet map) at `{doc_catalog_path_str}` keeps scripted lookups fast while prompts stay lean."
             )
             documentation_asset_lines.append(
-                "- Path is also exported as `$GC_DOC_CATALOG_PATH`; quick listing: `python3 -c \"import json, os; data=json.load(open(os.environ['GC_DOC_CATALOG_PATH'])); print('\\n'.join(sorted(data.get('documents', {}))))\"`"
+                "- Path is also exported as `$GC_DOC_CATALOG_PATH`; quick listing: `python3 scripts/python/doc_catalog_query.py list --limit 10` (falls back to repo scan when the SQLite DB is missing)."
             )
         else:
             documentation_asset_lines.append(
@@ -5932,7 +6414,7 @@ def main():
         _BUILTIN_WORK_PROMPT_FALLBACK_LINES: List[str] = [
             "## work-on-tasks Prompt",
             "- Load the task details and acceptance criteria from the context section.",
-            "- Consult the documentation catalog or search hits before modifying files.",
+                "- Consult the documentation catalog (`python3 scripts/python/doc_catalog_query.py search|show …`) before modifying files.",
             "- Outline a concise plan (<=3 bullets focused on actions), execute the required edits, and capture final status notes with clear pass/fail decisions.",
             "- Never create files named `PLAN.md` (or any case variant); summarize plans inline instead of emitting that artifact.",
             "- Apply changes by editing files directly via shell commands (no diff/patch output).",
@@ -6273,9 +6755,9 @@ def main():
             lines.append('- Schema quick look: sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables" or ".schema documentation"')
             lines.append("- Vector DB ($GC_DOCUMENTATION_INDEX_PATH) table `vectors`: embeddings per surface (embedding_id PK, doc_id, section_id, vector_json, dims, metadata_json, updated_at).")
             lines.append("Common catalog commands (wrap inner commands in single quotes so the environment variables remain quoted):")
-            lines.append('- List recent docs: bash -lc \'python3 "$GC_DOC_CATALOG_PY" list --db "$GC_DOCUMENTATION_DB_PATH" --limit 10\'')
-            lines.append('- Full-text search: bash -lc \'python3 "$GC_DOC_CATALOG_PY" search --db "$GC_DOCUMENTATION_DB_PATH" --query "lockout" --limit 15\'')
-            lines.append('- Show document by id: bash -lc \'python3 "$GC_DOC_CATALOG_PY" show --db "$GC_DOCUMENTATION_DB_PATH" --doc-id <id>\'')
+            lines.append('- List recent docs: python3 scripts/python/doc_catalog_query.py list --limit 10')
+            lines.append('- Full-text search: python3 scripts/python/doc_catalog_query.py search --query "lockout" --limit 15')
+            lines.append('- Show document by id: python3 scripts/python/doc_catalog_query.py show DOC-1234ABCD --start 500 --end 540')
             lines.append("- Docdex-powered search/snippets: the doc catalog helper automatically talks to the running docdex daemon—use the commands above instead of `rg`/`cat` when you need to locate docs or quote a snippet.")
             lines.append('- Rebuild semantic index: bash -lc \'python3 "$GC_DOC_INDEXER_PY" rebuild --db "$GC_DOCUMENTATION_DB_PATH" --out "$GC_DOC_VECTOR_INDEX_PATH"\'')
             lines.append('- Register or sync discovery TSV: bash -lc \'python3 "$GC_DOC_REGISTRY_PY" register --db "$GC_DOCUMENTATION_DB_PATH" --tsv ".gpt-creator/manifests/<latest>.tsv"\'')
@@ -6310,13 +6792,13 @@ def main():
             lines.append('    "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"')
             lines.append("- Schema quick look:")
             lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables"')
-            lines.append("- When the docdex daemon is running, `python3 \"$GC_DOC_CATALOG_PY\" search/show ...` routes through it—prefer that helper over ad-hoc `rg` or `cat` when you need doc snippets.")
+            lines.append("- When the docdex daemon is running, `python3 scripts/python/doc_catalog_query.py search|show ...` routes through it—prefer that helper over ad-hoc `rg` or `cat` when you need doc snippets.")
             if not documentation_db_available:
                 lines.append("- (Documentation catalog helpers unavailable without the SQLite database; regenerate with `gpt-creator scan` before running catalog commands.)")
             else:
                 missing_helpers: List[str] = []
                 if not has_doc_catalog_helper:
-                    missing_helpers.append("$GC_DOC_CATALOG_PY")
+                    missing_helpers.append('doc_catalog_refresh.py or GC_DOC_CATALOG_HELPER')
                 if not has_doc_registry_helper:
                     missing_helpers.append("$GC_DOC_REGISTRY_PY")
                 if not has_doc_indexer_helper:
@@ -7138,7 +7620,7 @@ def main():
                 doc_id_token = shlex.quote(example_doc_id)
             lines.append(
                 "Use the catalog below to pick a section, then run "
-                f"`bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" show --db \"$GC_DOCUMENTATION_DB_PATH\" --doc-id {doc_id_token}'` for a narrow excerpt. "
+                f"`python3 scripts/python/doc_catalog_query.py show {doc_id_token} --start 1 --end 200` for a narrow excerpt. "
                 "Avoid reading the raw documentation files directly."
             )
             for entry in doc_catalog_entries[:6]:
@@ -7454,10 +7936,13 @@ def main():
                 "## Helper Checklist (before exploring code or docs)",
                 "- Map the repo once via `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus apps/api` (helper is auto-cloned under .gpt-creator/shims/python/) instead of issuing repetitive `ls` commands.",
                 "- When you need to inspect code, run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
-                "- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.",
+                "- For SDS/PDR context or migrations, run `python3 scripts/python/doc_catalog_query.py search --query \"<term>\" --limit 5` instead of opening doc files or grepping blindly.",
                 "- Validate REST endpoints via manifests and `python3 \"$GC_REST_CHECK_RUNNER_PY\" manifest.yaml` instead of crafting ad-hoc HTTP scripts.",
                 "- Preview file ranges safely using `python3 \"$GC_SAFE_SHOW_FILE_PY\" <path> --suggest` before `sed`/`cat`, so you avoid missing-file retries.",
+                "- Need a quick view of specific lines? Run `python3 scripts/python/show_file_excerpt.py <path> --start 1 --end 200` instead of `nl|sed` pipelines.",
                 "- Need a quick Python helper? Create /tmp/snippet.py and run `python3 \"$GC_RUN_SNIPPET_PY\" /tmp/snippet.py`; the script refuses placeholder-only heredocs and keeps commands deterministic.",
+                '- Building command entries? Run `python3 scripts/python/command_scaffold.py "label" \'cd apps/api\' \'pnpm test\'` to emit a ready-to-paste "bash -lc ..." block without ellipses.',
+                "- Monitoring guardrail hits? Run `python3 scripts/python/guardrails_report.py --json` (or `--fail-on-placeholder N`) to summarize events or fail CI when placeholders persist.",
             ]
         )
 
@@ -7465,11 +7950,14 @@ def main():
             "## Instructions",
             "### Response Format",
             "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
+            "- Keep notes in Action/Result form; when narration is unavoidable, pipe it through `python3 scripts/python/summarize_note.py \"label\"` and paste the emitted summary pointer.",
             "- Write each heading exactly as shown (e.g., `Plan` on its own line) with no surrounding Markdown styling or punctuation.",
             "- Keep each section to short bullet items or terse sentences; skip JSON, code fences, and closing summaries.",
             "- Do not include source code, config snippets, or test case bodies; describe changes and evidence at a high level only.",
             "- Make repository edits by listing the exact shell commands you will run under `Commands` (use `bash` to write files when needed).",
+            '  Example: `bash -lc "python3 scripts/python/summarize_note.py "label" <<\'EOF\' ... EOF"`',
             "- Ensure the `Commands` section lists actionable shell commands; if none are required, include a single bullet `- (none)` beneath the heading.",
+                "- Placeholders (`...`, `…`, `cat <<'EOF'` without a closing `EOF`, etc.) immediately trigger the commands-fill-placeholders guard—fully expand every command before submitting.",
             "- Do not generate diffs or patches; apply edits directly through those shell commands.",
             "- Primary objective: ship the code required by the task acceptance criteria; avoid documentation rewrites or reorganizing prompts.",
             "- If an acceptance criterion demands heavy setup or environments the agent cannot access, acknowledge the gap and continue focusing on the core code changes.",
@@ -7478,7 +7966,7 @@ def main():
             "- Push your work once committed (e.g., `git push origin <branch>`), and include that command under `Commands` as well.",
             "- Capture blockers or follow-ups in `Notes`.",
             "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",
-            "- Use `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` (or the `show` variant) for SDS/PDR context instead of opening doc files directly.",
+            "- Use `python3 scripts/python/doc_catalog_query.py search --query \"<term>\" --limit 5` (or `show DOC-ID --start 500 --end 520`) for SDS/PDR context instead of opening doc files directly.",
             "- Need a repo overview? Run `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus <path>` (see `assets/templates/help/repo_outline_usage.txt`).",
             "- Searching for symbols? Run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern <needle> --paths <dirs> [--ext .ts]` instead of repo-wide `rg`/`python os.walk` loops (`assets/templates/help/targeted_search_usage.txt`).",
             "- Validating REST endpoints? Define a manifest and run `python3 \"$GC_REST_CHECK_RUNNER_PY\" <manifest.yaml>` (`assets/templates/help/rest_check_runner_usage.txt`).",
@@ -7514,6 +8002,7 @@ def main():
                 "- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.",
                 "- Keep command usage lean and focused on assets needed for the acceptance criteria.",
                 "- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.",
+                "- Never copy, rename, or vend manual backups of dependency caches (node_modules, vendor, Pods, venv/.venv, dist/build/target, pkg/mod, third_party); treat third-party modules as read-only and rely on the package manager instead.",
                 "- Tackle documentation edits only after the related code changes land, and only when the documentation would be inaccurate without the update.",
                 "- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.",
             ]

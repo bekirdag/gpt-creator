@@ -157,7 +157,28 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
    - Generated code lands in `/apps/api`, `/apps/web`, `/apps/admin`, `/db`, `/docker`.
    - A `.env` file with random database credentials is created automatically; reuse it for local scripts and CI secrets.
   - The automated testing stage has been removed; gpt-creator now focuses exclusively on code creation.
-   - Templates live under `project_templates/`. Add subdirectories (optionally with `tags.txt` or `template.json`) to seed new projects; `--template auto` attempts to match the staged RFP/PDR, or pass `--template <name>` / `--skip-template` to override.
+  - Templates live under `project_templates/`. Add subdirectories (optionally with `tags.txt` or `template.json`) to seed new projects; `--template auto` attempts to match the staged RFP/PDR, or pass `--template <name>` / `--skip-template` to override.
+
+### Contributor Quick Reference
+
+- **Response template:** Every assistant reply must use the `Plan`, `Focus`, `Commands`, `Notes` headings (each on its own line). Keep the sections terse—bulleted steps with `Action: … | Result: …` phrasing where possible.
+- **Narration limits:** The runtime auto-warns after two narration-style notes and will block on the third. Convert prose into checklist bullets immediately; if you need to preserve detail, pipe it through `python3 scripts/python/summarize_note.py "label"` and paste the generated summary pointer.
+- **Command helper:** Use `python3 scripts/python/command_scaffold.py "label" 'cd apps/api' 'pnpm test'` to produce a placeholder-free `bash -lc` entry instead of typing ellipses.
+- **Code samples:** Instead of pasting diffs or source blobs, reference the touched paths (e.g., ``apps/api/src/foo.ts:42``). The response guard flags raw code fences and will auto-format them away.
+- **Guard telemetry:** If any guard triggers, check `logs/guardrails/events.jsonl` (or the `guard-telemetry` note) to see which rule fired and how often. Run `python3 scripts/python/guardrails_report.py --json` (or `--fail-on-placeholder N`) to aggregate hits or fail CI when placeholders pop up.
+- **Final reminder:** The prompt banner reiterates the response-format rules before every run—use it as a checklist before submitting so guardrails never fire in the first place. See `docs/onboarding/response_format.md` for the full guide.
+
+#### Command Writing Checklist
+
+- No placeholders: commands must be fully formed (no `...` or `…`).
+- Heredocs require matching terminators (`cat <<'EOF' ... EOF`).
+- Prefer `python3 scripts/python/command_scaffold.py` to generate `bash -lc` entries.
+- Use `python3 scripts/python/show_file_excerpt.py <path> --start 1 --end 120` for quick file views instead of `nl`/`sed` pipelines.
+- Re-run the `commands-fill-placeholders` guard (apply phase) if you edit commands after tests to ensure no TODO markers remain.
+
+#### Documentation Catalog Helper
+
+- Query documentation via `python3 scripts/python/doc_catalog_query.py list|search|show ...`; it wraps `doc_catalog.py` with supported flags and falls back to repo scanning when the SQLite DB is absent. No need to remember the raw `$GC_DOC_CATALOG_PY` command.
 
    To drive the entire flow (PDR → SDS → Jira tasks → stack generation) in one shot:
 

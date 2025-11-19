@@ -22,12 +22,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Sequence, Tuple
 
+_DOCDEX_IMPORT_ERROR: Optional[str] = None
 try:
     import docdex_client  # type: ignore
-except Exception:  # pragma: no cover - optional dependency
+except Exception as err:  # pragma: no cover - optional dependency
     docdex_client = None
+    _DOCDEX_IMPORT_ERROR = str(err)
+else:  # pragma: no cover - import success path exercised in integration
+    _DOCDEX_IMPORT_ERROR = None
 
 DocDexError = getattr(docdex_client, "DocDexError", RuntimeError) if docdex_client else RuntimeError
+
+_DOCDEX_STATUS_LOGGED = False
+_DOCDEX_FALLBACK_LOGGED = False
+
+
+def _log_docdex(message: str) -> None:
+    print(f"[doc_catalog] {message}", file=sys.stderr)
 
 
 DEFAULT_DIRECTORIES = ("docs",)
@@ -92,7 +103,25 @@ def _display_path(doc: Document) -> str:
 
 
 def _docdex_available() -> bool:
-    return docdex_client is not None
+    global _DOCDEX_STATUS_LOGGED
+    if docdex_client is None:
+        if not _DOCDEX_STATUS_LOGGED:
+            reason = _DOCDEX_IMPORT_ERROR or "docdex_client module missing"
+            _log_docdex(f"docdex integration disabled: {reason}")
+            _DOCDEX_STATUS_LOGGED = True
+        return False
+    if not _DOCDEX_STATUS_LOGGED:
+        _log_docdex("docdex integration enabled; routing doc catalog queries through the daemon")
+        _DOCDEX_STATUS_LOGGED = True
+    return True
+
+
+def _note_docdex_fallback(reason: str) -> None:
+    global _DOCDEX_FALLBACK_LOGGED
+    if _DOCDEX_FALLBACK_LOGGED:
+        return
+    _log_docdex(f"docdex lookup failed ({reason}); falling back to SQLite/filesystem catalog")
+    _DOCDEX_FALLBACK_LOGGED = True
 
 
 def _resolve_repo_root(raw: Optional[str]) -> Path:
@@ -149,7 +178,8 @@ def _docdex_search(query: str, limit: Optional[int], repo_root: Path) -> list[Do
             limit=max_hits,
             repo_root=repo_root,
         )
-    except Exception:
+    except Exception as err:
+        _note_docdex_fallback(f"search error: {err}")
         return []
     docs: list[Document] = []
     for hit in payload.get("hits", []):
@@ -171,7 +201,8 @@ def _docdex_fetch_document(doc_id: str, repo_root: Path) -> Optional[Tuple[Docum
             repo_root=repo_root,
             window=200,
         )
-    except Exception:
+    except Exception as err:
+        _note_docdex_fallback(f"snippet error: {err}")
         return None
     doc_meta = payload.get("doc") or {}
     rel_path_value = (doc_meta.get("rel_path") or doc_meta.get("doc_id") or "").strip()

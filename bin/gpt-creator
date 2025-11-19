@@ -594,6 +594,9 @@ gc_setup_doc_catalog_helpers() {
   export GC_DOC_INDEXER_PY="$helper_path"
   ensure_helper_compat "$helper_path" "doc_indexer.py"
 
+  helper_path="$(gc_clone_python_tool "docdex_client.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  ensure_helper_compat "$helper_path" "docdex_client.py"
+
   helper_path="$(gc_clone_python_tool "repo_outline.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   export GC_REPO_OUTLINE_PY="$helper_path"
   ensure_helper_compat "$helper_path" "repo_outline.py"

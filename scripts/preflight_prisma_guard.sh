@@ -189,14 +189,28 @@ for schema_path in "${schema_paths[@]}"; do
       continue
     fi
     read -r -a runner_parts <<< "$runner_cmd"
-    set +e
-    prisma_output=""
-    prisma_output="$("${runner_parts[@]}" migrate diff \
-      --from-migrations "$migrations_dir" \
-      --to-schema-datamodel "$schema_path" \
-      --exit-code 2>&1)"
-    status=$?
-    set -e
+    prisma_flag="--to-schema"
+    while true; do
+      set +e
+      prisma_output=""
+      prisma_output="$("${runner_parts[@]}" migrate diff \
+        --from-migrations "$migrations_dir" \
+        "$prisma_flag" "$schema_path" \
+        --exit-code 2>&1)"
+      status=$?
+      set -e
+      if (( status != 0 )); then
+        if [[ "$prisma_flag" == "--to-schema" ]] && [[ "$prisma_output" == *"Unknown argument \"--to-schema\""* || "$prisma_output" == *"Did you mean '--to-schema-datamodel'"* ]]; then
+          prisma_flag="--to-schema-datamodel"
+          continue
+        fi
+        if [[ "$prisma_flag" == "--to-schema-datamodel" ]] && [[ "$prisma_output" == *"'--to-schema-datamodel' was removed"* || "$prisma_output" == *"Please use \`--[from/to]-schema\` instead"* ]]; then
+          prisma_flag="--to-schema"
+          continue
+        fi
+      fi
+      break
+    done
     if (( status == 0 )); then
       schema_ok=1
       break

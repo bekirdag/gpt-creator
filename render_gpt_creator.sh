@@ -1151,6 +1151,7 @@ render_task_end() {
 
   printf "    %s%s%s\n\n" "$(fg 245)" "░░░░░ END OF THE TASK WORK ░░░░░" "$(reset)"
   printf "────────────────────────────────────────────────────────────\n\n"
+  printf "%s" "$(reset)"  # keep trailing newline from being trimmed by downstream loggers
 }
 
 render_epic_overview() {

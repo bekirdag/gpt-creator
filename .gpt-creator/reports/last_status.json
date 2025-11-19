@@ -1,0 +1,25 @@
+{
+  "task": {
+    "id": "",
+    "slug": "",
+    "number": ""
+  },
+  "status": "RETRYABLE",
+  "timestamp": "20251119T075543Z",
+  "logs": {
+    "directory": ".gpt-creator/reports/task/20251119T075543Z",
+    "errors": ".gpt-creator/reports/task/20251119T075543Z/errors.log",
+    "next_commands": ".gpt-creator/reports/task/20251119T075543Z/next-commands.txt",
+    "commands": ".gpt-creator/reports/task/20251119T075543Z/commands.log",
+    "tests": ".gpt-creator/reports/task/20251119T075543Z/tests.log",
+    "acceptance": ".gpt-creator/reports/task/20251119T075543Z/acceptance.txt",
+    "report": ".gpt-creator/reports/task/20251119T075543Z/task_report.md",
+    "status": ".gpt-creator/reports/task/20251119T075543Z/status.json"
+  },
+  "commands": [],
+  "acceptance": {
+    "items": [],
+    "source_path": "",
+    "log_path": ".gpt-creator/reports/task/20251119T075543Z/acceptance.txt"
+  }
+}

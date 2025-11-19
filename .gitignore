@@ -105,3 +105,5 @@ tmp/*
 
 .gpt-creator/python-env/
 .gpt-creator/python-env/**/*
+# gpt-creator
+.gpt-creator/cache/

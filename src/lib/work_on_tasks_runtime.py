@@ -8,14 +8,230 @@ import os
 import sqlite3
 import sys
 import json
+import re
 from pathlib import Path
-from typing import Any, Dict, Tuple, Optional, List
+from typing import Any, Dict, Tuple, Optional, List, Set
 import importlib
+try:  # pragma: no cover - POSIX-only helper
+    import pwd  # type: ignore
+except ImportError:  # pragma: no cover - Windows fallback
+    pwd = None  # type: ignore
 
 docdex_client = None  # type: ignore
 _docdex_logged_success = False
 
 LAST_PENDING_CHANGES: Dict[str, Tuple[str, ...]] = {}
+
+DEPENDENCY_DIR_BASENAMES = {
+    "node_modules",
+    "vendor",
+    "deps",
+    "packages",
+    "site-packages",
+    "venv",
+    ".venv",
+    "env",
+    "envs",
+    "virtualenv",
+    "dist",
+    "build",
+    "target",
+    "pods",
+    "third_party",
+    "buck-out",
+    "bazel-out",
+    "cmake-build-debug",
+    "cmake-build-release",
+    "deriveddata",
+    ".gradle",
+    ".m2",
+    ".cargo",
+    ".dart_tool",
+    "gopath",
+    "pkgcache",
+    "pkg-cache",
+    ".nuget",
+}
+
+DEPENDENCY_CLONE_SUFFIXES = (
+    ".orig",
+    ".backup",
+    ".bak",
+    ".copy",
+    ".tmp",
+    ".temp",
+    ".old",
+    ".hold",
+    "-orig",
+    "-backup",
+    "-bak",
+    "-copy",
+    "-tmp",
+    "-temp",
+    "-old",
+    "-hold",
+    "_orig",
+    "_backup",
+    "_bak",
+    "_copy",
+    "_tmp",
+    "_temp",
+    "_old",
+    "_hold",
+)
+
+DEPENDENCY_CLONE_PREFIXES = (
+    "copy_of_",
+    "copy-of-",
+    "copy_",
+    "copy-",
+    "backup_",
+    "backup-",
+    "tmp_",
+    "tmp-",
+    "temp_",
+    "temp-",
+    "old_",
+    "old-",
+    "zzz_",
+    "zzz-",
+    "save_",
+    "save-",
+    "snapshot_",
+    "snapshot-",
+)
+
+
+def _has_action_token(text: str) -> bool:
+    lowered = text.lower()
+    if any(token in lowered for token in ('action:', 'result:', 'command', 'next:', 'plan:', 'test:')):
+        return True
+    stripped = text.strip()
+    stripped_lower = stripped.lower()
+    if re.match(r'^(plan|focus|commands|notes)\b', stripped_lower):
+        return True
+    if not stripped:
+        return False
+    if stripped[0] in {'-', '*', '•'}:
+        return True
+    if stripped[:1].isdigit():
+        suffix = stripped[1:2]
+        if suffix in {'.', ')', ':'} or (suffix == ' ' and len(stripped) > 2):
+            return True
+    if ' -> ' in stripped:
+        return True
+    return False
+
+
+def _autoformat_note_entry(text: str) -> Tuple[str, bool]:
+    """Coerce narration into Action/Result format so guards are satisfied."""
+    stripped = text.strip()
+    if not stripped:
+        return text, False
+    if _has_action_token(stripped):
+        return text, False
+    normalized = re.sub(r"\s+", " ", stripped)
+    preview = normalized[:80].strip()
+    preview = preview.rstrip(".,;:·•-") or "note"
+    words = [w for w in re.split(r"[^a-z0-9]+", preview.lower()) if w]
+    slug = "-".join(words[:3]) if words else "note"
+    action_label = f"auto-note:{slug}" if slug else "auto-note"
+    formatted = f"Action: {action_label} | Result: {stripped}"
+    return formatted, True
+
+
+def _owner_name_for_uid(uid: int) -> str:
+    if pwd is None:  # pragma: no cover - Windows fallback
+        return f"uid {uid}"
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:  # pragma: no cover - best effort
+        return f"uid {uid}"
+
+
+def _friendly_relpath(path: Path, project_root: Path) -> str:
+    try:
+        return str(path.relative_to(project_root))
+    except ValueError:
+        return str(path)
+
+
+def _normalize_dependency_dir_name(entry_name: str) -> Tuple[Optional[str], bool]:
+    lowered = entry_name.strip().lower()
+    if not lowered:
+        return None, False
+    candidate = lowered
+    clone_detected = False
+    changed = True
+    while changed:
+        changed = False
+        for suffix in DEPENDENCY_CLONE_SUFFIXES:
+            if candidate.endswith(suffix) and len(candidate) > len(suffix):
+                candidate = candidate[: -len(suffix)]
+                clone_detected = True
+                changed = True
+                break
+        if changed:
+            continue
+        for prefix in DEPENDENCY_CLONE_PREFIXES:
+            if candidate.startswith(prefix) and len(candidate) > len(prefix):
+                candidate = candidate[len(prefix):]
+                clone_detected = True
+                changed = True
+                break
+    trimmed = candidate.strip("_-.")
+    if trimmed in DEPENDENCY_DIR_BASENAMES:
+        return trimmed, clone_detected
+    return None, False
+
+
+def _scan_dependency_directories(project_root: Path, *, max_depth: int = 5) -> Tuple[List[Path], List[Tuple[Path, str]]]:
+    suspicious_clones: List[Path] = []
+    ownership_issues: List[Tuple[Path, str]] = []
+    if not project_root.exists():
+        return suspicious_clones, ownership_issues
+    if not hasattr(os, "getuid"):
+        return suspicious_clones, ownership_issues
+    current_uid = os.getuid()
+    visited: Set[Path] = set()
+    stack: List[Tuple[Path, int]] = [(project_root, 0)]
+    skip_names = {".git", ".hg", ".svn", ".gpt-creator"}
+    while stack:
+        base, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        try:
+            entries = list(base.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if name in skip_names:
+                continue
+            try:
+                resolved = entry.resolve()
+            except OSError:
+                resolved = entry
+            if resolved in visited:
+                continue
+            visited.add(resolved)
+            normalized_name, clone_detected = _normalize_dependency_dir_name(name)
+            if normalized_name:
+                try:
+                    stat_result = entry.stat()
+                except OSError:
+                    stat_result = None
+                if clone_detected:
+                    suspicious_clones.append(entry)
+                if stat_result is not None and stat_result.st_uid != current_uid:
+                    owner_label = _owner_name_for_uid(stat_result.st_uid)
+                    ownership_issues.append((entry, owner_label))
+                continue
+            if depth + 1 <= max_depth:
+                stack.append((entry, depth + 1))
+    return suspicious_clones, ownership_issues
 
 _HELPER_DIR = Path(__file__).resolve().parents[2] / "scripts" / "python"
 if _HELPER_DIR.exists():
@@ -823,26 +1039,6 @@ def main():
         def _format_action_result(action: str, result: str) -> str:
             return f"Action: {action.strip()} | Result: {result.strip()}"
 
-        def _has_action_token(text: str) -> bool:
-            lowered = text.lower()
-            if any(token in lowered for token in ('action:', 'result:', 'command', 'next:', 'plan:', 'test:')):
-                return True
-            stripped = text.strip()
-            stripped_lower = stripped.lower()
-            if re.match(r'^(plan|focus|commands|notes)\b', stripped_lower):
-                return True
-            if not stripped:
-                return False
-            if stripped[0] in {'-', '*', '•'}:
-                return True
-            if stripped[:1].isdigit():
-                suffix = stripped[1:2]
-                if suffix in {'.', ')', ':'} or (suffix == ' ' and len(stripped) > 2):
-                    return True
-            if ' -> ' in stripped:
-                return True
-            return False
-
 
         apply_timeout_env = os.environ.get("GC_APPLY_PHASE_TIMEOUT_SECONDS", "1500")
         try:
@@ -861,6 +1057,7 @@ def main():
         except UnicodeDecodeError:
             raw_text_original = output_path.read_text(encoding='utf-8', errors='replace')
         raw = raw_text_original.strip()
+        canonical_response_text = raw_text_original
         if not raw:
             print("empty-output", flush=True)
             sys.exit(0)
@@ -989,8 +1186,10 @@ def main():
                 'notes': ["Recovered edits from apply_patch blocks in the response."],
             }
 
+        REQUIRED_RESPONSE_SECTIONS = ("plan", "focus", "commands", "notes")
+
         def _extract_section_lines(text: str):
-            headings = {"plan", "focus", "commands", "notes", "changes"}
+            headings = set(REQUIRED_RESPONSE_SECTIONS) | {"changes"}
             sections: Dict[str, List[str]] = {}
             current = None
             in_fence = False
@@ -1544,6 +1743,10 @@ def main():
         patched = []
         noop_entries = []
         manual_notes = []
+
+        def _append_guard_note(code: str, message: str) -> None:
+            manual_notes.append(_format_action_result(code, message))
+            _record_guard_event(code, message)
         error_records: List[str] = []
         required_scripts: List[str] = []
         reports_base = project_root / ".gpt-creator" / "reports"
@@ -2057,6 +2260,56 @@ def main():
                         normalized.append(str(entry))
             return normalized
 
+        def _has_structured_response_sections(text: str) -> bool:
+            if not text or not text.strip():
+                return False
+            sections = _extract_section_lines(text)
+            if not sections:
+                return False
+            for required in REQUIRED_RESPONSE_SECTIONS:
+                if required not in sections:
+                    return False
+            heading_order: List[int] = []
+            seen_labels: Set[str] = set()
+            for line in text.splitlines():
+                candidate = line.strip().rstrip(':').strip()
+                normalized = candidate.strip("*_# ").lower()
+                if normalized in REQUIRED_RESPONSE_SECTIONS and normalized not in seen_labels:
+                    seen_labels.add(normalized)
+                    heading_order.append(REQUIRED_RESPONSE_SECTIONS.index(normalized))
+            return heading_order[:len(REQUIRED_RESPONSE_SECTIONS)] == list(range(len(REQUIRED_RESPONSE_SECTIONS)))
+
+        def _render_structured_response(
+            plan_entries: Sequence[object],
+            focus_entries: Sequence[object],
+            command_entries: Sequence[object],
+            note_entries: Sequence[object],
+        ) -> str:
+            buffer: List[str] = []
+            _append_section_block(buffer, "Plan", _normalize_section_entries(plan_entries))
+            _append_section_block(buffer, "Focus", _normalize_section_entries(focus_entries))
+            _append_section_block(
+                buffer,
+                "Commands",
+                _normalize_section_entries(command_entries),
+                preserve_indent=True,
+            )
+            _append_section_block(buffer, "Notes", _normalize_section_entries(note_entries))
+            while buffer and buffer[-1] == "":
+                buffer.pop()
+            return ("\n".join(buffer).rstrip() + "\n") if buffer else ""
+
+        guard_events: List[Dict[str, str]] = []
+
+        def _record_guard_event(code: str, detail: str) -> None:
+            guard_events.append(
+                {
+                    "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "code": code,
+                    "detail": detail,
+                }
+            )
+
         def _append_section_block(
             buffer: List[str],
             title: str,
@@ -2077,6 +2330,41 @@ def main():
             else:
                 buffer.append("- (none)")
             buffer.append("")
+
+        def _flush_guard_events() -> None:
+            if not guard_events:
+                return
+            guard_dir = project_root / "logs" / "guardrails"
+            try:
+                guard_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            events_path = guard_dir / "events.jsonl"
+            counts: Dict[str, int] = {}
+            try:
+                with events_path.open("a", encoding="utf-8") as handle:
+                    for event in guard_events:
+                        enriched = dict(event)
+                        enriched.update(
+                            {
+                                "task_id": active_task_id,
+                                "task_number": task_number,
+                                "story_slug": task_slug,
+                                "run": run_timestamp,
+                            }
+                        )
+                        handle.write(json.dumps(enriched, ensure_ascii=False) + "\n")
+                        counts[event["code"]] = counts.get(event["code"], 0) + 1
+            except Exception:
+                return
+            rel_path = _relativize_path(events_path)
+            summary = ", ".join(f"{code}={count}" for code, count in sorted(counts.items()))
+            manual_notes.append(
+                _format_action_result(
+                    "guard-telemetry",
+                    f"recorded {len(guard_events)} guard event(s): {summary}; see {rel_path}",
+                )
+            )
 
         def _persist_agent_sections(
             plan_entries: Sequence[object],
@@ -2415,18 +2703,14 @@ def main():
                     _append_required_script(candidate)
 
         if code_sample_detected:
-            manual_notes.append(
-                _format_action_result(
-                    "code-sample-detected",
-                    "warning — response contained source/test snippets; restate steps without including code"
-                )
+            _append_guard_note(
+                "code-sample-detected",
+                "warning — response contained source/test snippets; restate steps without including code"
             )
         if parse_failure_detected:
-            manual_notes.append(
-                _format_action_result(
-                    "agent-output-parse",
-                    "warning — response unparsable; skipped task instructions and continued to next item"
-                )
+            _append_guard_note(
+                "agent-output-parse",
+                "warning — response unparsable; skipped task instructions and continued to next item"
             )
 
         existing_notes = payload.get('notes')
@@ -2438,6 +2722,8 @@ def main():
             longform_flag = False
             non_action_streak = 0
             stop_prompt_sent = False
+            autoformatted_notes = 0
+            last_lint_remaining: Optional[int] = None
             for entry in existing_notes:
                 if not isinstance(entry, str):
                     continue
@@ -2446,6 +2732,11 @@ def main():
                     continue
                 reasoning_chars += len(text)
                 has_action = _has_action_token(text)
+                if not has_action:
+                    text, auto_fmt_applied = _autoformat_note_entry(text)
+                    if auto_fmt_applied:
+                        has_action = True
+                        autoformatted_notes += 1
                 if len(text) > NOTE_CHAR_LIMIT and not has_action:
                     longform_flag = True
                     full_text = text
@@ -2468,34 +2759,61 @@ def main():
                     non_action_streak = 0
                 else:
                     non_action_streak += 1
+                    remaining = max(0, MAX_CONSECUTIVE_NON_ACTION_NOTES - non_action_streak)
+                    if remaining <= 1 and last_lint_remaining != remaining:
+                        countdown = max(0, remaining)
+                        plural = '' if countdown == 1 else 's'
+                        warning_message = (
+                            "warning — "
+                            + ("only 1 narration note" if countdown == 1 else f"{countdown} narration note{plural}" if countdown > 1 else "next narration note")
+                            + " before the Plan/Focus/Commands/Notes guard triggers; switch back to Action/Result bullets now"
+                        )
+                        _append_guard_note(
+                            "notes-lint-warning",
+                            warning_message,
+                        )
+                        last_lint_remaining = countdown
                     if (
                         non_action_streak > MAX_CONSECUTIVE_NON_ACTION_NOTES
                         and not stop_prompt_sent
                     ):
-                        manual_notes.append(
-                            _format_action_result(
-                                "notes-stop-and-plan",
-                                "blocked — convert narration into actionable checklist tied to upcoming commands before continuing"
-                            )
+                        _append_guard_note(
+                            "notes-stop-and-plan",
+                            "blocked — convert narration into actionable checklist tied to upcoming commands before continuing"
                         )
                         stop_prompt_sent = True
             payload['notes'] = cleaned_notes
+            if autoformatted_notes:
+                suffix = "s" if autoformatted_notes > 1 else ""
+                _append_guard_note(
+                    "notes-autoformat",
+                    f"normalized {autoformatted_notes} narrative note{suffix} into Action/Result format to satisfy the response guard",
+                )
             if longform_flag:
-                manual_notes.append(
-                    _format_action_result(
-                        "notes-trim-longform",
-                        "blocked — detected long-form notes; saved full content under logs/notes/*.txt and kept note entries referencing those paths. Restate as Action/Result bullets pointing to the archived files."
-                    )
+                _append_guard_note(
+                    "notes-trim-longform",
+                    "blocked — detected long-form notes; saved full content under logs/notes/*.txt and kept note entries referencing those paths. Restate as Action/Result bullets pointing to the archived files."
                 )
             if reasoning_chars > NOTE_REASONING_BUDGET_CHARS:
-                manual_notes.append(
-                    _format_action_result(
-                        "notes-reasoning-budget",
-                        "warning — cumulative reasoning exceeded ~1.5k tokens; keep subsequent updates concise and command-linked"
-                    )
+                _append_guard_note(
+                    "notes-reasoning-budget",
+                    "warning — cumulative reasoning exceeded ~1.5k tokens; keep subsequent updates concise and command-linked"
                 )
         elif existing_notes is not None:
             payload['notes'] = []
+
+        if not _has_structured_response_sections(canonical_response_text):
+            canonical_response_text = _render_structured_response(
+                payload.get('plan') or [],
+                payload.get('focus') or [],
+                payload.get('commands') or [],
+                payload.get('notes') or [],
+            ) or canonical_response_text
+            if canonical_response_text != raw_text_original:
+                _append_guard_note(
+                    "response-autoformat",
+                    "info — original reply lacked Plan/Focus/Commands/Notes headings; generated canonical template automatically",
+                )
         actual_changes = 0
         documentation_only_run = False
         change_bytes = {}
@@ -2599,20 +2917,16 @@ def main():
                 except FileNotFoundError:
                     continue
                 except OSError as exc:
-                    manual_notes.append(
-                        _format_action_result(
-                            "plan-guard",
-                            f"warning — unable to remove forbidden {candidate_name}: {exc}"
-                        )
+                    _append_guard_note(
+                        "plan-guard",
+                        f"warning — unable to remove forbidden {candidate_name}: {exc}"
                     )
             if removed:
                 unique = ", ".join(sorted(set(removed)))
                 suffix = f" after {trigger_label}" if trigger_label else ""
-                manual_notes.append(
-                    _format_action_result(
-                        "plan-guard",
-                        f"auto-removed forbidden PLAN artifact(s): {unique}{suffix}"
-                    )
+                _append_guard_note(
+                    "plan-guard",
+                    f"auto-removed forbidden PLAN artifact(s): {unique}{suffix}"
                 )
 
         _remove_plan_artifacts("startup")
@@ -3774,10 +4088,47 @@ def main():
         preexisting_pending_changes = False
         pending_changes_before: List[str] = []
         dirty_tree_blocked = False
+        workspace_block_reason: Optional[str] = None
         allow_dirty_tree = _env_flag("WORK_ON_TASKS_ALLOW_DIRTY", default=False)
         dirty_autofix_enabled = _env_flag("WORK_ON_TASKS_DIRTY_AUTOFIX", default=True)
         dirty_ignore_raw = os.environ.get("WORK_ON_TASKS_DIRTY_IGNORE", ".gpt-creator/**:.gitignore")
         dirty_ignore_patterns = [pattern for pattern in (segment.strip() for segment in dirty_ignore_raw.split(":")) if pattern]
+
+        dependency_clone_paths, dependency_owner_conflicts = _scan_dependency_directories(project_root)
+        if dependency_clone_paths:
+            sample = [
+                _friendly_relpath(path, project_root)
+                for path in dependency_clone_paths[:4]
+            ]
+            if len(dependency_clone_paths) > 4:
+                sample.append("…")
+            sample_text = ", ".join(sample) if sample else "repository root"
+            manual_notes.append(
+                _format_action_result(
+                    "dependency-clones",
+                    "blocked — remove manual copies/backups of dependency caches (node_modules/vendor/venv/etc). "
+                    f"Found: {sample_text}. Use the package manager instead of duplicating third-party directories."
+                )
+            )
+            dirty_tree_blocked = True
+            workspace_block_reason = workspace_block_reason or 'blocked-dependency-clones'
+        if dependency_owner_conflicts:
+            owner_samples = []
+            for path, owner in dependency_owner_conflicts[:4]:
+                owner_samples.append(f"{_friendly_relpath(path, project_root)} owned by {owner}")
+            if len(dependency_owner_conflicts) > 4:
+                owner_samples.append("…")
+            owner_text = "; ".join(owner_samples) if owner_samples else "unknown"
+            manual_notes.append(
+                _format_action_result(
+                    "dependency-ownership",
+                    "blocked — dependency cache ownership mismatch. Ensure gpt-creator and the agent run as the same unix user "
+                    f"(e.g., chown -R $(whoami) path). Offending paths: {owner_text}"
+                )
+            )
+            dirty_tree_blocked = True
+            if workspace_block_reason is None:
+                workspace_block_reason = 'blocked-dependency-ownership'
 
         def _should_ignore_dirty_entry(path_fragment: str) -> bool:
             if not dirty_ignore_patterns:
@@ -3841,6 +4192,8 @@ def main():
                     LAST_PENDING_CHANGES[cache_key] = snapshot
             else:
                 dirty_tree_blocked = True
+                if workspace_block_reason is None:
+                    workspace_block_reason = 'blocked-dirty-tree'
                 blocking_message = (
                     "blocked — working tree is dirty before running task commands; clean or stash local edits, "
                     "or set WORK_ON_TASKS_ALLOW_DIRTY=1 if you intentionally want to proceed. "
@@ -4578,11 +4931,9 @@ def main():
                 snippet = text_pattern.replace("\n", "\\n")
                 if len(snippet) > 120:
                     snippet = snippet[:117] + "..."
-                manual_notes.append(
-                    _format_action_result(
-                        "regex-guard",
-                        f"warning — pattern {snippet!r} invalid; treated as literal match"
-                    )
+                _append_guard_note(
+                    "regex-guard",
+                    f"warning — pattern {snippet!r} invalid; treated as literal match"
                 )
 
         def _refresh_documentation_assets(doc_paths: Sequence[str]) -> List[str]:
@@ -4885,7 +5236,7 @@ def main():
         strict_validation = os.environ.get("WORK_ON_TASKS_STRICT_VALIDATION", "").strip().lower() in {"1", "true", "yes"}
         if dirty_tree_blocked:
             forced_canonical_status = 'BLOCKED'
-            forced_legacy_status = 'blocked-dirty-tree'
+            forced_legacy_status = workspace_block_reason or 'blocked-dirty-tree'
         elif strict_validation:
             if 'placeholder-ellipsis' in blocked_command_counts:
                 forced_canonical_status = 'RETRYABLE'
@@ -4938,9 +5289,11 @@ def main():
             payload.get('focus') or [],
             payload.get('commands') or [],
             payload.get('notes') or [],
-            raw_text_original,
+            canonical_response_text,
             canonical_status,
         )
+
+        _flush_guard_events()
 
         for entry in manual_notes:
             lowered_entry = entry.lower()
@@ -7462,9 +7815,10 @@ def main():
         )
 
         guidance_lines = [
-            "## Instructions",
-            "### Response Format",
-            "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
+                "## Instructions",
+                "### Response Format",
+                "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
+                "- Keep notes in Action/Result form; when narration is unavoidable, pipe it through `python3 scripts/python/summarize_note.py \"label\"` and paste the emitted summary pointer.",
             "- Write each heading exactly as shown (e.g., `Plan` on its own line) with no surrounding Markdown styling or punctuation.",
             "- Keep each section to short bullet items or terse sentences; skip JSON, code fences, and closing summaries.",
             "- Do not include source code, config snippets, or test case bodies; describe changes and evidence at a high level only.",
@@ -7514,6 +7868,7 @@ def main():
                 "- Consult only the referenced docs or clearly relevant files; skip broad repo sweeps.",
                 "- Keep command usage lean and focused on assets needed for the acceptance criteria.",
                 "- Do not run directory-wide listings/searches outside the declared `focus`; revise the plan + focus first.",
+                "- Never copy, rename, or vend manual backups of dependency caches (node_modules, vendor, Pods, venv/.venv, dist/build/target, pkg/mod, third_party); treat third-party modules as read-only and rely on the package manager instead.",
                 "- Tackle documentation edits only after the related code changes land, and only when the documentation would be inaccurate without the update.",
                 "- Wrap up once deliverables are met; record blockers or follow-ups succinctly in `notes`.",
             ]

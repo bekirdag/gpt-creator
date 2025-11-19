@@ -157,7 +157,14 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
    - Generated code lands in `/apps/api`, `/apps/web`, `/apps/admin`, `/db`, `/docker`.
    - A `.env` file with random database credentials is created automatically; reuse it for local scripts and CI secrets.
   - The automated testing stage has been removed; gpt-creator now focuses exclusively on code creation.
-   - Templates live under `project_templates/`. Add subdirectories (optionally with `tags.txt` or `template.json`) to seed new projects; `--template auto` attempts to match the staged RFP/PDR, or pass `--template <name>` / `--skip-template` to override.
+  - Templates live under `project_templates/`. Add subdirectories (optionally with `tags.txt` or `template.json`) to seed new projects; `--template auto` attempts to match the staged RFP/PDR, or pass `--template <name>` / `--skip-template` to override.
+
+### Contributor Quick Reference
+
+- **Response template:** Every assistant reply must use the `Plan`, `Focus`, `Commands`, `Notes` headings (each on its own line). Keep the sections terse—bulleted steps with `Action: … | Result: …` phrasing where possible.
+- **Narration limits:** The runtime auto-warns after two narration-style notes and will block on the third. Convert prose into checklist bullets immediately; if you need to preserve detail, pipe it through `python3 scripts/python/summarize_note.py "label"` and paste the generated summary pointer.
+- **Code samples:** Instead of pasting diffs or source blobs, reference the touched paths (e.g., ``apps/api/src/foo.ts:42``). The response guard flags raw code fences and will auto-format them away.
+- **Final reminder:** The prompt banner reiterates the response-format rules before every run—use it as a checklist before submitting so guardrails never fire in the first place.
 
    To drive the entire flow (PDR → SDS → Jira tasks → stack generation) in one shot:
 

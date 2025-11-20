@@ -100,7 +100,7 @@ gc_git_status_ok() {
   local s
   s="$(printf "%s" "${1:-}" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
   case "$s" in
-    SUCCESS|COMPLETED|COMPLETED_OK) return 0 ;;
+    SUCCESS|COMPLETE|COMPLETED|COMPLETED_OK) return 0 ;;
     *) return 1 ;;
   esac
 }

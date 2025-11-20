@@ -4648,15 +4648,9 @@ def main():
                 forced_canonical_status = 'RETRYABLE'
                 forced_legacy_status = 'retryable'
                 return
-            push_base = _run_git_command(['push', 'origin', base_task_branch])
-            if push_base.returncode != 0:
-                stderr_text = (push_base.stderr or "").strip()
-                manual_notes.append(
-                    _format_action_result(
-                        "branch",
-                        f"failed — merge committed but push of {base_task_branch} failed: {stderr_text or 'see stderr'}"
-                    )
-                )
+            push_ok, push_note = _push_branch_to_remote(base_task_branch, "post-merge base sync")
+            manual_notes.append(push_note)
+            if not push_ok:
                 command_failure_detected = True
                 forced_canonical_status = 'RETRYABLE'
                 forced_legacy_status = 'retryable'
@@ -5614,6 +5608,7 @@ def main():
             print("prompt requires 8 arguments", file=sys.stderr)
             sys.exit(1)
         sys.argv = [sys.argv[0]] + args
+        import fnmatch
         import hashlib
         import json
         import math
@@ -6280,6 +6275,91 @@ def main():
         _ensure_task_branch_columns(conn)
         cur = conn.cursor()
 
+        def _guard_prompt_git_state(project_root_path: Path) -> None:
+            allow_dirty_env = os.getenv("WORK_ON_TASKS_ALLOW_DIRTY", "").strip().lower()
+            if allow_dirty_env in {"1", "true", "yes", "on"}:
+                return
+            try:
+                project_root_resolved = project_root_path.resolve()
+            except Exception:
+                project_root_resolved = project_root_path
+            git_dir = project_root_resolved / ".git"
+            if not git_dir.exists():
+                return
+            clone_paths, owner_conflicts = _scan_dependency_directories(project_root_resolved)
+            if clone_paths:
+                sample = [
+                    _friendly_relpath(path, project_root_resolved)
+                    for path in clone_paths[:4]
+                ]
+                if len(clone_paths) > 4:
+                    sample.append("…")
+                detail = ", ".join(sample) if sample else "repository root"
+                print(
+                    f"[work_on_tasks] Dependency cache clones detected before prompt; remove copies like {detail} "
+                    "before retrying.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if owner_conflicts:
+                sample = []
+                for path, owner in owner_conflicts[:4]:
+                    sample.append(f"{_friendly_relpath(path, project_root_resolved)} owned by {owner}")
+                if len(owner_conflicts) > 4:
+                    sample.append("…")
+                detail = "; ".join(sample) if sample else "unknown ownership mismatch"
+                print(
+                    f"[work_on_tasks] Dependency ownership mismatch (pre-prompt guard): {detail}. "
+                    "Ensure the same user owns all dependency caches.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            dirty_ignore_raw = os.environ.get("WORK_ON_TASKS_DIRTY_IGNORE", ".gpt-creator/**:.gitignore")
+            dirty_ignore_patterns = [
+                pattern for pattern in (segment.strip() for segment in dirty_ignore_raw.split(":")) if pattern
+            ]
+
+            def _should_ignore(path_fragment: str) -> bool:
+                if not dirty_ignore_patterns:
+                    return False
+                normalized_path = path_fragment.lstrip("./")
+                return any(fnmatch.fnmatch(normalized_path, pattern) for pattern in dirty_ignore_patterns)
+
+            try:
+                status_proc = subprocess.run(
+                    ['git', 'status', '--porcelain=v1', '--untracked-files=all'],
+                    capture_output=True,
+                    text=True,
+                    cwd=str(project_root_resolved),
+                    check=False,
+                )
+            except OSError:
+                return
+            if status_proc.returncode != 0:
+                return
+            dirty_entries: List[str] = []
+            for raw_line in status_proc.stdout.splitlines():
+                line = raw_line.rstrip()
+                if len(line) < 4:
+                    continue
+                path = line[3:].strip()
+                if not path or _should_ignore(path):
+                    continue
+                label = line[:2].strip().upper() or "M"
+                dirty_entries.append(f"{label} {path}")
+            if dirty_entries:
+                preview = dirty_entries[:6]
+                summary = "; ".join(preview)
+                if len(dirty_entries) > 6:
+                    summary += "; …"
+                print(
+                    "[work_on_tasks] Dirty working tree detected before prompt; clean or stash local edits, "
+                    "or set WORK_ON_TASKS_ALLOW_DIRTY=1 to override. "
+                    f"Affected paths: {summary}",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+
         cwd_path = Path.cwd()
         project_root_path = cwd_path
         if PROJECT_ROOT:
@@ -6301,6 +6381,7 @@ def main():
                 staging_root = staging_candidate
         else:
             staging_root = project_root_path / ".gpt-creator" / "staging"
+        _guard_prompt_git_state(project_root_path)
 
         plan_instruction_dir: Optional[Path] = None
         if staging_root:

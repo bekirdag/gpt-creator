@@ -1,7 +1,8 @@
 services:
   db:
     image: mysql:8.0
-    container_name: ${GEN_DOCKER_PROJECT_SLUG}-db
+    mem_limit: 1536m
+    mem_reservation: 1g
     environment:
       MYSQL_ROOT_PASSWORD: ${GEN_DOCKER_DB_ROOT_PASS}
       MYSQL_ROOT_HOST: '%'
@@ -11,10 +12,13 @@ services:
     ports:
       - "${GEN_DOCKER_DB_HOST_PORT}:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${GEN_DOCKER_DB_ROOT_PASS}"]
+      test:
+        - CMD-SHELL
+        - MYSQL_PWD="$${MYSQL_ROOT_PASSWORD:-}" mysqladmin ping -h 127.0.0.1 -uroot --silent
       interval: 5s
-      timeout: 3s
+      timeout: 5s
       retries: 30
+      start_period: 10s
     volumes:
       - db_data:/var/lib/mysql
 
@@ -22,7 +26,8 @@ services:
     build:
       context: ..
       dockerfile: docker/api.Dockerfile
-    container_name: ${GEN_DOCKER_PROJECT_SLUG}-api
+    mem_limit: 1024m
+    mem_reservation: 512m
     depends_on:
       db:
         condition: service_healthy
@@ -31,54 +36,146 @@ services:
       DATABASE_URL: ${GEN_DOCKER_DATABASE_URL_CONTAINER}
       PORT: 3000
       GC_SERVICE: api
-    command: sh -c "corepack enable pnpm && cd /workspace && CI=1 pnpm install --frozen-lockfile=false && cd apps/api && pnpm run start:dev"
+      PNPM_HOME: /usr/local/share/pnpm
+      PNPM_STORE_PATH: /var/pnpm-store
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:3000/api/v1/health || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    user: "${GC_STACK_UID:-1000}:${GC_STACK_GID:-1000}"
+    entrypoint:
+      - /workspace/docker/pnpm-entry.sh
+    command:
+      - cd /workspace/apps/api && pnpm run start:dev
     ports:
       - "${GEN_DOCKER_API_HOST_PORT}:3000"
     volumes:
       - ..:/workspace
+      - pnpm_store:/var/pnpm-store
 
   web:
     build:
       context: ..
       dockerfile: docker/web.Dockerfile
-    container_name: ${GEN_DOCKER_PROJECT_SLUG}-web
+    mem_limit: 768m
+    mem_reservation: 384m
     environment:
       NODE_ENV: development
       VITE_API_BASE: ${GEN_DOCKER_API_BASE_URL}
       GC_SERVICE: web
-    command: sh -c "corepack enable pnpm && cd /workspace && CI=1 pnpm install --frozen-lockfile=false && cd apps/web && pnpm run dev -- --host 0.0.0.0"
+      PNPM_HOME: /usr/local/share/pnpm
+      PNPM_STORE_PATH: /var/pnpm-store
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:5173/admin/__vite_ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    user: "${GC_STACK_UID:-1000}:${GC_STACK_GID:-1000}"
+    entrypoint:
+      - /workspace/docker/pnpm-entry.sh
+    command:
+      - cd /workspace/apps/web && pnpm run dev -- --host 0.0.0.0
     ports:
       - "${GEN_DOCKER_WEB_HOST_PORT}:5173"
     volumes:
       - ..:/workspace
+      - pnpm_store:/var/pnpm-store
 
   admin:
     build:
       context: ..
       dockerfile: docker/admin.Dockerfile
-    container_name: ${GEN_DOCKER_PROJECT_SLUG}-admin
+    mem_limit: 768m
+    mem_reservation: 384m
     environment:
       NODE_ENV: development
       VITE_API_BASE: ${GEN_DOCKER_API_BASE_URL}
       GC_SERVICE: admin
-    command: sh -c "corepack enable pnpm && cd /workspace && CI=1 pnpm install --frozen-lockfile=false && cd apps/admin && pnpm run dev -- --host 0.0.0.0"
+      PNPM_HOME: /usr/local/share/pnpm
+      PNPM_STORE_PATH: /var/pnpm-store
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:5173/__vite_ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    user: "${GC_STACK_UID:-1000}:${GC_STACK_GID:-1000}"
+    entrypoint:
+      - /workspace/docker/pnpm-entry.sh
+    command:
+      - cd /workspace/apps/admin && pnpm run dev -- --host 0.0.0.0
     ports:
       - "${GEN_DOCKER_ADMIN_HOST_PORT}:5173"
     volumes:
       - ..:/workspace
+      - pnpm_store:/var/pnpm-store
+
+  mobile:
+    profiles: ["mobile"]
+    build:
+      context: ..
+      dockerfile: docker/mobile.Dockerfile
+    mem_limit: 1536m
+    mem_reservation: 768m
+    environment:
+      NODE_ENV: development
+      REACT_NATIVE_PACKAGER_HOSTNAME: ${GEN_DOCKER_REACT_NATIVE_HOSTNAME:-localhost}
+      EXPO_DEVTOOLS_LISTEN_ADDRESS: 0.0.0.0
+      GC_SERVICE: mobile
+      PNPM_HOME: /usr/local/share/pnpm
+      PNPM_STORE_PATH: /var/pnpm-store
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          curl -fsS http://127.0.0.1:8081/status | grep -q "packager-status:running"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 180s
+    user: "${GC_STACK_UID:-1000}:${GC_STACK_GID:-1000}"
+    entrypoint:
+      - /workspace/docker/pnpm-entry.sh
+    command:
+      - cd /workspace/apps/mobile && pnpm start -- --host lan
+    ports:
+      - "${GEN_DOCKER_MOBILE_PACKAGER_HOST_PORT}:8081"
+      - "${GEN_DOCKER_MOBILE_DEVTOOLS_HOST_PORT}:8082"
+    volumes:
+      - ..:/workspace
+      - pnpm_store:/var/pnpm-store
 
   proxy:
     image: nginx:alpine
-    container_name: ${GEN_DOCKER_PROJECT_SLUG}-proxy
     depends_on:
-      - web
-      - admin
-      - api
+      web:
+        condition: service_healthy
+      admin:
+        condition: service_healthy
+      api:
+        condition: service_healthy
     ports:
       - "${GEN_DOCKER_PROXY_HOST_PORT}:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -qO- http://127.0.0.1/ >/dev/null 2>&1 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
 volumes:
   db_data: {}
-
+  pnpm_store: {}

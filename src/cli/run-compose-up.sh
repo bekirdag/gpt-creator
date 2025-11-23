@@ -58,6 +58,9 @@ if [[ -z "${COMPOSE_FILE}" ]]; then
   fi
 fi
 
+gc_cli_heading "Resetting existing docker stack (if any)"
+COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" down --remove-orphans --timeout 0 || true
+
 gc_cli_heading "Starting Docker stack"
 COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" up -d --build
 

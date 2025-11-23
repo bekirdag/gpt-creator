@@ -35,6 +35,15 @@ cmd::create_project() {
 
   gc::ok "Plan scaffold created: $work_dir/staging/plan/PLAN_TODO.md"
 
+  # Seed .gitignore if missing
+  local gitignore_path="$target/.gitignore"
+  if [[ ! -f "$gitignore_path" ]]; then
+    gc_cli_render_template "project/gitignore.tmpl" > "$gitignore_path"
+    gc::ok "Added .gitignore to project root"
+  else
+    gc::log ".gitignore already present; leaving as-is"
+  fi
+
   gc::hr
   gc::ok "Done. You can now run:"
   printf "  %s%s cd %q && tree -L 3 %s\n" "${GC_CLR_BOLD}" "$" "$work_dir" "${GC_CLR_RESET}"

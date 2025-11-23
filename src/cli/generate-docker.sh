@@ -61,6 +61,9 @@ API_HOST_PORT="${API_HOST_PORT:-${GC_API_HOST_PORT:-3000}}"
 WEB_HOST_PORT="${WEB_HOST_PORT:-${GC_WEB_HOST_PORT:-5173}}"
 ADMIN_HOST_PORT="${ADMIN_HOST_PORT:-${GC_ADMIN_HOST_PORT:-5174}}"
 PROXY_HOST_PORT="${PROXY_HOST_PORT:-${GC_PROXY_HOST_PORT:-8080}}"
+MOBILE_PACKAGER_HOST_PORT="${MOBILE_PACKAGER_HOST_PORT:-${GC_MOBILE_PACKAGER_HOST_PORT:-8081}}"
+MOBILE_DEVTOOLS_HOST_PORT="${MOBILE_DEVTOOLS_HOST_PORT:-${GC_MOBILE_DEVTOOLS_HOST_PORT:-8083}}"
+REACT_NATIVE_HOSTNAME="${REACT_NATIVE_HOSTNAME:-${GC_REACT_NATIVE_HOSTNAME:-localhost}}"
 
 port_in_use() {
   local port="$1"
@@ -124,6 +127,8 @@ API_HOST_PORT="$(ensure_port "API" "$API_HOST_PORT" 3000)"
 WEB_HOST_PORT="$(ensure_port "Web" "$WEB_HOST_PORT" 5173)"
 ADMIN_HOST_PORT="$(ensure_port "Admin" "$ADMIN_HOST_PORT" 5174)"
 PROXY_HOST_PORT="$(ensure_port "Proxy" "$PROXY_HOST_PORT" 8080)"
+MOBILE_PACKAGER_HOST_PORT="$(ensure_port "Mobile (Metro)" "$MOBILE_PACKAGER_HOST_PORT" 8081)"
+MOBILE_DEVTOOLS_HOST_PORT="$(ensure_port "Mobile (Devtools)" "$MOBILE_DEVTOOLS_HOST_PORT" 8083)"
 
 API_BASE_URL="http://localhost:${API_HOST_PORT}/api/v1"
 
@@ -154,7 +159,9 @@ compose="${OUT_PATH}/docker-compose.yml"
 api_df="${OUT_PATH}/api.Dockerfile"
 web_df="${OUT_PATH}/web.Dockerfile"
 admin_df="${OUT_PATH}/admin.Dockerfile"
+mobile_df="${OUT_PATH}/mobile.Dockerfile"
 nginx_conf="${OUT_PATH}/nginx.conf"
+pnpm_entry="${OUT_PATH}/pnpm-entry.sh"
 env_example="${ROOT_DIR}/.env.example"
 
 env \
@@ -168,6 +175,9 @@ env \
   GEN_DOCKER_WEB_HOST_PORT="${WEB_HOST_PORT}" \
   GEN_DOCKER_ADMIN_HOST_PORT="${ADMIN_HOST_PORT}" \
   GEN_DOCKER_PROXY_HOST_PORT="${PROXY_HOST_PORT}" \
+  GEN_DOCKER_MOBILE_PACKAGER_HOST_PORT="${MOBILE_PACKAGER_HOST_PORT}" \
+  GEN_DOCKER_MOBILE_DEVTOOLS_HOST_PORT="${MOBILE_DEVTOOLS_HOST_PORT}" \
+  GEN_DOCKER_REACT_NATIVE_HOSTNAME="${REACT_NATIVE_HOSTNAME}" \
   GEN_DOCKER_API_BASE_URL="${API_BASE_URL}" \
   GEN_DOCKER_DATABASE_URL_CONTAINER="mysql://${DB_USER}:${DB_PASS}@db:3306/${DB_NAME}" \
   gc_cli_render_template "docker/docker-compose.yml.tmpl" > "${compose}"
@@ -175,6 +185,9 @@ env \
 gc_cli_render_template "docker/api.Dockerfile" > "${api_df}"
 gc_cli_render_template "docker/web.Dockerfile" > "${web_df}"
 gc_cli_render_template "docker/admin.Dockerfile" > "${admin_df}"
+gc_cli_render_template "docker/mobile.Dockerfile" > "${mobile_df}"
+gc_cli_render_template "docker/pnpm-entry.sh.tmpl" > "${pnpm_entry}"
+chmod +x "${pnpm_entry}" || true
 
 gc_cli_render_template "docker/nginx.conf.tmpl" > "${nginx_conf}"
 
@@ -185,6 +198,8 @@ env \
   GEN_DOCKER_WEB_HOST_PORT="${WEB_HOST_PORT}" \
   GEN_DOCKER_ADMIN_HOST_PORT="${ADMIN_HOST_PORT}" \
   GEN_DOCKER_PROXY_HOST_PORT="${PROXY_HOST_PORT}" \
+  GEN_DOCKER_MOBILE_PACKAGER_HOST_PORT="${MOBILE_PACKAGER_HOST_PORT}" \
+  GEN_DOCKER_MOBILE_DEVTOOLS_HOST_PORT="${MOBILE_DEVTOOLS_HOST_PORT}" \
   GEN_DOCKER_API_BASE_URL="${API_BASE_URL}" \
   gc_cli_render_template "env/docker.env.example.tmpl" > "${env_example}"
 

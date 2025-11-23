@@ -1,7 +1,9 @@
-# Admin (Vue 3) development Dockerfile
-FROM node:20-alpine
+# Mobile (React Native / Expo) development Dockerfile
+FROM node:20-bullseye
 
-RUN apk add --no-cache util-linux curl
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential python3 util-linux curl && \
+    rm -rf /var/lib/apt/lists/*
 
 ENV PNPM_VERSION=10.17.1 \
     PNPM_HOME=/usr/local/share/pnpm
@@ -21,7 +23,7 @@ RUN if [ -f pnpm-lock.yaml ]; then \
       pnpm install --unsafe-perm --prefer-offline --engine-strict=false --reporter=append-only; \
     fi || true
 
-WORKDIR /workspace/apps/admin
+WORKDIR /workspace/apps/mobile
 
-EXPOSE 5173
+EXPOSE 8081 8082
 CMD ["sh", "-c", "while true; do sleep 3600; done"]

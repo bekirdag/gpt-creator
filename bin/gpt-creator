@@ -5565,64 +5565,167 @@ cmd_generate() {
     docker)
       local out="$PROJECT_ROOT/docker"
       mkdir -p "$out"
+      local services_raw="${GC_DOCKER_SERVICES:-db api web admin proxy mobile}"
+      local -a docker_services=()
+      for item in $services_raw; do
+        docker_services+=("$item")
+      done
+      service_enabled() {
+        local name="$1"
+        for svc in "${docker_services[@]}"; do
+          [[ "$svc" == "$name" ]] && return 0
+        done
+        return 1
+      }
       local preferred="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-${MYSQL_HOST_PORT:-3306}}}"
       gc_unreserve_port db
-      if port_in_use "$preferred"; then
+      if service_enabled db && port_in_use "$preferred"; then
         local next; next="$(find_free_port "$preferred")"
         if [[ "$next" != "$preferred" ]]; then
           info "Port $preferred in use; remapping MySQL to $next"
           preferred="$next"
         fi
       fi
-      GC_DB_HOST_PORT="$preferred"
-      DB_HOST_PORT="$GC_DB_HOST_PORT"
-      MYSQL_HOST_PORT="$GC_DB_HOST_PORT"
-      gc_reserve_port db "$GC_DB_HOST_PORT"
-      gc_set_env_var DB_HOST_PORT "$GC_DB_HOST_PORT"
-      gc_set_env_var MYSQL_HOST_PORT "$GC_DB_HOST_PORT"
-      gc_set_env_var GC_DB_HOST_PORT "$GC_DB_HOST_PORT"
-      local api_host_port
-      api_host_port="$(gc_pick_port "API" 3000 GC_API_HOST_PORT API_HOST_PORT)"
-      GC_API_HOST_PORT="$api_host_port"
-      API_HOST_PORT="$GC_API_HOST_PORT"
-      gc_set_env_var API_HOST_PORT "$API_HOST_PORT"
-      gc_set_env_var GC_API_HOST_PORT "$GC_API_HOST_PORT"
-      gc_reserve_port api "$GC_API_HOST_PORT"
-      local web_host_port
-      web_host_port="$(gc_pick_port "Web" 5173 GC_WEB_HOST_PORT WEB_HOST_PORT)"
-      GC_WEB_HOST_PORT="$web_host_port"
-      WEB_HOST_PORT="$GC_WEB_HOST_PORT"
-      gc_set_env_var WEB_HOST_PORT "$WEB_HOST_PORT"
-      gc_set_env_var GC_WEB_HOST_PORT "$GC_WEB_HOST_PORT"
-      gc_reserve_port web "$GC_WEB_HOST_PORT"
-      local admin_host_port
-      admin_host_port="$(gc_pick_port "Admin" 5174 GC_ADMIN_HOST_PORT ADMIN_HOST_PORT)"
-      GC_ADMIN_HOST_PORT="$admin_host_port"
-      ADMIN_HOST_PORT="$GC_ADMIN_HOST_PORT"
-      gc_set_env_var ADMIN_HOST_PORT "$ADMIN_HOST_PORT"
-      gc_set_env_var GC_ADMIN_HOST_PORT "$GC_ADMIN_HOST_PORT"
-      gc_reserve_port admin "$GC_ADMIN_HOST_PORT"
-      local proxy_host_port
-      proxy_host_port="$(gc_pick_port "Proxy" 8080 GC_PROXY_HOST_PORT PROXY_HOST_PORT)"
-      GC_PROXY_HOST_PORT="$proxy_host_port"
-      PROXY_HOST_PORT="$GC_PROXY_HOST_PORT"
-      gc_set_env_var PROXY_HOST_PORT "$PROXY_HOST_PORT"
-      gc_set_env_var GC_PROXY_HOST_PORT "$GC_PROXY_HOST_PORT"
-      gc_reserve_port proxy "$GC_PROXY_HOST_PORT"
-      local local_url="mysql://${GC_DB_USER}:${GC_DB_PASSWORD}@127.0.0.1:${GC_DB_HOST_PORT}/${GC_DB_NAME}"
-      gc_set_env_var DATABASE_URL "$local_url"
-      local api_base_url="http://localhost:${GC_API_HOST_PORT}/api/v1"
-      gc_set_env_var GC_API_BASE_URL "$api_base_url"
-      gc_set_env_var VITE_API_BASE "$api_base_url"
-      local api_health_url="${api_base_url%/}/health"
-      gc_set_env_var GC_API_HEALTH_URL "$api_health_url"
-      local proxy_base="http://localhost:${GC_PROXY_HOST_PORT}"
-      gc_set_env_var GC_WEB_URL "${proxy_base}/"
-      gc_set_env_var GC_ADMIN_URL "${proxy_base}/admin/"
+      if service_enabled db; then
+        GC_DB_HOST_PORT="$preferred"
+        DB_HOST_PORT="$GC_DB_HOST_PORT"
+        MYSQL_HOST_PORT="$GC_DB_HOST_PORT"
+        gc_reserve_port db "$GC_DB_HOST_PORT"
+        gc_set_env_var DB_HOST_PORT "$GC_DB_HOST_PORT"
+        gc_set_env_var MYSQL_HOST_PORT "$GC_DB_HOST_PORT"
+        gc_set_env_var GC_DB_HOST_PORT "$GC_DB_HOST_PORT"
+        local local_url="mysql://${GC_DB_USER}:${GC_DB_PASSWORD}@127.0.0.1:${GC_DB_HOST_PORT}/${GC_DB_NAME}"
+        gc_set_env_var DATABASE_URL "$local_url"
+      fi
+      local api_host_port=""
+      if service_enabled api; then
+        api_host_port="$(gc_pick_port "API" 3000 GC_API_HOST_PORT API_HOST_PORT)"
+        GC_API_HOST_PORT="$api_host_port"
+        API_HOST_PORT="$GC_API_HOST_PORT"
+        gc_set_env_var API_HOST_PORT "$API_HOST_PORT"
+        gc_set_env_var GC_API_HOST_PORT "$GC_API_HOST_PORT"
+        gc_reserve_port api "$GC_API_HOST_PORT"
+        local api_base_url="http://localhost:${GC_API_HOST_PORT}/api/v1"
+        gc_set_env_var GC_API_BASE_URL "$api_base_url"
+        gc_set_env_var VITE_API_BASE "$api_base_url"
+        local api_health_url="${api_base_url%/}/health"
+        gc_set_env_var GC_API_HEALTH_URL "$api_health_url"
+      fi
+      local web_host_port=""
+      if service_enabled web; then
+        web_host_port="$(gc_pick_port "Web" 5173 GC_WEB_HOST_PORT WEB_HOST_PORT)"
+        GC_WEB_HOST_PORT="$web_host_port"
+        WEB_HOST_PORT="$GC_WEB_HOST_PORT"
+        gc_set_env_var WEB_HOST_PORT "$WEB_HOST_PORT"
+        gc_set_env_var GC_WEB_HOST_PORT "$GC_WEB_HOST_PORT"
+        gc_reserve_port web "$GC_WEB_HOST_PORT"
+      fi
+      local admin_host_port=""
+      if service_enabled admin; then
+        admin_host_port="$(gc_pick_port "Admin" 5174 GC_ADMIN_HOST_PORT ADMIN_HOST_PORT)"
+        GC_ADMIN_HOST_PORT="$admin_host_port"
+        ADMIN_HOST_PORT="$GC_ADMIN_HOST_PORT"
+        gc_set_env_var ADMIN_HOST_PORT "$ADMIN_HOST_PORT"
+        gc_set_env_var GC_ADMIN_HOST_PORT "$GC_ADMIN_HOST_PORT"
+        gc_reserve_port admin "$GC_ADMIN_HOST_PORT"
+      fi
+      local proxy_host_port=""
+      local include_proxy=0
+      if service_enabled web && service_enabled admin && service_enabled api; then
+        include_proxy=1
+        proxy_host_port="$(gc_pick_port "Proxy" 8080 GC_PROXY_HOST_PORT PROXY_HOST_PORT)"
+        GC_PROXY_HOST_PORT="$proxy_host_port"
+        PROXY_HOST_PORT="$GC_PROXY_HOST_PORT"
+        gc_set_env_var PROXY_HOST_PORT "$PROXY_HOST_PORT"
+        gc_set_env_var GC_PROXY_HOST_PORT "$GC_PROXY_HOST_PORT"
+        gc_reserve_port proxy "$GC_PROXY_HOST_PORT"
+        local proxy_base="http://localhost:${GC_PROXY_HOST_PORT}"
+        gc_set_env_var GC_WEB_URL "${proxy_base}/"
+        gc_set_env_var GC_ADMIN_URL "${proxy_base}/admin/"
+      elif service_enabled web; then
+        local web_base="http://localhost:${GC_WEB_HOST_PORT:-5173}"
+        gc_set_env_var GC_WEB_URL "${web_base}/"
+      elif service_enabled admin; then
+        local admin_base="http://localhost:${GC_ADMIN_HOST_PORT:-5174}"
+        gc_set_env_var GC_ADMIN_URL "${admin_base}/"
+      fi
       gc_load_env
       copy_template_tree "$templates/docker" "$out"
       if [[ -f "$out/pnpm-entry.sh" ]]; then
         chmod +x "$out/pnpm-entry.sh" || true
+      fi
+      # Prune docker-compose.yml to selected services
+      local keep_services=()
+      for svc in "${docker_services[@]}"; do
+        case "$svc" in
+          api|db|web|admin|mobile|proxy) keep_services+=("$svc") ;;
+        esac
+      done
+      if (( include_proxy == 0 )); then
+        # remove proxy unless explicitly included by web+admin+api
+        local pruned_keep=()
+        for svc in "${keep_services[@]}"; do
+          [[ "$svc" == "proxy" ]] && continue
+          pruned_keep+=("$svc")
+        done
+        keep_services=("${pruned_keep[@]}")
+      fi
+      if [[ -f "$out/docker-compose.yml" && ${#keep_services[@]} -gt 0 ]]; then
+        python3 - "$out/docker-compose.yml" "${keep_services[@]}" <<'PY'
+import sys, pathlib
+
+compose_path = pathlib.Path(sys.argv[1])
+keep = set(sys.argv[2:])
+
+lines = compose_path.read_text().splitlines()
+out_lines = []
+section = "root"
+skip_service = False
+
+def is_service_header(line: str) -> str | None:
+    if line.startswith("  ") and not line.startswith("    "):
+        stripped = line.strip()
+        if stripped.endswith(":") and not stripped.startswith("#"):
+            return stripped[:-1]
+    return None
+
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if line.startswith("services:"):
+        section = "services"
+        out_lines.append(line)
+        i += 1
+        continue
+    if section == "services":
+        name = is_service_header(line)
+        if name:
+            if name in keep:
+                out_lines.append(line)
+                i += 1
+                while i < len(lines):
+                    nxt = lines[i]
+                    maybe_header = is_service_header(nxt)
+                    if maybe_header:
+                        break
+                    out_lines.append(nxt)
+                    i += 1
+                continue
+            else:
+                i += 1
+                while i < len(lines):
+                    nxt = lines[i]
+                    maybe_header = is_service_header(nxt)
+                    if maybe_header:
+                        break
+                    i += 1
+                continue
+    out_lines.append(line)
+    i += 1
+
+compose_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+PY
+        ok "Docker compose pruned to services: ${keep_services[*]}"
       fi
       ok "Docker assets scaffolded → ${out}"
       ;;
@@ -14198,6 +14301,8 @@ cmd_apply_block() {
 cmd_create_project() {
   local template_request="auto"
   local path=""
+  local surfaces_override=""
+  local rfp_path=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --template)
@@ -14207,6 +14312,14 @@ cmd_create_project() {
       --skip-template)
         template_request="skip"
         shift
+        ;;
+      --surfaces)
+        surfaces_override="${2:?--surfaces requires a value (e.g., api,db,docker)}"
+        shift 2
+        ;;
+      --rfp)
+        rfp_path="${2:?--rfp requires a file path}"
+        shift 2
         ;;
       -h|--help)
         gc_render_template "help/create_project_usage.txt"
@@ -14238,10 +14351,67 @@ cmd_create_project() {
 
   cmd_scan --project "$PROJECT_ROOT"
   cmd_normalize --project "$PROJECT_ROOT"
+
+  local surfaces=""
+  if [[ -n "$surfaces_override" ]]; then
+    surfaces="$(printf '%s' "$surfaces_override" | tr ',;' ' ')"
+  else
+    local detector="$CLI_ROOT/scripts/python/detect_surfaces.py"
+    if [[ -f "$detector" ]]; then
+      surfaces="$(python3 "$detector" "$PROJECT_ROOT" ${rfp_path:+--rfp "$rfp_path"} 2>/dev/null || true)"
+    fi
+  fi
+  [[ -n "$surfaces" ]] || surfaces="api db docker"
+  read -r -a SURFACES_ARR <<<"$surfaces"
+  info "Selected surfaces: ${SURFACES_ARR[*]}"
+
   cmd_plan --project "$PROJECT_ROOT"
-  cmd_generate all --project "$PROJECT_ROOT"
-  cmd_db provision --project "$PROJECT_ROOT" || warn "Database provision step reported an error"
-  cmd_run up --project "$PROJECT_ROOT" || warn "Stack start reported an error"
+
+  local has_docker=0 has_db=0
+  local docker_services=()
+  for surface in "${SURFACES_ARR[@]}"; do
+    case "$surface" in
+      docker) has_docker=1 ;;
+      db) has_db=1 ;;
+    esac
+  done
+
+  for surface in "${SURFACES_ARR[@]}"; do
+    case "$surface" in
+      docker) ;;
+      *) cmd_generate "$surface" --project "$PROJECT_ROOT" ;;
+    esac
+    case "$surface" in
+      api|db|web|admin|mobile) docker_services+=("$surface") ;;
+    esac
+  done
+
+  if (( has_docker )); then
+    local keep_services=()
+    local has_web=0 has_admin=0
+    for svc in "${docker_services[@]}"; do
+      [[ "$svc" == "web" ]] && has_web=1
+      [[ "$svc" == "admin" ]] && has_admin=1
+      keep_services+=("$svc")
+    done
+    if (( has_web && has_admin )); then
+      keep_services+=("proxy")
+    fi
+    GC_DOCKER_SERVICES="${keep_services[*]}" cmd_generate docker --project "$PROJECT_ROOT"
+  else
+    info "Skipping docker assets because 'docker' was not selected for this project."
+  fi
+
+  if (( has_db && has_docker )); then
+    cmd_db provision --project "$PROJECT_ROOT" || warn "Database provision step reported an error"
+  else
+    info "Skipping DB provision (db or docker not selected)."
+  fi
+  if (( has_docker )); then
+    cmd_run up --project "$PROJECT_ROOT" || warn "Stack start reported an error"
+  else
+    info "Skipping stack startup (docker not selected)."
+  fi
   ok "Project bootstrap complete"
 }
 

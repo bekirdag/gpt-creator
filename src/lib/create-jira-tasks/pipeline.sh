@@ -706,7 +706,7 @@ cjt::normalize_story_jsons() {
   while IFS= read -r story_file; do
     [[ -n "$story_file" ]] || continue
     # Detect bundled story payloads shaped like {"epic_id": "...", "user_stories": [...]}
-    if python3 - <<'PY' "$story_file"; then
+    if python3 - "$story_file" <<'PY'
 import json, sys
 path = sys.argv[1]
 try:
@@ -729,7 +729,9 @@ PY
   done < <(find "$CJT_JSON_STORIES_DIR" -maxdepth 1 -type f -name '*.json' | sort)
 
   if (( converted )); then
-    find "$tmp_dir" -maxdepth 1 -type f -name '*.json' -print0 | xargs -0 -I{} mv "{}" "$CJT_JSON_STORIES_DIR"/
+    while IFS= read -r -d '' split_file; do
+      mv -f "$split_file" "$CJT_JSON_STORIES_DIR"/
+    done < <(find "$tmp_dir" -maxdepth 1 -type f -name '*.json' -print0)
     cjt::log "Bundled story files converted; continuing with per-story JSON inputs"
   fi
 

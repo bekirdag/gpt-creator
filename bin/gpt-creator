@@ -1248,8 +1248,8 @@ export APP_NAME VERSION
 
 # Defaults (override via env)
 CODEX_BIN="${CODEX_BIN:-codex}"
-CODEX_MODEL="${CODEX_MODEL:-gpt-5.1-codex}"
-CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-gpt-5.1-codex}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.1-codex-max}"
+CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-gpt-5.1-codex-max}"
 
 # Stage-aware model selection (defaults fall back to CODEX_MODEL for compatibility)
 CODEX_MODEL_LOW="${CODEX_MODEL_LOW:-${CODEX_MODEL}}"

@@ -17,7 +17,7 @@ fi
 # Sensible defaults if constants are missing
 : "${GC_NAME:=gpt-creator}"
 : "${GC_VERSION:=0.1.0}"
-: "${GC_DEFAULT_MODEL:=gpt-5-high}"
+: "${GC_DEFAULT_MODEL:=gpt-5.1-codex-max}"
 : "${PROJECT_DIR:=${PWD}}"
 : "${GC_STATE_DIR:=${PROJECT_DIR}/.gpt-creator}"
 : "${GC_STAGING_DIR:=${GC_STATE_DIR}/staging}"

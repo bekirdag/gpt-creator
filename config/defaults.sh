@@ -4,7 +4,7 @@
 # Set default values
 : "${GC_NAME:=gpt-creator}"
 : "${GC_VERSION:=0.1.0}"
-: "${GC_MODEL:=gpt-5-high}"
+: "${GC_MODEL:=gpt-5.1-codex-max}"
 : "${GC_DEFAULT_API_URL:=http://localhost:3000/api/v1}"
 : "${GC_DEFAULT_UI_URL:=http://localhost:5173}"
 

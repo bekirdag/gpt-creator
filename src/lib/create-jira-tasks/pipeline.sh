@@ -664,9 +664,25 @@ cjt::generate_tasks() {
     unset CJT_INLINE_REFINE_REASON
   fi
 
-  local story_file
+  local -a story_files=()
   while IFS= read -r story_file; do
     [[ -n "$story_file" ]] || continue
+    story_files+=("$story_file")
+  done < <(cjt::list_story_files)
+
+  if (( ${#story_files[@]} == 0 )); then
+    cjt::warn "No story files found in ${CJT_JSON_STORIES_DIR}; skipping task generation"
+    cjt::state_mark_stage_completed "tasks"
+    return
+  fi
+
+  local story_file
+  for story_file in "${story_files[@]}"; do
+    [[ -n "$story_file" ]] || continue
+    if [[ ! -f "$story_file" ]]; then
+      cjt::warn "Story file missing on disk, skipping: ${story_file}"
+      continue
+    fi
     local slug
     slug="${story_file##*/}"; slug="${slug%.json}"
     local prompt_file="$CJT_PROMPTS_DIR/tasks_${slug}.prompt.md"
@@ -690,14 +706,22 @@ cjt::generate_tasks() {
     else
       cjt::die "Codex failed while generating tasks for story ${slug}"
     fi
-  done < <(find "$CJT_JSON_STORIES_DIR" -maxdepth 1 -type f -name '*.json' | sort)
+  done
 
   cjt::state_mark_stage_completed "tasks"
+}
+
+cjt::list_story_files() {
+  local helper
+  helper="$(cjt::clone_python_tool "list_json_files.py")" || return 0
+  python3 "$helper" "$CJT_JSON_STORIES_DIR" 2>/dev/null
 }
 
 cjt::normalize_story_jsons() {
   local split_helper
   split_helper="$(cjt::clone_python_tool "split_story_json.py")" || return 0
+  local list_helper
+  list_helper="$(cjt::clone_python_tool "list_json_files.py")" || list_helper=""
   local tmp_dir="$CJT_JSON_STORIES_DIR/.split_tmp"
   rm -rf "$tmp_dir" 2>/dev/null || true
   mkdir -p "$tmp_dir"
@@ -726,12 +750,20 @@ PY
         cjt::warn "Failed to split bundled story file ${story_file}; leaving as-is"
       fi
     fi
-  done < <(find "$CJT_JSON_STORIES_DIR" -maxdepth 1 -type f -name '*.json' | sort)
+  done < <(cjt::list_story_files)
 
   if (( converted )); then
-    while IFS= read -r -d '' split_file; do
-      mv -f "$split_file" "$CJT_JSON_STORIES_DIR"/
-    done < <(find "$tmp_dir" -maxdepth 1 -type f -name '*.json' -print0)
+    if [[ -n "$list_helper" && -f "$list_helper" ]]; then
+      while IFS= read -r split_file; do
+        [[ -n "$split_file" ]] || continue
+        mv -f "$split_file" "$CJT_JSON_STORIES_DIR"/
+      done < <(python3 "$list_helper" "$tmp_dir" 2>/dev/null)
+    else
+      while IFS= read -r -d '' split_file; do
+        [[ -n "$split_file" ]] || continue
+        mv -f "$split_file" "$CJT_JSON_STORIES_DIR"/
+      done < <(find "$tmp_dir" -maxdepth 1 -type f -name '*.json' -print0)
+    fi
     cjt::log "Bundled story files converted; continuing with per-story JSON inputs"
   fi
 

@@ -25,6 +25,8 @@ _gpt_creator() {
     'estimate:Estimate backlog completion time from story points'
     'sweep-artifacts:Sweep legacy progress artifacts into .gpt-creator'
     'work-on-tasks:Execute tasks from the SQLite backlog with Codex'
+    'review-tasks:Review ready-to-review tasks and record comments'
+    'qa-tasks:Run Playwright QA on ready-for-qa tasks'
     'reports:List or show captured issue reports'
     'task-convert:[deprecated] Alias for create-tasks'
     'iterate:[deprecated] Legacy Jira loop'
@@ -148,6 +150,33 @@ _gpt_creator() {
         '--no-context-doc-snippets[Disable doc-snippet mode and include staged docs verbatim]' \
         '--sample-lines=[Include at most N lines from sample payloads]' \
         '--idle-timeout=[Abort if no task progress for N seconds]'
+      ;;
+    review-tasks)
+      _arguments \
+        '--project=[Project root]:dir:_files -/' \
+        '--db=[Path to tasks.db]:file:_files' \
+        '--agent=[Reviewer agent name]' \
+        '--client=[Override LLM client/provider id]' \
+        '--model=[Override model id]' \
+        '--max-issues=[Cap number of issues emitted]' \
+        '--max-output=[Cap review comment length in chars]' \
+        '--task=[Task id or story:pos]' \
+        '--dry-run[Preview without updating statuses]'
+      ;;
+    qa-tasks)
+      _arguments \
+        '--project=[Project root]:dir:_files -/' \
+        '--db=[Path to tasks.db]:file:_files' \
+        '--url=[Base URL to test]' \
+        '--task=[Task id or story:pos]' \
+        '--headed[Run the browser headed]' \
+        '--headless[Run the browser headless]' \
+        '--allow-console[Allow console errors without failing]' \
+        '--allow-network[Allow network failures without failing]' \
+        '--retry-mobile[Retry once with mobile viewport on failure]' \
+        '--no-retry-mobile[Disable mobile retry]' \
+        '--fallback-cmd=[Fallback command when Playwright unavailable]' \
+        '--dry-run[Preview without updating statuses]'
       ;;
     iterate)
       _arguments \

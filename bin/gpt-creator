@@ -2171,6 +2171,7 @@ gc_migrate_progress_artifacts() {
     local plan_path="${gc_root}/logs/progress-migration.plan.json"
     local map_path="${gc_root}/logs/progress-migration.map.ndjson"
     local helper_path=""
+    gc_clone_python_tool "task_comments.py" "$project_root" >/dev/null 2>&1 || true
     if ! helper_path="$(gc_clone_python_tool "progress_migration.py" "$project_root")"; then
       warn "Unable to prepare progress migration helper; skipping task state reconciliation."
       return 0
@@ -3750,6 +3751,8 @@ gc_build_tasks_db() {
   local db_path="${2:?sqlite db path required}"
   local force_flag="${3:-0}"
   local helper_path
+  gc_clone_python_tool "ensure_agents_schema.py" "${PROJECT_ROOT:-$PWD}" >/dev/null 2>&1 || true
+  gc_clone_python_tool "task_comments.py" "${PROJECT_ROOT:-$PWD}" >/dev/null 2>&1 || true
   helper_path="$(gc_clone_python_tool "build_tasks_db.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   python3 "$helper_path" "$tasks_json" "$db_path" "$force_flag"
 }
@@ -7116,10 +7119,10 @@ cmd_create_agent() {
         tags="${2:-}"
         shift 2
         ;;
-      --json)
-        json=1
-        shift
-        ;;
+    --json)
+      json=1
+      shift
+      ;;
       --full)
         full=1
         shift
@@ -7226,6 +7229,118 @@ cmd_create_agent() {
 
   gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" "${cli_args[@]}"
   return $?
+}
+
+cmd_qa_tasks() {
+  local root="" db_override="" task_filter="" url="" head_mode="headless" dry_run=0 allow_console=0 allow_network=0 retry_mobile=1 fallback_cmd=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project|--root)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      --db)
+        db_override="$(abs_path "$2")"
+        shift 2
+        ;;
+      --db=*)
+        db_override="$(abs_path "${1#*=}")"
+        shift
+        ;;
+      --task)
+        task_filter="${2:-}"
+        shift 2
+        ;;
+      --task=*)
+        task_filter="${1#*=}"
+        shift
+        ;;
+      --url)
+        url="${2:-}"
+        shift 2
+        ;;
+      --url=*)
+        url="${1#*=}"
+        shift
+        ;;
+      --headed)
+        head_mode="headed"
+        shift
+        ;;
+      --headless)
+        head_mode="headless"
+        shift
+        ;;
+      --strict-http)
+        shift
+        ;;
+      --allow-console)
+        allow_console=1
+        shift
+        ;;
+      --allow-network)
+        allow_network=1
+        shift
+        ;;
+      --dry-run|--dryrun)
+        dry_run=1
+        shift
+        ;;
+      --retry-mobile)
+        retry_mobile=1
+        shift
+        ;;
+      --no-retry-mobile)
+        retry_mobile=0
+        shift
+        ;;
+      --fallback-cmd)
+        fallback_cmd="${2:-}"
+        shift 2
+        ;;
+      --fallback-cmd=*)
+        fallback_cmd="${1#*=}"
+        shift
+        ;;
+      -h|--help)
+        printf '%s\n' "Run Playwright QA smoke for ready-for-qa tasks and record findings." \
+          "" \
+          "Usage: gpt-creator qa-tasks --url https://site.example [--project DIR] [--db PATH] [--task ID|story:pos] [--headed] [--allow-console] [--allow-network] [--retry-mobile|--no-retry-mobile] [--fallback-cmd \"npm run lint\"] [--dry-run]" \
+          "" \
+          "Transitions: ready-for-qa -> completed on pass, else -> pending."
+        return 0
+        ;;
+      *)
+        die "Unknown qa-tasks option: $1"
+        ;;
+    esac
+  done
+
+  ensure_ctx "$root"
+  [[ -n "$url" ]] || die "--url is required for qa-tasks"
+  local tasks_db="${db_override:-${PLAN_DIR}/tasks/tasks.db}"
+  if [[ ! -f "$tasks_db" ]]; then
+    die "Tasks database not found at ${tasks_db}."
+  fi
+
+  local helper_path
+  gc_clone_python_tool "task_comments.py" "${PROJECT_ROOT:-$PWD}" >/dev/null 2>&1 || true
+  gc_clone_python_tool "update_task_state.py" "${PROJECT_ROOT:-$PWD}" >/dev/null 2>&1 || true
+  helper_path="$(gc_clone_python_tool "qa_tasks.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local -a args=(--project "${PROJECT_ROOT:-$PWD}" --db "$tasks_db" --url "$url")
+  [[ -n "$task_filter" ]] && args+=(--task "$task_filter")
+  if [[ "$head_mode" == "headed" ]]; then
+    args+=(--headed)
+  else
+    args+=(--headless)
+  fi
+  (( allow_console )) && args+=(--allow-console)
+  (( allow_network )) && args+=(--allow-network)
+  (( retry_mobile )) && args+=(--retry-mobile)
+  (( retry_mobile == 0 )) && args+=(--no-retry-mobile)
+  [[ -n "$fallback_cmd" ]] && args+=(--fallback-cmd "$fallback_cmd")
+  (( dry_run )) && args+=(--dry-run)
+  python3 "$helper_path" "${args[@]}"
 }
 
 cmd_list_agents() {
@@ -7619,6 +7734,111 @@ cmd_sync_llms() {
 
   gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" "${cli_args[@]}"
   return $?
+}
+
+cmd_review_tasks() {
+  local root="" agent="" db_override="" task_filter="" dry_run=0 client_override="" model_override="" max_issues=10 max_output=4000
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --project|--root)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      --db)
+        db_override="$(abs_path "$2")"
+        shift 2
+        ;;
+      --db=*)
+        db_override="$(abs_path "${1#*=}")"
+        shift
+        ;;
+      --agent)
+        agent="${2:-}"
+        shift 2
+        ;;
+      --agent=*)
+        agent="${1#*=}"
+        shift
+        ;;
+      --client)
+        client_override="${2:-}"
+        shift 2
+        ;;
+      --client=*)
+        client_override="${1#*=}"
+        shift
+        ;;
+      --model)
+        model_override="${2:-}"
+        shift 2
+        ;;
+      --model=*)
+        model_override="${1#*=}"
+        shift
+        ;;
+      --max-issues)
+        max_issues="${2:-10}"
+        shift 2
+        ;;
+      --max-issues=*)
+        max_issues="${1#*=}"
+        shift
+        ;;
+      --max-output)
+        max_output="${2:-4000}"
+        shift 2
+        ;;
+      --max-output=*)
+        max_output="${1#*=}"
+        shift
+        ;;
+      --task)
+        task_filter="${2:-}"
+        shift 2
+        ;;
+      --task=*)
+        task_filter="${1#*=}"
+        shift
+        ;;
+      --dry-run|--dryrun)
+        dry_run=1
+        shift
+        ;;
+      -h|--help)
+        printf '%s\n' "Review ready-to-review tasks and record comments." \
+          "" \
+          "Usage: gpt-creator review-tasks [--project DIR] [--db PATH] [--agent NAME] [--client PROVIDER] [--model MODEL] [--max-issues N] [--max-output CHARS] [--task ID|story:pos] [--dry-run]" \
+          "" \
+          "Transitions tasks: ready-to-review -> ready-for-qa on pass, or -> pending on fail."
+        return 0
+        ;;
+      *)
+        die "Unknown review-tasks option: $1"
+        ;;
+    esac
+  done
+
+  ensure_ctx "$root"
+  local tasks_db="${db_override:-${PLAN_DIR}/tasks/tasks.db}"
+  if [[ ! -f "$tasks_db" ]]; then
+    die "Tasks database not found at ${tasks_db}."
+  fi
+
+  local helper_path
+  gc_clone_python_tool "llm_client_factory.py" "${PROJECT_ROOT:-$PWD}" >/dev/null 2>&1 || true
+  gc_clone_python_tool "task_comments.py" "${PROJECT_ROOT:-$PWD}" >/dev/null 2>&1 || true
+  gc_clone_python_tool "update_task_state.py" "${PROJECT_ROOT:-$PWD}" >/dev/null 2>&1 || true
+  helper_path="$(gc_clone_python_tool "review_tasks.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local -a args=(--project "${PROJECT_ROOT:-$PWD}" --db "$tasks_db")
+  [[ -n "$agent" ]] && args+=(--agent "$agent")
+  [[ -n "$client_override" ]] && args+=(--client "$client_override")
+  [[ -n "$model_override" ]] && args+=(--model "$model_override")
+  [[ -n "$max_issues" ]] && args+=(--max-issues "$max_issues")
+  [[ -n "$max_output" ]] && args+=(--max-output "$max_output")
+  [[ -n "$task_filter" ]] && args+=(--task "$task_filter")
+  (( dry_run )) && args+=(--dry-run)
+
+  python3 "$helper_path" "${args[@]}"
 }
 
 cmd_show_agent() {
@@ -11055,7 +11275,7 @@ print(error)'
         task_locked_migration=1
       fi
       local task_status_reason_current="$task_status_reason"
-      local terminal_locked_regex='^(complete|completed|completed-no-changes|dead-letter|permanent-fail|blocked-budget|blocked-quota|blocked-merge-conflict|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\([^)]+\)|skipped-already-complete)$'
+      local terminal_locked_regex='^(complete|completed|completed-no-changes|ready-to-review|ready_to_review|ready-for-qa|ready_for_qa|dead-letter|permanent-fail|blocked-budget|blocked-quota|blocked-merge-conflict|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\([^)]+\)|skipped-already-complete)$'
       if [[ "$task_status_lower" == blocked-dependency\(* ]]; then
         local blocked_reason="${task_status_reason_current:-${task_status_original}}"
         warn "  Task ${task_number} (${banner_task_id}) blocked by dependency: ${blocked_reason}; skipping for now."
@@ -11838,7 +12058,7 @@ print(flag("notes_contains_already_satisfied"))'
             fi
 
             if (( allow_noop_completion )) && (( note_reject_completion == 0 )); then
-              info "    No repository changes required; marking task complete."
+              info "    No repository changes required; marking task ready-to-review (no code changes)."
               if [[ -z "$apply_status" || "$apply_status" == "pending" || "$apply_status" == "ok" ]]; then
                 apply_status="noop-accepted"
               fi
@@ -12490,7 +12710,7 @@ print(flag("notes_contains_already_satisfied"))'
       fi
 
       if [[ "$task_result_status" == "in-progress" ]]; then
-        task_result_status="complete"
+        task_result_status="ready-to-review"
       fi
 
       local note_status_override=""
@@ -12505,13 +12725,13 @@ print(flag("notes_contains_already_satisfied"))'
       if [[ -n "$note_status_override" ]]; then
         case "$note_status_override" in
           completed-no-changes|completed_no_changes)
-            if [[ "$task_result_status" == "complete" || "$task_result_status" == "in-progress" || "$task_result_status" == "retryable" ]]; then
-              task_result_status="completed-no-changes"
+            if [[ "$task_result_status" == "complete" || "$task_result_status" == "ready-to-review" || "$task_result_status" == "in-progress" || "$task_result_status" == "retryable" ]]; then
+              task_result_status="ready-to-review-no-changes"
             fi
             ;;
-          completed|complete)
-            if [[ "$task_result_status" == "completed-no-changes" || "$task_result_status" == "in-progress" || "$task_result_status" == "retryable" ]]; then
-              task_result_status="complete"
+          completed|complete|ready-to-review|ready_to_review)
+            if [[ "$task_result_status" == "completed-no-changes" || "$task_result_status" == "ready-to-review-no-changes" || "$task_result_status" == "in-progress" || "$task_result_status" == "retryable" ]]; then
+              task_result_status="ready-to-review"
             fi
             ;;
           needs-retry|needs_retry|retry|retryable)
@@ -12529,16 +12749,25 @@ print(flag("notes_contains_already_satisfied"))'
         esac
       fi
 
+      case "$task_result_status" in
+        complete|completed)
+          task_result_status="ready-to-review"
+          ;;
+        completed-no-changes)
+          task_result_status="ready-to-review-no-changes"
+          ;;
+      esac
+
       if [[ "$task_terminal_state" == "RUNNING" ]]; then
         case "$task_result_status" in
-          complete)
+          complete|ready-to-review)
             if (( task_changes_applied > 0 )); then
               gc_mark_terminal_state "COMPLETED_WITH_CHANGES"
             else
               gc_mark_terminal_state "NOOP_ACCEPTED"
             fi
             ;;
-          completed-no-changes)
+          completed-no-changes|ready-to-review-no-changes)
             gc_mark_terminal_state "NOOP_ACCEPTED"
             ;;
           permanent-fail)
@@ -12590,10 +12819,10 @@ print(flag("notes_contains_already_satisfied"))'
 
       local status_token=""
       case "$task_result_status" in
-        complete|completed)
+        complete|completed|ready-to-review)
           status_token="COMPLETED"
           ;;
-        completed-no-changes)
+        completed-no-changes|ready-to-review-no-changes)
           status_token="COMPLETED NO CHANGES"
           ;;
         retryable)
@@ -12628,7 +12857,7 @@ print(flag("notes_contains_already_satisfied"))'
 
       local attempt_label=$(( attempt > 0 ? attempt : 1 ))
 
-      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
+      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" || "$task_result_status" == "ready-to-review" || "$task_result_status" == "ready-to-review-no-changes" ]]; then
         local commit_label="${banner_task_id}: ${task_title:-Task ${task_number}}"
         if gc_finalize_task_snapshot "$commit_label" "$task_ref_for_verify" "$attempt_label" "$task_result_status" "complete" "${task_auto_push_records[@]}"; then
           if [[ "${GC_LAST_AUTO_COMMIT_STATUS:-}" == "committed" ]]; then
@@ -12716,7 +12945,7 @@ print(flag("notes_contains_already_satisfied"))'
       esac
 
       local completed_hint="$task_index"
-      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
+      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" || "$task_result_status" == "ready-to-review" || "$task_result_status" == "ready-to-review-no-changes" ]]; then
         completed_hint=$((task_index + 1))
       fi
 
@@ -12938,7 +13167,7 @@ print(flag("notes_contains_already_satisfied"))'
         gc_telemetry_record "agent_usage" "${AGENT_TELEMETRY_PAYLOAD}" || true
       fi
 
-      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" ]]; then
+      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" || "$task_result_status" == "ready-to-review" || "$task_result_status" == "ready-to-review-no-changes" ]]; then
         local throughput_task_msg=""
         if throughput_task_msg="$(gc_update_throughput_metrics "$tasks_db" "task-complete" "$slug" "$task_index")"; then
           if [[ -n "$throughput_task_msg" ]]; then
@@ -12954,8 +13183,8 @@ print(flag("notes_contains_already_satisfied"))'
       gc_clear_active_task
 
       case "$task_result_status" in
-        complete|completed-no-changes)
-          info "  ✓ Task ${task_number} (${task_id:-no-id}) completed with status: ${task_result_status}"
+        complete|completed-no-changes|ready-to-review|ready-to-review-no-changes)
+          info "  ✓ Task ${task_number} (${task_id:-no-id}) ready for review with status: ${task_result_status}"
           ;;
         retryable)
           warn "  Task ${task_number} (${task_id:-no-id}) marked retryable; inspect ${report_entry_display} and rerun when ready."
@@ -15044,6 +15273,8 @@ main() {
     check-llms)     cmd_check_llms "$@" ;;
     install-llm)    cmd_install_llm "$@" ;;
     sync-llms)      cmd_sync_llms "$@" ;;
+    review-tasks)   cmd_review_tasks "$@" ;;
+    qa-tasks)       cmd_qa_tasks "$@" ;;
     show-agent)     cmd_show_agent "$@" ;;
     edit-agent)     cmd_edit_agent "$@" ;;
     agent-check)    cmd_agent_check "$@" ;;

@@ -10,7 +10,7 @@ def count_unstarted_tasks(db_path: Path) -> int:
         """
         SELECT COUNT(*)
           FROM tasks
-         WHERE LOWER(COALESCE(status, 'pending')) IN ('', 'pending')
+         WHERE LOWER(REPLACE(COALESCE(status, 'pending'),'_','-')) IN ('', 'pending')
         """
     ).fetchone()
     pending = row[0] if row else 0

@@ -8,6 +8,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from ensure_agents_schema import ensure_agents_schema
+from task_comments import ensure_task_comments_schema
 
 
 def slugify(text: str) -> str:
@@ -285,6 +286,7 @@ def main() -> int:
               ON task_dependencies (blocker_id)
         """
         )
+        ensure_task_comments_schema(cur)
 
     ensure_table()
     cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_uid ON tasks(uid)")

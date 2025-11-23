@@ -6419,7 +6419,7 @@ def main():
             raise SystemExit(f"Story slug not found: {STORY_SLUG}")
 
         task_rows = cur.execute(
-            'SELECT task_id, title, description, story_points, assignees_json, tags_json, acceptance_json, dependencies_json, '
+            'SELECT id, task_id, title, description, story_points, assignees_json, tags_json, acceptance_json, dependencies_json, '
             'tags_text, story_points, dependencies_text, assignee_text, document_reference, idempotency, rate_limits, rbac, '
             'messaging_workflows, performance_targets, observability, acceptance_text, endpoints, sample_create_request, '
             'sample_create_response, user_story_ref_id, epic_ref_id, status, last_progress_at, last_progress_run, '
@@ -6865,6 +6865,49 @@ def main():
         last_duration_seconds = parse_int_field(task['last_duration_seconds'])
         last_notes = parse_json_list(task['last_notes_json'])
         last_commands = parse_json_list(task['last_commands_json'])
+        task_row_id = None
+        try:
+            task_row_id = int(task['id'])
+        except Exception:
+            task_row_id = None
+
+        def fetch_recent_comments(limit: int = 6) -> List[sqlite3.Row]:
+            """Load latest review/QA comments for this task."""
+            if tasks_db_path is None:
+                return []
+            try:
+                with sqlite3.connect(str(tasks_db_path)) as cconn:
+                    cconn.row_factory = sqlite3.Row
+                    ccur = cconn.cursor()
+                    exists = ccur.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='task_comments'"
+                    ).fetchone()
+                    if not exists:
+                        return []
+                    task_ref_value = task_db_id or f"{STORY_SLUG}:{TASK_INDEX + 1}"
+                    where_clauses: List[str] = []
+                    params: List[object] = []
+                    if task_row_id is not None:
+                        where_clauses.append("task_row_id = ?")
+                        params.append(task_row_id)
+                    where_clauses.append("(story_slug = ? AND task_ref = ?)")
+                    params.extend([STORY_SLUG, task_ref_value])
+                    where = " OR ".join(where_clauses)
+                    params.append(limit)
+                    return list(
+                        ccur.execute(
+                            f"""
+                            SELECT commenter, details, status_from, status_to, severity, component, suggested_fix, blocking, artifact_path, agent_run_id, created_at
+                              FROM task_comments
+                             WHERE {where}
+                             ORDER BY created_at DESC
+                             LIMIT ?
+                            """,
+                            params,
+                        ).fetchall()
+                    )
+            except Exception:
+                return []
 
         project_display = project_display_name(PROJECT_ROOT)
         repo_path = PROJECT_ROOT or '.'
@@ -7227,6 +7270,39 @@ def main():
                 lines.append("- Prior command attempts:")
                 for cmd in last_commands[:3]:
                     lines.append(f"  - {clamp_text(cmd, 160)}")
+
+            recent_comments = fetch_recent_comments()
+            if recent_comments:
+                lines.append("- Review/QA comments (latest):")
+                for comment in recent_comments[:4]:
+                    commenter = clean(comment['commenter'])
+                    created_at = clean(comment['created_at'])
+                    status_from = clean(comment['status_from'])
+                    status_to = clean(comment['status_to'])
+                    severity = clean(comment['severity'])
+                    component = clean(comment['component'])
+                    suggested_fix = clean(comment['suggested_fix'])
+                    blocking = (str(comment['blocking']).strip() == "1")
+                    detail_text = clamp_text(clean(comment['details']), 220)
+                    meta_bits = []
+                    if status_from or status_to:
+                        transition = f"{status_from or '?'}→{status_to or '?'}"
+                        meta_bits.append(transition)
+                    if severity:
+                        meta_bits.append(severity)
+                    if component:
+                        meta_bits.append(component)
+                    if blocking:
+                        meta_bits.append("BLOCKING")
+                    meta_prefix = ""
+                    if created_at or meta_bits:
+                        meta_prefix = " ".join(part for part in [created_at, "[" + " | ".join(meta_bits) + "]" if meta_bits else ""] if part)
+                    if meta_prefix:
+                        lines.append(f"  - {commenter or 'agent'} {meta_prefix}: {detail_text}")
+                    else:
+                        lines.append(f"  - {commenter or 'agent'}: {detail_text}")
+                    if suggested_fix:
+                        lines.append(f"    Suggested fix: {clamp_text(suggested_fix, 180)}")
 
             log_excerpt_lines: list[str] = []
             log_display = ""

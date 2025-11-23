@@ -12,6 +12,8 @@ gpt-creator verify --root DIR
 gpt-creator create-tasks --root DIR [--jira tasks.md] [--force]
 gpt-creator backlog --project DIR [--type epics|stories] [--item-children ITEM] [--progress] [--task-details ID]
 gpt-creator work-on-tasks --root DIR [--story ID|SLUG] [--from-task REF] [--fresh] [--verify|--soft-verify] [--no-verify] [--agent NAME]
+gpt-creator review-tasks --project DIR [--agent NAME] [--task ID|story:pos] [--dry-run]
+gpt-creator qa-tasks --project DIR --url https://site.example [--task ID|story:pos] [--headed] [--dry-run]
 gpt-creator iterate --root DIR [--jira tasks.md]  # deprecated
 gpt-creator tui  # preview TUI with placeholder data
 gpt-creator keys [list|set <service>]  # manage API credentials
@@ -28,7 +30,7 @@ Global flags:
 
 Common flow:
 1) `create-project` (runs everything) or hand‑run: scan → normalize → plan → generate → db → run → verify.
-2) Snapshot Jira markdown with `create-tasks`, then execute the backlog via `work-on-tasks`. The legacy `iterate` command is deprecated.
+2) Snapshot Jira markdown with `create-tasks`, then execute the backlog via `work-on-tasks` (stops at `ready-to-review`), follow with `review-tasks` (pass → `ready-for-qa`, fail → `pending`) and `qa-tasks` (pass → `completed`, fail → `pending`). The legacy `iterate` command is deprecated.
    - Use `--batch-size` to pause after a fixed number of tasks and `--sleep-between` to insert delays if Codex runs are exhausting local resources.
   - Each Codex run inherits a hard runtime guard (default 3600s) controlled by `GC_CODEX_EXEC_MAX_DURATION`; set it to `0` to disable the watchdog for long-running manual sessions.
    - Repeated Codex diffs are capped by `GC_CODEX_DIFF_REPEAT_LIMIT` (default 6) so infinite answer loops stop automatically; raise or set to `0` if you really need more attempts.

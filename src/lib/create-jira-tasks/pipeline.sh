@@ -641,6 +641,8 @@ cjt::generate_tasks() {
     return
   fi
 
+  cjt::normalize_story_jsons
+
   cjt::state_mark_stage_pending "tasks"
   local inline_refine_enabled=0
   local inline_refine_reason=""
@@ -691,6 +693,47 @@ cjt::generate_tasks() {
   done < <(find "$CJT_JSON_STORIES_DIR" -maxdepth 1 -type f -name '*.json' | sort)
 
   cjt::state_mark_stage_completed "tasks"
+}
+
+cjt::normalize_story_jsons() {
+  local split_helper
+  split_helper="$(cjt::clone_python_tool "split_story_json.py")" || return 0
+  local tmp_dir="$CJT_JSON_STORIES_DIR/.split_tmp"
+  rm -rf "$tmp_dir" 2>/dev/null || true
+  mkdir -p "$tmp_dir"
+
+  local converted=0
+  while IFS= read -r story_file; do
+    [[ -n "$story_file" ]] || continue
+    # Detect bundled story payloads shaped like {"epic_id": "...", "user_stories": [...]}
+    if python3 - <<'PY' "$story_file"; then
+import json, sys
+path = sys.argv[1]
+try:
+    data = json.loads(open(path, "r", encoding="utf-8").read())
+except Exception:
+    sys.exit(1)
+if isinstance(data, dict) and isinstance(data.get("user_stories"), list):
+    sys.exit(0)
+sys.exit(1)
+PY
+    then
+      cjt::log "Splitting bundled story file ${story_file} into per-story JSON"
+      if python3 "$split_helper" "$story_file" "$tmp_dir"; then
+        rm -f "$story_file"
+        converted=1
+      else
+        cjt::warn "Failed to split bundled story file ${story_file}; leaving as-is"
+      fi
+    fi
+  done < <(find "$CJT_JSON_STORIES_DIR" -maxdepth 1 -type f -name '*.json' | sort)
+
+  if (( converted )); then
+    find "$tmp_dir" -maxdepth 1 -type f -name '*.json' -print0 | xargs -0 -I{} mv "{}" "$CJT_JSON_STORIES_DIR"/
+    cjt::log "Bundled story files converted; continuing with per-story JSON inputs"
+  fi
+
+  rm -rf "$tmp_dir" 2>/dev/null || true
 }
 
 cjt::inline_refine_is_enabled() {

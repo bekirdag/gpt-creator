@@ -18,6 +18,10 @@ TERMINAL_STATUSES = {
     "complete",
     "completed",
     "completed-no-changes",
+    "ready-to-review",
+    "ready_for_review",
+    "ready-for-qa",
+    "ready_for_qa",
     "skipped-already-complete",
 }
 
@@ -35,6 +39,7 @@ ACTIVE_STATUSES = {
     "on-hold",
     "review",
     "needs-review",
+    "ready-to-review",
 }
 
 BLOCKED_STATUSES = {

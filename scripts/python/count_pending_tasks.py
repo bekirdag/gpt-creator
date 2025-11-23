@@ -7,8 +7,8 @@ def count_pending_tasks(db_path: Path) -> int:
     conn = sqlite3.connect(str(db_path))
     cur = conn.cursor()
     row = cur.execute(
-        "SELECT COUNT(*) FROM tasks WHERE LOWER(COALESCE(status, 'pending')) "
-        "NOT IN ('complete','completed','completed-no-changes','skipped-already-complete')"
+        "SELECT COUNT(*) FROM tasks WHERE LOWER(REPLACE(COALESCE(status, 'pending'), '_','-')) "
+        "NOT IN ('complete','completed','completed-no-changes','ready-to-review','ready-for-qa','skipped-already-complete')"
     ).fetchone()
     pending = row[0] if row else 0
     conn.close()

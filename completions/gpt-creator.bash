@@ -9,7 +9,7 @@ _gpt_creator()
     prev="${COMP_WORDS[COMP_CWORD-1]}"
   }
 
-  local subcmds="create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks backlog estimate sweep-artifacts work-on-tasks reports iterate help version"
+  local subcmds="create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks backlog estimate sweep-artifacts work-on-tasks review-tasks qa-tasks reports iterate help version"
   local global_opts="--project -h --help -v --version --reports-on --reports-off --reports-idle-timeout"
 
   # find the subcommand (first non-option token)
@@ -40,7 +40,7 @@ _gpt_creator()
       local opts="--template --skip-template"
       COMPREPLY=( $(compgen -W "$opts" -- "$cur") $(compgen -d -- "$cur") )
       ;;
-    scan|normalize|plan|iterate|verify|run|refresh-stack|db|generate|create-pdr|create-sds|create-db-dump|create-jira-tasks|migrate-tasks|refine-tasks|create-tasks|backlog|estimate|sweep-artifacts|work-on-tasks|task-convert|bootstrap)
+    scan|normalize|plan|iterate|verify|run|refresh-stack|db|generate|create-pdr|create-sds|create-db-dump|create-jira-tasks|migrate-tasks|refine-tasks|create-tasks|backlog|estimate|sweep-artifacts|work-on-tasks|review-tasks|qa-tasks|task-convert|bootstrap)
       case "$prev" in
         --project) COMPREPLY=( $(compgen -d -- "$cur") ); return 0;;
         --jira) COMPREPLY=( $(compgen -f -- "$cur") ); return 0;;
@@ -102,6 +102,12 @@ _gpt_creator()
           ;;
         work-on-tasks)
           COMPREPLY=( $(compgen -W "--project --story --from-story --from-task --fresh-from --task --fresh --force --keep-artifacts --memory-cycle --batch-size --sleep-between --context-lines --context-none --context-file-lines --context-skip --prompt-compact --prompt-expanded --context-doc-snippets --no-context-doc-snippets --sample-lines --idle-timeout ${global_opts}" -- "$cur") )
+          ;;
+        review-tasks)
+          COMPREPLY=( $(compgen -W "--project --db --agent --client --model --max-issues --max-output --task --dry-run ${global_opts}" -- "$cur") )
+          ;;
+        qa-tasks)
+          COMPREPLY=( $(compgen -W "--project --db --url --task --headed --headless --allow-console --allow-network --retry-mobile --no-retry-mobile --fallback-cmd --dry-run ${global_opts}" -- "$cur") )
           ;;
         generate)
           COMPREPLY=( $(compgen -W "api web admin db docker all ${global_opts}" -- "$cur") )

@@ -1,6 +1,6 @@
 # Fish completion for gpt-creator
 
-set -l subcmds create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks backlog estimate sweep-artifacts work-on-tasks reports iterate help version
+set -l subcmds create-project bootstrap scan normalize plan generate db run refresh-stack verify create-pdr create-sds create-db-dump create-jira-tasks migrate-tasks refine-tasks create-tasks backlog estimate sweep-artifacts work-on-tasks review-tasks qa-tasks reports iterate help version
 complete -c gpt-creator -f -n "not __fish_seen_subcommand_from $subcmds" -a "$subcmds" -d "Commands"
 
 # global flags
@@ -130,6 +130,31 @@ complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l contex
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l no-context-doc-snippets -d "Disable doc-snippet mode and include staged docs verbatim"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l sample-lines -r -d "Include at most N lines from sample payloads"
 complete -c gpt-creator -n "__fish_seen_subcommand_from work-on-tasks" -l idle-timeout -r -d "Abort if no progress for N seconds"
+
+# review-tasks
+complete -c gpt-creator -n "__fish_seen_subcommand_from review-tasks" -l project -r -d "Project root"
+complete -c gpt-creator -n "__fish_seen_subcommand_from review-tasks" -l db -r -d "Path to tasks.db"
+complete -c gpt-creator -n "__fish_seen_subcommand_from review-tasks" -l agent -r -d "Reviewer agent name"
+complete -c gpt-creator -n "__fish_seen_subcommand_from review-tasks" -l client -r -d "Override LLM client/provider id"
+complete -c gpt-creator -n "__fish_seen_subcommand_from review-tasks" -l model -r -d "Override model id"
+complete -c gpt-creator -n "__fish_seen_subcommand_from review-tasks" -l max-issues -r -d "Cap number of issues emitted"
+complete -c gpt-creator -n "__fish_seen_subcommand_from review-tasks" -l max-output -r -d "Cap review comment length in chars"
+complete -c gpt-creator -n "__fish_seen_subcommand_from review-tasks" -l task -r -d "Task id or story:pos"
+complete -c gpt-creator -n "__fish_seen_subcommand_from review-tasks" -l dry-run -d "Preview without updating statuses"
+
+# qa-tasks
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l project -r -d "Project root"
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l db -r -d "Path to tasks.db"
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l url -r -d "Base URL to test"
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l task -r -d "Task id or story:pos"
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l headed -d "Run browser headed"
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l headless -d "Run browser headless"
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l allow-console -d "Allow console errors without failing"
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l allow-network -d "Allow network failures without failing"
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l retry-mobile -d "Retry once with mobile viewport on failure"
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l no-retry-mobile -d "Disable mobile retry"
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l fallback-cmd -r -d "Fallback command when Playwright unavailable"
+complete -c gpt-creator -n "__fish_seen_subcommand_from qa-tasks" -l dry-run -d "Preview without updating statuses"
 
 # iterate (deprecated)
 complete -c gpt-creator -n "__fish_seen_subcommand_from iterate" -l jira -r -d "Jira tasks file"

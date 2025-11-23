@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from task_comments import ensure_task_comments_schema
+
 TERMINAL_STATUSES = {
     "complete",
     "completed",
@@ -169,6 +171,8 @@ def _ensure_schema(cur: sqlite3.Cursor) -> None:
         )
         """
     )
+
+    ensure_task_comments_schema(cur)
 
 
 def _fetch_tasks(cur: sqlite3.Cursor) -> List[sqlite3.Row]:

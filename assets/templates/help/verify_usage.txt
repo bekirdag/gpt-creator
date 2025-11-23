@@ -1,4 +1,4 @@
-Usage: ${VERIFY_CMD_NAME} verify [options]
+Usage: ${VERIFY_CMD_NAME} qa [options]
 
 Service URLs:
   --api-url URL     API health URL (default: ${VERIFY_API_DEFAULT})
@@ -17,4 +17,3 @@ Other:
   -h, --help           Show help
 
 Exits non-zero on any failure.
-

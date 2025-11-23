@@ -6114,10 +6114,7 @@ cmd_refresh_stack() {
 }
 
 
-cmd_verify() {
-  info "'gpt-creator verify' is deprecated; no automated checks are available."
-  return 0
-
+cmd_qa() {
   local kind="${1:-all}"; shift || true
   local root=""
   local api_base="${GC_API_BASE_URL:-http://localhost:3000/api/v1}"
@@ -6125,6 +6122,16 @@ cmd_verify() {
   local web_url="${GC_WEB_URL:-http://localhost:8080/}"
   local admin_url="${GC_ADMIN_URL:-http://localhost:8080/admin/}"
   local api_base_override=0 api_health_override=0 web_url_override=0 admin_url_override=0
+  local mobile_dir="${GC_MOBILE_APP_DIR:-}"
+  local detox_config_ios="${GC_DETOX_CONFIG_IOS:-}"
+  local detox_config_android="${GC_DETOX_CONFIG_ANDROID:-}"
+  local detox_args="${GC_DETOX_ARGS:-}"
+  local maestro_flows_dir="${GC_MAESTRO_FLOWS_DIR:-}"
+  local maestro_device="${GC_MAESTRO_DEVICE:-}"
+  local maestro_device_ios="${GC_MAESTRO_DEVICE_IOS:-}"
+  local maestro_device_android="${GC_MAESTRO_DEVICE_ANDROID:-}"
+  local maestro_args="${GC_MAESTRO_ARGS:-}"
+  local mobile_optional="${GC_MOBILE_OPTIONAL:-0}"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -6133,10 +6140,41 @@ cmd_verify() {
       --api-health) api_health="$2"; api_health_override=1; shift 2;;
       --web-url) web_url="$2"; web_url_override=1; shift 2;;
       --admin-url) admin_url="$2"; admin_url_override=1; shift 2;;
+      --mobile-dir) mobile_dir="$2"; shift 2;;
+      --detox-config-ios) detox_config_ios="$2"; shift 2;;
+      --detox-config-android) detox_config_android="$2"; shift 2;;
+      --detox-args) detox_args="$2"; shift 2;;
+      --maestro-flows) maestro_flows_dir="$2"; shift 2;;
+      --maestro-device) maestro_device="$2"; shift 2;;
+      --maestro-device-ios) maestro_device_ios="$2"; shift 2;;
+      --maestro-device-android) maestro_device_android="$2"; shift 2;;
+      --maestro-args) maestro_args="$2"; shift 2;;
+      --mobile-optional|--allow-mobile-skip) mobile_optional=1; shift;;
       *) break;;
     esac
   done
+  if [[ "$mobile_optional" == "true" || "$mobile_optional" == "yes" ]]; then
+    mobile_optional=1
+  elif [[ "$mobile_optional" == "false" ]]; then
+    mobile_optional=0
+  fi
   ensure_ctx "$root"
+  if [[ -z "$mobile_dir" ]]; then
+    if [[ -d "${PROJECT_ROOT}/apps/mobile" ]]; then
+      mobile_dir="${PROJECT_ROOT}/apps/mobile"
+    elif [[ -d "${PROJECT_ROOT}/mobile" ]]; then
+      mobile_dir="${PROJECT_ROOT}/mobile"
+    else
+      mobile_dir="${PROJECT_ROOT}"
+    fi
+  fi
+  if [[ -z "$maestro_flows_dir" ]]; then
+    if [[ -d "${mobile_dir}/maestro" ]]; then
+      maestro_flows_dir="${mobile_dir}/maestro"
+    elif [[ -d "${PROJECT_ROOT}/maestro" ]]; then
+      maestro_flows_dir="${PROJECT_ROOT}/maestro"
+    fi
+  fi
 
   kind="$(printf '%s' "$kind" | tr '[:upper:]' '[:lower:]')"
 
@@ -6188,21 +6226,24 @@ cmd_verify() {
 
   case "$kind" in
     program_filters) kind="program-filters" ;;
-    program-filters|acceptance|openapi|a11y|lighthouse|consent|telemetry|nfr|all) ;;
+    program-filters|acceptance|openapi|a11y|lighthouse|consent|telemetry|mobile|mobile-detox|mobile-maestro|nfr|all) ;;
     *) die "Unknown verify target: ${kind}";;
   esac
 
   local -a check_names
   case "$kind" in
     acceptance) check_names=(acceptance) ;;
-    openapi|a11y|lighthouse|consent|program-filters|telemetry)
+    openapi|a11y|lighthouse|consent|program-filters|telemetry|mobile-detox|mobile-maestro)
       check_names=("$kind")
+      ;;
+    mobile)
+      check_names=(mobile-detox mobile-maestro)
       ;;
     nfr)
       check_names=(openapi a11y lighthouse consent program-filters telemetry)
       ;;
     all)
-      check_names=(acceptance openapi a11y lighthouse consent program-filters telemetry)
+      check_names=(acceptance openapi a11y lighthouse consent program-filters telemetry mobile-detox mobile-maestro)
       ;;
   esac
 
@@ -6217,13 +6258,18 @@ cmd_verify() {
     python_available=1
     python_bin="$(command -v python3)"
   fi
-  local check_order="acceptance,openapi,lighthouse,a11y,consent,program-filters,telemetry"
+  local check_order="acceptance,openapi,lighthouse,a11y,consent,program-filters,telemetry,mobile-detox,mobile-maestro"
 
   local pass=0 fail=0 skip=0
 
   # verification summary handled inline
 
   run_check() {
+    local require_success=0
+    if [[ "${1:-}" == "--require" ]]; then
+      require_success=1
+      shift
+    fi
     local name="$1"; shift
     local label="$1"; shift
     local -a cmd=("$@")
@@ -6248,8 +6294,15 @@ cmd_verify() {
       3)
         status="skip"
         message="${label} check skipped (missing dependency)."
-        ((skip++))
-        warn "${label} check skipped (missing dependency)"
+        if (( require_success )); then
+          status="fail"
+          message="${label} check required but skipped (missing dependency)."
+          ((fail++))
+          warn "${label} check required but skipped (missing dependency)"
+        else
+          ((skip++))
+          warn "${label} check skipped (missing dependency)"
+        fi
         ;;
       *)
         status="fail"
@@ -6407,13 +6460,64 @@ print(json.dumps(summary, ensure_ascii=False))'
         run_check "telemetry" "Telemetry" \
           bash "$verify_root/check-telemetry.sh"
         ;;
+      mobile-detox)
+        if (( mobile_optional )); then
+          run_check "mobile-detox" "Mobile (Detox)" \
+            env PROJECT_ROOT="$PROJECT_ROOT" \
+              GC_MOBILE_APP_DIR="$mobile_dir" \
+              GC_DETOX_CONFIG_IOS="$detox_config_ios" \
+              GC_DETOX_CONFIG_ANDROID="$detox_config_android" \
+              GC_DETOX_ARGS="$detox_args" \
+              GC_MOBILE_OPTIONAL="$mobile_optional" \
+            bash "$verify_root/mobile-detox.sh"
+        else
+          run_check --require "mobile-detox" "Mobile (Detox)" \
+            env PROJECT_ROOT="$PROJECT_ROOT" \
+              GC_MOBILE_APP_DIR="$mobile_dir" \
+              GC_DETOX_CONFIG_IOS="$detox_config_ios" \
+              GC_DETOX_CONFIG_ANDROID="$detox_config_android" \
+              GC_DETOX_ARGS="$detox_args" \
+              GC_MOBILE_OPTIONAL="$mobile_optional" \
+            bash "$verify_root/mobile-detox.sh"
+        fi
+        ;;
+      mobile-maestro)
+        if (( mobile_optional )); then
+          run_check "mobile-maestro" "Mobile (Maestro)" \
+            env PROJECT_ROOT="$PROJECT_ROOT" \
+              GC_MOBILE_APP_DIR="$mobile_dir" \
+              GC_MAESTRO_FLOWS_DIR="$maestro_flows_dir" \
+              GC_MAESTRO_DEVICE="$maestro_device" \
+              GC_MAESTRO_DEVICE_IOS="$maestro_device_ios" \
+              GC_MAESTRO_DEVICE_ANDROID="$maestro_device_android" \
+              GC_MAESTRO_ARGS="$maestro_args" \
+              GC_MOBILE_OPTIONAL="$mobile_optional" \
+            bash "$verify_root/mobile-maestro.sh"
+        else
+          run_check --require "mobile-maestro" "Mobile (Maestro)" \
+            env PROJECT_ROOT="$PROJECT_ROOT" \
+              GC_MOBILE_APP_DIR="$mobile_dir" \
+              GC_MAESTRO_FLOWS_DIR="$maestro_flows_dir" \
+              GC_MAESTRO_DEVICE="$maestro_device" \
+              GC_MAESTRO_DEVICE_IOS="$maestro_device_ios" \
+              GC_MAESTRO_DEVICE_ANDROID="$maestro_device_android" \
+              GC_MAESTRO_ARGS="$maestro_args" \
+              GC_MOBILE_OPTIONAL="$mobile_optional" \
+            bash "$verify_root/mobile-maestro.sh"
+        fi
+        ;;
     esac
   done
 
   if (( fail > 0 )); then
-    die "Verify failed — pass=${pass} fail=${fail} skip=${skip}"
+    die "QA failed — pass=${pass} fail=${fail} skip=${skip}"
   fi
-  ok "Verify complete — pass=${pass} skip=${skip}"
+  ok "QA complete — pass=${pass} skip=${skip}"
+}
+
+cmd_verify() {
+  warn "'verify' has been renamed to 'qa'; this alias will be removed in a future release."
+  cmd_qa "$@"
 }
 
 gc_exec_with_timeout() {
@@ -15258,6 +15362,7 @@ main() {
     db)             cmd_db "$@" ;;
     run)            cmd_run "$@" ;;
     refresh-stack)  cmd_refresh_stack "$@" ;;
+    qa)             cmd_qa "$@" ;;
     verify)         cmd_verify "$@" ;;
     migrate-tasks)  cmd_migrate_tasks_json "$@" ;;
     refine-tasks)   cmd_refine_tasks "$@" ;;

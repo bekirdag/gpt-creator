@@ -8,7 +8,7 @@ gpt-creator plan --root DIR --out plan.json
 gpt-creator generate {api|web|admin|db|docker} --root DIR
 gpt-creator db {provision|import|seed} --root DIR
 gpt-creator run {up|down|logs|open} --root DIR
-gpt-creator verify --root DIR
+gpt-creator qa --root DIR
 gpt-creator create-tasks --root DIR [--jira tasks.md] [--force]
 gpt-creator backlog --project DIR [--type epics|stories] [--item-children ITEM] [--progress] [--task-details ID]
 gpt-creator work-on-tasks --root DIR [--story ID|SLUG] [--from-task REF] [--fresh] [--verify|--soft-verify] [--no-verify] [--agent NAME]
@@ -18,6 +18,8 @@ gpt-creator iterate --root DIR [--jira tasks.md]  # deprecated
 gpt-creator tui  # preview TUI with placeholder data
 gpt-creator keys [list|set <service>]  # manage API credentials
 ```
+
+`gpt-creator qa` runs the bundled QA checks (web + mobile). Configure mobile with `--mobile-dir`, `--detox-config-ios|--detox-config-android`, `--maestro-flows`, `--maestro-device[-ios|-android]` or the matching `GC_*` env vars; pass `--mobile-optional` if you want missing mobile tooling to skip instead of fail.
 
 Global flags:
 - `--reports-on` enables automatic crash/stall reports for the current invocation (files land in `.gpt-creator/logs/issue-reports/`).
@@ -29,7 +31,7 @@ Global flags:
 - Maintainers can review remote auto-reports with `gpt-creator reports audit`; add `--close-invalid` to append an "Authenticity failed" comment and close any issue whose checksum/watermark does not match the trusted digests (defaults to `config/release-digests.json`, overridable with `--digests FILE` or `--allow VERSION=SHA256`).
 
 Common flow:
-1) `create-project` (runs everything) or hand‑run: scan → normalize → plan → generate → db → run → verify.
+1) `create-project` (runs everything) or hand‑run: scan → normalize → plan → generate → db → run → qa.
 2) Snapshot Jira markdown with `create-tasks`, then execute the backlog via `work-on-tasks` (stops at `ready-to-review`), follow with `review-tasks` (pass → `ready-for-qa`, fail → `pending`) and `qa-tasks` (pass → `completed`, fail → `pending`). The legacy `iterate` command is deprecated.
    - Use `--batch-size` to pause after a fixed number of tasks and `--sleep-between` to insert delays if Codex runs are exhausting local resources.
   - Each Codex run inherits a hard runtime guard (default 3600s) controlled by `GC_CODEX_EXEC_MAX_DURATION`; set it to `0` to disable the watchdog for long-running manual sessions.

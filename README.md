@@ -8,13 +8,13 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 
 ## Features at a Glance
 
-- **Single-command bootstrap**: `gpt-creator create-project <path>` orchestrates scan → normalize → plan → generate → db → run; automated verification has been removed and the legacy `verify` commands remain only as inert compatibility shims for manual scripts.
+- **Single-command bootstrap**: `gpt-creator create-project <path>` orchestrates scan → normalize → plan → generate → db → run → qa so the stack and QA (web + mobile) are exercised in one flow.
 - **Fuzzy discovery**: Locates artifacts across diverse naming conventions (e.g., `*PDR*.md`, `openapi.*`, `sql_dump*.sql`, `*.mmd`, HTML/CSS samples).
 - **Deterministic staging**: Copies inputs into `.gpt-creator/staging/inputs/` with canonical names and provenance tracking.
 - **Progress cleanup**: Sweeps legacy Codex progress artifacts (e.g., `tmp_*`, `final_*`, `diff*`, `*_patch.jsonstr`) into `.gpt-creator/**` so the project root stays clean while runs remain resumable.
 - **Planning outputs**: Produces route/entity summaries and task hints under `.gpt-creator/staging/plan/` as scaffolding for further design work.
 - **Template-driven generation**: Renders baseline NestJS, Vue 3, Prisma, and Docker scaffolds into `/apps/**` and `/docker`, ready for manual extension or Codex-driven augmentation.
-- **Verification toolkit**: Ships scripts for acceptance, OpenAPI validation, accessibility, Lighthouse, consent, and program-filter checks for teams that still want to run them manually outside the core workflow.
+- **Verification toolkit**: Bundled acceptance/OpenAPI/a11y/Lighthouse/consent/program-filter/telemetry checks plus Detox/Maestro mobile hooks so `gpt-creator qa` can gate both web and React Native surfaces.
 - **Doc synthesis**: `create-pdr` converts the staged RFP into a multi-level Product Requirements Document (PDR) by iteratively asking Codex to draft the table of contents, sections, and detailed subsections. `create-sds` continues the loop, transforming the staged PDR into a System Design Specification that drills from architecture overview down to low-level operational detail.
 - **Database synthesis**: `create-db-dump` reads the SDS (and PDR context) to draft a full MySQL schema plus production-grade seed data, then reviews both dumps for consistency before storing them under `.gpt-creator/staging/plan/create-db-dump/sql/`.
 - **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, `order-tasks` rebuilds dependency metadata and DAG priority, and `work-on-tasks` executes/resumes backlog items using that persisted order so dependencies land first. When coding is done, `review-tasks` performs LLM-based code review (ready-to-review → ready-for-qa or → pending with comments) and `qa-tasks` runs Playwright smoke (ready-for-qa → completed or → pending with findings). The legacy `iterate` command is deprecated.
@@ -229,93 +229,44 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
    gpt-creator create-tasks --project /path/to/project --jira docs/jira.md
 
    # Execute and resume tasks directly from SQLite
-  gpt-creator work-on-tasks --project /path/to/project
-  gpt-creator review-tasks --project /path/to/project --agent Reviewer-A
-  gpt-creator qa-tasks --project /path/to/project --url https://localhost:3000
+   gpt-creator work-on-tasks --project /path/to/project
+   gpt-creator review-tasks --project /path/to/project --agent Reviewer-A
+   gpt-creator qa-tasks --project /path/to/project --url https://localhost:3000
 
    # Populate task dependencies and recompute the global DAG order
    gpt-creator order-tasks --project /path/to/project [--force]
 
    # Browse epics → stories → tasks from the backlog database
    gpt-creator backlog --project /path/to/project          # defaults to epic summaries
+   gpt-creator backlog --project /path/to/project --item-children epic-slug
+   gpt-creator backlog --project /path/to/project --progress
 
-  # Drill into a specific epic or story
-  gpt-creator backlog --project /path/to/project --item-children epic-slug
-
-  # Show aggregate task progress
-  gpt-creator backlog --project /path/to/project --progress
-
-  # Manage reusable agents (job + character personas)
-  gpt-creator create-agent --project /path/to/project --name Fixer-A \
-      --client openai --model gpt-5.1-codex \
-      --job-doc agents/jobs/bug-fixer.md \
-      --character-doc agents/chars/strict.md
-  gpt-creator list-agents --project /path/to/project
-  gpt-creator work-on-tasks --project /path/to/project --agent Fixer-A
-  gpt-creator export-agents --project /path/to/project --output agents.json
-  gpt-creator import-agents --project /another/project --input agents.json
-  ```
-- Client-specific agents (OpenAI/Anthropic/xAI) snapshot their API credentials
-  from the corresponding env vars when created. Ensure the following env vars
-  are populated before running `create-agent`, or pass `--allow-missing-key`
-  when you want to stage the agent first and wire up credentials later (the CLI
-  will warn that keys are still required). `--json` responses now return
-  `{"agent": {...}, "warnings": [...]}` so automation can capture both the
-  agent payload and any missing-credential warnings in one response:
+   # Manage reusable agents (job + character personas)
+   gpt-creator create-agent --project /path/to/project --name Fixer-A \
+     --client openai --model gpt-5.1-codex \
+     --job-doc agents/jobs/bug-fixer.md \
+     --character-doc agents/chars/strict.md
+   gpt-creator list-agents --project /path/to/project
+   gpt-creator work-on-tasks --project /path/to/project --agent Fixer-A
+   gpt-creator export-agents --project /path/to/project --output agents.json
+   gpt-creator import-agents --project /another/project --input agents.json
+   ```
+- Client-specific agents (OpenAI/Anthropic/xAI) snapshot their API credentials from env vars when created. Ensure the following are populated before `create-agent`, or pass `--allow-missing-key` to stage the agent and wire credentials later (`--json` responses return `{"agent": {...}, "warnings": [...]}`):
   - **OpenAI**: `OPENAI_API_KEY` (optional `OPENAI_API_BASE`, `OPENAI_ORG_ID`)
   - **Anthropic**: `ANTHROPIC_API_KEY` (optional `ANTHROPIC_API_BASE`)
   - **xAI (Grok)**: `GROK_API_KEY` (optional `GROK_API_BASE`, `GROK_ORG_ID`)
-  Run `gpt-creator keys set <service>` (`openai`, `anthropic`, `grok`) to store
-  these values securely under `~/.config/gpt-creator/api-keys.env`.
-- The agent registry is LLM-agnostic. `config/agent_clients.json` now accepts
-  adapter metadata so you can wire up any CLI-based client (Codex, Gemini,
-  custom wrappers, etc.) without changing code. Use `adapter: "command"` with a
-  `command` array (placeholders such as `{model}` are substituted at runtime) and
-  optional env overrides. See `docs/agents.md` for a Gemini example and point
-  `GC_AGENT_REGISTRY_PATH` at a different file when each project needs its own
-  catalog.
-- Providers/models from the [Catwalk](https://catwalk.charm.sh) catalog are
-  fetched automatically every 24 hours and merged into `list-clients` output so
-  you can explore newer LLMs without editing the registry file manually. The
-  cache (`~/.config/gpt-creator/cache/llm_catalog.json`) is used as an offline
-  fallback, and `python3 scripts/python/agents_registry.py catalog --refresh`
-  forces a manual refresh. Set `GC_AGENT_CATALOG_DISABLE=1` to skip the sync on
-  air-gapped hosts. To persist the catalog directly into a workspace database,
-  invoke `python3 scripts/python/llm_catalog.py --db-path /path/to/tasks.db` (add
-  `--refresh` to bypass the TTL).
-- Use `gpt-creator list-llms` to inspect the catalog (filters: `--provider`,
-  `--adapter`, `--source`, `--model`, `--name-like`, `--status`,
-  `--needs-key`). The output now highlights API key warnings (disable with
-  `--no-warn-keys`). Run
-  `gpt-creator check-llms` to detect whether CLI adapters (Codex, Gemini, etc.)
-  are installed locally; the results are stored back into `tasks.db` so you can
-  see which personas are runnable on a given machine. Pass
-  `--install-missing` to `check-llms` if you want gpt-creator to invoke the
-  stored install command for each missing adapter (Claude Code, Gemini CLI,
-  Codestral, DeepSeek, Code Llama, StarCoder2, Qwen Code, etc.). Commands are
-  per-OS (Linux/macOS/Windows) and typically print or run the vendor’s official
-  installer so teammates can bootstrap the right tooling quickly. Add
-  `--health-check` to `check-llms` when you want a lightweight `--version`
-  probe for installed adapters before running a long job. When you want to
-  inspect or run a single installer interactively, use
-  `gpt-creator install-llm --provider <id> [--run --yes]`. Use
-  `gpt-creator sync-llms` to pre-seed the catalog with all registry entries
-  (optionally `--refresh` to pull the Catwalk API at the same time) in brand-new
-  workspaces. In CI, add `--require-adapters --require-keys` (or just `--ci`) so the
-  command fails early when adapters or credentials are missing.
-- `create-agent --summarize` (and `edit-agent --resummarize --summarize`) call the
-  active LLM to produce concise job/character summaries. This consumes extra
-  tokens, so override the summarizer provider/model via
-  `GC_AGENT_SUMMARIZER_CLIENT` / `GC_AGENT_SUMMARIZER_MODEL`, or use the CLI
-  flags `--summarize-client` / `--summarize-model` to point at a cheaper tier.
-  - `create-jira-tasks` crawls the staged docs (PDR, SDS, OpenAPI, SQL, UI samples) to synthesize epics → user stories → detailed task JSON under `.gpt-creator/staging/plan/create-jira-tasks/json/` and refreshes the consolidated payload/SQLite database. Progress is recorded in `.gpt-creator/staging/plan/create-jira-tasks/state.json` (use `--force` to restart). The extractor now strips Codex code fences, normalizes smart quotes, removes stray comments/trailing commas, and even coerces Python-style literals before giving up.
-  - Pass `-m/--model <model-id>` to `create-jira-tasks` whenever you need to override the Codex tier for backlog synthesis without touching the global `CODEX_MODEL_NON_CODE`.
-  - `migrate-tasks` regenerates `.gpt-creator/staging/plan/tasks/tasks.db` directly from the JSON artifacts — ideal when you want to sync the DB without re-running Codex.
-  - `refine-tasks` streams tasks from `tasks.db` one at a time, rehydrates the original story context, runs Codex against the staged docs, writes the refined JSON to `json/refined`, and updates the task row in SQLite immediately after each successful response. Use `--force` to reset refinement flags and reprocess every task.
-  - `create-tasks` snapshots a Jira markdown export into the same database if you already maintain backlog files.
-  - `work-on-tasks` walks tasks from the database with Codex, updating statuses so reruns resume automatically (now finishing at `ready-to-review`; follow with `review-tasks` → `qa-tasks`). Use `--fresh` to restart from the first story without clearing stored progress, `--from-task TASK` (or `--fresh-from`) to rewind the backlog so execution resumes from that task id or `story-slug:position` reference, and `--force` to reset all story/task statuses to `pending` before the run. Pass `--prepare-prompts` when you explicitly want story prompts regenerated/published during the run (skipped by default to avoid redundant prep). The runner now invokes `order-tasks` automatically, populates `task_dependencies` on demand, recomputes the deterministic cross-story DAG queue (persisted to the `global_order` column in `tasks.db`), and always advances to the next ready task across the entire backlog. It still blocks early if the workspace has merge conflicts, dirty/untracked files, or Prisma schema drift (detected via `prisma migrate diff`), so resolve those issues before retrying. When you need to switch personas, pass `--agent NAME` to reuse a stored agent (see [Agents](docs/agents.md)); the CLI injects the agent’s job/character docs and selects the configured client/model. `--agent MODEL` still works as the legacy “raw model id” override.
-  - `order-tasks` is a utility command that (re)hydrates `task_dependencies` from each task’s metadata and rebuilds the stored DAG order. Pass `--force` to drop and repopulate the table even when dependencies already exist.
-  - `backlog` renders summaries directly to the terminal: run it with no extra flags (or `--type epics`) to list each epic with progress metrics, `--type stories` for an all-story table, `--item-children <slug>` to drill into an epic or story, `--task-details <id>` to print a single task, and `--progress` to draw an overall task progress bar. Task tables now show the stored DAG order, and `--dag-limit N` prints the next `N` globally prioritised tasks (default 20). Use `--project` (or legacy `--root`) to point at a different workspace.
+  Run `gpt-creator keys set <service>` (`openai`, `anthropic`, `grok`) to store these securely under `~/.config/gpt-creator/api-keys.env`.
+- The agent registry is LLM-agnostic. `config/agent_clients.json` accepts adapter metadata so you can wire up any CLI-based client (Codex, Gemini, custom wrappers, etc.) without code changes. Use `adapter: "command"` with a `command` array (placeholders like `{model}` substituted at runtime) and optional env overrides. Point `GC_AGENT_REGISTRY_PATH` at another file when each project needs its own catalog (see `docs/agents.md` for examples).
+- Providers/models from the [Catwalk](https://catwalk.charm.sh) catalog are fetched automatically every 24 hours and merged into `list-clients` output. The cache (`~/.config/gpt-creator/cache/llm_catalog.json`) is used offline; `python3 scripts/python/agents_registry.py catalog --refresh` forces an update. Set `GC_AGENT_CATALOG_DISABLE=1` to skip the sync. To persist the catalog into a workspace DB, run `python3 scripts/python/llm_catalog.py --db-path /path/to/tasks.db` (add `--refresh` to bypass the TTL).
+- Use `gpt-creator list-llms` to inspect the catalog (filters: `--provider`, `--adapter`, `--source`, `--model`, `--name-like`, `--status`, `--needs-key`). Output highlights API key warnings (disable with `--no-warn-keys`). `gpt-creator check-llms` records which adapters are installed locally; add `--install-missing` to run each stored installer (Claude Code, Gemini CLI, Codestral, DeepSeek, Code Llama, StarCoder2, Qwen Code, etc.) and `--health-check` for lightweight `--version` probes. `gpt-creator install-llm --provider <id> [--run --yes]` runs a single installer; `gpt-creator sync-llms` seeds all registry entries (optionally `--refresh`) and use `--require-adapters --require-keys` (or `--ci`) to fail early in CI when adapters/keys are missing.
+- `create-agent --summarize` (and `edit-agent --resummarize --summarize`) call the active LLM to produce concise job/character summaries; override via `GC_AGENT_SUMMARIZER_CLIENT` / `GC_AGENT_SUMMARIZER_MODEL` or `--summarize-client` / `--summarize-model` to pick a cheaper tier.
+- Backlog automation notes:
+  - `create-jira-tasks` crawls staged docs (PDR, SDS, OpenAPI, SQL, UI samples) to synthesize epics → stories → task JSON under `.gpt-creator/staging/plan/create-jira-tasks/json/` and refreshes the SQLite payload. Progress is tracked in `.gpt-creator/staging/plan/create-jira-tasks/state.json` (use `--force` to restart). The extractor strips Codex code fences, normalizes smart quotes, removes stray comments/trailing commas, and coerces Python-style literals before failing.
+  - `migrate-tasks` regenerates `.gpt-creator/staging/plan/tasks/tasks.db` from JSON artifacts without calling Codex; `refine-tasks` streams tasks from `tasks.db`, rehydrates context, refines with Codex, writes to `json/refined`, and updates SQLite per task (use `--force` to reset flags).
+  - `create-tasks` snapshots a Jira markdown export into the same database if you maintain backlog files externally.
+  - `work-on-tasks` walks tasks with Codex, updating statuses for automatic resume (finishes at `ready-to-review`; follow with `review-tasks` → `qa-tasks`). Use `--fresh` to restart from the first story without clearing progress, `--from-task TASK` (or `--fresh-from`) to rewind to a specific task, and `--force` to reset all statuses to `pending`. `--prepare-prompts` regenerates/publishes prompts when needed. The runner invokes `order-tasks`, hydrates `task_dependencies`, recomputes the cross-story DAG (`global_order` in `tasks.db`), and blocks on merge conflicts, dirty/untracked files, or Prisma schema drift (`prisma migrate diff`).
+  - `order-tasks` rehydrates `task_dependencies` and rebuilds the DAG order (`--force` drops/repopulates even when dependencies exist).
+  - `backlog` renders summaries: run with no flags (or `--type epics`) for epic tables; `--type stories` for all stories; `--item-children <slug>` to drill into an epic/story; `--task-details <id>` for a single task; `--progress` for an overall bar; `--dag-limit N` for the next `N` globally prioritised tasks (default 20). Use `--project` (or legacy `--root`) to target another workspace.
   - The legacy `iterate` command is deprecated.
 
 ### Approved file writers (`gpt-creator apply-block`)
@@ -512,7 +463,11 @@ gpt-creator run up --project /path/to/project
 - Use `gpt-creator refresh-stack --project /path/to/project` when you want to tear everything down, rebuild containers, re-import the SQL dump, and apply seeds in one shot (handy after large migrations or corrupted volumes).
 
 ### 7. Testing
-`gpt-creator` does not orchestrate automated testing. Running `gpt-creator verify <args>` prints a notice and exits without executing checks so you can manage QA with your own tooling. The legacy scripts under `verify/` remain available for teams that choose to maintain separate validation flows.
+`gpt-creator qa` runs the bundled QA checks (web + mobile):
+- Web: acceptance (API/web/admin), OpenAPI, Lighthouse, a11y, consent, program-filters, telemetry.
+- Mobile: Detox (iOS/Android) and Maestro flows; missing CLIs/configs fail the run unless you pass `--mobile-optional`.
+- Configure mobile with `--mobile-dir`, `--detox-config-ios|--detox-config-android`, `--maestro-flows`, `--maestro-device[-ios|-android]` (env: `GC_MOBILE_APP_DIR`, `GC_DETOX_CONFIG_*`, `GC_MAESTRO_*`, `GC_MOBILE_OPTIONAL`).
+- Scope to a specific suite with `gpt-creator qa acceptance|openapi|a11y|lighthouse|consent|program-filters|telemetry|mobile|mobile-detox|mobile-maestro`.
 
 ### Codex Token Usage
 ```
@@ -687,7 +642,7 @@ By default `GC_AUTO_REVIEW` is active; the CLI drops automated review stubs unde
 ├── scripts/                  # install/uninstall helpers
 ├── src/                      # bash libraries used by the CLI
 ├── templates/                # generator templates (api/web/admin/db/docker)
-├── verify/                   # legacy verification scripts (outside the core workflow)
+├── verify/                   # verification scripts (web + mobile)
 ├── docs/                     # PDR, usage guides, roadmap
 └── examples/sample-project/  # Sample artifacts for testing
 ```

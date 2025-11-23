@@ -1,0 +1,11 @@
+/home/wodo/apps/gpt-creator/docdexd/target/release/deps/bitpacking-a4722c491a02c962.d: /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/lib.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/macros.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/macros_simple.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/bitpacker1x.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/bitpacker4x.rs
+
+/home/wodo/apps/gpt-creator/docdexd/target/release/deps/libbitpacking-a4722c491a02c962.rlib: /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/lib.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/macros.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/macros_simple.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/bitpacker1x.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/bitpacker4x.rs
+
+/home/wodo/apps/gpt-creator/docdexd/target/release/deps/libbitpacking-a4722c491a02c962.rmeta: /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/lib.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/macros.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/macros_simple.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/bitpacker1x.rs /home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/bitpacker4x.rs
+
+/home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/lib.rs:
+/home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/macros.rs:
+/home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/macros_simple.rs:
+/home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/bitpacker1x.rs:
+/home/wodo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bitpacking-0.8.4/src/bitpacker4x.rs:

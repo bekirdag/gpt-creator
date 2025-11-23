@@ -11,7 +11,7 @@ Usage:
   ${APP_NAME} db <provision|import|seed> [--project <path>]
   ${APP_NAME} run <up|down|logs|open> [--project <path>]
   ${APP_NAME} refresh-stack [options]
-  ${APP_NAME} verify <acceptance|nfr|all> [--project <path>] [--api-url API_BASE] [--api-health URL] [--web-url URL] [--admin-url URL]
+  ${APP_NAME} qa <acceptance|mobile|mobile-detox|mobile-maestro|nfr|all> [--project <path>] [--api-url API_BASE] [--api-health URL] [--web-url URL] [--admin-url URL]
   ${APP_NAME} create-sds [--project <path>] [--model NAME] [--dry-run] [--force]
   ${APP_NAME} create-pdr [--project <path>] [--model NAME] [--dry-run] [--force]
   ${APP_NAME} create-jira-tasks [--project <path>] [--model NAME] [--force] [--dry-run]
@@ -45,4 +45,3 @@ Global flags:
 
 Environment overrides:
   CODEX_BIN, CODEX_MODEL, DOCKER_BIN, MYSQL_BIN, EDITOR_CMD, GC_API_HEALTH_URL, GC_WEB_URL, GC_ADMIN_URL
-

@@ -70,7 +70,7 @@ Discovery emits `/staging/scan.json` with type, path, confidence.
 scan → normalize → plan → generate → db → run → create-tasks → work-on-tasks
 ```
 
-Components: `src/cli/*`, `src/lib/*`, `templates/*`, `examples/*` (legacy QA scripts reside under `verify/` but are outside the default workflow).
+Components: `src/cli/*`, `src/lib/*`, `templates/*`, `examples/*` (QA scripts reside under `verify/` and are invoked by the `qa` command).
 
 ---
 
@@ -78,7 +78,7 @@ Components: `src/cli/*`, `src/lib/*`, `templates/*`, `examples/*` (legacy QA scr
 
 **FR‑1 CLI**  
 - `create-project <path>` orchestrates all phases; fails fast with actionable errors.  
-- Subcommands: `scan`, `normalize`, `plan`, `generate [api|web|admin|db|docker]`, `db [provision|import|seed]`, `run [compose-up|logs|open]`, `create-tasks`, `work-on-tasks`, `iterate` (deprecated), `help`, `version`. (Testing/QA is managed outside the CLI; `verify` remains only as a no-op compatibility shim.)
+- Subcommands: `scan`, `normalize`, `plan`, `generate [api|web|admin|db|docker]`, `db [provision|import|seed]`, `run [compose-up|logs|open]`, `qa`, `create-tasks`, `work-on-tasks`, `iterate` (deprecated), `help`, `version`. (`qa` runs acceptance/NFR + mobile checks; `verify` is kept only as a temporary alias.)
 
 **FR‑2 Normalize**  
 - Copies inputs to `/staging/inputs` with canonical names; keeps provenance in `/staging/plan/provenance.json`.

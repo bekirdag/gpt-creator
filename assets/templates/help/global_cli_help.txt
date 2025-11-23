@@ -6,7 +6,7 @@ Usage:
   gpt-creator generate (api|web|admin|db|docker) [options]
   gpt-creator db (provision|import|seed) [options]
   gpt-creator run (compose up|logs|open) [options]
-  gpt-creator verify [options]
+  gpt-creator qa [options]
   gpt-creator create-tasks [options]
   gpt-creator backlog [options]
   gpt-creator work-on-tasks [options]
@@ -16,9 +16,8 @@ Usage:
 
 Tips:
   • Use 'gpt-creator create-project …' for one-shot discovery → normalize → plan → generate → run.
-  • 'verify' pings API/Web/Admin, checks MySQL, and ensures docs are present in staging.
+  • 'qa' pings API/Web/Admin, checks MySQL, and runs web/mobile checks (Detox/Maestro).
   • 'create-tasks' snapshots Jira markdown; 'work-on-tasks' executes those stories with Codex.
   • 'work-on-tasks' supports batching (`--batch-size`) and pacing (`--sleep-between`) to control resource usage.
   • 'backlog' prints summaries (`--type epics|stories`), drills into hierarchy (`--item-children`), shows overall progress (`--progress`), or dumps a single task (`--task-details`).
   • 'iterate' is deprecated; it runs the legacy loop but prints a warning that suggests the commands above.
-

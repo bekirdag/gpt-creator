@@ -15,5 +15,5 @@
 **Vue site isn’t styling correctly**
 - Ensure `page_samples/style.css` was discovered; re-run `scan` then `normalize` then `generate web`.
 
-**Verify step fails Lighthouse**
-- Optimize images, check bundle sizes, ensure gzip/brotli at proxy. Re-run `verify`.
+**QA step fails Lighthouse**
+- Optimize images, check bundle sizes, ensure gzip/brotli at proxy. Re-run `qa`.

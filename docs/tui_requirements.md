@@ -4,7 +4,7 @@ Absolutely—here’s a **complete TUI spec + Bubble Tea implementation plan** t
 
 ---
 
-> **Testing note:** References to `verify` commands and QA screens in this spec are preserved for historical context. gpt-creator no longer orchestrates automated testing; any QA flows are maintained outside the core workflow.
+> **Testing note:** QA now runs via `gpt-creator qa` (formerly `verify`) and includes web + mobile checks. This spec still uses the legacy `verify` labels; read them as `qa` anywhere they appear.
 
 ---
 

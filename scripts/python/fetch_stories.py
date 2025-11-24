@@ -240,6 +240,11 @@ def _task_column_exists(column: str) -> bool:
 
 
 HAS_TASK_ESTIMATE_COLUMN = _task_column_exists("estimate")
+HAS_TASK_GLOBAL_ORDER_COLUMN = _task_column_exists("global_order")
+HAS_TASK_STORY_ORDER_COLUMN = _task_column_exists("story_order")
+HAS_TASK_PRIORITY_COLUMN = _task_column_exists("priority")
+HAS_TASK_DUE_AT_COLUMN = _task_column_exists("due_at")
+HAS_TASK_POINTS_COLUMN = _task_column_exists("points")
 
 DONE_PREFIXES = (
     "complete",
@@ -409,14 +414,23 @@ def fetch_tasks_for_story(slug):
     story_points_expr = "story_points"
     if HAS_TASK_ESTIMATE_COLUMN:
         story_points_expr = "COALESCE(story_points, estimate)"
+    global_order_expr = "global_order" if HAS_TASK_GLOBAL_ORDER_COLUMN else "NULL"
+    if HAS_TASK_STORY_ORDER_COLUMN and HAS_TASK_GLOBAL_ORDER_COLUMN:
+        story_display_expr = "COALESCE(NULLIF(story_order, 0), NULLIF(global_order, 0))"
+    elif HAS_TASK_STORY_ORDER_COLUMN:
+        story_display_expr = "COALESCE(NULLIF(story_order, 0), 0)"
+    elif HAS_TASK_GLOBAL_ORDER_COLUMN:
+        story_display_expr = "COALESCE(NULLIF(global_order, 0), 0)"
+    else:
+        story_display_expr = "0"
     query = f"""
         SELECT position,
                task_id,
                title,
                status,
                {story_points_expr} AS story_points,
-               global_order,
-               COALESCE(NULLIF(story_order, 0), NULLIF(global_order, 0)) AS story_display_order
+               {global_order_expr} AS global_order,
+               {story_display_expr} AS story_display_order
         FROM tasks
         WHERE story_slug = ?
         ORDER BY position
@@ -954,12 +968,14 @@ def print_task_details(task_identifier):
     emit("Story Slug", row["story_slug"])
     emit("Story Title", row["story_title"])
     emit("Epic", row["epic_title"] or row["epic_key"])
+    emit("Description", row["description"])
     emit("Status", row["status"])
     emit("Assignees", row["assignee_text"])
     emit("Tags", row["tags_text"])
     emit("Dependencies", row["dependencies_text"])
     emit("Story Points", row["story_points"])
     emit("Document Reference", row["document_reference"])
+    emit("Acceptance Criteria", row["acceptance_text"] or row["acceptance_json"])
     emit("Idempotency", row["idempotency"])
     emit("Rate Limits", row["rate_limits"])
     emit("RBAC", row["rbac"])
@@ -969,7 +985,6 @@ def print_task_details(task_identifier):
     emit("Endpoints", row["endpoints"])
     emit("Sample Create Request", row["sample_create_request"])
     emit("Sample Create Response", row["sample_create_response"])
-    emit("Acceptance Criteria", row["acceptance_text"])
     emit("User Story Ref", row["user_story_ref_id"])
     emit("Epic Ref", row["epic_ref_id"])
     emit("Started At", row["started_at"])
@@ -980,6 +995,12 @@ def print_task_details(task_identifier):
 
 
 def print_global_order_queue(limit: int) -> None:
+    if not HAS_TASK_GLOBAL_ORDER_COLUMN:
+        print("Global order queue unavailable (database missing global_order column).")
+        return
+    priority_expr = "priority" if HAS_TASK_PRIORITY_COLUMN else "NULL"
+    due_expr = "due_at" if HAS_TASK_DUE_AT_COLUMN else "NULL"
+    points_expr = "COALESCE(points, story_points)" if HAS_TASK_POINTS_COLUMN else "story_points"
     if limit <= 0:
         limit = 20
     query = """
@@ -988,14 +1009,18 @@ def print_global_order_queue(limit: int) -> None:
                task_id,
                title,
                status,
-               priority,
-               due_at,
-               COALESCE(points, story_points) AS points
+               {priority_expr} AS priority,
+               {due_expr} AS due_at,
+               {points_expr} AS points
           FROM tasks
          WHERE global_order > 0
          ORDER BY global_order ASC
          LIMIT ?
-    """
+    """.format(
+        priority_expr=priority_expr,
+        due_expr=due_expr,
+        points_expr=points_expr,
+    )
     rows = conn.execute(query, (limit,)).fetchall()
     if not rows:
         print("No tasks have been ordered yet (global_order column is empty).")
@@ -1160,13 +1185,30 @@ finally:
         print_totals_summary()
     conn.close()
 def print_global_order_queue(limit: int) -> None:
+    if not HAS_TASK_GLOBAL_ORDER_COLUMN:
+        print("Global order queue unavailable (database missing global_order column).")
+        return
+    priority_expr = "priority" if HAS_TASK_PRIORITY_COLUMN else "NULL"
+    due_expr = "due_at" if HAS_TASK_DUE_AT_COLUMN else "NULL"
+    points_expr = "COALESCE(points, story_points)" if HAS_TASK_POINTS_COLUMN else "story_points"
     query = """
-        SELECT global_order, story_slug, task_id, title, status
+        SELECT global_order,
+               story_slug,
+               task_id,
+               title,
+               status,
+               {priority_expr} AS priority,
+               {due_expr} AS due_at,
+               {points_expr} AS points
           FROM tasks
          WHERE global_order > 0
          ORDER BY global_order ASC
          LIMIT ?
-    """
+    """.format(
+        priority_expr=priority_expr,
+        due_expr=due_expr,
+        points_expr=points_expr,
+    )
     rows = []
     for row in conn.execute(query, (limit,)):
         order_value = row["global_order"]
@@ -1180,9 +1222,12 @@ def print_global_order_queue(limit: int) -> None:
         task_id = (row["task_id"] or "").strip() or "-"
         title = truncate(row["title"], width=80)
         status = normalise_status(row["status"] or "pending")
-        rows.append([str(order_int), story_slug or "-", task_id, title, status])
+        priority = row["priority"] if row["priority"] is not None else "-"
+        due = (row["due_at"] or "").strip() or "-"
+        points = row["points"] if row["points"] is not None else "-"
+        rows.append([str(order_int), story_slug or "-", task_id, title, status, str(priority), due, str(points)])
 
-    headers = ["Order", "Story", "Task ID", "Title", "Status"]
+    headers = ["Order", "Story", "Task ID", "Title", "Status", "Priority", "Due", "Points"]
     if not rows:
         print(f"No tasks found with global order.")
     else:

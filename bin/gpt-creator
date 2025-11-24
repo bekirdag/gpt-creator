@@ -8849,6 +8849,9 @@ cmd_refine_tasks() {
   if [[ -n "$story_filter" ]]; then
     export CJT_ONLY_STORY_SLUG="$story_filter"
   fi
+  if (( force )); then
+    export CJT_REFINE_MODE="all"
+  fi
 
   cjt::refine_tasks
   ok "Task refinement complete"

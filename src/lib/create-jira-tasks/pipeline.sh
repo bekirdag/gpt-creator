@@ -712,15 +712,20 @@ cjt::generate_tasks() {
 }
 
 cjt::list_story_files() {
-  local helper
+  local helper=""
   helper="$(cjt::clone_python_tool "list_json_files.py")" || return 0
   python3 "$helper" "$CJT_JSON_STORIES_DIR" 2>/dev/null
 }
 
 cjt::normalize_story_jsons() {
-  local split_helper
+  local _nounset_was_set=0
+  if set -o | grep -q 'nounset[[:space:]]*on'; then
+    _nounset_was_set=1
+    set +u
+  fi
+  local split_helper=""
   split_helper="$(cjt::clone_python_tool "split_story_json.py")" || return 0
-  local list_helper
+  local list_helper=""
   list_helper="$(cjt::clone_python_tool "list_json_files.py")" || list_helper=""
   local tmp_dir="$CJT_JSON_STORIES_DIR/.split_tmp"
   rm -rf "$tmp_dir" 2>/dev/null || true
@@ -768,6 +773,9 @@ PY
   fi
 
   rm -rf "$tmp_dir" 2>/dev/null || true
+  if (( _nounset_was_set )); then
+    set -u
+  fi
 }
 
 cjt::inline_refine_is_enabled() {

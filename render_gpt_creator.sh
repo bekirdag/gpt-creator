@@ -577,7 +577,8 @@ is_epic_children()    { grep -qE '^Stories for epic:' <<<"$INPUT"; }
 is_story_tasks()      { grep -qE '^Tasks for story:' <<<"$INPUT"; }
 is_overall_progress() { grep -qiE '^Overall backlog progress' <<<"$INPUT"; }
 is_epic_overview()    { grep -qE '__GC_EPIC_TABLE__|^Epic ID[[:space:]]+Slug|^┌' <<<"$INPUT"; }
-is_task_end()         { grep -qiE 'END OF TASK REPORT|END TASK ID|^Task ID:' <<<"$INPUT"; }
+is_task_details()     { grep -qE '^Task details' <<<"$INPUT"; }
+is_task_end()         { grep -qiE 'END OF TASK REPORT|END TASK ID' <<<"$INPUT" || { ! is_task_details && grep -qiE '^Task ID:' <<<"$INPUT"; }; }
 is_task_start()       { grep -qiE 'START TASK ID|→ Working on task' <<<"$INPUT"; }
 
 # ============================ Renderers ============================
@@ -1216,7 +1217,8 @@ render_epic_overview() {
 }
 
 # ============================ Router ============================
-if   is_task_end;         then render_task_end;         exit 0
+if   is_task_details;     then printf "%s\n" "$INPUT"; exit 0
+elif is_task_end;         then render_task_end;         exit 0
 elif is_task_start;       then render_task_start;       exit 0
 elif is_estimate;         then render_estimate;         exit 0
 elif is_epic_children;    then render_epic_children;    exit 0

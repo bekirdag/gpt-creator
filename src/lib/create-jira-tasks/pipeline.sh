@@ -253,6 +253,9 @@ cjt::collect_source_files() {
   local pattern
   for pattern in \
     "$CJT_STAGING_DIR/docs"/*.md \
+    "$CJT_PLAN_DIR"/sds/*.md \
+    "$CJT_PLAN_DIR"/pdr/*.md \
+    "$CJT_PLAN_DIR"/*.md \
     "$CJT_STAGING_DIR"/*.md \
     "$CJT_STAGING_DIR"/*.txt \
     "$CJT_STAGING_DIR/openapi"/* \
@@ -879,7 +882,7 @@ cjt::inline_refine_story_tasks() {
     else
       [[ -z "$line" ]] || refine_order+=("$line")
     fi
-    ((line_no++))
+    ((line_no+=1))
   done <<<"$refine_data"
 
   local max_tasks="${CJT_INLINE_REFINE_MAX_TASKS:-0}"
@@ -1078,7 +1081,7 @@ cjt::refine_tasks() {
       else
         refine_order+=("$line")
       fi
-      ((__line_index++))
+      ((__line_index+=1))
     done <<<"$refine_data"
     if [[ -n "$task_total_candidates" ]]; then
       task_total="$task_total_candidates"
@@ -1148,7 +1151,7 @@ cjt::refine_tasks() {
       local success=0
       local parse_retry=0
       while :; do
-        (( attempt++ ))
+        (( attempt+=1 ))
         if [[ -n "$task_title" ]]; then
           cjt::log "  -> Task ${slug}#${task_num} attempt ${attempt} — '${task_title//'"'/\"}'"
         else
@@ -1170,7 +1173,7 @@ cjt::refine_tasks() {
           else
             cjt::log "    -> Codex refinement applied for ${slug}#${task_num}"
           fi
-          ((processed_count++))
+          ((processed_count+=1))
           success=1
           break
         fi

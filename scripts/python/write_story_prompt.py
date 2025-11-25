@@ -161,7 +161,7 @@ def write_story_prompt(
         fh.write(
             f"You are a lead product analyst expanding Jira epics into granular user stories for the {project_label} initiative.\n\n"
         )
-        fh.write("Only focus on the website and admin/backoffice surfaces. Ignore DevOps/infra.\n\n")
+        fh.write("Cover website, admin/backoffice, and mobile (React Native/Expo) surfaces. Ignore pure DevOps/infra unless explicitly documented.\n\n")
         fh.write("## Target epic\n")
         json.dump(match, fh, indent=2)
         fh.write("\n\n")
@@ -183,7 +183,7 @@ def write_story_prompt(
         fh.write("- Provide a user story narrative (role, goal, benefit) and detailed description of scope.\n")
         fh.write("- List acceptance criteria as bullet-equivalent strings (cover positive and negative cases).\n")
         fh.write("- Note any dependencies on other epics/stories when relevant.\n")
-        fh.write("- Tag each story with domains (e.g., Web-FE, Web-BE, Admin-FE, Admin-BE).\n")
+        fh.write("- Tag each story with domains (e.g., Web-FE, Web-BE, Admin-FE, Admin-BE, Mobile-FE, Mobile-BE) and include mobile parity where required by the docs.\n")
         fh.write("- Capture primary user roles touched by the story.\n\n")
         fh.write("## Output (JSON only)\n")
         fh.write(

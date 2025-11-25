@@ -8,10 +8,10 @@ import sys
 from pathlib import Path
 
 PROMPT_BODY = """## Requirements
-- Create a comprehensive backlog of Jira epics that covers every piece of functionality the website and admin/backoffice must deliver.
-- Use identifiers `WEB-XX` for website-facing epics and `ADM-XX` for admin/backoffice epics. Start numbering at 01.
-- Ensure the epics collectively span navigation, authentication, content, commerce/workflows, reporting, localization, accessibility, error states, and any other requirements found in the docs.
-- Provide rich acceptance criteria per epic describing what success looks like (include non-functional needs such as performance, security, accessibility when applicable).
+- Create a comprehensive backlog of Jira epics that covers every piece of functionality the product must deliver across web, admin/backoffice, and mobile (React Native/Expo) clients.
+- Use identifiers `WEB-XX` for website-facing epics, `ADM-XX` for admin/backoffice epics, and `MOB-XX` for mobile app epics. Start numbering each prefix at 01.
+- Ensure the epics collectively span navigation, authentication, content, commerce/workflows, reporting, localization, accessibility, error states, offline/resilience, notifications, and any other requirements found in the docs. Maintain parity across surfaces when the docs mandate it.
+- Provide rich acceptance criteria per epic describing what success looks like (include non-functional needs such as performance, security, accessibility, and mobile parity when applicable).
 - Note any cross-epic dependencies.
 - Include a short call-out of the primary user roles touched by the epic.
 

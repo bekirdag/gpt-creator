@@ -362,6 +362,41 @@ def fetch_epics():
     """
     return [dict(row) for row in conn.execute(query)]
 
+def _story_totals_fallback():
+    try:
+        info = conn.execute("PRAGMA table_info(stories)").fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    columns = {row[1] for row in info}
+    if "total_tasks" not in columns or "completed_tasks" not in columns:
+        return None
+    try:
+        rows = conn.execute(
+            "SELECT story_slug, COALESCE(total_tasks, 0) AS total_tasks, COALESCE(completed_tasks, 0) AS completed_tasks FROM stories"
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return None
+    totals = {"total": 0, "completed": 0}
+    story_counts: dict[str, dict[str, int]] = {}
+    for slug, total_tasks, completed_tasks in rows:
+        slug = (slug or "").strip()
+        try:
+            total_val = int(total_tasks or 0)
+        except Exception:
+            total_val = 0
+        try:
+            completed_val = int(completed_tasks or 0)
+        except Exception:
+            completed_val = 0
+        totals["total"] += total_val
+        totals["completed"] += completed_val
+        story_counts[slug] = {
+            "total": total_val,
+            "completed": completed_val,
+            "in_progress": max(total_val - completed_val, 0),
+        }
+    return {"totals": totals, "counts": story_counts}
+
 def fetch_task_counts():
     counts = {}
     totals = {
@@ -408,6 +443,26 @@ def fetch_task_counts():
             entry["completed"] += 1
         elif status_is_in_progress(resolved_status):
             entry["in_progress"] += 1
+    # If stories table reports more tasks than the tasks table, fall back to story totals for the summary.
+    story_fallback = _story_totals_fallback()
+    if story_fallback:
+        story_totals = story_fallback.get("totals", {})
+        story_counts = story_fallback.get("counts", {})
+        if story_totals.get("total", 0) > totals["total"]:
+            counts = story_counts
+            story_total = story_totals.get("total", 0) or 0
+            story_completed = story_totals.get("completed", 0) or 0
+            story_pending = max(story_total - story_completed, 0)
+            totals = {
+                "total": story_total,
+                "canonical_completed": story_completed,
+                "canonical_in_progress": 0,
+                "canonical_pending": story_pending,
+                "effective_completed": story_completed,
+                "effective_in_progress": 0,
+                "effective_pending": story_pending,
+                "detections_pending": 0,
+            }
     return counts, totals
 
 def fetch_tasks_for_story(slug):

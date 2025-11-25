@@ -1195,6 +1195,19 @@ render_epic_overview() {
   printf "• %s%d%s epics between 30-69%%\n" "$(c "1;38;5;214")" "$mid" "$(reset)"
   printf "• %s%d%s epics below 30%% or pending\n\n" "$(c "1;31")" "$low" "$(reset)"
 
+  local queue_block
+  queue_block="$(awk '
+    /^Next tasks by DAG priority/ {flag=1; next}
+    /^Backlog totals \\(canonical\\)/ && flag {exit}
+    flag {print}
+  ' <<<"$INPUT")"
+  if [[ -n "$queue_block" ]]; then
+    printf "%s📋 Next tasks by DAG priority%s\n" "$(lc 111)" "$(reset)"
+    printf "──────────────────────────────────────────────\n"
+    printf "%s\n" "$queue_block"
+    printf "\n"
+  fi
+
   if grep -q '^Backlog totals (canonical)' <<<"$INPUT"; then
     printf "%s📊 Backlog totals (canonical)%s\n" "$(lc 111)" "$(reset)"
     printf "──────────────────────────────────────────────\n"

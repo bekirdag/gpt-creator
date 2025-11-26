@@ -1537,17 +1537,17 @@ gc_renderer_path_if_enabled() {
     candidates+=("${GC_RENDER_GPT_CREATOR}")
   fi
 
+  local cache_path
+  cache_path="$(gc_renderer_cache_path)"
+  if [[ -n "$cache_path" ]]; then
+    candidates+=("$cache_path")
+  fi
+
   if [[ -n "${CLI_ROOT:-}" ]]; then
     copy_sources+=("${CLI_ROOT}/render_gpt_creator.sh")
     copy_sources+=("${CLI_ROOT}/bin/render_gpt_creator.sh")
     copy_sources+=("${CLI_ROOT}/scripts/render_task_footer.sh")
     candidates+=("${copy_sources[@]}")
-  fi
-
-  local cache_path
-  cache_path="$(gc_renderer_cache_path)"
-  if [[ -n "$cache_path" ]]; then
-    candidates+=("$cache_path")
   fi
 
   local candidate

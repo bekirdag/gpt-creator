@@ -23,6 +23,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 DEFAULT_RATE = 15.0
+ESTIMATE_CACHE_VERSION = 3
 DONE_STATUS_PREFIXES = (
     "complete",
     "completed",
@@ -243,14 +244,14 @@ def is_ready_for_review_status(value: str) -> bool:
     status = coerce_status(value)
     if not status:
         return False
-    return status.startswith("ready-to-review") or status.startswith("ready-for-review") or status.startswith("ready_to_review")
+    return status.startswith("ready-to-review") or status.startswith("ready-for-review") or status.startswith("ready_to_review") or status.startswith("ready-for-review")
 
 
 def is_ready_for_qa_status(value: str) -> bool:
     status = coerce_status(value)
     if not status:
         return False
-    return status.startswith("ready-for-qa") or status.startswith("ready_to_qa") or status.startswith("ready-to-qa")
+    return status.startswith("ready-for-qa") or status.startswith("ready_to_qa") or status.startswith("ready-to-qa") or status.startswith("ready-for-qa")
 
 
 STATUS_BUCKET_COMPLETED = "completed"
@@ -1287,13 +1288,11 @@ def render_color_estimate(ctx: Dict[str, Any]) -> None:
     print(bottom)
     print()
 
-    status_header = color_text(AUX_HEADER_COLOR, "📊 Status Breakdown")
-    print(status_header)
-    print("────────────────────────────────────────────")
     fmt_val = fmt_number
     fmt_int = lambda value: fmt_number(float(value))
     green = lambda text: color_text("1;32", text)
     cyan = lambda text: color_text("1;36", text)
+    blue = lambda text: color_text("1;34", text)
     yellow = lambda text: color_text("1;33", text)
     white = lambda text: color_text("1;37", text)
     magenta = lambda text: color_text("1;35", text)
@@ -1305,102 +1304,130 @@ def render_color_estimate(ctx: Dict[str, Any]) -> None:
         ("ready_review", "Ready for review", "1;36"),
         ("ready_qa", "Ready for QA", "1;34"),
     ]
-    for key, label, color in status_order:
-        snap = status_snapshots.get(key, {}) or {}
-        task_count = int(snap.get("count", 0) or 0)
-        task_pct = float(snap.get("task_pct", 0.0) or 0.0)
-        points_val = float(snap.get("points", 0.0) or 0.0)
-        points_pct = float(snap.get("points_pct", 0.0) or 0.0)
-        tasks_display = color_text(color, f"{fmt_int(task_count)} ({task_pct:0.1f}%)")
-        if total_story_points_all > 0:
-            points_display = color_text(
-                color, f"{fmt_val(points_val)} ({points_pct:0.1f}% of tracked SP)"
-            )
-        else:
-            points_display = color_text(color, fmt_val(points_val))
-        print(f"• {label}: {tasks_display} | SP {points_display}")
-    missing_points = int(ctx.get("completed_tasks_missing_points", 0) or 0)
-    if missing_points:
-        print(f"• Completed without points:          {yellow(fmt_int(missing_points))}")
-    print()
-    totals_header = color_text(AUX_HEADER_COLOR, "🧮 Backlog Totals")
-    print(totals_header)
-    print("────────────────────────────────────────────")
-    if ctx.get("detections_pending"):
-        print(f"• Detections pending apply:          {yellow(fmt_int(ctx['detections_pending']))}")
-    if ctx.get("detections_applied"):
-        print(f"• Detections applied:                {cyan(fmt_int(ctx['detections_applied']))}")
-    print(f"• Completed (effective):             {green(fmt_int(ctx['completed_effective']))}")
-    print(f"• Completed (canonical):             {green(fmt_int(ctx['completed_canonical']))}")
-    print(f"• In-progress (canonical):           {cyan(fmt_int(ctx['in_progress_canonical']))}")
-    print(f"• Pending (canonical):               {white(fmt_int(ctx['pending_canonical']))}")
-    print(f"• Remaining (canonical):             {white(fmt_int(ctx['remaining_canonical']))}")
-    print(f"• Remaining tasks (effective):       {white(fmt_int(ctx['remaining_effective']))}")
-    print(f"• Total tasks:                       {white(fmt_int(ctx['total_tasks']))}")
-    print(f"• Remaining story points:            {red(fmt_val(ctx['remaining_story_points']))}")
-    print(f"• Estimated completion:              ⏱️  {magenta(ctx['estimate_display'])}")
-    print()
-
-    throughput_header = color_text(AUX_HEADER_COLOR, "⚙️ Throughput")
-    print(throughput_header)
-    print("────────────────────────────────────────────")
     rate_display = fmt_float(ctx["effective_rate"])
+    throughput_lines: list[str] = []
     if ctx["using_recent_velocity"]:
         basis_text = cyan(f"Last {ctx['recent_sample_count']} task(s)")
         rate_text = green(f"{rate_display} SP/h")
-        print(f"• Basis: {basis_text}")
-        print(f"• Effective throughput: {rate_text} (recent window)")
+        throughput_lines.append(f"• Basis: {basis_text}")
+        throughput_lines.append(f"• Effective throughput: {rate_text} (recent window)")
     else:
         basis = "run" if ctx["rate_samples"] == 1 else "runs"
         basis_text = cyan(f"Measured from {ctx['rate_samples']} {basis}")
         rate_text = green(f"{rate_display} SP/h")
-        print(f"• Basis: {basis_text}")
-        print(f"• Effective throughput (EWMA): {rate_text}")
-
+        throughput_lines.append(f"• Basis: {basis_text}")
+        throughput_lines.append(f"• Effective throughput (EWMA): {rate_text}")
     window_total = ctx.get("recent_window_total", 0)
     if window_total:
         project_count = ctx.get("recent_sample_count", 0)
         out_of_scope = ctx.get("window_out_of_scope", 0)
-        print(f"• Window: {white(f'{window_total} tasks')} (project {project_count} | out-of-scope {out_of_scope})")
-
+        throughput_lines.append(
+            f"• Window: {white(f'{window_total} tasks')} (project {project_count} | out-of-scope {out_of_scope})"
+        )
     if ctx.get("eta_stalled_reason"):
         status_line = red(f"⛔  Stalled ({ctx['eta_stalled_reason']})")
     elif ctx.get("eta_warning_reason"):
         status_line = yellow(f"⚠️  Warning ({ctx['eta_warning_reason']})")
     else:
         status_line = green("OK")
-    print(f"• Run status: {status_line}")
-
+    throughput_lines.append(f"• Run status: {status_line}")
     contamination_ratio = ctx.get("contamination_ratio", 0.0) * 100
     if contamination_ratio > 0:
-        print(f"• Window contamination: {yellow(f'{contamination_ratio:.0f}%')}")
+        throughput_lines.append(f"• Window contamination: {yellow(f'{contamination_ratio:.0f}%')}")
     blocked_ratio = ctx.get("blocked_ratio", 0.0) * 100
     if blocked_ratio > 0:
         suffix = f" ({ctx['blocked_dominant']})" if ctx.get("blocked_dominant") else ""
-        print(f"• Blocked signal: {yellow(f'{blocked_ratio:.0f}% of recent runs{suffix}')}")
-    print()
+        throughput_lines.append(f"• Blocked signal: {yellow(f'{blocked_ratio:.0f}% of recent runs{suffix}')}")
 
-    tokens_header = color_text(AUX_HEADER_COLOR, "🔢 Token Telemetry")
-    print(tokens_header)
-    print("────────────────────────────────────────────")
+    token_lines: list[str] = []
     if ctx.get("tokens_total") and ctx.get("token_samples"):
-        print(f"• Observed tokens:            {cyan(fmt_tokens(ctx['tokens_total']))} across {ctx['token_samples']} task(s)")
+        token_lines.append(
+            f"• Observed tokens:            {cyan(fmt_tokens(ctx['tokens_total']))} across {ctx['token_samples']} task(s)"
+        )
         if ctx.get("avg_tokens_per_point"):
             avg_tokens_display = f"{fmt_number(ctx['avg_tokens_per_point'])} tokens/SP"
-            print(f"• Avg tokens / SP:            {white(avg_tokens_display)}")
+            token_lines.append(f"• Avg tokens / SP:            {white(avg_tokens_display)}")
         if ctx.get("estimated_tokens_hour"):
             burn = fmt_tokens(ctx["estimated_tokens_hour"])
             rate_str = fmt_float(ctx["effective_rate"])
-            print(
-                f"• Est. token burn:            {red(burn)} tokens/h @{green(rate_str + ' SP/h')}"
-            )
+            token_lines.append(f"• Est. token burn:            {red(burn)} tokens/h @{green(rate_str + ' SP/h')}")
         if ctx.get("projected_remaining_tokens"):
-            print(
-                f"• Projected remaining tokens: {magenta(fmt_tokens(ctx['projected_remaining_tokens']))} for {fmt(ctx['remaining_story_points'])} SP"
+            token_lines.append(
+                f"• Projected remaining tokens: {magenta(fmt_tokens(ctx['projected_remaining_tokens']))} for {fmt_val(ctx['remaining_story_points'])} SP"
             )
     else:
-        print("• Status: Token usage data unavailable; run work-on-tasks to capture token telemetry.")
-    print()
+        token_lines.append("• Status: Token usage data unavailable; run work-on-tasks to capture token telemetry.")
+
+    def render_status_section(key: str, label: str, color: str) -> None:
+        snap = status_snapshots.get(key, {}) or {}
+        task_count = int(snap.get("count", 0) or 0)
+        task_pct = float(snap.get("task_pct", 0.0) or 0.0)
+        points_val = float(snap.get("points", 0.0) or 0.0)
+        points_pct = float(snap.get("points_pct", 0.0) or 0.0)
+        remaining_tasks = 0 if key == "completed" else task_count
+        remaining_points = 0.0 if key == "completed" else points_val
+        bar = gradient_bar(task_pct, 30)
+        print(color_text(AUX_HEADER_COLOR, f"▶︎ {label} Progress"))
+        print(f"{bar}  {color_text(color, f'{task_pct:0.1f}% of tasks')}")
+        print()
+        print(color_text(AUX_HEADER_COLOR, f"🧾 {label} Snapshot"))
+        print("────────────────────────────────────────────")
+        points_display = (
+            f"{fmt_val(points_val)} ({points_pct:0.1f}% of tracked SP)"
+            if total_story_points_all > 0
+            else fmt_val(points_val)
+        )
+        print(f"• Tasks in status:             {color_text(color, f'{fmt_int(task_count)} ({task_pct:0.1f}%)')}")
+        print(f"• Story points in status:      {color_text(color, points_display)}")
+        if ctx.get("detections_pending") and key == "completed":
+            print(f"• Detections pending apply:    {yellow(fmt_int(ctx['detections_pending']))}")
+        if ctx.get("detections_applied") and key == "completed":
+            print(f"• Detections applied:          {cyan(fmt_int(ctx['detections_applied']))}")
+        if key == "completed":
+            remaining_task_display = "0"
+            remaining_points_display = "0"
+        else:
+            remaining_task_display = fmt_int(remaining_tasks)
+            remaining_points_display = fmt_val(remaining_points)
+        print(f"• Remaining tasks (status):    {white(remaining_task_display)}")
+        print(f"• Remaining story points:      {magenta(remaining_points_display)}")
+        eta_display = ctx.get("estimate_display") if key == "completed" else "N/A"
+        if remaining_points > 0 and ctx.get("eta_stalled_reason"):
+            eta_display = f"Stalled ({ctx['eta_stalled_reason']})"
+        elif remaining_points > 0 and ctx.get("effective_rate", 0.0) > 0:
+            minutes = math.ceil((remaining_points / ctx["effective_rate"]) * 60)
+            days, rem = divmod(minutes, 1440)
+            hours, mins = divmod(rem, 60)
+            parts = []
+            if days:
+                parts.append(f"{days}d")
+            if hours:
+                parts.append(f"{hours}h")
+            if mins or not parts:
+                parts.append(f"{mins}m")
+            eta_display = " ".join(parts) + f" @{fmt_float(ctx['effective_rate'])} SP/hour"
+        print(f"• ETA:                         {magenta(eta_display)}")
+        missing_points = int(ctx.get("completed_tasks_missing_points", 0) or 0)
+        if missing_points and key == "completed":
+            print(f"• Completed without points:    {yellow(fmt_int(missing_points))}")
+        print()
+        print(color_text(AUX_HEADER_COLOR, "⚙️ Throughput"))
+        print("────────────────────────────────────────────")
+        for line in throughput_lines:
+            print(line)
+        print()
+        print(color_text(AUX_HEADER_COLOR, "🔢 Token Telemetry"))
+        print("────────────────────────────────────────────")
+        for line in token_lines:
+            if key == "completed":
+                print(line)
+            else:
+                # keep the same data for consistency across sections
+                print(line)
+        print()
+
+    for key, label, color in status_order:
+        render_status_section(key, label, color)
 def parse_recent_tasks_arg(raw: str) -> Optional[int]:
     text = str(raw or "").strip().lower()
     if text in {"", "default"}:
@@ -1490,7 +1517,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     )
 
     if use_cache:
-        cached_output = load_cached_output(cache_file, db_mtime=db_mtime, runs_mtime=runs_mtime)
+        cached_output = load_cached_output(
+            cache_file,
+            db_mtime=db_mtime,
+            runs_mtime=runs_mtime,
+            version=ESTIMATE_CACHE_VERSION,
+        )
         if cached_output:
             sys.stdout.write(cached_output)
             return
@@ -1510,7 +1542,13 @@ def main(argv: Optional[list[str]] = None) -> None:
     sys.stdout.write(output_text)
 
     if exit_code == 0 and use_cache:
-        save_cached_output(cache_file, output=output_text, db_mtime=db_mtime, runs_mtime=runs_mtime)
+        save_cached_output(
+            cache_file,
+            output=output_text,
+            db_mtime=db_mtime,
+            runs_mtime=runs_mtime,
+            version=ESTIMATE_CACHE_VERSION,
+        )
 
     raise SystemExit(exit_code)
 

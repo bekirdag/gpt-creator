@@ -572,7 +572,7 @@ fi
 INPUT="$(cat)"
 
 # ============================ Detectors ============================
-is_estimate()         { grep -q '^Remaining Work Summary' <<<"$INPUT"; }
+is_estimate()         { grep -q '^Remaining Work Summary' <<<"$INPUT" || grep -q '^Ready for review$' <<<"$INPUT"; }
 is_epic_children()    { grep -qE '^Stories for epic:' <<<"$INPUT"; }
 is_story_tasks()      { grep -qE '^Tasks for story:' <<<"$INPUT"; }
 is_overall_progress() { grep -qiE '^Overall backlog progress' <<<"$INPUT"; }
@@ -583,7 +583,140 @@ is_task_start()       { grep -qiE 'START TASK ID|→ Working on task' <<<"$INPUT
 
 # ============================ Renderers ============================
 
+render_estimate_status_sections() {
+  local comp_can comp_eff rem_can rem_sp eta throughput_rate detect obs_tokens avg_per_sp burn proj
+  comp_can="$(sed -n 's/^Completed tasks (canonical)[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
+  comp_eff="$(sed -n 's/^Completed tasks (effective)[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
+  rem_can="$(sed -n 's/^Remaining (canonical)[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
+  rem_sp="$(sed -n 's/^Remaining story points[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
+  eta="$(sed -n 's/^Estimated completion[[:space:]]\{1,\}\(.*\)$/\1/p' <<<"$INPUT" | head -1)"
+  detect="$(sed -n 's/^Detections pending apply[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
+  throughput_rate="$(sed -n 's/^Effective throughput[[:space:]]\{1,\}\([0-9.]\+\) SP\/hour.*/\1/p' <<<"$INPUT" | head -1)"
+  obs_tokens="$(sed -n 's/^Observed tokens[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
+  avg_per_sp="$(sed -n 's/^Average tokens per story point[[:space:]]\{1,\}\([0-9.,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
+  burn="$(sed -n 's/^Estimated token burn[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
+  proj="$(sed -n 's/^Projected remaining tokens[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT" | head -1)"
+
+  local throughput_lines token_lines
+  throughput_lines="$(sed -n -e 's/^Throughput basis/• Basis/p' \
+         -e 's/^Effective throughput/• Effective throughput/p' \
+         -e 's/^Throughput window/• Window/p' \
+         -e 's/^Run status/• Run status/p' \
+         -e 's/^Blocked signal/• Blocked signal/p' \
+         -e 's/^Window contamination/• Window contamination/p' <<<"$INPUT")"
+  token_lines="$(sed -n -e 's/^Observed tokens/• Observed tokens/p' \
+         -e 's/^Average tokens per story point/• Avg tokens \/ SP/p' \
+         -e 's/^Estimated token burn/• Est. token burn/p' \
+         -e 's/^Projected remaining tokens/• Projected remaining tokens/p' \
+         -e 's/^Status/• Status/p' <<<"$INPUT")"
+
+  local total_clean comp_eff_clean progress_pct
+  total_clean="$(numclean "${rem_can:-0}")"
+  comp_eff_clean="$(numclean "${comp_eff:-0}")"
+  progress_pct="0.0"
+  if [[ "$total_clean" =~ ^[0-9]+$ ]] && (( total_clean > 0 )); then
+    progress_pct="$(awk -v c="$comp_eff_clean" -v t="$total_clean" 'BEGIN{printf "%.1f",(c/t)*100}')"
+  fi
+
+  render_box_header "GPT-Creator :: Project Estimate Summary" 60
+
+  printf "  "; badge "TOTAL ${rem_can:-N/A}" 39; printf "  "
+  badge "DONE ${comp_eff:-N/A}" 46; printf "  "
+  badge "REMAIN ${rem_can:-N/A}" 208; printf "  "
+  [[ -n "$eta" ]] && { badge "ETA ${eta}" 111; printf "  "; }
+  [[ -n "$rem_sp" ]] && badge "SP ${rem_sp}" 201
+  printf "\n\n"
+
+  printf "  %sProgress%s\n" "$(lc 111)" "$(reset)"
+  solid_progress_bar "$progress_pct" 40 "Complete"
+  printf "\n"
+
+  local labels=("Completed" "Ready for review" "Ready for QA")
+  local colors=("1;32" "1;36" "1;34")
+  local idx
+  local CLEAN_INPUT
+  CLEAN_INPUT="$(printf "%s\n" "$INPUT" | sed -E 's/\x1B\[[0-9;]*[A-Za-z]//g')"
+  for idx in "${!labels[@]}"; do
+    local label="${labels[$idx]}"
+    local color="${colors[$idx]}"
+    local block tasks_line points_line tasks_count tasks_pct points_val points_pct
+    block="$(printf "%s\n" "$CLEAN_INPUT" | awk -v label="$label" '
+      $0==label {found=1; next}
+      found && NF==0 {exit}
+      found {print}
+    ')"
+    tasks_line="$(printf "%s\n" "$block" | awk '/^[[:space:]]*•?[[:space:]]*Tasks/ {print; exit}')"
+    if [[ -z "$tasks_line" ]]; then
+      tasks_line="$(printf "%s\n" "$block" | awk '/^Tasks[[:space:]]/ {print; exit}')"
+    fi
+    points_line="$(printf "%s\n" "$block" | awk '/^[[:space:]]*•?[[:space:]]*(Story points|Completed story points)/ {print; exit}')"
+    if [[ -z "$points_line" ]]; then
+      points_line="$(printf "%s\n" "$block" | awk '/^Story points[[:space:]]/ {print; exit}')"
+    fi
+    tasks_count="$(sed -n 's/[^0-9]*\([0-9][0-9,]*\).*/\1/p' <<<"${tasks_line:-0}")"
+    tasks_pct="$(sed -n 's/.*(\([0-9.]\+\)%).*/\1/p' <<<"${tasks_line:-0}")"
+    points_val="$(sed -n 's/[^0-9]*\([0-9.,]\+\).*/\1/p' <<<"${points_line:-0}")"
+    points_pct="$(sed -n 's/.*(\([0-9.\-]\+\)%.*SP).*/\1/p' <<<"${points_line:-0}")"
+    tasks_count="${tasks_count:-0}"
+    tasks_pct="${tasks_pct:-0}"
+    points_val="${points_val:-0}"
+    points_pct="${points_pct:-0}"
+
+    local points_clean eta_display eta_minutes
+    points_clean="$(numclean "$points_val")"
+    eta_display="N/A"
+    if [[ "$points_clean" =~ ^[0-9]+(\.[0-9]+)?$ ]] && [[ "$throughput_rate" =~ ^[0-9]+(\.[0-9]+)?$ ]] && (( $(awk -v p="$points_clean" -v r="$throughput_rate" 'BEGIN{print (p>0 && r>0)?1:0}') )); then
+      eta_minutes="$(awk -v pts="$points_clean" -v rate="$throughput_rate" 'BEGIN{if(rate>0){printf "%.0f",(pts/rate)*60}else{print -1}}')"
+      if [[ "$eta_minutes" =~ ^[0-9]+$ ]]; then
+        local days hours mins rem_minutes
+        days=$(( eta_minutes / 1440 ))
+        rem_minutes=$(( eta_minutes % 1440 ))
+        hours=$(( rem_minutes / 60 ))
+        mins=$(( rem_minutes % 60 ))
+        eta_display=""
+        (( days > 0 )) && eta_display+="${days}d "
+        (( hours > 0 )) && eta_display+="${hours}h "
+        eta_display+="${mins}m @${throughput_rate:-?} SP/h"
+      fi
+    fi
+
+    printf "%s▶︎ %s Progress%s\n" "$(c "$color")" "$label" "$(reset)"
+    solid_progress_bar "$tasks_pct" 40 "$label"
+    printf "\n"
+
+    printf "%s🧾 %s Snapshot%s\n" "$(lc 111)" "$label" "$(reset)"
+    printf "────────────────────────────────────────────\n"
+    printf "  • %sTasks in status:%s        %s (%s%%)\n" "$(c "$color")" "$(reset)" "${tasks_count:-—}" "${tasks_pct:-0.0}"
+    printf "  • %sStory points in status:%s %s (%s%% of tracked SP)\n" "$(c "$color")" "$(reset)" "${points_val:-—}" "${points_pct:-0.0}"
+    if [[ -n "$detect" && "$label" == "Completed" ]]; then
+      printf "  • %sDetections pending:%s     %s\n" "$(c "1;38;5;214")" "$(reset)" "${detect:-—}"
+    fi
+    printf "  • %sRemaining tasks:%s        %s\n" "$(c "1;37")" "$(reset)" "${tasks_count:-—}"
+    printf "  • %sRemaining story points:%s %s\n" "$(c "1;35")" "$(reset)" "${points_val:-—}"
+    printf "  • %sETA:%s                    %s\n\n" "$(c "1;35")" "$(reset)" "${eta_display:-—}"
+
+    printf "%s⚙️ Throughput%s\n" "$(lc 111)" "$(reset)"
+    printf "────────────────────────────────────────────\n"
+    printf "%s\n\n" "${throughput_lines:-  • (not reported)}"
+
+    printf "%s🔢 Token Telemetry%s\n" "$(lc 111)" "$(reset)"
+    printf "────────────────────────────────────────────\n"
+    if [[ -n "$token_lines" ]]; then
+      while IFS= read -r line; do
+        printf "  %s\n" "$line"
+      done <<<"$token_lines"
+    else
+      printf "  • (not reported)\n"
+    fi
+    printf "\n"
+  done
+}
+
 render_estimate() {
+  if grep -q '^Ready for review$' <<<"$INPUT" && grep -q '^Ready for QA$' <<<"$INPUT"; then
+    render_estimate_status_sections
+    return
+  fi
   local comp_can comp_eff sp_done detect pend_can inprog_can rem_can rem_eff total rem_sp eta throughput obs_tokens avg_per_sp burn proj
   comp_can="$(sed -n 's/^Completed tasks (canonical)[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT")"
   comp_eff="$(sed -n 's/^Completed tasks (effective)[[:space:]]\{1,\}\([0-9,]\+\).*/\1/p' <<<"$INPUT")"

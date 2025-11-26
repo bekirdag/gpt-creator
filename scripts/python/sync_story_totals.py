@@ -49,6 +49,8 @@ def sync_story_totals(db_path: Path) -> None:
                       'ready_for_review',
                       'ready-to-review-no-changes',
                       'ready_to_review_no_changes',
+                      'ready-to-qa',
+                      'ready_to_qa',
                       'ready-for-qa',
                       'ready_for_qa'
                     )

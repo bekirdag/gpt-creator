@@ -25,7 +25,9 @@ TERMINAL_STATUSES = {
     "ready_for_review",
     "ready-for-review",
     "ready-for-qa",
+    "ready-to-qa",
     "ready_for_qa",
+    "ready_to_qa",
     "skipped-already-complete",
 }
 

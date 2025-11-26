@@ -20,6 +20,8 @@ TERMINAL_LOCK_STATUSES = {
     "ready_for_review",
     "ready-for-review",
     "ready-for-qa",
+    "ready-to-qa",
+    "ready_to_qa",
     "ready_for_qa",
     "blocked-budget",
     "blocked-quota",

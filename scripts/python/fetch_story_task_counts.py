@@ -27,6 +27,8 @@ def fetch_story_task_counts(db_path: Path, story_slug: str) -> str:
                   'ready_for_review',
                   'ready-to-review-no-changes',
                   'ready_to_review_no_changes',
+                  'ready-to-qa',
+                  'ready_to_qa',
                   'ready-for-qa',
                   'ready_for_qa'
                 )

@@ -23,7 +23,17 @@ def _is_terminal_status(value: str | None) -> bool:
     s = _normalize_status(value)
     if not s:
         return False
-    if s in {"complete", "completed", "completed-no-changes", "done", "skipped", "skipped-already-complete"}:
+    if s in {
+        "complete",
+        "completed",
+        "completed-no-changes",
+        "ready-to-review",
+        "ready-to-review-no-changes",
+        "ready-for-qa",
+        "done",
+        "skipped",
+        "skipped-already-complete",
+    }:
         return True
     return s.startswith("completed-") or s.startswith("done-") or s.startswith("skipped-")
 

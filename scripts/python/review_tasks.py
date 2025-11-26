@@ -35,7 +35,7 @@ def _normalize_status(value: str) -> str:
     return text
 
 
-READY_STATUSES = {"ready-to-review", "ready_to_review"}
+READY_STATUSES = {"ready-to-review", "ready_to_review", "ready-to-review-no-changes"}
 
 
 def _default_db(project_root: Path) -> Path:
@@ -76,7 +76,7 @@ def _load_adapter_config(cur: sqlite3.Cursor, provider_id: str) -> Tuple[str, Di
 
 def _fetch_tasks(cur: sqlite3.Cursor, specific: Optional[str] = None) -> List[sqlite3.Row]:
     params: List[Any] = []
-    where_clauses = ["LOWER(REPLACE(status,'_','-')) IN ('ready-to-review')"]
+    where_clauses = ["LOWER(REPLACE(status,'_','-')) IN ('ready-to-review','ready-to-review-no-changes')"]
     if specific:
         params.extend([specific, specific])
         where_clauses.append("(task_id = ? OR LOWER(story_slug || ':' || (position+1)) = LOWER(?))")

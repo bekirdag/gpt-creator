@@ -249,6 +249,9 @@ HAS_TASK_POINTS_COLUMN = _task_column_exists("points")
 DONE_PREFIXES = (
     "complete",
     "completed",
+    "ready-to-review",
+    "ready-to-review-no-changes",
+    "ready-for-qa",
     "done",
     "skipped",
     "skip",

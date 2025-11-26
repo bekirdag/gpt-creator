@@ -20,6 +20,14 @@ DONE_STATUSES = {
     "complete",
     "completed",
     "completed-no-changes",
+    "ready-to-review",
+    "ready-to-review-no-changes",
+    "ready_to_review",
+    "ready_to_review_no_changes",
+    "ready_for_review",
+    "ready-for-review",
+    "ready-for-qa",
+    "ready_for_qa",
     "skipped-already-complete",
 }
 

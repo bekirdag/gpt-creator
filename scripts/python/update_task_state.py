@@ -9,7 +9,10 @@ LOCKABLE_STATUSES = {
     "completed",
     "completed-no-changes",
     "ready-to-review",
+    "ready_to_review",
+    "ready-to-review-no-changes",
     "ready_for_review",
+    "ready-for-review",
     "ready-for-qa",
     "ready_for_qa",
     "blocked-budget",
@@ -81,7 +84,17 @@ def update_task_state(
 
         if status in {"in-progress"} and not started_at:
             fields.append(("started_at", timestamp))
-        elif status in {"complete", "completed", "ready-to-review", "ready_for_review", "ready-for-qa", "ready_for_qa"}:
+        elif status in {
+            "complete",
+            "completed",
+            "ready-to-review",
+            "ready_to_review",
+            "ready-to-review-no-changes",
+            "ready_for_review",
+            "ready-for-review",
+            "ready-for-qa",
+            "ready_for_qa",
+        }:
             if not started_at:
                 fields.append(("started_at", timestamp))
             fields.append(("completed_at", timestamp))

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "docdex": {
+      "command": "docdexd",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

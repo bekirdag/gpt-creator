@@ -249,9 +249,6 @@ HAS_TASK_POINTS_COLUMN = _task_column_exists("points")
 DONE_PREFIXES = (
     "complete",
     "completed",
-    "ready-to-review",
-    "ready-to-review-no-changes",
-    "ready-for-qa",
     "done",
     "skipped",
     "skip",
@@ -338,6 +335,28 @@ def status_is_in_progress(value: str) -> bool:
         return True
     return False
 
+
+
+STATUS_BUCKET_COMPLETED = "completed"
+STATUS_BUCKET_READY_REVIEW = "ready_review"
+STATUS_BUCKET_READY_QA = "ready_qa"
+STATUS_BUCKET_IN_PROGRESS = "in_progress"
+STATUS_BUCKET_PENDING = "pending"
+
+
+def status_bucket(value: str) -> str:
+    status = normalise_status(value)
+    if not status:
+        return STATUS_BUCKET_PENDING
+    if status_is_ready_for_review(status):
+        return STATUS_BUCKET_READY_REVIEW
+    if status_is_ready_for_qa(status):
+        return STATUS_BUCKET_READY_QA
+    if status_is_completed(status):
+        return STATUS_BUCKET_COMPLETED
+    if status_is_in_progress(status):
+        return STATUS_BUCKET_IN_PROGRESS
+    return STATUS_BUCKET_PENDING
 
 
 def pluralize(value, singular, plural=None):
@@ -441,32 +460,34 @@ def fetch_task_counts():
         totals["total"] += 1
         base_status = apply_status_override(task_id, row["status"])
         canonical_status = normalise_status(base_status)
-        if status_is_completed(canonical_status):
+        canonical_bucket = status_bucket(canonical_status)
+        if canonical_bucket == STATUS_BUCKET_COMPLETED:
             totals["canonical_completed"] += 1
-        elif status_is_in_progress(canonical_status):
+        elif canonical_bucket == STATUS_BUCKET_IN_PROGRESS:
             totals["canonical_in_progress"] += 1
         else:
             totals["canonical_pending"] += 1
 
         resolved_status = resolve_status_with_overrides(base_status, slug, position, task_id)
-        if status_is_completed(resolved_status):
+        resolved_bucket = status_bucket(resolved_status)
+        if resolved_bucket == STATUS_BUCKET_COMPLETED:
             totals["effective_completed"] += 1
-            if status_is_ready_for_review(resolved_status):
-                totals["ready_review"] += 1
-            elif status_is_ready_for_qa(resolved_status):
-                totals["ready_qa"] += 1
-        elif status_is_in_progress(resolved_status):
+        elif resolved_bucket == STATUS_BUCKET_READY_REVIEW:
+            totals["ready_review"] += 1
+        elif resolved_bucket == STATUS_BUCKET_READY_QA:
+            totals["ready_qa"] += 1
+        elif resolved_bucket == STATUS_BUCKET_IN_PROGRESS:
             totals["effective_in_progress"] += 1
         else:
             totals["effective_pending"] += 1
-        if status_is_completed(resolved_status) and not status_is_completed(canonical_status):
+        if resolved_bucket == STATUS_BUCKET_COMPLETED and canonical_bucket != STATUS_BUCKET_COMPLETED:
             totals["detections_pending"] += 1
 
         entry = counts.setdefault(slug, {"total": 0, "completed": 0, "in_progress": 0})
         entry["total"] += 1
-        if status_is_completed(resolved_status):
+        if resolved_bucket == STATUS_BUCKET_COMPLETED:
             entry["completed"] += 1
-        elif status_is_in_progress(resolved_status):
+        elif resolved_bucket == STATUS_BUCKET_IN_PROGRESS:
             entry["in_progress"] += 1
     # If stories table reports more tasks than the tasks table, fall back to story totals for the summary.
     story_fallback = _story_totals_fallback()
@@ -487,6 +508,8 @@ def fetch_task_counts():
                 "effective_in_progress": 0,
                 "effective_pending": story_pending,
                 "detections_pending": 0,
+                "ready_review": 0,
+                "ready_qa": 0,
             }
     return counts, totals
 
@@ -1148,19 +1171,22 @@ def print_progress():
     percent = (effective_completed / total * 100) if total else 0.0
     ready_review_pct = (ready_review / total * 100) if total else 0.0
     ready_qa_pct = (ready_qa / total * 100) if total else 0.0
+    in_progress_pct = (effective_in_progress / total * 100) if total else 0.0
+    pending_pct = (effective_pending / total * 100) if total else 0.0
     bar_length = 30
     filled_units = int(round((percent / 100) * bar_length))
     filled_units = min(bar_length, max(0, filled_units))
     bar = "#" * filled_units + "-" * (bar_length - filled_units)
     print("Overall backlog progress")
+    print("Status distribution:")
+    print(f"  Completed:         {effective_completed:,} ({percent:0.1f}%)")
+    print(f"  Ready for review:  {ready_review:,} ({ready_review_pct:0.1f}%)")
+    print(f"  Ready for QA:      {ready_qa:,} ({ready_qa_pct:0.1f}%)")
+    print(f"  In-progress:       {effective_in_progress:,} ({in_progress_pct:0.1f}%)")
+    print(f"  Pending:           {effective_pending:,} ({pending_pct:0.1f}%)")
     print(f"Completed tasks (canonical): {canonical_completed:,}")
-    print(f"Completed tasks (effective): {effective_completed:,} ({percent:0.1f}%)")
-    print(f"Ready for review: {ready_review:,} ({ready_review_pct:0.1f}%)")
-    print(f"Ready for QA: {ready_qa:,} ({ready_qa_pct:0.1f}%)")
     if detection_pending:
         print(f"Detections pending apply: {detection_pending:,}")
-    print(f"In-progress (effective): {effective_in_progress:,}")
-    print(f"Pending (effective): {effective_pending:,}")
     print(f"Remaining (canonical): {canonical_remaining:,}")
     print(f"Total tasks: {total:,}")
     print(f"[{bar}]")
@@ -1180,15 +1206,16 @@ def render_progress_color():
     percent = (effective_completed / total * 100) if total else 0.0
     ready_review_pct = (ready_review / total * 100) if total else 0.0
     ready_qa_pct = (ready_qa / total * 100) if total else 0.0
+    in_progress_pct = (effective_in_progress / total * 100) if total else 0.0
+    pending_pct = (effective_pending / total * 100) if total else 0.0
     top, body, bottom = boxed_header_lines(f"Overall Backlog Progress ({PROJECT_ROOT})")
     print(top)
     print(body)
     print(bottom)
-    print(color_text(SECTION_COLOR, "📊 Backlog Summary"))
+    print(color_text(SECTION_COLOR, "📊 Backlog Status"))
     print("──────────────────────────────────────────────────────────────")
-    print(f"• Completed tasks (canonical):   {color_text('1;32', f'{canonical_completed:,}')}")
     print(
-        f"• Completed tasks (effective):   {color_text('1;32', f'{effective_completed:,}')} "
+        f"• Completed (effective):         {color_text('1;32', f'{effective_completed:,}')} "
         f"({color_text('1;32', f'{percent:0.1f}%')})"
     )
     print(
@@ -1199,10 +1226,17 @@ def render_progress_color():
         f"• Ready for QA:                  {color_text('1;34', f'{ready_qa:,}')} "
         f"({color_text('1;34', f'{ready_qa_pct:0.1f}%')})"
     )
+    print(
+        f"• In-progress:                   {color_text('1;33', f'{effective_in_progress:,}')} "
+        f"({color_text('1;33', f'{in_progress_pct:0.1f}%')})"
+    )
+    print(
+        f"• Pending:                       {color_text('1;37', f'{effective_pending:,}')} "
+        f"({color_text('1;37', f'{pending_pct:0.1f}%')})"
+    )
+    print(f"• Completed (canonical):         {color_text('1;32', f'{canonical_completed:,}')}")
     if detection_pending:
         print(f"• Detections pending apply:     {color_text('1;33', f'{detection_pending:,}')}")
-    print(f"• In-progress (effective):       {color_text('1;33', f'{effective_in_progress:,}')}")
-    print(f"• Pending (effective):           {color_text('1;37', f'{effective_pending:,}')}")
     print(f"• Remaining (canonical):         {color_text('1;37', f'{canonical_remaining:,}')}")
     print(f"• Total tasks:                   {color_text('1;36', f'{total:,}')}")
     print()

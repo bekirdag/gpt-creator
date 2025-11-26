@@ -26,10 +26,6 @@ DEFAULT_RATE = 15.0
 DONE_STATUS_PREFIXES = (
     "complete",
     "completed",
-    "ready-to-review",
-    "ready-for-review",
-    "ready-to-qa",
-    "ready-for-qa",
     "done",
     "skipped",
     "skip",
@@ -255,6 +251,28 @@ def is_ready_for_qa_status(value: str) -> bool:
     if not status:
         return False
     return status.startswith("ready-for-qa") or status.startswith("ready_to_qa") or status.startswith("ready-to-qa")
+
+
+STATUS_BUCKET_COMPLETED = "completed"
+STATUS_BUCKET_READY_REVIEW = "ready_review"
+STATUS_BUCKET_READY_QA = "ready_qa"
+STATUS_BUCKET_IN_PROGRESS = "in_progress"
+STATUS_BUCKET_PENDING = "pending"
+
+
+def status_bucket(value: str) -> str:
+    status = coerce_status(value)
+    if not status:
+        return STATUS_BUCKET_PENDING
+    if is_ready_for_review_status(status):
+        return STATUS_BUCKET_READY_REVIEW
+    if is_ready_for_qa_status(status):
+        return STATUS_BUCKET_READY_QA
+    if is_done_status(status):
+        return STATUS_BUCKET_COMPLETED
+    if status_is_in_progress(status):
+        return STATUS_BUCKET_IN_PROGRESS
+    return STATUS_BUCKET_PENDING
 
 
 def meta_float(cursor: sqlite3.Cursor, key: str, default: float = 0.0) -> float:
@@ -765,11 +783,25 @@ def estimate(
     remaining_tasks = 0
     total_tasks_count = 0
     effective_completed_tasks = 0
-    ready_review_count = 0
-    ready_qa_count = 0
     total_points = 0.0
     completed_points = 0.0
     completed_tasks_missing_points = 0
+    ready_review_count = 0
+    ready_qa_count = 0
+    bucket_counts: Dict[str, int] = {
+        STATUS_BUCKET_COMPLETED: 0,
+        STATUS_BUCKET_READY_REVIEW: 0,
+        STATUS_BUCKET_READY_QA: 0,
+        STATUS_BUCKET_IN_PROGRESS: 0,
+        STATUS_BUCKET_PENDING: 0,
+    }
+    bucket_points: Dict[str, float] = {
+        STATUS_BUCKET_COMPLETED: 0.0,
+        STATUS_BUCKET_READY_REVIEW: 0.0,
+        STATUS_BUCKET_READY_QA: 0.0,
+        STATUS_BUCKET_IN_PROGRESS: 0.0,
+        STATUS_BUCKET_PENDING: 0.0,
+    }
     task_info: Dict[str, Dict[str, float | str]] = {}
     canonical_completed_count = 0
     canonical_in_progress = 0
@@ -780,10 +812,10 @@ def estimate(
         total_tasks_count += 1
         base_status = row["status"] or ""
         canonical_status_norm = coerce_status(base_status, "")
-        canonical_done = is_done_status(canonical_status_norm)
-        if canonical_done:
+        canonical_bucket = status_bucket(canonical_status_norm)
+        if canonical_bucket == STATUS_BUCKET_COMPLETED:
             canonical_completed_count += 1
-        elif status_is_in_progress(canonical_status_norm):
+        elif canonical_bucket == STATUS_BUCKET_IN_PROGRESS:
             canonical_in_progress += 1
         else:
             canonical_pending += 1
@@ -824,12 +856,21 @@ def estimate(
             status_options.append("pending")
         resolved_status = ""
         for candidate in status_options:
-            if is_done_status(candidate):
+            candidate_bucket = status_bucket(candidate)
+            if candidate_bucket in (
+                STATUS_BUCKET_COMPLETED,
+                STATUS_BUCKET_READY_REVIEW,
+                STATUS_BUCKET_READY_QA,
+            ):
                 resolved_status = candidate
                 break
+            if candidate_bucket == STATUS_BUCKET_IN_PROGRESS and not resolved_status:
+                resolved_status = candidate
         if not resolved_status:
             resolved_status = status_options[0]
-        is_done = is_done_status(resolved_status)
+        resolved_bucket = status_bucket(resolved_status)
+        bucket_counts[resolved_bucket] = bucket_counts.get(resolved_bucket, 0) + 1
+        bucket_points[resolved_bucket] = bucket_points.get(resolved_bucket, 0.0) + points
         task_key_primary = str(row["id"])
         task_info[task_key_primary] = {"points": points, "status": resolved_status}
         story_slug = (row["story_slug"] or "").strip()
@@ -839,16 +880,12 @@ def estimate(
         task_id_value = (row["task_id"] or "").strip()
         if task_id_value:
             task_info[task_id_value] = {"points": points, "status": resolved_status}
-        if is_done:
-            if is_ready_for_review_status(resolved_status):
-                ready_review_count += 1
-            elif is_ready_for_qa_status(resolved_status):
-                ready_qa_count += 1
+        if resolved_bucket == STATUS_BUCKET_COMPLETED:
             effective_completed_tasks += 1
             completed_points += points
             if points <= 0:
                 completed_tasks_missing_points += 1
-            if not canonical_done and effective_origin == "override":
+            if canonical_bucket != STATUS_BUCKET_COMPLETED and effective_origin == "override":
                 detection_key = task_id_value or (
                     f"{story_slug}:{position}" if story_slug and position is not None else task_key_primary
                 )
@@ -865,11 +902,38 @@ def estimate(
                         "updated_at": override_meta.get("updated_at"),
                     }
             continue
+        if resolved_bucket == STATUS_BUCKET_READY_REVIEW:
+            ready_review_count += 1
+        elif resolved_bucket == STATUS_BUCKET_READY_QA:
+            ready_qa_count += 1
         remaining_tasks += 1
         total_points += points
 
     pending_detections = list(pending_detection_map.values())
     detection_pending_count = len(pending_detections)
+    total_story_points_all = completed_points + total_points
+
+    def build_status_snapshot(label: str, bucket: str) -> dict[str, float | str]:
+        count = bucket_counts.get(bucket, 0)
+        task_pct = (count / total_tasks_count * 100) if total_tasks_count else 0.0
+        points_val = bucket_points.get(bucket, 0.0)
+        points_pct = (points_val / total_story_points_all * 100) if total_story_points_all > 0 else 0.0
+        return {
+            "label": label,
+            "count": count,
+            "task_pct": task_pct,
+            "points": points_val,
+            "points_pct": points_pct,
+        }
+
+    status_snapshots = {
+        "completed": build_status_snapshot("Completed", STATUS_BUCKET_COMPLETED),
+        "ready_review": build_status_snapshot("Ready for review", STATUS_BUCKET_READY_REVIEW),
+        "ready_qa": build_status_snapshot("Ready for QA", STATUS_BUCKET_READY_QA),
+    }
+    effective_completed_tasks = int(status_snapshots["completed"]["count"])
+    ready_review_count = int(status_snapshots["ready_review"]["count"])
+    ready_qa_count = int(status_snapshots["ready_qa"]["count"])
 
     recent_window_descriptor = describe_recent_window(recent_task_limit)
     scoped_recent_samples, total_recent_samples = fetch_recent_productive_samples(
@@ -1012,16 +1076,7 @@ def estimate(
 
     canonical_remaining = canonical_in_progress + canonical_pending
 
-    summary_rows = [
-        ("Completed tasks (canonical)", f"{canonical_completed_count:,}"),
-        ("Completed tasks (effective)", f"{effective_completed_tasks:,}"),
-        ("Completed story points", fmt_number(completed_points)),
-    ]
-    if total_tasks_count > 0:
-        ready_review_pct = (ready_review_count / total_tasks_count) * 100
-        ready_qa_pct = (ready_qa_count / total_tasks_count) * 100
-        summary_rows.append(("Ready for review", f"{ready_review_count:,} ({ready_review_pct:0.1f}%)"))
-        summary_rows.append(("Ready for QA", f"{ready_qa_count:,} ({ready_qa_pct:0.1f}%)"))
+    summary_rows: list[tuple[str, str]] = []
     remaining_detections = max(detection_pending_count - applied_detections, 0)
     if detection_pending_count > 0:
         summary_rows.append(("Detections pending apply", f"{remaining_detections:,}"))
@@ -1034,6 +1089,9 @@ def estimate(
         )
     summary_rows.extend(
         [
+            ("Completed tasks (effective)", f"{effective_completed_tasks:,}"),
+            ("Completed story points", fmt_number(completed_points)),
+            ("Completed tasks (canonical)", f"{canonical_completed_count:,}"),
             ("In-progress (canonical)", f"{canonical_in_progress:,}"),
             ("Pending (canonical)", f"{canonical_pending:,}"),
             ("Remaining (canonical)", f"{canonical_remaining:,}"),
@@ -1049,6 +1107,17 @@ def estimate(
             ("Estimated completion", f"{estimate_str} @{fmt_float(effective_rate)} SP/hour")
         )
     if not colorize_output:
+        def format_status_section(snapshot: dict[str, float | str]) -> list[tuple[str, str]]:
+            points_value = fmt_number(float(snapshot["points"]))
+            if total_story_points_all > 0:
+                points_value = f"{points_value} ({float(snapshot['points_pct']):0.1f}% of tracked SP)"
+            return [
+                ("Tasks", f"{int(snapshot['count']):,} ({float(snapshot['task_pct']):0.1f}%)"),
+                ("Story points", points_value),
+            ]
+
+        for snapshot_key in ("completed", "ready_review", "ready_qa"):
+            print_section(status_snapshots[snapshot_key]["label"], format_status_section(status_snapshots[snapshot_key]))
         print_section("Remaining Work Summary", summary_rows)
 
     throughput_rows: list[tuple[str, str]] = []
@@ -1180,6 +1249,7 @@ def estimate(
             "remaining_effective": remaining_tasks,
             "total_tasks": total_tasks_count,
             "remaining_story_points": total_points,
+            "total_story_points_all": total_story_points_all,
             "estimate_display": (
                 f"Stalled ({eta_stalled_reason})" if eta_stalled_reason else f"{estimate_str} @{fmt_float(effective_rate)} SP/hour"
             ),
@@ -1200,10 +1270,8 @@ def estimate(
             "estimated_tokens_hour": estimated_tokens_hour,
             "projected_remaining_tokens": projected_remaining_tokens,
             "default_rate": DEFAULT_RATE,
-            "ready_review": ready_review_count,
-            "ready_review_pct": (ready_review_count / total_tasks_count * 100) if total_tasks_count else 0.0,
-            "ready_qa": ready_qa_count,
-            "ready_qa_pct": (ready_qa_count / total_tasks_count * 100) if total_tasks_count else 0.0,
+            "status_snapshots": status_snapshots,
+            "completed_tasks_missing_points": completed_tasks_missing_points,
         }
         render_color_estimate(context)
         return 0
@@ -1219,42 +1287,57 @@ def render_color_estimate(ctx: Dict[str, Any]) -> None:
     print(bottom)
     print()
 
-    summary_header = color_text(AUX_HEADER_COLOR, "📊 Remaining Work Summary")
-    print(summary_header)
+    status_header = color_text(AUX_HEADER_COLOR, "📊 Status Breakdown")
+    print(status_header)
     print("────────────────────────────────────────────")
-    fmt = fmt_number
+    fmt_val = fmt_number
+    fmt_int = lambda value: fmt_number(float(value))
     green = lambda text: color_text("1;32", text)
     cyan = lambda text: color_text("1;36", text)
     yellow = lambda text: color_text("1;33", text)
     white = lambda text: color_text("1;37", text)
     magenta = lambda text: color_text("1;35", text)
     red = lambda text: color_text("1;31", text)
-    ready_review_val = ctx.get("ready_review", 0)
-    ready_review_pct = ctx.get("ready_review_pct", 0.0)
-    ready_qa_val = ctx.get("ready_qa", 0)
-    ready_qa_pct = ctx.get("ready_qa_pct", 0.0)
-
-    print(f"• Completed tasks (canonical):       {green(fmt(ctx['completed_canonical']))}")
-    print(f"• Completed tasks (effective):       {green(fmt(ctx['completed_effective']))}")
-    print(f"• Completed story points:            {green(fmt(ctx['completed_story_points']))}")
-    print(
-        f"• Ready for review:                  {cyan(fmt(ready_review_val))} "
-        f"({cyan(f'{ready_review_pct:0.1f}%')})"
-    )
-    print(
-        f"• Ready for QA:                      {cyan(fmt(ready_qa_val))} "
-        f"({cyan(f'{ready_qa_pct:0.1f}%')})"
-    )
+    status_snapshots = ctx.get("status_snapshots", {})
+    total_story_points_all = float(ctx.get("total_story_points_all", 0.0) or 0.0)
+    status_order = [
+        ("completed", "Completed", "1;32"),
+        ("ready_review", "Ready for review", "1;36"),
+        ("ready_qa", "Ready for QA", "1;34"),
+    ]
+    for key, label, color in status_order:
+        snap = status_snapshots.get(key, {}) or {}
+        task_count = int(snap.get("count", 0) or 0)
+        task_pct = float(snap.get("task_pct", 0.0) or 0.0)
+        points_val = float(snap.get("points", 0.0) or 0.0)
+        points_pct = float(snap.get("points_pct", 0.0) or 0.0)
+        tasks_display = color_text(color, f"{fmt_int(task_count)} ({task_pct:0.1f}%)")
+        if total_story_points_all > 0:
+            points_display = color_text(
+                color, f"{fmt_val(points_val)} ({points_pct:0.1f}% of tracked SP)"
+            )
+        else:
+            points_display = color_text(color, fmt_val(points_val))
+        print(f"• {label}: {tasks_display} | SP {points_display}")
+    missing_points = int(ctx.get("completed_tasks_missing_points", 0) or 0)
+    if missing_points:
+        print(f"• Completed without points:          {yellow(fmt_int(missing_points))}")
+    print()
+    totals_header = color_text(AUX_HEADER_COLOR, "🧮 Backlog Totals")
+    print(totals_header)
+    print("────────────────────────────────────────────")
     if ctx.get("detections_pending"):
-        print(f"• Detections pending apply:          {yellow(fmt(ctx['detections_pending']))}")
+        print(f"• Detections pending apply:          {yellow(fmt_int(ctx['detections_pending']))}")
     if ctx.get("detections_applied"):
-        print(f"• Detections applied:                {cyan(fmt(ctx['detections_applied']))}")
-    print(f"• In-progress (canonical):           {cyan(fmt(ctx['in_progress_canonical']))}")
-    print(f"• Pending (canonical):               {white(fmt(ctx['pending_canonical']))}")
-    print(f"• Remaining (canonical):             {white(fmt(ctx['remaining_canonical']))}")
-    print(f"• Remaining tasks (effective):       {white(fmt(ctx['remaining_effective']))}")
-    print(f"• Total tasks:                       {white(fmt(ctx['total_tasks']))}")
-    print(f"• Remaining story points:            {red(fmt(ctx['remaining_story_points']))}")
+        print(f"• Detections applied:                {cyan(fmt_int(ctx['detections_applied']))}")
+    print(f"• Completed (effective):             {green(fmt_int(ctx['completed_effective']))}")
+    print(f"• Completed (canonical):             {green(fmt_int(ctx['completed_canonical']))}")
+    print(f"• In-progress (canonical):           {cyan(fmt_int(ctx['in_progress_canonical']))}")
+    print(f"• Pending (canonical):               {white(fmt_int(ctx['pending_canonical']))}")
+    print(f"• Remaining (canonical):             {white(fmt_int(ctx['remaining_canonical']))}")
+    print(f"• Remaining tasks (effective):       {white(fmt_int(ctx['remaining_effective']))}")
+    print(f"• Total tasks:                       {white(fmt_int(ctx['total_tasks']))}")
+    print(f"• Remaining story points:            {red(fmt_val(ctx['remaining_story_points']))}")
     print(f"• Estimated completion:              ⏱️  {magenta(ctx['estimate_display'])}")
     print()
 

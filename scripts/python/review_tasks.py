@@ -82,13 +82,13 @@ def _fetch_tasks(cur: sqlite3.Cursor, specific: Optional[str] = None) -> List[sq
         where_clauses.append("(task_id = ? OR LOWER(story_slug || ':' || (position+1)) = LOWER(?))")
     sql = f"""
     SELECT id, story_slug, position, task_id, title, description, acceptance_json, acceptance_text,
-           status, last_log_path, last_output_path, last_prompt_path, last_notes_json, last_commands_json,
+           status, priority, last_log_path, last_output_path, last_prompt_path, last_notes_json, last_commands_json,
            last_apply_status, last_changes_applied, last_tokens_total, last_duration_seconds,
            last_history_summary_path, last_history_meta_path, doc_refs, status_reason, uid,
            last_written_json, last_patched_json
       FROM tasks
      WHERE {" AND ".join(where_clauses)}
-     ORDER BY global_order ASC, position ASC
+     ORDER BY COALESCE(priority, 1000000) ASC, global_order ASC, position ASC
     """
     cur.execute(sql, params)
     return list(cur.fetchall())

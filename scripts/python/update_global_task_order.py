@@ -180,7 +180,27 @@ def _id_key(task_id: str) -> Tuple[Tuple[int, object], ...]:
     return tuple(key_parts)
 
 
-def _stable_toposort(task_ids: Iterable[str], dep_edges: Iterable[Tuple[str, str]]) -> List[str]:
+def _priority_value(raw: object) -> int:
+    """
+    Lower numbers mean higher priority. Non-numeric or missing values fall back to a large default.
+    """
+    if raw is None:
+        return 1_000_000
+    try:
+        return int(float(raw))
+    except (TypeError, ValueError):
+        text = str(raw).strip().split()[0] if str(raw).strip() else ""
+        try:
+            return int(float(text))
+        except (TypeError, ValueError):
+            return 1_000_000
+
+
+def _stable_toposort(
+    task_ids: Iterable[str],
+    dep_edges: Iterable[Tuple[str, str]],
+    priority_map: Optional[Dict[str, int]] = None,
+) -> List[str]:
     """
     Deterministically order tasks by ID, respecting dependency edges.
 
@@ -212,7 +232,7 @@ def _stable_toposort(task_ids: Iterable[str], dep_edges: Iterable[Tuple[str, str
     for comp in _sccs(adjacency, list(nodes)):
         if len(comp) <= 1 and not any(member in adjacency.get(member, ()) for member in comp):
             continue
-        ordered_comp = sorted(comp, key=lambda name: (key_map.get(name), name))
+        ordered_comp = sorted(comp, key=lambda name: (_priority(name), key_map.get(name), name))
         position = {name: idx for idx, name in enumerate(ordered_comp)}
         for src in list(comp):
             for dest in list(adjacency.get(src, ())):
@@ -223,25 +243,30 @@ def _stable_toposort(task_ids: Iterable[str], dep_edges: Iterable[Tuple[str, str
                     adjacency[src].discard(dest)
                     indegree[dest] = max(0, indegree.get(dest, 0) - 1)
 
-    heap: List[Tuple[Tuple[int, object], str]] = []
+    def _priority(node: str) -> int:
+        if priority_map is None:
+            return 1_000_000
+        return priority_map.get(node, 1_000_000)
+
+    heap: List[Tuple[int, Tuple[Tuple[int, object], ...], str]] = []
     for node in nodes:
         if indegree.get(node, 0) == 0:
-            heapq.heappush(heap, (key_map[node], node))
+            heapq.heappush(heap, (_priority(node), key_map[node], node))
 
     ordered: List[str] = []
     while heap:
-        _, node = heapq.heappop(heap)
+        _, _, node = heapq.heappop(heap)
         ordered.append(node)
         for dest in list(adjacency[node]):
             indegree[dest] = indegree.get(dest, 0) - 1
             if indegree[dest] == 0:
-                heapq.heappush(heap, (key_map[dest], dest))
+                heapq.heappush(heap, (_priority(dest), key_map[dest], dest))
         adjacency[node].clear()
 
     if len(ordered) < len(nodes):
         remaining = sorted(
             (node for node in nodes if node not in ordered),
-            key=lambda name: (key_map.get(name), name),
+            key=lambda name: (_priority(name), key_map.get(name), name),
         )
         ordered.extend(remaining)
 
@@ -411,7 +436,11 @@ def compute_order(db_path: Path, project_root: Path, skip_if_exists: bool = Fals
             file=sys.stderr,
         )
 
-    order = _stable_toposort(nodes, valid_edges)
+    priority_map: Dict[str, int] = {}
+    for key, row in tasks_by_key.items():
+        priority_map[key] = _priority_value(row["priority"])
+
+    order = _stable_toposort(nodes, valid_edges, priority_map=priority_map)
 
     now = dt.datetime.utcnow().isoformat() + "Z"
 

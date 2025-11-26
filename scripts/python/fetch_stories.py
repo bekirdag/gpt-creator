@@ -297,6 +297,20 @@ def status_is_completed(value: str) -> bool:
     return False
 
 
+def status_is_ready_for_review(value: str) -> bool:
+    status = normalise_status(value)
+    if not status:
+        return False
+    return status.startswith("ready-to-review") or status.startswith("ready_to_review") or status.startswith("ready-for-review")
+
+
+def status_is_ready_for_qa(value: str) -> bool:
+    status = normalise_status(value)
+    if not status:
+        return False
+    return status.startswith("ready-for-qa") or status.startswith("ready_to_qa") or status.startswith("ready-to-qa")
+
+
 def apply_status_override(task_id: str, status: str) -> str:
     normalised = normalise_status(status)
     if normalised != "completed-no-changes":
@@ -345,6 +359,8 @@ def empty_counts():
         "tasks_complete": 0,
         "tasks_in_progress": 0,
         "tasks_pending": 0,
+        "tasks_ready_review": 0,
+        "tasks_ready_qa": 0,
     }
 
 
@@ -411,6 +427,8 @@ def fetch_task_counts():
         "effective_in_progress": 0,
         "effective_pending": 0,
         "detections_pending": 0,
+        "ready_review": 0,
+        "ready_qa": 0,
     }
     query = "SELECT story_slug, status, task_id, position FROM tasks"
     for row in conn.execute(query):
@@ -433,6 +451,10 @@ def fetch_task_counts():
         resolved_status = resolve_status_with_overrides(base_status, slug, position, task_id)
         if status_is_completed(resolved_status):
             totals["effective_completed"] += 1
+            if status_is_ready_for_review(resolved_status):
+                totals["ready_review"] += 1
+            elif status_is_ready_for_qa(resolved_status):
+                totals["ready_qa"] += 1
         elif status_is_in_progress(resolved_status):
             totals["effective_in_progress"] += 1
         else:
@@ -1117,11 +1139,15 @@ def print_progress():
     total = totals.get("total", 0)
     canonical_completed = totals.get("canonical_completed", 0)
     effective_completed = totals.get("effective_completed", canonical_completed)
+    ready_review = totals.get("ready_review", 0)
+    ready_qa = totals.get("ready_qa", 0)
     effective_in_progress = totals.get("effective_in_progress", 0)
     effective_pending = totals.get("effective_pending", 0)
     detection_pending = totals.get("detections_pending", 0)
     canonical_remaining = totals.get("canonical_in_progress", 0) + totals.get("canonical_pending", 0)
     percent = (effective_completed / total * 100) if total else 0.0
+    ready_review_pct = (ready_review / total * 100) if total else 0.0
+    ready_qa_pct = (ready_qa / total * 100) if total else 0.0
     bar_length = 30
     filled_units = int(round((percent / 100) * bar_length))
     filled_units = min(bar_length, max(0, filled_units))
@@ -1129,6 +1155,8 @@ def print_progress():
     print("Overall backlog progress")
     print(f"Completed tasks (canonical): {canonical_completed:,}")
     print(f"Completed tasks (effective): {effective_completed:,} ({percent:0.1f}%)")
+    print(f"Ready for review: {ready_review:,} ({ready_review_pct:0.1f}%)")
+    print(f"Ready for QA: {ready_qa:,} ({ready_qa_pct:0.1f}%)")
     if detection_pending:
         print(f"Detections pending apply: {detection_pending:,}")
     print(f"In-progress (effective): {effective_in_progress:,}")
@@ -1143,11 +1171,15 @@ def render_progress_color():
     total = totals.get("total", 0)
     canonical_completed = totals.get("canonical_completed", 0)
     effective_completed = totals.get("effective_completed", canonical_completed)
+    ready_review = totals.get("ready_review", 0)
+    ready_qa = totals.get("ready_qa", 0)
     effective_in_progress = totals.get("effective_in_progress", 0)
     effective_pending = totals.get("effective_pending", 0)
     detection_pending = totals.get("detections_pending", 0)
     canonical_remaining = totals.get("canonical_in_progress", 0) + totals.get("canonical_pending", 0)
     percent = (effective_completed / total * 100) if total else 0.0
+    ready_review_pct = (ready_review / total * 100) if total else 0.0
+    ready_qa_pct = (ready_qa / total * 100) if total else 0.0
     top, body, bottom = boxed_header_lines(f"Overall Backlog Progress ({PROJECT_ROOT})")
     print(top)
     print(body)
@@ -1158,6 +1190,14 @@ def render_progress_color():
     print(
         f"• Completed tasks (effective):   {color_text('1;32', f'{effective_completed:,}')} "
         f"({color_text('1;32', f'{percent:0.1f}%')})"
+    )
+    print(
+        f"• Ready for review:              {color_text('1;36', f'{ready_review:,}')} "
+        f"({color_text('1;36', f'{ready_review_pct:0.1f}%')})"
+    )
+    print(
+        f"• Ready for QA:                  {color_text('1;34', f'{ready_qa:,}')} "
+        f"({color_text('1;34', f'{ready_qa_pct:0.1f}%')})"
     )
     if detection_pending:
         print(f"• Detections pending apply:     {color_text('1;33', f'{detection_pending:,}')}")

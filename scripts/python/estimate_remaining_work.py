@@ -26,6 +26,10 @@ DEFAULT_RATE = 15.0
 DONE_STATUS_PREFIXES = (
     "complete",
     "completed",
+    "ready-to-review",
+    "ready-for-review",
+    "ready-to-qa",
+    "ready-for-qa",
     "done",
     "skipped",
     "skip",
@@ -237,6 +241,20 @@ def status_is_in_progress(value: str) -> bool:
         if prefix_norm and status.startswith(prefix_norm):
             return True
     return False
+
+
+def is_ready_for_review_status(value: str) -> bool:
+    status = coerce_status(value)
+    if not status:
+        return False
+    return status.startswith("ready-to-review") or status.startswith("ready-for-review") or status.startswith("ready_to_review")
+
+
+def is_ready_for_qa_status(value: str) -> bool:
+    status = coerce_status(value)
+    if not status:
+        return False
+    return status.startswith("ready-for-qa") or status.startswith("ready_to_qa") or status.startswith("ready-to-qa")
 
 
 def meta_float(cursor: sqlite3.Cursor, key: str, default: float = 0.0) -> float:
@@ -747,6 +765,8 @@ def estimate(
     remaining_tasks = 0
     total_tasks_count = 0
     effective_completed_tasks = 0
+    ready_review_count = 0
+    ready_qa_count = 0
     total_points = 0.0
     completed_points = 0.0
     completed_tasks_missing_points = 0
@@ -820,6 +840,10 @@ def estimate(
         if task_id_value:
             task_info[task_id_value] = {"points": points, "status": resolved_status}
         if is_done:
+            if is_ready_for_review_status(resolved_status):
+                ready_review_count += 1
+            elif is_ready_for_qa_status(resolved_status):
+                ready_qa_count += 1
             effective_completed_tasks += 1
             completed_points += points
             if points <= 0:
@@ -993,6 +1017,11 @@ def estimate(
         ("Completed tasks (effective)", f"{effective_completed_tasks:,}"),
         ("Completed story points", fmt_number(completed_points)),
     ]
+    if total_tasks_count > 0:
+        ready_review_pct = (ready_review_count / total_tasks_count) * 100
+        ready_qa_pct = (ready_qa_count / total_tasks_count) * 100
+        summary_rows.append(("Ready for review", f"{ready_review_count:,} ({ready_review_pct:0.1f}%)"))
+        summary_rows.append(("Ready for QA", f"{ready_qa_count:,} ({ready_qa_pct:0.1f}%)"))
     remaining_detections = max(detection_pending_count - applied_detections, 0)
     if detection_pending_count > 0:
         summary_rows.append(("Detections pending apply", f"{remaining_detections:,}"))
@@ -1171,6 +1200,10 @@ def estimate(
             "estimated_tokens_hour": estimated_tokens_hour,
             "projected_remaining_tokens": projected_remaining_tokens,
             "default_rate": DEFAULT_RATE,
+            "ready_review": ready_review_count,
+            "ready_review_pct": (ready_review_count / total_tasks_count * 100) if total_tasks_count else 0.0,
+            "ready_qa": ready_qa_count,
+            "ready_qa_pct": (ready_qa_count / total_tasks_count * 100) if total_tasks_count else 0.0,
         }
         render_color_estimate(context)
         return 0
@@ -1196,10 +1229,22 @@ def render_color_estimate(ctx: Dict[str, Any]) -> None:
     white = lambda text: color_text("1;37", text)
     magenta = lambda text: color_text("1;35", text)
     red = lambda text: color_text("1;31", text)
+    ready_review_val = ctx.get("ready_review", 0)
+    ready_review_pct = ctx.get("ready_review_pct", 0.0)
+    ready_qa_val = ctx.get("ready_qa", 0)
+    ready_qa_pct = ctx.get("ready_qa_pct", 0.0)
 
     print(f"• Completed tasks (canonical):       {green(fmt(ctx['completed_canonical']))}")
     print(f"• Completed tasks (effective):       {green(fmt(ctx['completed_effective']))}")
     print(f"• Completed story points:            {green(fmt(ctx['completed_story_points']))}")
+    print(
+        f"• Ready for review:                  {cyan(fmt(ready_review_val))} "
+        f"({cyan(f'{ready_review_pct:0.1f}%')})"
+    )
+    print(
+        f"• Ready for QA:                      {cyan(fmt(ready_qa_val))} "
+        f"({cyan(f'{ready_qa_pct:0.1f}%')})"
+    )
     if ctx.get("detections_pending"):
         print(f"• Detections pending apply:          {yellow(fmt(ctx['detections_pending']))}")
     if ctx.get("detections_applied"):

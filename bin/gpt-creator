@@ -11235,7 +11235,12 @@ print(error)'
   local processed_total=0
   local processed_any_total=0
   local remaining_tasks=0
+  local no_progress_iterations=0
   local memory_cycle_single=0
+  local no_progress_story_limit="${GC_NO_PROGRESS_STORY_LIMIT:-40}"
+  if ! [[ "$no_progress_story_limit" =~ ^[0-9]+$ ]]; then
+    no_progress_story_limit=40
+  fi
   local story_plan_helper=""
   story_plan_helper="$(gc_clone_python_tool "story_scheduler.py" "${PROJECT_ROOT:-$PWD}")" || return 1
 
@@ -11244,6 +11249,8 @@ print(error)'
     local iteration_processed_any=0
     local iteration_processed=0
     local continue_current_run=0
+    local progress_safety_break=0
+    local no_progress_story_count=0
     local pending_tasks=0
 
     local effective_batch_size="$batch_size"
@@ -11265,6 +11272,7 @@ print(error)'
       fi
 
       iteration_processed_any=1
+      local story_progress_before="$iteration_processed"
 
       if (( throughput_checkpoint_interval > 0 )); then
         now_ts="$(date +%s)"
@@ -13512,7 +13520,26 @@ print(flag("notes_contains_already_satisfied"))'
       rmdir "${story_run_dir}/prompts" 2>/dev/null || true
       rmdir "${story_run_dir}/out" 2>/dev/null || true
     fi
+
+    if (( iteration_processed == story_progress_before )); then
+      (( no_progress_story_count++ ))
+      if (( iteration_processed == 0 && no_progress_story_limit > 0 && no_progress_story_count >= no_progress_story_limit )); then
+        warn "No tasks executed across ${no_progress_story_count} consecutive stories; resynchronising metadata and restarting to avoid a prompt-preparation loop."
+        if ! gc_sync_story_totals "$tasks_db"; then
+          warn "Story/task metadata resync failed; continuing without metadata refresh."
+        fi
+        gc_touch_progress
+        progress_safety_break=1
+        break
+      fi
+    else
+      no_progress_story_count=0
+    fi
   done < <("$python_bin" "$story_plan_helper" "$tasks_db" "${story_filter}" "$resume_flag")
+
+    if (( progress_safety_break )); then
+      continue
+    fi
 
     if (( single_task_mode )) && (( single_task_consumed )); then
       break
@@ -13541,6 +13568,24 @@ print(flag("notes_contains_already_satisfied"))'
         info "No stories to process (already complete)."
       fi
       break
+    fi
+
+    if (( iteration_processed == 0 )); then
+      (( no_progress_iterations++ ))
+      if (( no_progress_iterations == 1 )); then
+        warn "No tasks were executed in this pass; resynchronising story/task metadata to avoid a prompt loop."
+        if ! gc_sync_story_totals "$tasks_db"; then
+          warn "Story/task metadata resync failed; continuing without metadata refresh."
+        fi
+        gc_touch_progress
+        continue
+      fi
+      warn "No tasks executed after metadata resync; stopping work-on-tasks to avoid an infinite prompt-preparation loop."
+      work_failed=1
+      manual_followups=1
+      break
+    else
+      no_progress_iterations=0
     fi
 
     if (( batch_limit_reached )); then

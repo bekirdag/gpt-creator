@@ -410,6 +410,27 @@ ensure_pnpm() {
   record_warning "pnpm could not be installed automatically. Install it manually via corepack or npm (https://pnpm.io/installation)."
 }
 
+ensure_docdex_cli() {
+  if need_cmd docdexd || need_cmd docdex; then
+    echo "✔ docdex CLI detected."
+    return 0
+  fi
+  if ! need_cmd npm; then
+    record_warning "docdex CLI not installed and npm unavailable; install via 'npm i -g docdex' or set GC_DOCDEX_BIN."
+    return 1
+  fi
+  log_info "docdex CLI not found; attempting global install via npm…"
+  if npm install -g docdex >/dev/null 2>&1; then
+    hash -r
+    if need_cmd docdexd || need_cmd docdex; then
+      echo "✔ docdex CLI installed via npm."
+      return 0
+    fi
+  fi
+  record_warning "docdex CLI installation failed; install manually with 'npm i -g docdex' or set GC_DOCDEX_BIN."
+  return 1
+}
+
 ensure_rust() {
   if need_cmd cargo; then
     echo "✔ Rust toolchain $(cargo --version 2>/dev/null || true) detected."
@@ -580,7 +601,7 @@ ensure_zstd_dev() {
     echo "✔ libzstd development headers installed."
     return 0
   fi
-  record_warning "libzstd development package not detected. Install `libzstd-dev` (Debian/Ubuntu) or `zstd-devel` (RHEL/Fedora) so docdex can build."
+  record_warning "libzstd development package not detected. Install `libzstd-dev` (Debian/Ubuntu) or `zstd-devel` (RHEL/Fedora) if other tooling requires it."
   return 1
 }
 
@@ -589,6 +610,7 @@ preflight() {
   ensure_docker
   ensure_node
   ensure_pnpm
+  ensure_docdex_cli
   ensure_rust
    ensure_pkg_config
    ensure_zstd_dev
@@ -626,7 +648,6 @@ install_files() {
     --include '/config/' --include '/config/***'
     --include '/src/***'
     --include '/scripts/***'
-    --include '/docdexd/***'
     --include '/.gpt-creator/'
     --include '/.gpt-creator/***'
     --include '/tui/***'
@@ -649,112 +670,6 @@ install_files() {
   echo "› Installing CLI entrypoint to $APP_BIN"
   as_root "$INSTALL_PREFIX" mkdir -p "$(dirname "$APP_BIN")"
   as_root "$INSTALL_PREFIX" install -m 0755 "$REPO_DIR/bin/gpt-creator" "$APP_BIN"
-}
-
-install_docdexd() {
-  local builder_script="$REPO_DIR/scripts/docdex/build.sh"
-  if [[ ! -f "$builder_script" ]]; then
-    return
-  fi
-  stop_docdexd_service "$REPO_DIR"
-  if ! need_cmd cargo; then
-    record_warning "Rust toolchain (cargo) not found; skipping docdexd build. Install Rust and run '$builder_script' later to enable doc indexing."
-    return
-  fi
-  local target_user="${SUDO_USER:-$USER}"
-  local target_home
-  if ! target_home="$(eval "echo ~${target_user}" 2>/dev/null)"; then
-    target_home="$HOME"
-  fi
-  local cargo_bin="${target_home}/.cargo/bin"
-  local user_path="$PATH"
-  if [[ -d "$cargo_bin" && ":$user_path:" != *":$cargo_bin:"* ]]; then
-    user_path="${cargo_bin}:$user_path"
-  fi
-  echo "› Building docdex daemon (docdexd)…"
-  local build_cmd="cd \"$REPO_DIR\" && bash \"$builder_script\""
-  if ! run_as_user "$target_user" env HOME="$target_home" PATH="$user_path" bash -c "$build_cmd"; then
-    record_warning "docdexd build failed; rerun '$builder_script' inside $REPO_DIR after installing Rust/libzstd (ensure ${target_home}/.cargo is writable)."
-    return
-  fi
-  local built_binary="$REPO_DIR/.gpt-creator/bin/docdexd"
-  if [[ ! -f "$built_binary" ]]; then
-    record_warning "docdexd build completed but ${built_binary} is missing."
-    return
-  fi
-  if [[ "$REPO_DIR" == "$APP_DIR" ]]; then
-    echo "✔ docdexd built and installed under $built_binary"
-    return
-  fi
-  local target_dir="$APP_DIR/.gpt-creator/bin"
-  if as_root "$APP_DIR" mkdir -p "$target_dir" && as_root "$APP_DIR" install -m 0755 "$built_binary" "$target_dir/docdexd"; then
-    echo "✔ docdexd built and installed under $target_dir/docdexd"
-  else
-    record_warning "Unable to install docdexd into $target_dir. Run 'sudo cp ${built_binary} ${target_dir}/docdexd' manually."
-  fi
-}
-
-stop_docdexd_service() {
-  local repo_root="${1:-$REPO_DIR}"
-  local pid_files=("${repo_root}/.gpt-creator/docdex/docdexd.pid" "${repo_root}/.gpt-creator/run/docdexd.pid")
-  for pid_path in "${pid_files[@]}"; do
-    [[ -f "$pid_path" ]] || continue
-    local pid
-    pid="$(cat "$pid_path" 2>/dev/null || true)"
-    if [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]]; then
-      rm -f "$pid_path"
-      continue
-    fi
-    if ! kill -0 "$pid" >/dev/null 2>&1; then
-      rm -f "$pid_path"
-      continue
-    fi
-    echo "› Stopping docdex daemon (pid=$pid) for $repo_root …"
-    if kill "$pid" >/dev/null 2>&1; then
-      local waited=0
-      while kill -0 "$pid" >/dev/null 2>&1 && (( waited < 25 )); do
-        sleep 0.2
-        waited=$((waited + 1))
-      done
-      if kill -0 "$pid" >/dev/null 2>&1; then
-        if kill -9 "$pid" >/dev/null 2>&1; then
-          echo "✔ docdexd force-stopped for $repo_root"
-        else
-          record_warning "Unable to stop docdexd (pid=$pid); process may still be running."
-        fi
-      else
-        echo "✔ docdexd stopped for $repo_root"
-      fi
-    else
-      record_warning "Unable to stop docdexd (pid=$pid); process may still be running."
-    fi
-    rm -f "$pid_path"
-  done
-}
-
-start_docdexd_service() {
-  local repo_root="$REPO_DIR"
-  if [[ ! -d "$repo_root" ]]; then
-    return
-  fi
-  local helper_path="$repo_root/scripts/python/docdex_client.py"
-  if [[ ! -f "$helper_path" && -f "$APP_DIR/scripts/python/docdex_client.py" ]]; then
-    helper_path="$APP_DIR/scripts/python/docdex_client.py"
-  fi
-  if [[ ! -f "$helper_path" ]]; then
-    record_warning "docdex client helper missing; skipping automatic docdex daemon start."
-    return
-  fi
-  if ! need_cmd python3; then
-    record_warning "python3 not available; skipping automatic docdex daemon start."
-    return
-  fi
-  echo "› Ensuring docdex daemon is running for $repo_root …"
-  if GC_PROJECT_ROOT="$repo_root" python3 "$helper_path" --repo "$repo_root" ensure >/dev/null 2>&1; then
-    echo "✔ docdexd ready for $repo_root"
-  else
-    record_warning "Unable to auto-start docdexd for $repo_root. Run 'gpt-creator docdex serve --project $repo_root &' manually if needed."
-  fi
 }
 
 ensure_runtime_permissions() {
@@ -842,11 +757,22 @@ install_completions() {
 main() {
   [[ $SKIP_PREFLIGHT -eq 1 ]] || preflight
 install_files
-install_docdexd
-start_docdexd_service
 ensure_runtime_permissions
 install_link
 install_completions
+  if [[ -d "${APP_DIR:-$REPO_DIR}" ]]; then
+    log_info "Registering docdex MCP helper for known clients…"
+    local mcp_root="${APP_DIR:-$REPO_DIR}"
+    if need_cmd docdex && docdex mcp-add --repo "$mcp_root" --log warn --max-results 8 >/dev/null 2>&1; then
+      echo "✔ docdex MCP helper registered (docdex)."
+    elif need_cmd docdexd && docdexd mcp-add --repo "$mcp_root" --log warn --max-results 8 >/dev/null 2>&1; then
+      echo "✔ docdex MCP helper registered (docdexd)."
+    elif need_cmd npx && npx -y docdex mcp-add --repo "$mcp_root" --log warn --max-results 8 >/dev/null 2>&1; then
+      echo "✔ docdex MCP helper registered (npx docdex)."
+    else
+      record_warning "docdex MCP helper registration failed; run 'docdex mcp-add --repo ${mcp_root} --log warn --max-results 8' manually."
+    fi
+  fi
   echo "✔ Installed. Try:"
   echo "    gpt-creator create-project /path/to/project"
 }

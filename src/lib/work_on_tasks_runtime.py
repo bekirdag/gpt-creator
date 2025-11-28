@@ -7529,18 +7529,6 @@ def main():
             except Exception:
                 return base
 
-        def _ensure_docdex_daemon_running() -> None:
-            if not _docdex_available():
-                print("[work_on_tasks] docdex_client unavailable; skipping daemon ensure", file=sys.stderr)
-                return
-            repo_root = _docdex_repo_root()
-            try:
-                print(f"[work_on_tasks] ensuring docdex daemon for repo {repo_root}", file=sys.stderr)
-                docdex_client.ensure_daemon(repo_root=repo_root)  # type: ignore[attr-defined]
-                print("[work_on_tasks] docdex daemon ensure completed", file=sys.stderr)
-            except Exception as err:
-                print(f"⚠ docdex daemon unavailable: {err}", file=sys.stderr)
-
         def _run_docdex_search(terms: Sequence[str], limit: int) -> List[Dict[str, object]]:
             if not _docdex_available() or not terms or limit <= 0:
                 print("[work_on_tasks] docdex search skipped (unavailable or no terms)", file=sys.stderr)
@@ -7798,8 +7786,6 @@ def main():
         doc_search_hits: List[Dict[str, object]] = []
         docdex_ready = _docdex_available()
         print(f"[work_on_tasks] docdex_ready={docdex_ready} (search terms present? {bool(search_terms)})", file=sys.stderr)
-        if docdex_ready:
-            _ensure_docdex_daemon_running()
         if search_terms:
             seen_doc_ids: Set[str] = {
                 entry.get("doc_id", "").strip()

@@ -279,8 +279,8 @@ mkdir -p "${CLI_SHIM_BIN}" 2>/dev/null || true
 export PATH="${CLI_SHIM_BIN}:${CLI_ROOT}/bin:${PATH}"
 GC_LAST_RENDER_TASK_FOOTER=""
 
-# Ensure docdex helpers default to the CLI-managed binary so docdex_client can auto-start the daemon.
-: "${GC_DOCDEX_BIN:=${CLI_ROOT}/.gpt-creator/bin/docdexd}"
+# Default to npm-provided docdex CLI on PATH.
+: "${GC_DOCDEX_BIN:=docdexd}"
 export GC_DOCDEX_BIN
 
 gc_template_path() {
@@ -8858,45 +8858,15 @@ cmd_refine_tasks() {
 }
 
 gc_docdex_bin() {
-  local default_bin="${CLI_ROOT}/.gpt-creator/bin/docdexd"
-  printf '%s' "${GC_DOCDEX_BIN:-$default_bin}"
-}
-
-gc_docdex_builder_script() {
-  printf '%s' "${CLI_ROOT}/scripts/docdex/build.sh"
-}
-
-gc_docdex_build() {
-  local script
-  script="$(gc_docdex_builder_script)"
-  [[ -f "$script" ]] || die "docdex builder not found at ${script}"
-  info "Building docdex daemon…"
-  if (cd "$CLI_ROOT" && bash "$script"); then
-    ok "docdexd built at $(gc_docdex_bin)"
-  else
-    die "docdex build failed. Install Rust/cargo and rerun ${script}."
-  fi
-}
-
-gc_docdex_require_bin() {
-  local bin
-  bin="$(gc_docdex_bin)"
-  if [[ ! -x "$bin" ]]; then
-    info "docdexd binary missing at ${bin}; attempting to build…"
-    gc_docdex_build
-  fi
-  [[ -x "$bin" ]] || die "docdexd binary not found at ${bin}. Set GC_DOCDEX_BIN or run $(gc_docdex_builder_script)."
+  printf '%s' "${GC_DOCDEX_BIN:-docdexd}"
 }
 
 gc_docdex_usage() {
   cat <<'EOF'
-Usage: gpt-creator docdex <build|index|serve> [options]
-
-  gpt-creator docdex build
-      Build the docdexd binary (requires Rust/cargo).
+Usage: gpt-creator docdex <index|serve> [options]
 
   gpt-creator docdex index --project /path/to/repo
-      Rebuild the documentation index for the project.
+      Rebuild the documentation index for the project (uses npm-installed docdex CLI).
 
   gpt-creator docdex serve --project /path/to/repo [--host 127.0.0.1] [--port 46137]
       Serve the docdex HTTP API (includes filesystem watcher for incremental updates).
@@ -8927,7 +8897,7 @@ cmd_docdex_index() {
       die "--project is required for docdex index"
     fi
   fi
-  gc_docdex_require_bin
+  need_cmd "$(gc_docdex_bin)" || die "docdex CLI not found; install via 'npm i -g docdex' or set GC_DOCDEX_BIN."
   "$(gc_docdex_bin)" index --repo "$root"
 }
 
@@ -8965,7 +8935,7 @@ cmd_docdex_serve() {
       die "--project is required for docdex serve"
     fi
   fi
-  gc_docdex_require_bin
+  need_cmd "$(gc_docdex_bin)" || die "docdex CLI not found; install via 'npm i -g docdex' or set GC_DOCDEX_BIN."
   info "Starting docdexd for ${root} on ${host}:${port}…"
   exec "$(gc_docdex_bin)" serve --repo "$root" --host "$host" --port "$port"
 }
@@ -8974,9 +8944,6 @@ cmd_docdex() {
   local action="${1:-help}"
   shift || true
   case "$action" in
-    build)
-      gc_docdex_build "$@"
-      ;;
     index)
       cmd_docdex_index "$@"
       ;;

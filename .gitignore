@@ -64,6 +64,8 @@ data/
 !.gpt-creator/tmp/.gitkeep
 **/.gpt-creator/docdex/
 **/.gpt-creator/docdex/**
+**/.docdex/
+**/.docdex/**
 **/.gpt-creator/scan.tsv
 **/.gpt-creator/scan.tsv.*
 **/.gpt-creator/staging/

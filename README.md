@@ -44,45 +44,34 @@ These helpers are mandatory during `work-on-tasks` sessions: mention them in you
 
 ## Docdex (Documentation Search) Guide
 
-`docdexd` is a lightweight Rust daemon that indexes staged docs for fast summaries/snippets. `scripts/install.sh` always builds/installs the daemon as part of the default flow, so every fresh `gpt-creator` install ships with a ready-to-run binary and the initial Tantivy index.
+Docdex is now distributed via npm. Install the CLI (`npm i -g docdex` or `npx docdex --version`) and use the provided commands—no local Rust build or bundled binary required.
 
-- During `work-on-tasks`, the runtime automatically talks to the local docdex daemon first, then falls back to the legacy SQLite/vector search (or the CLI JSON query) only when HTTP access is blocked. Completed coding runs stop at `ready-to-review`; run `review-tasks` next (pass/pend) then `qa-tasks` (complete/pend).
-- The documented helpers below (`doc_catalog_query.py`, `work_on_tasks_runtime.py`) already route through docdex transparently, so agents get instant snippets without any extra setup.
+- During `work-on-tasks`, the runtime shells out to the docdex CLI for searches; it falls back to legacy SQLite/vector search only if the CLI fails. Completed coding runs stop at `ready-to-review`; run `review-tasks` next (pass/pend) then `qa-tasks` (complete/pend).
+- Helpers (`doc_catalog_query.py`, `work_on_tasks_runtime.py`) already call `docdex_client.search_docs`, which now wraps the npm CLI.
 
-### Build & Serve (optional)
+### Quickstart
 
 ```bash
-# Build docdexd (requires Rust/cargo)
-gpt-creator docdex build
-
-# Rebuild the index and serve the HTTP API
-gpt-creator docdex index --project /path/to/project
-gpt-creator docdex serve --project /path/to/project --host 127.0.0.1 --port 46137
+npm i -g docdex           # or use npx docdex --version
+docdexd index --repo /path/to/project   # build index
+docdexd query --repo /path/to/project --query "otp flow" --limit 5   # ad-hoc search (JSON)
 ```
 
-`docdex_client.py` auto-starts the daemon by default, but you can override defaults with:
+You can override the CLI path with `GC_DOCDEX_BIN` (default: `docdexd` on PATH). For local use we set `DOCDEX_SECURE_MODE=false` when spawning the CLI; if you run the HTTP server yourself, keep secure defaults (`--secure-mode=true`, auth token).
 
-- `GC_DOCDEX_BIN` – absolute path to the `docdexd` binary (defaults to `.gpt-creator/bin/docdexd`).
-- `GC_DOCDEX_HOST` / `GC_DOCDEX_PORT` – host/port the client and daemon use (defaults `127.0.0.1:46137`).
-- `GC_DOCDEX_LOG` – log level passed to `docdexd serve`.
-- `GC_PROJECT_ROOT` – repo root resolved by `docdex_client` when `--repo` is omitted.
+### Rebuilding the Index
 
-### Wiring the Helpers
+Docdex stores its index under `.docdex/index` by default (it will reuse a legacy `.gpt-creator/docdex/index` if present). To refresh snippets, run:
 
-- `scripts/python/doc_catalog.py` now calls `docdex_client.search_docs` and `fetch_snippet` whenever the daemon responds, falling back to the legacy SQLite scan or CLI JSON query only when docdex isn’t reachable.
-- `work_on_tasks_runtime.py` (and every generated prompt) defaults to docdex for documentation hits/snippets so backlog runs stay responsive even without the SQLite catalog.
+```bash
+docdexd index --repo /path/to/project
+```
 
-If you need the legacy path (e.g., testing without Rust/Cargo), unset `GC_DOCDEX_BIN` or point `GC_DOCDEX_PORT` at an unused port so `_port_open` fails and the client skips auto-starting docdexd.
+Or reindex a single file:
 
-### Rebuilding the Tantivy Index
-
-The index lives under `.gpt-creator/docdex/index`. When the schema or stored fields change:
-
-1. Stop the daemon (`pkill docdexd` or cancel the `gpt-creator docdex serve …` process).
-2. Remove `.gpt-creator/docdex/index` or run `gpt-creator docdex index --project …` to rebuild it.
-3. Restart `gpt-creator docdex serve …` (or let the Python client auto-start it) so the new schema is served.
-
-Old indexes may fail to load summaries/snippets correctly, so always rebuild after pulling docdex-related updates.
+```bash
+docdexd ingest --repo /path/to/project --file docs/new.md
+```
 
 ---
 
@@ -124,8 +113,6 @@ Installs:
 - Executable symlink: `/usr/local/bin/gpt-creator`
 - Library assets: `/usr/local/lib/gpt-creator`
 - Shell completions: zsh/bash/fish (if writable)
-
-During installation the script automatically builds the `docdexd` binary and seeds the repo’s `.gpt-creator/docdex/index` directory so documentation search is ready without extra commands.
 
 Use `--skip-preflight` to bypass dependency checks or `--force` to replace an existing symlink. The installer will try to provision missing tooling like Node.js, pnpm, and the MySQL client automatically; dependencies that need manual setup (Docker Desktop, Codex CLI, API keys) surface as warnings when the relevant commands run.
 

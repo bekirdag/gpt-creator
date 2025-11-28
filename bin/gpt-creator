@@ -11352,6 +11352,16 @@ print(error)'
       fi
     fi
 
+    if (( total_tasks_int > 0 && next_task_int >= total_tasks_int )); then
+      info "  All ${total_tasks_int} task(s) already complete; skipping prompt preparation."
+      gc_update_work_state "$tasks_db" "$slug" "complete" "$total_tasks_int" "$total_tasks_int" "$run_stamp"
+      if (( keep_artifacts == 0 )); then
+        rmdir "${story_run_dir}/prompts" 2>/dev/null || true
+        rmdir "${story_run_dir}/out" 2>/dev/null || true
+      fi
+      continue
+    fi
+
     if (( total_tasks_int == 0 )); then
       info "  No tasks for this story; marking complete."
       gc_update_work_state "$tasks_db" "$slug" "complete" 0 0 "$run_stamp"

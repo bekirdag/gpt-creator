@@ -23,7 +23,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 DEFAULT_RATE = 15.0
-ESTIMATE_CACHE_VERSION = 3
+ESTIMATE_CACHE_VERSION = 4
 DONE_STATUS_PREFIXES = (
     "complete",
     "completed",
@@ -123,6 +123,114 @@ def cache_key_for(
 ) -> str:
     payload = f"{db_path.resolve()}|{recent_label}|{scope}|{warn_floor or 'auto'}|{color_variant}"
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def collect_token_telemetry_by_status(
+    cur: sqlite3.Cursor,
+    *,
+    scope: str,
+    project_root: Path,
+) -> dict[str, dict[str, float | int]]:
+    stats: dict[str, dict[str, float | int]] = {}
+    project_root_str = str(project_root.resolve())
+    try:
+        rows = cur.execute(
+            """
+            SELECT final_status, tokens_total, sp_delivered, project_root
+              FROM metric_samples
+             WHERE tokens_total IS NOT NULL
+               AND tokens_total > 0
+            """
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return stats
+
+    for row in rows:
+        status_value = coerce_status(row["final_status"] or "", "")
+        bucket = status_bucket(status_value)
+        if not bucket:
+            continue
+        if scope == "project":
+            row_root = str(row["project_root"] or "").strip()
+            if row_root and Path(row_root).resolve() != project_root.resolve():
+                continue
+        bucket_stats = stats.setdefault(
+            bucket,
+            {
+                "tokens_total": 0.0,
+                "samples": 0,
+                "sp_total": 0.0,
+            },
+        )
+        tokens_val = float(row["tokens_total"] or 0.0)
+        sp_val = float(row["sp_delivered"] or 0.0)
+        bucket_stats["tokens_total"] = float(bucket_stats.get("tokens_total", 0.0) or 0.0) + tokens_val
+        bucket_stats["sp_total"] = float(bucket_stats.get("sp_total", 0.0) or 0.0) + sp_val
+        try:
+            bucket_stats["samples"] = int(bucket_stats.get("samples", 0) or 0) + 1
+        except Exception:
+            bucket_stats["samples"] = 1
+    return stats
+
+
+def collect_throughput_by_status(
+    cur: sqlite3.Cursor,
+    *,
+    scope: str,
+    project_root: Path,
+) -> dict[str, dict[str, float | int]]:
+    stats: dict[str, dict[str, float | int]] = {}
+    project_root_resolved = project_root.resolve()
+    try:
+        rows = cur.execute(
+            """
+            SELECT final_status, sp_delivered, duration_seconds, project_root
+              FROM metric_samples
+             WHERE sp_delivered IS NOT NULL
+               AND sp_delivered > 0
+               AND duration_seconds IS NOT NULL
+               AND duration_seconds > 0
+            """
+        ).fetchall()
+    except sqlite3.DatabaseError:
+        return stats
+
+    for row in rows:
+        status_value = coerce_status(row["final_status"] or "", "")
+        bucket = status_bucket(status_value)
+        if not bucket:
+            continue
+        if scope == "project":
+            row_root = str(row["project_root"] or "").strip()
+            if row_root:
+                try:
+                    if Path(row_root).resolve() != project_root_resolved:
+                        continue
+                except Exception:
+                    continue
+        bucket_stats = stats.setdefault(
+            bucket,
+            {
+                "sp_total": 0.0,
+                "duration_seconds": 0.0,
+                "samples": 0,
+                "rate": 0.0,
+            },
+        )
+        sp_val = float(row["sp_delivered"] or 0.0)
+        duration_val = float(row["duration_seconds"] or 0.0)
+        bucket_stats["sp_total"] = float(bucket_stats.get("sp_total", 0.0) or 0.0) + sp_val
+        bucket_stats["duration_seconds"] = float(bucket_stats.get("duration_seconds", 0.0) or 0.0) + duration_val
+        bucket_stats["samples"] = int(bucket_stats.get("samples", 0) or 0) + 1
+
+    for meta in stats.values():
+        dur = float(meta.get("duration_seconds", 0.0) or 0.0)
+        sp_total = float(meta.get("sp_total", 0.0) or 0.0)
+        if dur > 0 and sp_total > 0:
+            meta["rate"] = sp_total / (dur / 3600.0)
+        else:
+            meta["rate"] = 0.0
+    return stats
 
 
 def compute_runs_mtime(project_root: Path) -> float:
@@ -935,6 +1043,8 @@ def estimate(
     effective_completed_tasks = int(status_snapshots["completed"]["count"])
     ready_review_count = int(status_snapshots["ready_review"]["count"])
     ready_qa_count = int(status_snapshots["ready_qa"]["count"])
+    tokens_by_status = collect_token_telemetry_by_status(cur, scope=scope_normalized, project_root=project_root)
+    throughput_by_status = collect_throughput_by_status(cur, scope=scope_normalized, project_root=project_root)
 
     recent_window_descriptor = describe_recent_window(recent_task_limit)
     scoped_recent_samples, total_recent_samples = fetch_recent_productive_samples(
@@ -1108,17 +1218,31 @@ def estimate(
             ("Estimated completion", f"{estimate_str} @{fmt_float(effective_rate)} SP/hour")
         )
     if not colorize_output:
-        def format_status_section(snapshot: dict[str, float | str]) -> list[tuple[str, str]]:
+        def format_status_section(snapshot: dict[str, float | str], status_key: str) -> list[tuple[str, str]]:
             points_value = fmt_number(float(snapshot["points"]))
             if total_story_points_all > 0:
                 points_value = f"{points_value} ({float(snapshot['points_pct']):0.1f}% of tracked SP)"
-            return [
+            lines: list[tuple[str, str]] = [
                 ("Tasks", f"{int(snapshot['count']):,} ({float(snapshot['task_pct']):0.1f}%)"),
                 ("Story points", points_value),
             ]
+            token_meta = tokens_by_status.get(status_key, {})
+            token_total = float(token_meta.get("tokens_total", 0.0) or 0.0)
+            token_samples = int(token_meta.get("samples", 0) or 0)
+            token_sp = float(token_meta.get("sp_total", 0.0) or 0.0)
+            if token_total > 0 and token_samples > 0:
+                lines.append(("Observed tokens", f"{fmt_tokens(token_total)} across {token_samples} task(s)"))
+                if token_sp > 0:
+                    lines.append(("Avg tokens / SP", f"{fmt_number(token_total / token_sp)} tokens/SP"))
+            rate_meta = throughput_by_status.get(status_key, {}) if isinstance(throughput_by_status, dict) else {}
+            rate_val = float(rate_meta.get("rate", 0.0) or 0.0)
+            rate_samples = int(rate_meta.get("samples", 0) or 0)
+            if rate_val > 0:
+                lines.append(("Throughput (status)", f"{fmt_float(rate_val)} SP/hour (samples {rate_samples})"))
+            return lines
 
         for snapshot_key in ("completed", "ready_review", "ready_qa"):
-            print_section(status_snapshots[snapshot_key]["label"], format_status_section(status_snapshots[snapshot_key]))
+            print_section(status_snapshots[snapshot_key]["label"], format_status_section(status_snapshots[snapshot_key], snapshot_key))
         print_section("Remaining Work Summary", summary_rows)
 
     throughput_rows: list[tuple[str, str]] = []
@@ -1273,6 +1397,8 @@ def estimate(
             "default_rate": DEFAULT_RATE,
             "status_snapshots": status_snapshots,
             "completed_tasks_missing_points": completed_tasks_missing_points,
+            "tokens_by_status": tokens_by_status,
+            "throughput_by_status": throughput_by_status,
         }
         render_color_estimate(context)
         return 0
@@ -1297,6 +1423,7 @@ def render_color_estimate(ctx: Dict[str, Any]) -> None:
     white = lambda text: color_text("1;37", text)
     magenta = lambda text: color_text("1;35", text)
     red = lambda text: color_text("1;31", text)
+
     status_snapshots = ctx.get("status_snapshots", {})
     total_story_points_all = float(ctx.get("total_story_points_all", 0.0) or 0.0)
     status_order = [
@@ -1304,16 +1431,19 @@ def render_color_estimate(ctx: Dict[str, Any]) -> None:
         ("ready_review", "Ready for review", "1;36"),
         ("ready_qa", "Ready for QA", "1;34"),
     ]
-    rate_display = fmt_float(ctx["effective_rate"])
+    tokens_by_status = ctx.get("tokens_by_status", {}) if isinstance(ctx.get("tokens_by_status", {}), dict) else {}
+    throughput_by_status = ctx.get("throughput_by_status", {}) if isinstance(ctx.get("throughput_by_status", {}), dict) else {}
+
+    rate_display = fmt_float(ctx.get("effective_rate", 0.0))
     throughput_lines: list[str] = []
-    if ctx["using_recent_velocity"]:
-        basis_text = cyan(f"Last {ctx['recent_sample_count']} task(s)")
+    if ctx.get("using_recent_velocity"):
+        basis_text = cyan(f"Last {ctx.get('recent_sample_count', 0)} task(s)")
         rate_text = green(f"{rate_display} SP/h")
         throughput_lines.append(f"• Basis: {basis_text}")
         throughput_lines.append(f"• Effective throughput: {rate_text} (recent window)")
     else:
-        basis = "run" if ctx["rate_samples"] == 1 else "runs"
-        basis_text = cyan(f"Measured from {ctx['rate_samples']} {basis}")
+        basis = "run" if ctx.get("rate_samples", 0) == 1 else "runs"
+        basis_text = cyan(f"Measured from {ctx.get('rate_samples', 0)} {basis}")
         rate_text = green(f"{rate_display} SP/h")
         throughput_lines.append(f"• Basis: {basis_text}")
         throughput_lines.append(f"• Effective throughput (EWMA): {rate_text}")
@@ -1336,7 +1466,7 @@ def render_color_estimate(ctx: Dict[str, Any]) -> None:
         throughput_lines.append(f"• Window contamination: {yellow(f'{contamination_ratio:.0f}%')}")
     blocked_ratio = ctx.get("blocked_ratio", 0.0) * 100
     if blocked_ratio > 0:
-        suffix = f" ({ctx['blocked_dominant']})" if ctx.get("blocked_dominant") else ""
+        suffix = f" ({ctx.get('blocked_dominant')})" if ctx.get("blocked_dominant") else ""
         throughput_lines.append(f"• Blocked signal: {yellow(f'{blocked_ratio:.0f}% of recent runs{suffix}')}")
 
     token_lines: list[str] = []
@@ -1349,7 +1479,7 @@ def render_color_estimate(ctx: Dict[str, Any]) -> None:
             token_lines.append(f"• Avg tokens / SP:            {white(avg_tokens_display)}")
         if ctx.get("estimated_tokens_hour"):
             burn = fmt_tokens(ctx["estimated_tokens_hour"])
-            rate_str = fmt_float(ctx["effective_rate"])
+            rate_str = fmt_float(ctx.get("effective_rate", 0.0))
             token_lines.append(f"• Est. token burn:            {red(burn)} tokens/h @{green(rate_str + ' SP/h')}")
         if ctx.get("projected_remaining_tokens"):
             token_lines.append(
@@ -1373,9 +1503,7 @@ def render_color_estimate(ctx: Dict[str, Any]) -> None:
         print(color_text(AUX_HEADER_COLOR, f"🧾 {label} Snapshot"))
         print("────────────────────────────────────────────")
         points_display = (
-            f"{fmt_val(points_val)} ({points_pct:0.1f}% of tracked SP)"
-            if total_story_points_all > 0
-            else fmt_val(points_val)
+            f"{fmt_val(points_val)} ({points_pct:0.1f}% of tracked SP)" if total_story_points_all > 0 else fmt_val(points_val)
         )
         print(f"• Tasks in status:             {color_text(color, f'{fmt_int(task_count)} ({task_pct:0.1f}%)')}")
         print(f"• Story points in status:      {color_text(color, points_display)}")
@@ -1391,22 +1519,46 @@ def render_color_estimate(ctx: Dict[str, Any]) -> None:
             remaining_points_display = fmt_val(remaining_points)
         print(f"• Remaining tasks (status):    {white(remaining_task_display)}")
         print(f"• Remaining story points:      {magenta(remaining_points_display)}")
-        eta_display = ctx.get("estimate_display") if key == "completed" else "N/A"
+        status_rate_meta = throughput_by_status.get(key, {}) if isinstance(throughput_by_status, dict) else {}
+        status_rate = float(status_rate_meta.get("rate", 0.0) or 0.0)
+        status_samples = int(status_rate_meta.get("samples", 0) or 0)
+        rate_for_eta = status_rate if status_rate > 0 else None
+        eta_display = "N/A"
         if remaining_points > 0 and ctx.get("eta_stalled_reason"):
             eta_display = f"Stalled ({ctx['eta_stalled_reason']})"
-        elif remaining_points > 0 and ctx.get("effective_rate", 0.0) > 0:
-            minutes = math.ceil((remaining_points / ctx["effective_rate"]) * 60)
+        elif remaining_points > 0 and rate_for_eta:
+            minutes = math.ceil((remaining_points / rate_for_eta) * 60)
             days, rem = divmod(minutes, 1440)
             hours, mins = divmod(rem, 60)
-            parts = []
+            parts: list[str] = []
             if days:
                 parts.append(f"{days}d")
             if hours:
                 parts.append(f"{hours}h")
             if mins or not parts:
                 parts.append(f"{mins}m")
-            eta_display = " ".join(parts) + f" @{fmt_float(ctx['effective_rate'])} SP/hour"
+            eta_display = " ".join(parts) + f" @{fmt_float(rate_for_eta)} SP/hour"
+        elif remaining_points == 0:
+            eta_display = ctx.get("estimate_display") if key == "completed" else "N/A"
+        else:
+            eta_display = "No throughput data"
         print(f"• ETA:                         {magenta(eta_display)}")
+        if status_rate > 0:
+            print(f"• Throughput (status):         {green(fmt_float(status_rate))} SP/h (samples {status_samples})")
+        else:
+            print("• Throughput (status):         N/A (no samples)")
+        token_meta = tokens_by_status.get(key, {}) if isinstance(tokens_by_status, dict) else {}
+        token_total = float(token_meta.get("tokens_total", 0.0) or 0.0)
+        token_samples = int(token_meta.get("samples", 0) or 0)
+        token_sp = float(token_meta.get("sp_total", 0.0) or 0.0)
+        if token_total > 0 and token_samples > 0:
+            print()
+            print(color_text(AUX_HEADER_COLOR, "🔢 Token Telemetry (status)"))
+            print("────────────────────────────────────────────")
+            print(f"• Observed tokens:            {cyan(fmt_tokens(token_total))} across {token_samples} task(s)")
+            if token_sp > 0:
+                print(f"• Avg tokens / SP:            {white(f'{fmt_number(token_total / token_sp)} tokens/SP')}")
+        print()
         missing_points = int(ctx.get("completed_tasks_missing_points", 0) or 0)
         if missing_points and key == "completed":
             print(f"• Completed without points:    {yellow(fmt_int(missing_points))}")
@@ -1419,11 +1571,7 @@ def render_color_estimate(ctx: Dict[str, Any]) -> None:
         print(color_text(AUX_HEADER_COLOR, "🔢 Token Telemetry"))
         print("────────────────────────────────────────────")
         for line in token_lines:
-            if key == "completed":
-                print(line)
-            else:
-                # keep the same data for consistency across sections
-                print(line)
+            print(line)
         print()
 
     for key, label, color in status_order:

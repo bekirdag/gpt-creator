@@ -223,6 +223,37 @@ render_backlog_header() {
   printf "%s╰%s╯%s\n" "$border_color" "$hyphens" "$(reset)"
 }
 
+render_subheader() {
+  local title="${1:-Snapshot}"
+  local width="${2:-64}"
+  local border_color="${3:-$(c "1;38;5;141")}"  # distinct accent (violet)
+  local title_color="${4:-$(c "1;38;5;45")}"    # bright teal
+
+  local inner=$((width - 2))
+  (( inner < 10 )) && inner=40
+  local trimmed="$title"
+  local tlen=${#trimmed}
+  if (( tlen > inner - 2 )); then
+    trimmed="${trimmed:0:inner-2}"
+    tlen=${#trimmed}
+  fi
+  local pad=$((inner - tlen))
+  (( pad < 0 )) && pad=0
+  local left=$((pad / 2))
+  local right=$((pad - left))
+
+  local line
+  printf -v line '%*s' "$inner" ''
+  line="${line// /─}"
+  printf "%s╭%s╮%s\n" "$border_color" "$line" "$(reset)"
+  printf "%s│%s" "$border_color" "$(reset)"
+  printf "%*s" "$left" ""
+  printf "%s%s%s" "$title_color" "$trimmed" "$(reset)"
+  printf "%*s" "$right" ""
+  printf "%s│%s\n" "$border_color" "$(reset)"
+  printf "%s╰%s╯%s\n" "$border_color" "$line" "$(reset)"
+}
+
 draw_table() {
   local width_spec="${1:-}"
   local type_spec="${2:-}"
@@ -684,8 +715,7 @@ render_estimate_status_sections() {
     solid_progress_bar "$tasks_pct" 40 "$label"
     printf "\n"
 
-    printf "%s🧾 %s Snapshot%s\n" "$(lc 111)" "$label" "$(reset)"
-    printf "────────────────────────────────────────────\n"
+    render_subheader "🧾 ${label} Snapshot" 60
     printf "  • %sTasks in status:%s        %s (%s%%)\n" "$(c "$color")" "$(reset)" "${tasks_count:-—}" "${tasks_pct:-0.0}"
     printf "  • %sStory points in status:%s %s (%s%% of tracked SP)\n" "$(c "$color")" "$(reset)" "${points_val:-—}" "${points_pct:-0.0}"
     if [[ -n "$detect" && "$label" == "Completed" ]]; then

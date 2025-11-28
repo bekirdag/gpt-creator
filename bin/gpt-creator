@@ -10566,6 +10566,15 @@ PY
     die "Task database missing or empty. Run 'gpt-creator create-tasks' (or create-jira-tasks + migrate-tasks) before work-on-tasks."
   fi
 
+  local total_tasks_all
+  total_tasks_all="$(sqlite3 "$tasks_db" "SELECT COUNT(*) FROM tasks;" 2>/dev/null || echo 0)"
+  if ! [[ "$total_tasks_all" =~ ^[0-9]+$ ]]; then
+    total_tasks_all=0
+  fi
+  if (( total_tasks_all == 0 )); then
+    die "there are no tasks in the database"
+  fi
+
   local now_ts
   now_ts="$(date +%s)"
   throughput_next_checkpoint=$((now_ts + throughput_checkpoint_interval))
@@ -11340,25 +11349,30 @@ print(error)'
     info "Story ${story_prefix} (${story_id:-$slug}) — ${story_title:-Unnamed}"
     export GC_BUDGET_STORY_ID="${story_id:-$slug}"
 
-    if (( total_tasks_int == 0 )); then
-      local stats=""
-      if stats="$(gc_fetch_story_task_counts "$tasks_db" "$slug" 2>/dev/null)"; then
-        local actual_total=0 actual_completed=0
-        IFS=$'\t' read -r actual_total actual_completed <<<"$stats"
-        if [[ "$actual_total" =~ ^[0-9]+$ ]] && (( actual_total > 0 )); then
-          info "  Found ${actual_total} task(s) in backlog despite zero metadata; synchronising."
-          total_tasks_int=$actual_total
-          completed="${actual_completed}"
-          if [[ "$completed" =~ ^[0-9]+$ ]]; then
-            (( completed > actual_total )) && completed="$actual_total"
-            if (( next_task_int < completed )); then
-              next_task_int=$completed
-            fi
-          fi
-          gc_update_work_state "$tasks_db" "$slug" "pending" "$completed" "$total_tasks_int" "$run_stamp"
-        fi
-      fi
+    # Always trust tasks.db for counts; ignore stale story metadata.
+    local stats=""
+    local actual_total=0 actual_completed=0
+    if stats="$(gc_fetch_story_task_counts "$tasks_db" "$slug" 2>/dev/null)"; then
+      IFS=$'\t' read -r actual_total actual_completed <<<"$stats"
+      [[ "$actual_total" =~ ^[0-9]+$ ]] || actual_total=0
+      [[ "$actual_completed" =~ ^[0-9]+$ ]] || actual_completed=0
     fi
+    total_tasks_int=$actual_total
+    if (( actual_completed > total_tasks_int )); then
+      actual_completed="$total_tasks_int"
+    fi
+    if (( next_task_int < actual_completed )); then
+      next_task_int="$actual_completed"
+    fi
+    if (( total_tasks_int == 0 )); then
+      info "  No tasks found in tasks.db for ${slug}; skipping."
+      if (( keep_artifacts == 0 )); then
+        rmdir "${story_run_dir}/prompts" 2>/dev/null || true
+        rmdir "${story_run_dir}/out" 2>/dev/null || true
+      fi
+      continue
+    fi
+    gc_update_work_state "$tasks_db" "$slug" "pending" "$actual_completed" "$total_tasks_int" "$run_stamp"
 
     if (( total_tasks_int > 0 && next_task_int >= total_tasks_int )); then
       info "  All ${total_tasks_int} task(s) already complete; skipping prompt preparation."

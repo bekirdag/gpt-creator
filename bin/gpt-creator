@@ -40,9 +40,6 @@ if (( BASH_VERSINFO[0] < 4 )); then
   exit 1
 fi
 
-mkdir -p "${PWD}/.gpt-creator/shims" 2>/dev/null || true
-export BASH_ENV="${BASH_ENV:-$PWD/.gpt-creator/shims/bash_env.sh}"
-
 if [[ -t 1 && $# -eq 0 && -z "${GC_SKIP_TUI_AUTO:-}" ]]; then
   export GC_SKIP_TUI_AUTO=1
   exec "$0" tui
@@ -121,110 +118,6 @@ GC_LLM_OUTPUT_LIMIT_HARD_CAP="${GC_LLM_OUTPUT_LIMIT_HARD_CAP_DEFAULT}"
 GC_LAST_CODEX_OUTPUT_STEP=""
 GC_LAST_CODEX_OUTPUT_LIMIT=0
 
-gc_budget_stage_id() {
-  local stage="${1:-}"
-  stage="${stage,,}"
-  stage="${stage//[^a-z0-9]/_}"
-  printf '%s' "$stage"
-}
-
-gc_budget_stage_limit_var() {
-  local id
-  id="$(gc_budget_stage_id "$1")"
-  id="${id^^}"
-  printf 'GC_BUDGET_STAGE_LIMIT_%s' "$id"
-}
-
-gc_budget_stage_total_var() {
-  local id
-  id="$(gc_budget_stage_id "$1")"
-  id="${id^^}"
-  printf 'GC_BUDGET_STAGE_TOTAL_%s' "$id"
-}
-
-gc_budget_stage_tripped_var() {
-  local id
-  id="$(gc_budget_stage_id "$1")"
-  id="${id^^}"
-  printf 'GC_BUDGET_STAGE_TRIPPED_%s' "$id"
-}
-
-gc_budget_stage_skip_var() {
-  local id
-  id="$(gc_budget_stage_id "$1")"
-  id="${id^^}"
-  printf 'GC_BUDGET_STAGE_SKIP_%s' "$id"
-}
-
-gc_budget_stage_reason_var() {
-  local id
-  id="$(gc_budget_stage_id "$1")"
-  id="${id^^}"
-  printf 'GC_BUDGET_STAGE_SKIP_REASON_%s' "$id"
-}
-
-gc_budget_get_stage_limit() {
-  local var
-  var="$(gc_budget_stage_limit_var "$1")"
-  printf '%s' "${!var:-0}"
-}
-
-gc_budget_set_stage_limit() {
-  local var
-  var="$(gc_budget_stage_limit_var "$1")"
-  local value="${2:-0}"
-  printf -v "$var" '%s' "$value"
-}
-
-gc_budget_stage_tripped() {
-  local var
-  var="$(gc_budget_stage_tripped_var "$1")"
-  [[ "${!var:-0}" == "1" ]]
-}
-
-gc_budget_stage_should_skip() {
-  local var
-  var="$(gc_budget_stage_skip_var "$1")"
-  [[ "${!var:-0}" == "1" ]]
-}
-
-gc_budget_set_stage_skip() {
-  local stage="$1"
-  local flag="${2:-0}"
-  local reason="${3:-}"
-  local skip_var
-  skip_var="$(gc_budget_stage_skip_var "$stage")"
-  printf -v "$skip_var" '%s' "$flag"
-  local reason_var
-  reason_var="$(gc_budget_stage_reason_var "$stage")"
-  printf -v "$reason_var" '%s' "$reason"
-}
-
-gc_budget_stage_skip_reason() {
-  local var
-  var="$(gc_budget_stage_reason_var "$1")"
-  printf '%s' "${!var:-}"
-}
-
-gc_budget_reset_stage_tracking() {
-  local stages=("retrieve" "plan" "patch")
-  local stage
-  for stage in "${stages[@]}"; do
-    local total_var
-    total_var="$(gc_budget_stage_total_var "$stage")"
-    printf -v "$total_var" '%s' "0"
-    local trip_var
-    trip_var="$(gc_budget_stage_tripped_var "$stage")"
-    printf -v "$trip_var" '%s' "0"
-    local skip_var
-    skip_var="$(gc_budget_stage_skip_var "$stage")"
-    printf -v "$skip_var" '%s' "0"
-    local reason_var
-    reason_var="$(gc_budget_stage_reason_var "$stage")"
-    printf -v "$reason_var" '%s' ""
-  done
-}
-
 gc_budget_collect_tool_actions_json() {
   local helper_path
   helper_path="$(gc_clone_python_tool "gc_budget_collect_tool_actions_json.py" "${PROJECT_ROOT:-$PWD}")" || return 1
@@ -271,6 +164,46 @@ fi
 if [[ -f "${CLI_ROOT}/scripts/render_task_footer.sh" ]]; then
   # shellcheck disable=SC1090
   . "${CLI_ROOT}/scripts/render_task_footer.sh"
+fi
+if [[ -f "${CLI_ROOT}/scripts/lib/fs.sh" ]]; then
+  # shellcheck source=scripts/lib/fs.sh
+  . "${CLI_ROOT}/scripts/lib/fs.sh"
+fi
+if [[ -f "${CLI_ROOT}/scripts/lib/budget.sh" ]]; then
+  # shellcheck source=scripts/lib/budget.sh
+  . "${CLI_ROOT}/scripts/lib/budget.sh"
+fi
+if [[ -f "${CLI_ROOT}/scripts/lib/util.sh" ]]; then
+  # shellcheck source=scripts/lib/util.sh
+  . "${CLI_ROOT}/scripts/lib/util.sh"
+fi
+if [[ -f "${CLI_ROOT}/scripts/lib/env.sh" ]]; then
+  # shellcheck source=scripts/lib/env.sh
+  . "${CLI_ROOT}/scripts/lib/env.sh"
+fi
+if [[ -f "${CLI_ROOT}/scripts/lib/docs.sh" ]]; then
+  # shellcheck source=scripts/lib/docs.sh
+  . "${CLI_ROOT}/scripts/lib/docs.sh"
+fi
+if [[ -f "${CLI_ROOT}/scripts/lib/render.sh" ]]; then
+  # shellcheck source=scripts/lib/render.sh
+  . "${CLI_ROOT}/scripts/lib/render.sh"
+fi
+if [[ -f "${CLI_ROOT}/scripts/lib/binder.sh" ]]; then
+  # shellcheck source=scripts/lib/binder.sh
+  . "${CLI_ROOT}/scripts/lib/binder.sh"
+fi
+if [[ -f "${CLI_ROOT}/scripts/lib/finalize.sh" ]]; then
+  # shellcheck source=scripts/lib/finalize.sh
+  . "${CLI_ROOT}/scripts/lib/finalize.sh"
+fi
+if [[ -f "${CLI_ROOT}/scripts/lib/docdex.sh" ]]; then
+  # shellcheck source=scripts/lib/docdex.sh
+  . "${CLI_ROOT}/scripts/lib/docdex.sh"
+fi
+if [[ -f "${CLI_ROOT}/scripts/lib/progress.sh" ]]; then
+  # shellcheck source=scripts/lib/progress.sh
+  . "${CLI_ROOT}/scripts/lib/progress.sh"
 fi
 
 GC_TEMPLATE_DIR="${CLI_ROOT}/assets/templates"
@@ -352,16 +285,6 @@ tmpl = Template(data)
 sys.stdout.write(tmpl.safe_substitute(os.environ))' "$template_path"
 }
 
-gc_json_escape() {
-  local value="${1:-}"
-  local python_bin="${PYTHON_BIN:-python3}"
-  if ! command -v "$python_bin" >/dev/null 2>&1; then
-    die "Python runtime '$python_bin' not available for JSON encoding"
-  fi
-  "$python_bin" -c 'import json, sys
-print(json.dumps(sys.argv[1]))' "$value"
-}
-
 gc_configure_tmpdir() {
   local base="${1:-${PROJECT_ROOT:-$PWD}}"
   local dir="${base}/.gpt-creator/tmp"
@@ -439,8 +362,6 @@ gc_note_mutation() {
   export GC_SCAN_DEDUP_EPOCH
 }
 
-gc_env_file() { echo "${PROJECT_ROOT:-$PWD}/.env"; }
-
 gc_assert() {
   local kind="${1:-}"
   local name="${2:-}"
@@ -476,344 +397,6 @@ gc_usage_limit_is_provider_signal() {
     return 0
   fi
   return 1
-}
-
-gc_bootstrap_docs_registry() {
-  local db_path="${GC_DOCUMENTATION_DB_PATH:-}"
-  [[ -n "$db_path" ]] || return 0
-
-  local repo_root="${PROJECT_ROOT:-$PWD}"
-  local candidate_config="${repo_root}/config/bootstrap_docs_catalog.sql"
-  local candidate_legacy="${repo_root}/.gpt-creator/staging/plan/tasks/bootstrap_docs_catalog.sql"
-  local sql_file_default=""
-  if [[ -f "$candidate_config" ]]; then
-    sql_file_default="$candidate_config"
-  elif [[ -f "$candidate_legacy" ]]; then
-    sql_file_default="$candidate_legacy"
-  else
-    sql_file_default="$candidate_config"
-  fi
-  local sql_file="${GC_DOCUMENTATION_BOOTSTRAP_SQL:-$sql_file_default}"
-  [[ -f "$sql_file" ]] || return 0
-
-  local sqlite_bin="${SQLITE_BIN:-sqlite3}"
-  if ! command -v "$sqlite_bin" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  local db_dir
-  db_dir="$(dirname "$db_path")"
-  mkdir -p "$db_dir"
-
-  "$sqlite_bin" "$db_path" ".read $sql_file" >/dev/null 2>&1 || true
-}
-
-gc_doc_indexer_available() {
-  local python_bin="${PYTHON_BIN:-python3}"
-  local pkg_root="${CLI_ROOT}/src"
-  if ! command -v "$python_bin" >/dev/null 2>&1; then
-    return 1
-  fi
-  if [[ ! -d "$pkg_root" ]]; then
-    return 1
-  fi
-  local helper_path
-  helper_path="$(gc_clone_python_tool "doc_indexer_available.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  if PYTHONPATH="${pkg_root}${PYTHONPATH:+:$PYTHONPATH}" \
-    "$python_bin" "$helper_path" "$pkg_root"; then
-    return 0
-  fi
-  return 1
-}
-
-gc_doc_catalog_ready() {
-  local root="${1:-${PROJECT_ROOT:-$PWD}}"
-  local runtime_dir="${root}/.gpt-creator"
-  local staging_dir="${runtime_dir}/staging"
-  local doc_library="${staging_dir}/doc-library.md"
-  local doc_index="${staging_dir}/doc-index.md"
-  local doc_catalog="${staging_dir}/doc-catalog.json"
-  local tasks_db="${staging_dir}/plan/tasks/tasks.db"
-  local vector_index="${staging_dir}/plan/tasks/documentation-vector-index.sqlite"
-
-  if [[ ! -s "$doc_library" || ! -s "$doc_index" || ! -s "$doc_catalog" ]]; then
-    return 1
-  fi
-  if [[ ! -f "$tasks_db" ]]; then
-    return 1
-  fi
-  local vector_required=0
-  if [[ "${GC_REQUIRE_VECTOR_INDEX:-0}" == "1" ]]; then
-    vector_required=1
-  elif gc_doc_indexer_available; then
-    vector_required=1
-  fi
-  if (( vector_required )) && [[ ! -s "$vector_index" ]]; then
-    return 1
-  fi
-
-  if command -v python3 >/dev/null 2>&1; then
-    local helper_path
-    helper_path="$(gc_clone_python_tool "doc_catalog_ready.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-    if ! python3 "$helper_path" "$tasks_db"; then
-      return 1
-    fi
-  else
-    return 1
-  fi
-
-  return 0
-}
-
-gc_setup_doc_catalog_helpers() {
-  local root="${PROJECT_ROOT:-$PWD}"
-  local compat_base="${root}/.gpt-creator/src/lib"
-  ensure_helper_compat() {
-    local helper_path="${1:?helper path required}"
-    local helper_name="${2:?helper name required}"
-    if [[ -z "$helper_path" || -z "$helper_name" ]]; then
-      return 0
-    fi
-    mkdir -p "$compat_base"
-    local compat_target="${compat_base}/${helper_name}"
-    if [[ ! -f "$compat_target" || "$helper_path" -nt "$compat_target" ]]; then
-      cp "$helper_path" "$compat_target" 2>/dev/null || true
-    fi
-  }
-
-  local helper_path=""
-  helper_path="$(gc_clone_python_tool "doc_catalog.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  export GC_DOC_CATALOG_PY="$helper_path"
-  ensure_helper_compat "$helper_path" "doc_catalog.py"
-
-  helper_path="$(gc_clone_python_tool "doc_registry.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  export GC_DOC_REGISTRY_PY="$helper_path"
-  ensure_helper_compat "$helper_path" "doc_registry.py"
-
-  helper_path="$(gc_clone_python_tool "doc_indexer.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  export GC_DOC_INDEXER_PY="$helper_path"
-  ensure_helper_compat "$helper_path" "doc_indexer.py"
-
-  helper_path="$(gc_clone_python_tool "docdex_client.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  ensure_helper_compat "$helper_path" "docdex_client.py"
-
-  helper_path="$(gc_clone_python_tool "repo_outline.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  export GC_REPO_OUTLINE_PY="$helper_path"
-  ensure_helper_compat "$helper_path" "repo_outline.py"
-
-  helper_path="$(gc_clone_python_tool "targeted_search.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  export GC_TARGETED_SEARCH_PY="$helper_path"
-  ensure_helper_compat "$helper_path" "targeted_search.py"
-
-  helper_path="$(gc_clone_python_tool "rest_check_runner.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  export GC_REST_CHECK_RUNNER_PY="$helper_path"
-  ensure_helper_compat "$helper_path" "rest_check_runner.py"
-
-  helper_path="$(gc_clone_python_tool "safe_show_file.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  export GC_SAFE_SHOW_FILE_PY="$helper_path"
-  ensure_helper_compat "$helper_path" "safe_show_file.py"
-
-  helper_path="$(gc_clone_python_tool "run_snippet.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  export GC_RUN_SNIPPET_PY="$helper_path"
-  ensure_helper_compat "$helper_path" "run_snippet.py"
-}
-
-gc_populate_doc_catalog_shims() {
-  local root="${1:-${PROJECT_ROOT:-$PWD}}"
-  local runtime_dir="${root}/.gpt-creator"
-  local staging_dir="${runtime_dir}/staging"
-  local doc_library="${staging_dir}/doc-library.md"
-  local doc_index="${staging_dir}/doc-index.md"
-  local doc_catalog="${staging_dir}/doc-catalog.json"
-  local plan_docs_dir="${staging_dir}/plan/docs"
-  local plan_work_dir="${staging_dir}/plan/work"
-  local plan_doc_library="${plan_docs_dir}/doc-library.md"
-  local plan_doc_index="${plan_docs_dir}/doc-index.md"
-  local plan_doc_catalog="${plan_work_dir}/doc-catalog.json"
-  local fallback_library="${root}/docs/doc-library.md"
-  local fallback_index="${root}/docs/doc-index.md"
-
-  if [[ -z "$root" ]]; then
-    return 0
-  fi
-
-  mkdir -p "$(dirname "$doc_library")" "$(dirname "$doc_index")" "$plan_docs_dir" "$plan_work_dir"
-
-  if [[ ! -s "$doc_library" && -s "$fallback_library" ]]; then
-    cp -f "$fallback_library" "$doc_library" 2>/dev/null || true
-    info "Seeded doc-library.md from docs directory."
-  fi
-  if [[ ! -s "$doc_index" && -s "$fallback_index" ]]; then
-    cp -f "$fallback_index" "$doc_index" 2>/dev/null || true
-    info "Seeded doc-index.md from docs directory."
-  fi
-
-  if [[ -s "$doc_library" ]]; then
-    if [[ ! -f "$plan_doc_library" || "$doc_library" -nt "$plan_doc_library" ]]; then
-      cp -f "$doc_library" "$plan_doc_library" 2>/dev/null || true
-    fi
-  fi
-
-  if [[ -s "$doc_index" ]]; then
-    if [[ ! -f "$plan_doc_index" || "$doc_index" -nt "$plan_doc_index" ]]; then
-      cp -f "$doc_index" "$plan_doc_index" 2>/dev/null || true
-    fi
-  fi
-
-  if [[ -s "$doc_catalog" ]]; then
-    if [[ ! -f "$plan_doc_catalog" || "$doc_catalog" -nt "$plan_doc_catalog" ]]; then
-      cp -f "$doc_catalog" "$plan_doc_catalog" 2>/dev/null || true
-    fi
-  fi
-}
-
-gc_clone_python_tool() {
-  local script_name="${1:?python script name required}"
-  local root_param="${2:-}"
-  local root="${root_param:-${PROJECT_ROOT:-$PWD}}"
-  if [[ -z "$root" ]]; then
-    die "Unable to determine project root while preparing ${script_name}"
-  fi
-  local source_path="${CLI_ROOT}/scripts/python/${script_name}"
-  if [[ ! -f "$source_path" ]]; then
-    die "Python helper missing at ${source_path}"
-  fi
-  local target_dir="${root}/.gpt-creator/shims/python"
-  local target_path="${target_dir}/${script_name}"
-  if [[ ! -d "$target_dir" ]]; then
-    mkdir -p "$target_dir" || die "Failed to create ${target_dir}"
-  fi
-  if [[ ! -f "$target_path" ]] || ! cmp -s "$source_path" "$target_path"; then
-    cp "$source_path" "$target_path" || die "Failed to copy ${script_name} helper"
-  fi
-  echo "$target_path"
-}
-
-gc_require_documentation_catalog() {
-  local root="${1:-${PROJECT_ROOT:-$PWD}}"
-  ensure_ctx "$root"
-
-  if gc_doc_catalog_ready "$root"; then
-    gc_populate_doc_catalog_shims "$root"
-    return 0
-  fi
-
-  info "Documentation catalog missing or stale; running 'gpt-creator scan'."
-  if ! cmd_scan --project "$root"; then
-    warn "Documentation scan failed."
-    return 1
-  fi
-
-  gc_populate_doc_catalog_shims "$root"
-
-  if ! gc_doc_catalog_ready "$root"; then
-    warn "Documentation catalog still incomplete after scan; inspect ${root}/.gpt-creator/staging."
-    return 1
-  fi
-
-  if ! cmd_sweep_artifacts --project "$root"; then
-    warn "Artifact sweep encountered issues; run 'gpt-creator sweep-artifacts --project \"$root\"' manually."
-  fi
-
-  return 0
-}
-
-gc_refresh_documentation_if_needed() {
-  local root="${1:-${PROJECT_ROOT:-$PWD}}"
-  if [[ "${GC_SKIP_AUTO_DOC_REFRESH:-0}" == "1" ]]; then
-    info "Skipping automatic documentation refresh (GC_SKIP_AUTO_DOC_REFRESH=1)."
-    return 0
-  fi
-
-  if gc_require_documentation_catalog "$root"; then
-    ok "Documentation catalog refreshed."
-    return 0
-  fi
-
-  warn "Automatic scan failed; rerun 'gpt-creator scan' manually."
-  return 1
-}
-
-gc_parse_int() {
-  local value="$1"
-  local fallback="$2"
-  if [[ "$value" =~ ^[0-9]+$ ]]; then
-    printf '%s\n' "$value"
-  else
-    printf '%s\n' "$fallback"
-  fi
-}
-
-gc_estimate_tokens_from_bytes() {
-  local prompt_file="${1:?prompt path required}"
-  if [[ ! -f "$prompt_file" ]]; then
-    printf '0\n'
-    return 0
-  fi
-  local bytes
-  if ! bytes="$(wc -c <"$prompt_file" 2>/dev/null)"; then
-    printf '0\n'
-    return 0
-  fi
-  if ! [[ "$bytes" =~ ^[0-9]+$ ]]; then
-    printf '0\n'
-    return 0
-  fi
-  local approx=$(( (bytes + 3) / 4 ))
-  printf '%s\n' "$approx"
-}
-
-gc_trim_prompt_file() {
-  local prompt_file="$1"
-  local max_tokens_raw="${GC_MAX_PROMPT_TOKENS:-8000}"
-  [[ -f "$prompt_file" ]] || return 0
-  if ! [[ "$max_tokens_raw" =~ ^[0-9]+$ ]]; then
-    return 0
-  fi
-  local max_tokens=$((max_tokens_raw))
-  if (( max_tokens <= 0 )); then
-    return 0
-  fi
-  local helper_path
-  helper_path="$(gc_clone_python_tool "trim_prompt_file.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path" "$prompt_file" "$max_tokens"
-}
-
-gc_trim_prompt_file_lean() {
-  local prompt_file="$1"
-  [[ -f "$prompt_file" ]] || return 0
-  local helper_path
-  helper_path="$(gc_clone_python_tool "trim_prompt_file_lean.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path" "$prompt_file"
-}
-
-gc_write_env_var() {
-  local target="$1" key="$2" value="$3"
-  local helper_path
-  helper_path="$(gc_clone_python_tool "write_env_var.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path" "$target" "$key" "$value"
-}
-
-gc_set_env_var() {
-  local key="$1" value="$2"
-  local env_file
-  env_file="$(gc_env_file)"
-  gc_write_env_var "$env_file" "$key" "$value"
-}
-
-gc_remove_env_var() {
-  local target="$1" key="$2"
-  [[ -f "$target" ]] || return 0
-  local helper_path
-  helper_path="$(gc_clone_python_tool "remove_env_var.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path" "$target" "$key"
-}
-
-gc_decode_base64() {
-  local value="${1:-}"
-  local helper_path
-  helper_path="$(gc_clone_python_tool "decode_base64.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path" "$value"
 }
 
 cmd_show_file() {
@@ -947,269 +530,6 @@ cmd_show_file() {
   GC_SHOW_FILE_DIFF="$diff_mode" \
   GC_SHOW_FILE_CACHE_DIR="$cache_dir" \
   python3 "$helper_path"
-}
-
-gc_env_sync_ports() {
-  GC_PORT_RESERVATIONS=""
-  GC_DB_HOST_PORT="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-${DB_PORT:-3306}}}"
-  DB_NAME="${DB_NAME:-$GC_DB_NAME}"
-  DB_USER="${DB_USER:-$GC_DB_USER}"
-  DB_PASSWORD="${DB_PASSWORD:-$GC_DB_PASSWORD}"
-  DB_ROOT_PASSWORD="${DB_ROOT_PASSWORD:-$GC_DB_ROOT_PASSWORD}"
-  DB_HOST_PORT="${DB_HOST_PORT:-$GC_DB_HOST_PORT}"
-  GC_API_HOST_PORT="${GC_API_HOST_PORT:-${API_HOST_PORT:-3000}}"
-  GC_WEB_HOST_PORT="${GC_WEB_HOST_PORT:-${WEB_HOST_PORT:-5173}}"
-  GC_ADMIN_HOST_PORT="${GC_ADMIN_HOST_PORT:-${ADMIN_HOST_PORT:-5174}}"
-  GC_PROXY_HOST_PORT="${GC_PROXY_HOST_PORT:-${PROXY_HOST_PORT:-8080}}"
-  API_HOST_PORT="${API_HOST_PORT:-$GC_API_HOST_PORT}"
-  WEB_HOST_PORT="${WEB_HOST_PORT:-$GC_WEB_HOST_PORT}"
-  ADMIN_HOST_PORT="${ADMIN_HOST_PORT:-$GC_ADMIN_HOST_PORT}"
-  PROXY_HOST_PORT="${PROXY_HOST_PORT:-$GC_PROXY_HOST_PORT}"
-  local api_base_default="http://localhost:${GC_API_HOST_PORT}/api/v1"
-  GC_API_BASE_URL="${GC_API_BASE_URL:-$api_base_default}"
-  VITE_API_BASE="${VITE_API_BASE:-$GC_API_BASE_URL}"
-  local expected_health="${GC_API_BASE_URL%/}/health"
-  if [[ -z "${GC_API_HEALTH_URL:-}" ]]; then
-    GC_API_HEALTH_URL="$expected_health"
-    gc_set_env_var GC_API_HEALTH_URL "$GC_API_HEALTH_URL"
-  elif [[ "$GC_API_HEALTH_URL" == "http://localhost:${GC_API_HOST_PORT}/health" && "$expected_health" != "$GC_API_HEALTH_URL" ]]; then
-    GC_API_HEALTH_URL="$expected_health"
-    gc_set_env_var GC_API_HEALTH_URL "$GC_API_HEALTH_URL"
-  fi
-  local proxy_origin="http://localhost:${GC_PROXY_HOST_PORT}"
-  GC_WEB_URL="${GC_WEB_URL:-${proxy_origin}/}"
-  GC_ADMIN_URL="${GC_ADMIN_URL:-${proxy_origin}/admin/}"
-  gc_reserve_port db "$GC_DB_HOST_PORT"
-  gc_reserve_port api "$GC_API_HOST_PORT"
-  gc_reserve_port web "$GC_WEB_HOST_PORT"
-  gc_reserve_port admin "$GC_ADMIN_HOST_PORT"
-  gc_reserve_port proxy "$GC_PROXY_HOST_PORT"
-
-  if gc_reports_enabled; then
-    gc_reports_initialize
-    gc_reports_touch_activity "$(date +%s)"
-  fi
-}
-
-gc_sanitize_env_file() {
-  local env_file="$1"
-  local helper_path
-  helper_path="$(gc_clone_python_tool "sanitize_env_file.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path" "$env_file"
-}
-
-gc_load_env() {
-  local env_file
-  env_file="$(gc_env_file)"
-  if [[ -f "$env_file" ]]; then
-    gc_sanitize_env_file "$env_file"
-    set -a
-    # shellcheck disable=SC1090
-    source "$env_file"
-    set +a
-  fi
-  GC_DB_NAME="${GC_DB_NAME:-${DB_NAME:-app}}"
-  GC_DB_USER="${GC_DB_USER:-${DB_USER:-app}}"
-  GC_DB_PASSWORD="${GC_DB_PASSWORD:-${DB_PASSWORD:-app_pass}}"
-  GC_DB_ROOT_PASSWORD="${GC_DB_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-root}}"
-  gc_env_sync_ports
-}
-
-GC_API_KEYS_METADATA=(
-  "openai|OpenAI Codex|OPENAI_API_KEY|AI automation commands (plan, generate, work-on-tasks)|GC_OPENAI_API_KEY,GC_OPENAI_KEY"
-  "anthropic|Anthropic Claude|ANTHROPIC_API_KEY|Claude HTTP adapter (--client anthropic)|"
-  "grok|xAI Grok|GROK_API_KEY|Grok HTTP adapter (--client xai)|GROK_KEY"
-  "gemini|Google Gemini CLI|GEMINI_API_KEY|Gemini CLI adapter (--client gemini)|"
-  "jira|Jira Automation|JIRA_API_TOKEN|Backlog integrations that sync with Jira (create-jira-tasks)|GC_JIRA_API_TOKEN"
-  "github|GitHub Auto Reports|GC_GITHUB_TOKEN|Crash/stall reports published as GitHub issues|"
-)
-
-gc_find_api_key_entry() {
-  local query input lower entry key_id label primary desc alias_csv
-  query="${1:-}"
-  [[ -n "$query" ]] || return 1
-  lower="$(to_lower "$query")"
-  for entry in "${GC_API_KEYS_METADATA[@]}"; do
-    IFS='|' read -r key_id label primary desc alias_csv <<<"$entry"
-    if [[ "$lower" == "$(to_lower "$key_id")" || "$lower" == "$(to_lower "$primary")" ]]; then
-      printf '%s\n' "$entry"
-      return 0
-    fi
-    if [[ -n "$alias_csv" ]]; then
-      IFS=',' read -ra input <<<"$alias_csv"
-      for alias in "${input[@]}"; do
-        alias="${alias//[[:space:]]/}"
-        [[ -n "$alias" ]] || continue
-        if [[ "$lower" == "$(to_lower "$alias")" ]]; then
-          printf '%s\n' "$entry"
-          return 0
-        fi
-      done
-    fi
-  done
-  return 1
-}
-
-gc_apply_api_key_aliases() {
-  local entry key_id label primary desc alias_csv value alias
-  local alias_arr
-  for entry in "${GC_API_KEYS_METADATA[@]}"; do
-    IFS='|' read -r key_id label primary desc alias_csv <<<"$entry"
-    value="${!primary:-}"
-    if [[ -z "$value" && -n "$alias_csv" ]]; then
-      IFS=',' read -ra alias_arr <<<"$alias_csv"
-      for alias in "${alias_arr[@]}"; do
-        alias="${alias//[[:space:]]/}"
-        [[ -n "$alias" ]] || continue
-        if [[ -n "${!alias:-}" ]]; then
-          value="${!alias}"
-          break
-        fi
-      done
-    fi
-    [[ -n "$value" ]] || continue
-    export "$primary"="$value"
-    if [[ -n "$alias_csv" ]]; then
-      IFS=',' read -ra alias_arr <<<"$alias_csv"
-      for alias in "${alias_arr[@]}"; do
-        alias="${alias//[[:space:]]/}"
-        [[ -n "$alias" && "$alias" != "$primary" ]] || continue
-        if [[ -z "${!alias:-}" ]]; then
-          export "$alias"="$value"
-        fi
-      done
-    fi
-  done
-}
-
-gc_api_keys_loaded=0
-
-gc_load_api_keys() {
-  if (( gc_api_keys_loaded )); then
-    gc_apply_api_key_aliases
-    return
-  fi
-  gc_ensure_config_dir
-  local keys_file
-  keys_file="$(gc_keys_file)"
-  if [[ -f "$keys_file" ]]; then
-    gc_sanitize_env_file "$keys_file"
-    set -a
-    # shellcheck disable=SC1090
-    source "$keys_file"
-    set +a
-  fi
-  gc_apply_api_key_aliases
-  gc_api_keys_loaded=1
-}
-
-gc_read_env_file_var() {
-  local file="$1" key="$2"
-  [[ -f "$file" ]] || return 0
-  local helper_path
-  helper_path="$(gc_clone_python_tool "read_env_file_var.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path" "$file" "$key"
-}
-
-gc_api_keys_list() {
-  gc_load_api_keys
-  gc_ensure_config_dir
-  local keys_file status_header="Status"
-  keys_file="$(gc_keys_file)"
-  printf "API keys status (storage file: %s)\n\n" "$keys_file"
-  printf "%-22s %-20s %-24s %s\n" "Service" "Environment" "$status_header" "Used for"
-  printf "%-22s %-20s %-24s %s\n" "-------" "-----------" "------" "-------"
-  local entry key_id label primary desc alias_csv value stored_value status alias
-  local alias_arr
-  for entry in "${GC_API_KEYS_METADATA[@]}"; do
-    IFS='|' read -r key_id label primary desc alias_csv <<<"$entry"
-    value="${!primary:-}"
-    if [[ -z "$value" && -n "$alias_csv" ]]; then
-      IFS=',' read -ra alias_arr <<<"$alias_csv"
-      for alias in "${alias_arr[@]}"; do
-        alias="${alias//[[:space:]]/}"
-        [[ -n "$alias" ]] || continue
-        if [[ -n "${!alias:-}" ]]; then
-          value="${!alias}"
-          break
-        fi
-      done
-    fi
-    stored_value="$(gc_read_env_file_var "$keys_file" "$primary")"
-    if [[ -n "$value" ]]; then
-      if [[ -n "$stored_value" ]]; then
-        status="configured (stored)"
-      else
-        status="configured (env)"
-      fi
-    else
-      status="missing"
-    fi
-    printf "%-22s %-20s %-24s %s\n" "$label" "$primary" "$status" "$desc"
-  done
-  if [[ -n "${GC_GITHUB_TOKEN:-}" && -z "${GC_GITHUB_REPO:-}" ]]; then
-    printf "\nHint: set GC_GITHUB_REPO (owner/name) so GitHub Auto Reports knows where to file issues.\n"
-  fi
-  printf "\nSet a value with: gpt-creator keys set <service>\n"
-}
-
-gc_api_keys_set() {
-  local query="${1:-}"
-  [[ -n "$query" ]] || die "keys set requires a service name or environment variable"
-  local entry
-  if ! entry="$(gc_find_api_key_entry "$query")"; then
-    die "Unknown API key: ${query}"
-  fi
-  IFS='|' read -r key_id label primary desc alias_csv <<<"$entry"
-  gc_load_api_keys
-  gc_ensure_config_dir
-  local keys_file value alias
-  local alias_arr
-  keys_file="$(gc_keys_file)"
-  printf "Updating %s (%s)\n" "$label" "$primary"
-  printf "Press ENTER without a value to remove the stored credential.\n"
-  if [[ -n "$alias_csv" ]]; then
-    printf "Aliases: %s\n" "${alias_csv//,/ }"
-  fi
-  if [[ -t 0 ]]; then
-    read -rsp "Enter value: " value
-    printf '\n'
-  else
-    info "Reading ${primary} from stdin (input will be visible)."
-    if ! read -r value; then
-      die "Failed to read value from stdin"
-    fi
-  fi
-  value="${value//$'\r'/}"
-  value="$(printf '%s' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-  if [[ -z "$value" ]]; then
-    gc_remove_env_var "$keys_file" "$primary"
-    unset "$primary"
-    if [[ -n "$alias_csv" ]]; then
-      IFS=',' read -ra alias_arr <<<"$alias_csv"
-      for alias in "${alias_arr[@]}"; do
-        alias="${alias//[[:space:]]/}"
-        [[ -n "$alias" ]] || continue
-        unset "$alias"
-      done
-    fi
-    ok "Removed stored value for ${label}"
-    return 0
-  fi
-  gc_write_env_var "$keys_file" "$primary" "$value"
-  chmod 600 "$keys_file" 2>/dev/null || true
-  export "$primary"="$value"
-  if [[ -n "$alias_csv" ]]; then
-    IFS=',' read -ra alias_arr <<<"$alias_csv"
-    for alias in "${alias_arr[@]}"; do
-      alias="${alias//[[:space:]]/}"
-      [[ -n "$alias" && "$alias" != "$primary" ]] || continue
-      export "$alias"="$value"
-    done
-  fi
-  gc_apply_api_key_aliases
-  ok "Stored credentials for ${label}"
-  printf "Saved to %s\n" "$keys_file"
 }
 
 gc_create_env_if_missing() {
@@ -1857,41 +1177,6 @@ gc_render_task_end_panel() {
   fi
 }
 
-gc_user_config_root() {
-  local helper_path
-  helper_path="$(gc_clone_python_tool "user_config_root.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path"
-}
-
-gc_config_dir() {
-  local root
-  root="$(gc_user_config_root)"
-  [[ -n "$root" ]] || root="."
-  printf '%s\n' "${root%/}/gpt-creator"
-}
-
-gc_keys_file() {
-  printf '%s/api-keys.env\n' "$(gc_config_dir)"
-}
-
-gc_ensure_config_dir() {
-  local dir
-  dir="$(gc_config_dir)"
-  mkdir -p "$dir"
-}
-
-abs_path() {
-  local target="${1:-}"
-  local helper_path
-  helper_path="$(gc_clone_python_tool "abs_path.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  local resolved=""
-  if resolved="$(python3 "$helper_path" "$target" 2>/dev/null)"; then
-    printf '%s\n' "${resolved:-$target}"
-    return 0
-  fi
-  perl -MCwd=abs_path -e 'print abs_path(shift)."\n"' "$target" || echo "$target"
-}
-
 to_lower() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
@@ -1902,395 +1187,6 @@ slugify_name() {
   s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
   s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
   printf '%s\n' "${s:-gptcreator}"
-}
-
-GC_PORT_RESERVATIONS=""
-
-gc_port_for_service() {
-  local service="$1"
-  local entry
-  for entry in $GC_PORT_RESERVATIONS; do
-    local svc="${entry%%:*}"
-    if [[ "$svc" == "$service" ]]; then
-      printf '%s\n' "${entry#*:}"
-      return 0
-    fi
-  done
-  return 1
-}
-
-gc_unreserve_port() {
-  local service="$1"
-  [[ -n "$service" ]] || return 0
-  local entry new_list=""
-  for entry in $GC_PORT_RESERVATIONS; do
-    local svc="${entry%%:*}"
-    if [[ "$svc" == "$service" ]]; then
-      continue
-    fi
-    if [[ -z "$new_list" ]]; then
-      new_list="$entry"
-    else
-      new_list+=" $entry"
-    fi
-  done
-  GC_PORT_RESERVATIONS="$new_list"
-}
-
-gc_reserve_port() {
-  local service="$1" port="$2"
-  [[ -n "$service" && -n "$port" ]] || return 0
-  gc_unreserve_port "$service"
-  if [[ -z "${GC_PORT_RESERVATIONS:-}" ]]; then
-    GC_PORT_RESERVATIONS="${service}:${port}"
-  else
-    GC_PORT_RESERVATIONS+=" ${service}:${port}"
-  fi
-}
-
-gc_port_is_reserved() {
-  local port="$1"
-  local entry
-  for entry in $GC_PORT_RESERVATIONS; do
-    if [[ "${entry#*:}" == "$port" ]]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-gc_port_reserved_by_other() {
-  local port="$1" service="$2"
-  local entry
-  for entry in $GC_PORT_RESERVATIONS; do
-    local svc="${entry%%:*}"
-    local val="${entry#*:}"
-    if [[ "$val" == "$port" && "$svc" != "$service" ]]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-gc_parse_duration_seconds() {
-  local value="${1:-}"
-  local default="${2:-0}"
-  if [[ -z "$value" ]]; then
-    echo "$default"
-    return
-  fi
-  if [[ "$value" =~ ^[0-9]+$ ]]; then
-    echo "$value"
-    return
-  fi
-  if [[ "$value" =~ ^([0-9]+)([smhd])$ ]]; then
-    local number="${BASH_REMATCH[1]}"
-    local unit="${BASH_REMATCH[2]}"
-    case "$unit" in
-      s) echo "$number" ;;
-      m) echo $((number * 60)) ;;
-      h) echo $((number * 3600)) ;;
-      d) echo $((number * 86400)) ;;
-      *) echo "$default" ;;
-    esac
-    return
-  fi
-  echo "$default"
-}
-
-gc_parse_size_bytes() {
-  local value="${1:-}"
-  local default="${2:-0}"
-  if [[ -z "$value" ]]; then
-    echo "$default"
-    return
-  fi
-  if [[ "$value" =~ ^[0-9]+$ ]]; then
-    echo "$value"
-    return
-  fi
-  if [[ "$value" =~ ^([0-9]+)([KMG]B?|[kmg]b?)$ ]]; then
-    local number="${BASH_REMATCH[1]}"
-    local unit="${BASH_REMATCH[2],,}"
-    case "$unit" in
-      kb|k) echo $((number * 1024)) ;;
-      mb|m) echo $((number * 1024 * 1024)) ;;
-      gb|g) echo $((number * 1024 * 1024 * 1024)) ;;
-      *) echo "$default" ;;
-    esac
-    return
-  fi
-  echo "$default"
-}
-
-GC_PROGRESS_DIR_MIGRATIONS=(
-  "Design::staging/docs"
-  "legal_editor_tmp::artifacts"
-)
-
-GC_PROGRESS_FILE_MIGRATIONS=(
-  "tmp_*::artifacts/tmp"
-  "final_*::artifacts/final"
-  "dump_*::artifacts/dump"
-  "diff*::artifacts/diff"
-  "change_*::artifacts/change"
-  "changes_*::artifacts/change"
-  "codex_*::artifacts/codex"
-  "backlog.md::artifacts/planning"
-  "plan.md::artifacts/planning"
-  "tasks.json::staging/plan/legacy"
-  "encoded*::artifacts/encoded"
-  "breadcrumbs*.json::artifacts/ui"
-  "cli_content.json::artifacts/context"
-  "focusTrap.json::artifacts/ui"
-  "navStore.json::artifacts/ui"
-  "service_content.json::artifacts/context"
-  "login_diff.txt::artifacts/diff"
-  "login_json.txt::artifacts/context"
-  "output_payload.json::artifacts/output"
-  "changes_output.json::artifacts/change"
-  "changes_strings.txt::artifacts/change"
-  "*.patch::artifacts/patches"
-  "*_patch.jsonstr::artifacts/patches"
-  "*.rej::artifacts/patches"
-  "*.rej.orig::artifacts/patches"
-  "*.orig::artifacts/patches"
-)
-
-GC_PROGRESS_MIGRATION_LAST_COUNT=0
-
-gc_move_progress_artifact() {
-  local source_path="$1"
-  local dest_dir="$2"
-  [[ -e "$source_path" ]] || return 1
-  mkdir -p "$dest_dir"
-  local base name ext target candidate idx
-  base="$(basename "$source_path")"
-  name="$base"
-  ext=""
-  if [[ -f "$source_path" ]]; then
-    if [[ "$base" == .* ]]; then
-      if [[ "$base" == *.* ]]; then
-        ext=".${base##*.}"
-        name="${base%$ext}"
-        [[ -z "$name" ]] && name="$base"
-      fi
-    else
-      if [[ "$base" == *.* ]]; then
-        ext=".${base##*.}"
-        name="${base%$ext}"
-      fi
-    fi
-  fi
-  target="${dest_dir}/${base}"
-  if [[ -e "$target" ]]; then
-    idx=2
-    while :; do
-      if [[ -n "$ext" && "$name" != "$base" ]]; then
-        candidate="${dest_dir}/${name}-${idx}${ext}"
-      else
-        candidate="${dest_dir}/${base}-${idx}"
-      fi
-      if [[ ! -e "$candidate" ]]; then
-        target="$candidate"
-        break
-      fi
-      idx=$((idx + 1))
-    done
-  fi
-  if mv -- "$source_path" "$target"; then
-    printf '%s\t%s\n' "$source_path" "$target"
-    return 0
-  fi
-  return 1
-}
-
-gc_migrate_progress_artifacts() {
-  local project_root="$1"
-  local work_dir_name="${GC_WORK_DIR_NAME:-.gpt-creator}"
-  local gc_root="${project_root}/${work_dir_name}"
-  local skip="${GC_SKIP_PROGRESS_MIGRATION:-0}"
-  [[ -d "$project_root" ]] || return 0
-  [[ "$skip" == "1" ]] && return 0
-  if [[ -n "${GC_ROOT:-}" && "$project_root" == "$GC_ROOT" ]]; then
-    return 0
-  fi
-  GC_PROGRESS_MIGRATION_LAST_COUNT=0
-  local python_bin="${PYTHON_BIN:-python3}"
-  local -a moved=()
-  local entry src_rel dest_rel src_path dest_dir record
-
-  for entry in "${GC_PROGRESS_DIR_MIGRATIONS[@]}"; do
-    src_rel="${entry%%::*}"
-    dest_rel="${entry#*::}"
-    src_path="${project_root}/${src_rel}"
-    [[ -d "$src_path" ]] || continue
-    dest_dir="${gc_root}/${dest_rel}"
-    if record="$(gc_move_progress_artifact "$src_path" "$dest_dir")"; then
-      moved+=("$record")
-    fi
-  done
-
-  shopt -s nullglob dotglob
-  for entry in "${GC_PROGRESS_FILE_MIGRATIONS[@]}"; do
-    src_rel="${entry%%::*}"
-    dest_rel="${entry#*::}"
-    local path
-    for path in "$project_root"/$src_rel; do
-      [[ -e "$path" ]] || continue
-      [[ "$path" == "$gc_root"* ]] && continue
-      dest_dir="${gc_root}/${dest_rel}"
-      if record="$(gc_move_progress_artifact "$path" "$dest_dir")"; then
-        moved+=("$record")
-      fi
-    done
-  done
-  shopt -u nullglob dotglob
-
-  if ((${#moved[@]} > 0)); then
-    local log_dir="${gc_root}/logs"
-    mkdir -p "$log_dir"
-    local log_file="${log_dir}/progress-migration.log"
-    {
-      printf -- '--- %s ---\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-      local row src_abs dst_abs src_relpath dst_relpath
-      for row in "${moved[@]}"; do
-        src_abs="${row%%$'\t'*}"
-        dst_abs="${row#*$'\t'}"
-        src_relpath="${src_abs#$project_root/}"
-        dst_relpath="${dst_abs#$project_root/}"
-        printf -- '%s -> %s\n' "$src_relpath" "$dst_relpath"
-      done
-    } >>"$log_file"
-    info "Migrated ${#moved[@]} work artifacts into .gpt-creator (see ${log_file#$project_root/})."
-  fi
-  GC_PROGRESS_MIGRATION_LAST_COUNT=${#moved[@]}
-
-  local tasks_db="${gc_root}/staging/plan/tasks/tasks.db"
-  if [[ -f "$tasks_db" ]]; then
-    local plan_path="${gc_root}/logs/progress-migration.plan.json"
-    local map_path="${gc_root}/logs/progress-migration.map.ndjson"
-    local helper_path=""
-    gc_clone_python_tool "task_comments.py" "$project_root" >/dev/null 2>&1 || true
-    if ! helper_path="$(gc_clone_python_tool "progress_migration.py" "$project_root")"; then
-      warn "Unable to prepare progress migration helper; skipping task state reconciliation."
-      return 0
-    fi
-    if ! command -v "$python_bin" >/dev/null 2>&1; then
-      warn "Skipping task state reconciliation; ${python_bin} not available."
-      return 0
-    fi
-    local plan_output=""
-    if plan_output="$("$python_bin" "$helper_path" plan --db "$tasks_db" --output "$plan_path" 2>/dev/null)"; then
-      local plan_updates=""
-      local plan_stats_helper=""
-      if plan_stats_helper="$(gc_clone_python_tool "progress_migration_extract_plan_updates.py" "$project_root")"; then
-        plan_updates="$("$python_bin" "$plan_stats_helper" "$plan_output" 2>/dev/null)"
-      fi
-      if [[ -n "$plan_updates" && "$plan_updates" != "0" ]]; then
-        info "Planned task migration updates for ${plan_updates} item(s); applying carry-over."
-      fi
-      local apply_output=""
-      if apply_output="$("$python_bin" "$helper_path" apply --db "$tasks_db" --plan "$plan_path" --map-log "$map_path" 2>/dev/null)"; then
-        local apply_stats=""
-        local apply_stats_helper=""
-        if apply_stats_helper="$(gc_clone_python_tool "progress_migration_extract_apply_stats.py" "$project_root")"; then
-          apply_stats="$("$python_bin" "$apply_stats_helper" "$apply_output" 2>/dev/null)"
-        fi
-        if [[ -n "$apply_stats" ]]; then
-          IFS=$'\t' read -r updatedTotal preservedTotal lockedTotal reopenedTotal <<<"$apply_stats"
-          info "Carried forward migration state for ${updatedTotal:-0} task(s) (preserved=${preservedTotal:-0}, locked=${lockedTotal:-0}, reopened=${reopenedTotal:-0})."
-        fi
-      else
-        warn "Failed to apply task migration plan; inspect ${plan_path#$project_root/} for details."
-      fi
-    fi
-  fi
-}
-
-gc_binder_clear_story() {
-  local project_root="${1:?project root required}"
-  local epic_slug="${2:-}"
-  local story_slug="${3:-}"
-  local helper_path
-  helper_path="$(gc_clone_python_tool "task_binder.py" "$project_root")" || return 1
-  python3 "$helper_path" clear --project "$project_root" --epic "$epic_slug" --story "$story_slug"
-}
-
-# Manual command helper to sweep legacy artifacts
-cmd_sweep_artifacts() {
-  local -a projects=()
-  local arg project_path
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --project|-p)
-        [[ -n "${2:-}" ]] || die "--project requires a directory path"
-        project_path="$(abs_path "$2")"
-        projects+=("$project_path")
-        shift 2
-        ;;
-      -h|--help)
-        gc_render_template "help/sweep_artifacts_usage.txt"
-        return 0
-        ;;
-      --)
-        shift
-        while [[ $# -gt 0 ]]; do
-          projects+=("$(abs_path "$1")")
-          shift
-        done
-        ;;
-      -*)
-        die "Unknown flag for sweep-artifacts: $1"
-        ;;
-      *)
-        projects+=("$(abs_path "$1")")
-        shift
-        ;;
-    esac
-  done
-
-  if ((${#projects[@]} == 0)); then
-    projects+=("$(abs_path "${PROJECT_ROOT:-$PWD}")")
-  fi
-
-  local root count prev_skip_set prev_skip_val
-  for root in "${projects[@]}"; do
-    if [[ ! -d "$root" ]]; then
-      warn "Skipping missing directory: ${root}"
-      continue
-    fi
-    info "Tidying progress artifacts under ${root}"
-    prev_skip_set=0
-    prev_skip_val=""
-    if [[ ${GC_SKIP_PROGRESS_MIGRATION+x} ]]; then
-      prev_skip_set=1
-      prev_skip_val="$GC_SKIP_PROGRESS_MIGRATION"
-    else
-      prev_skip_set=0
-      prev_skip_val=""
-    fi
-    GC_SKIP_PROGRESS_MIGRATION=0
-    gc_migrate_progress_artifacts "$root"
-    count=${GC_PROGRESS_MIGRATION_LAST_COUNT:-0}
-    if (( prev_skip_set )); then
-      GC_SKIP_PROGRESS_MIGRATION="$prev_skip_val"
-    else
-      unset GC_SKIP_PROGRESS_MIGRATION
-    fi
-    if (( count > 0 )); then
-      ok "Relocated ${count} artifact(s) into ${root}/.gpt-creator."
-    else
-      info "No legacy artifacts found outside .gpt-creator."
-    fi
-  done
-
-  return 0
-}
-
-cmd_tidy_progress() {
-  warn "'tidy-progress' has been renamed to 'sweep-artifacts'. Running the renamed command."
-  cmd_sweep_artifacts "$@"
 }
 
 # Context directories inside project
@@ -5565,11 +4461,20 @@ cmd_generate() {
     docker)
       local out="$PROJECT_ROOT/docker"
       mkdir -p "$out"
-      local services_raw="${GC_DOCKER_SERVICES:-db api web admin proxy mobile}"
+      local services_raw=""
+      if [[ ${GC_DOCKER_SERVICES+x} ]]; then
+        services_raw="${GC_DOCKER_SERVICES}"
+      else
+        services_raw="db api web admin proxy mobile"
+      fi
       local -a docker_services=()
       for item in $services_raw; do
         docker_services+=("$item")
       done
+      if (( ${#docker_services[@]} == 0 )); then
+        warn "No docker services requested; skipping docker scaffold."
+        return 0
+      fi
       service_enabled() {
         local name="$1"
         for svc in "${docker_services[@]}"; do
@@ -5737,6 +4642,62 @@ PY
       ;;
     *) die "Unknown facet: ${facet}";;
   esac
+}
+
+gc_detect_surfaces() {
+  local project_root="${1:-}"
+  local rfp_path="${2:-}"
+  local detector="$CLI_ROOT/scripts/python/detect_surfaces.py"
+  [[ -n "$project_root" ]] || return 0
+  if [[ ! -f "$detector" ]]; then
+    return 0
+  fi
+  python3 "$detector" "$project_root" ${rfp_path:+--rfp "$rfp_path"} 2>/dev/null || true
+}
+
+gc_resolve_surfaces() {
+  local project_root="${1:-}"
+  local surfaces_override="${2:-}"
+  local rfp_path="${3:-}"
+  local surfaces=""
+  if [[ -n "$surfaces_override" ]]; then
+    surfaces="$(printf '%s' "$surfaces_override" | tr ',;' ' ')"
+  else
+    surfaces="$(gc_detect_surfaces "$project_root" "$rfp_path")"
+  fi
+  # If nothing is detected, return empty (caller may choose a fallback).
+  printf '%s\n' "$surfaces"
+}
+
+gc_docker_services_from_surfaces() {
+  local -a surfaces=("$@")
+  local -a services=()
+  local has_web=0 has_admin=0
+  local surface
+  for surface in "${surfaces[@]}"; do
+    case "$surface" in
+      web) has_web=1;;
+      admin) has_admin=1;;
+    esac
+    case "$surface" in
+      api|db|web|admin|mobile) services+=("$surface");;
+    esac
+  done
+  if (( has_web && has_admin )); then
+    services+=("proxy")
+  fi
+  # Deduplicate while preserving order
+  local -a deduped=()
+  local seen=""
+  for surface in "${services[@]}"; do
+    [[ -z "$surface" ]] && continue
+    case " $seen " in
+      *" $surface "*) continue;;
+    esac
+    deduped+=("$surface")
+    seen+=" $surface"
+  done
+  printf '%s\n' "${deduped[*]}"
 }
 
 cmd_db() {
@@ -5925,21 +4886,52 @@ cmd_refresh_stack() {
 
   info "Using database '${GC_DB_NAME}' with user '${GC_DB_USER}'"
 
+  local docker_services_resolved=""
+  if [[ -n "${GC_DOCKER_SERVICES:-}" ]]; then
+    docker_services_resolved="${GC_DOCKER_SERVICES}"
+  else
+    local detected_surfaces=""
+    detected_surfaces="$(gc_detect_surfaces "$PROJECT_ROOT")"
+    if [[ -n "$detected_surfaces" ]]; then
+      local -a detected_surfaces_arr=()
+      read -r -a detected_surfaces_arr <<<"$detected_surfaces"
+      docker_services_resolved="$(gc_docker_services_from_surfaces "${detected_surfaces_arr[@]}")"
+      if [[ -n "$docker_services_resolved" ]]; then
+        GC_DOCKER_SERVICES="$docker_services_resolved"
+      fi
+    fi
+  fi
+
   local compose_file="$compose_override"
   if [[ -n "$compose_file" ]]; then
     compose_file="$(abs_path "$compose_file")"
   else
     info "Rendering docker assets from templates"
-    if ! cmd_generate docker --project "$PROJECT_ROOT"; then
-      die "Failed to generate docker assets"
-    fi
-    if [[ -f "${PROJECT_ROOT}/docker/compose.yaml" ]]; then
-      compose_file="${PROJECT_ROOT}/docker/compose.yaml"
-    elif [[ -f "${PROJECT_ROOT}/docker/docker-compose.yml" ]]; then
-      compose_file="${PROJECT_ROOT}/docker/docker-compose.yml"
-    elif [[ -f "${PROJECT_ROOT}/docker-compose.yml" ]]; then
-      compose_file="${PROJECT_ROOT}/docker-compose.yml"
+    if [[ -n "$docker_services_resolved" ]]; then
+      if ! GC_DOCKER_SERVICES="$docker_services_resolved" cmd_generate docker --project "$PROJECT_ROOT"; then
+        die "Failed to generate docker assets"
+      fi
     else
+      if [[ -f "${PROJECT_ROOT}/docker/compose.yaml" ]]; then
+        compose_file="${PROJECT_ROOT}/docker/compose.yaml"
+      elif [[ -f "${PROJECT_ROOT}/docker/docker-compose.yml" ]]; then
+        compose_file="${PROJECT_ROOT}/docker/docker-compose.yml"
+      elif [[ -f "${PROJECT_ROOT}/docker-compose.yml" ]]; then
+        compose_file="${PROJECT_ROOT}/docker-compose.yml"
+      else
+        die "No docker services detected and no compose file found. Set GC_DOCKER_SERVICES or provide --compose/--only-services."
+      fi
+    fi
+    if [[ -z "$compose_file" ]]; then
+      if [[ -f "${PROJECT_ROOT}/docker/compose.yaml" ]]; then
+        compose_file="${PROJECT_ROOT}/docker/compose.yaml"
+      elif [[ -f "${PROJECT_ROOT}/docker/docker-compose.yml" ]]; then
+        compose_file="${PROJECT_ROOT}/docker/docker-compose.yml"
+      elif [[ -f "${PROJECT_ROOT}/docker-compose.yml" ]]; then
+        compose_file="${PROJECT_ROOT}/docker-compose.yml"
+      fi
+    fi
+    if [[ -z "$compose_file" ]]; then
       die "Compose file not found after generation. Expected docker/compose.yaml or docker-compose.yml"
     fi
   fi
@@ -5984,7 +4976,12 @@ cmd_refresh_stack() {
     info "No SQL assets discovered automatically."
   fi
 
-  local -a all_services=(db api web admin proxy)
+  local -a all_services=()
+  if [[ -n "$docker_services_resolved" ]]; then
+    read -r -a all_services <<<"$docker_services_resolved"
+  else
+    all_services=()
+  fi
   local -a services_to_start=()
   if [[ -n "$only_services" ]]; then
     local normalized_only="${only_services//,/ }"
@@ -8855,108 +7852,6 @@ cmd_refine_tasks() {
 
   cjt::refine_tasks
   ok "Task refinement complete"
-}
-
-gc_docdex_bin() {
-  printf '%s' "${GC_DOCDEX_BIN:-docdexd}"
-}
-
-gc_docdex_usage() {
-  cat <<'EOF'
-Usage: gpt-creator docdex <index|serve> [options]
-
-  gpt-creator docdex index --project /path/to/repo
-      Rebuild the documentation index for the project (uses npm-installed docdex CLI).
-
-  gpt-creator docdex serve --project /path/to/repo [--host 127.0.0.1] [--port 46137]
-      Serve the docdex HTTP API (includes filesystem watcher for incremental updates).
-EOF
-}
-
-cmd_docdex_index() {
-  local root=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --project|-p|--repo)
-        root="$(abs_path "$2")"
-        shift 2
-        ;;
-      -h|--help)
-        gc_docdex_usage
-        return 0
-        ;;
-      *)
-        die "Unknown argument for docdex index: $1"
-        ;;
-    esac
-  done
-  if [[ -z "$root" ]]; then
-    if [[ -n "${PROJECT_ROOT:-}" ]]; then
-      root="$PROJECT_ROOT"
-    else
-      die "--project is required for docdex index"
-    fi
-  fi
-  need_cmd "$(gc_docdex_bin)" || die "docdex CLI not found; install via 'npm i -g docdex' or set GC_DOCDEX_BIN."
-  "$(gc_docdex_bin)" index --repo "$root"
-}
-
-cmd_docdex_serve() {
-  local root=""
-  local host="${GC_DOCDEX_HOST:-127.0.0.1}"
-  local port="${GC_DOCDEX_PORT:-46137}"
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --project|-p|--repo)
-        root="$(abs_path "$2")"
-        shift 2
-        ;;
-      --host)
-        host="$2"
-        shift 2
-        ;;
-      --port)
-        port="$2"
-        shift 2
-        ;;
-      -h|--help)
-        gc_docdex_usage
-        return 0
-        ;;
-      *)
-        die "Unknown argument for docdex serve: $1"
-        ;;
-    esac
-  done
-  if [[ -z "$root" ]]; then
-    if [[ -n "${PROJECT_ROOT:-}" ]]; then
-      root="$PROJECT_ROOT"
-    else
-      die "--project is required for docdex serve"
-    fi
-  fi
-  need_cmd "$(gc_docdex_bin)" || die "docdex CLI not found; install via 'npm i -g docdex' or set GC_DOCDEX_BIN."
-  info "Starting docdexd for ${root} on ${host}:${port}…"
-  exec "$(gc_docdex_bin)" serve --repo "$root" --host "$host" --port "$port"
-}
-
-cmd_docdex() {
-  local action="${1:-help}"
-  shift || true
-  case "$action" in
-    index)
-      cmd_docdex_index "$@"
-      ;;
-    serve)
-      cmd_docdex_serve "$@"
-      ;;
-    help|-h|--help|"")
-      gc_docdex_usage
-      ;;
-    *)
-      die "Unknown docdex action: ${action}"
-      ;;
-  esac
 }
 
 gc_write_task_prompt() {
@@ -13839,65 +12734,6 @@ cmd_iterate() {
 
 }
 
-cmd_binder() {
-  local action="${1:-}"
-  if [[ -z "$action" || "$action" == "-h" || "$action" == "--help" ]]; then
-    gc_render_template "help/binder_usage.txt"
-    return 0
-  fi
-  shift || true
-  case "$action" in
-    clear)
-      local project="${PROJECT_ROOT:-$PWD}"
-      local epic=""
-      local story=""
-      local task=""
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --project|-p)
-            project="$(abs_path "${2:?project path required}")"
-            shift 2
-            ;;
-          --story)
-            story="${2:?story slug required}"
-            shift 2
-            ;;
-          --epic)
-            epic="${2:-}"
-            shift 2
-            ;;
-          --task)
-            task="${2:-}"
-            shift 2
-            ;;
-          -h|--help)
-            gc_render_template "help/binder_clear_usage.txt"
-            return 0
-            ;;
-          --)
-            shift
-            break
-            ;;
-          *)
-            die "Unknown option for binder clear: $1"
-            ;;
-        esac
-      done
-      [[ -n "$story" ]] || die "--story is required for binder clear"
-      local helper_path
-      helper_path="$(gc_clone_python_tool "task_binder.py" "$project")" || return 1
-      if [[ -n "$task" ]]; then
-        python3 "$helper_path" clear --project "$project" --epic "${epic:-$story}" --story "$story" --task "$task"
-      else
-        python3 "$helper_path" clear --project "$project" --epic "${epic:-$story}" --story "$story"
-      fi
-      ;;
-    *)
-      die "Unknown binder subcommand: ${action}"
-      ;;
-  esac
-}
-
 cmd_estimate() {
   local root="" recent_tasks="" scope="project" warn_threshold=""
   local apply_detections=0 no_cache=0 reindex=0 color_flag=""
@@ -14412,51 +13248,42 @@ cmd_create_project() {
   cmd_normalize --project "$PROJECT_ROOT"
 
   local surfaces=""
-  if [[ -n "$surfaces_override" ]]; then
-    surfaces="$(printf '%s' "$surfaces_override" | tr ',;' ' ')"
-  else
-    local detector="$CLI_ROOT/scripts/python/detect_surfaces.py"
-    if [[ -f "$detector" ]]; then
-      surfaces="$(python3 "$detector" "$PROJECT_ROOT" ${rfp_path:+--rfp "$rfp_path"} 2>/dev/null || true)"
-    fi
-  fi
-  [[ -n "$surfaces" ]] || surfaces="api db docker"
+  surfaces="$(gc_resolve_surfaces "$PROJECT_ROOT" "$surfaces_override" "$rfp_path")"
   read -r -a SURFACES_ARR <<<"$surfaces"
+  if (( ${#SURFACES_ARR[@]} == 0 )); then
+    warn "No surfaces detected; defaulting to api db (no docker)."
+    SURFACES_ARR=(api db)
+  fi
   info "Selected surfaces: ${SURFACES_ARR[*]}"
 
   cmd_plan --project "$PROJECT_ROOT"
 
   local has_docker=0 has_db=0
-  local docker_services=()
+  local docker_services_str=""
+  local -a docker_services=()
   for surface in "${SURFACES_ARR[@]}"; do
     case "$surface" in
       docker) has_docker=1 ;;
       db) has_db=1 ;;
     esac
   done
+  docker_services_str="$(gc_docker_services_from_surfaces "${SURFACES_ARR[@]}")"
+  read -r -a docker_services <<<"$docker_services_str"
+  if (( ${#docker_services[@]} > 0 )); then
+    has_docker=1
+  fi
 
   for surface in "${SURFACES_ARR[@]}"; do
     case "$surface" in
       docker) ;;
       *) cmd_generate "$surface" --project "$PROJECT_ROOT" ;;
     esac
-    case "$surface" in
-      api|db|web|admin|mobile) docker_services+=("$surface") ;;
-    esac
   done
 
-  if (( has_docker )); then
-    local keep_services=()
-    local has_web=0 has_admin=0
-    for svc in "${docker_services[@]}"; do
-      [[ "$svc" == "web" ]] && has_web=1
-      [[ "$svc" == "admin" ]] && has_admin=1
-      keep_services+=("$svc")
-    done
-    if (( has_web && has_admin )); then
-      keep_services+=("proxy")
-    fi
-    GC_DOCKER_SERVICES="${keep_services[*]}" cmd_generate docker --project "$PROJECT_ROOT"
+  if (( has_docker )) && (( ${#docker_services[@]} > 0 )); then
+    GC_DOCKER_SERVICES="${docker_services[*]}" cmd_generate docker --project "$PROJECT_ROOT"
+  elif (( has_docker )); then
+    info "Skipping docker assets because no docker services were detected (set GC_DOCKER_SERVICES to force generation)."
   else
     info "Skipping docker assets because 'docker' was not selected for this project."
   fi
@@ -14479,6 +13306,11 @@ cmd_bootstrap() {
   local path=""
   local fresh=0
   local rfp_path=""
+  local bootstrap_surfaces=""
+  local -a BOOTSTRAP_SURFACES_ARR=()
+  local -a BOOTSTRAP_DOCKER_SERVICES=()
+  local bootstrap_has_docker=0
+  local bootstrap_has_db=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --template)
@@ -14636,25 +13468,73 @@ cmd_bootstrap() {
     info "Step 'plan' already completed; skipping."
   fi
 
+  bootstrap_surfaces="$(gc_resolve_surfaces "$PROJECT_ROOT" "" "$rfp_path")"
+  read -r -a BOOTSTRAP_SURFACES_ARR <<<"$bootstrap_surfaces"
+  if [[ -n "$bootstrap_surfaces" ]]; then
+    info "Selected surfaces: ${BOOTSTRAP_SURFACES_ARR[*]}"
+  fi
+  local bootstrap_docker_services_str=""
+  bootstrap_docker_services_str="$(gc_docker_services_from_surfaces "${BOOTSTRAP_SURFACES_ARR[@]}")"
+  read -r -a BOOTSTRAP_DOCKER_SERVICES <<<"$bootstrap_docker_services_str"
+  local surface
+  for surface in "${BOOTSTRAP_SURFACES_ARR[@]}"; do
+    case "$surface" in
+      docker) bootstrap_has_docker=1 ;;
+      db) bootstrap_has_db=1 ;;
+    esac
+  done
+  if (( ${#BOOTSTRAP_DOCKER_SERVICES[@]} > 0 )); then
+    bootstrap_has_docker=1
+  fi
+
   if ! gc_bootstrap_step_is_done generate; then
     info "[8/11] Generating stack code"
-    if cmd_generate all --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step generate "done"
-    else
+    local generation_failed=0
+    if (( ${#BOOTSTRAP_SURFACES_ARR[@]} == 0 )); then
+      warn "No surfaces detected; defaulting to api db (no docker)."
+      BOOTSTRAP_SURFACES_ARR=(api db)
+      bootstrap_has_db=1
+      bootstrap_has_docker=0
+      BOOTSTRAP_DOCKER_SERVICES=()
+    fi
+    for surface in "${BOOTSTRAP_SURFACES_ARR[@]}"; do
+      case "$surface" in
+        docker) continue ;;
+      esac
+      if ! cmd_generate "$surface" --project "$PROJECT_ROOT"; then
+        generation_failed=1
+        break
+      fi
+    done
+    if (( generation_failed )); then
       gc_bootstrap_mark_step generate "failed"
       die "generate step failed"
     fi
+    if (( bootstrap_has_docker )); then
+      if ! GC_DOCKER_SERVICES="${BOOTSTRAP_DOCKER_SERVICES[*]}" cmd_generate docker --project "$PROJECT_ROOT"; then
+        gc_bootstrap_mark_step generate "failed"
+        die "generate step failed"
+      fi
+    else
+      info "Skipping docker assets because 'docker' was not selected or no docker services were detected (set GC_DOCKER_SERVICES to force generation)."
+    fi
+    gc_bootstrap_mark_step generate "done"
   else
     info "Step 'generate' already completed; skipping."
   fi
 
   info "[9/11] Provisioning infrastructure"
   if ! gc_bootstrap_step_is_done db-provision; then
-    if cmd_db provision --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step db-provision "done"
+    if (( bootstrap_has_db && bootstrap_has_docker )); then
+      if cmd_db provision --project "$PROJECT_ROOT"; then
+        gc_bootstrap_mark_step db-provision "done"
+      else
+        gc_bootstrap_mark_step db-provision "failed"
+        die "Database provision failed"
+      fi
     else
-      gc_bootstrap_mark_step db-provision "failed"
-      die "Database provision failed"
+      info "Skipping DB provision (db or docker not selected)."
+      gc_bootstrap_mark_step db-provision "done"
     fi
   else
     info "Step 'db-provision' already completed; skipping."
@@ -14662,11 +13542,16 @@ cmd_bootstrap() {
 
   info "[10/11] Starting stack"
   if ! gc_bootstrap_step_is_done run-up; then
-    if cmd_run up --project "$PROJECT_ROOT"; then
-      gc_bootstrap_mark_step run-up "done"
+    if (( bootstrap_has_docker )); then
+      if cmd_run up --project "$PROJECT_ROOT"; then
+        gc_bootstrap_mark_step run-up "done"
+      else
+        gc_bootstrap_mark_step run-up "failed"
+        die "Stack start failed"
+      fi
     else
-      gc_bootstrap_mark_step run-up "failed"
-      die "Stack start failed"
+      info "Skipping stack startup (docker not selected)."
+      gc_bootstrap_mark_step run-up "done"
     fi
   else
     info "Step 'run-up' already completed; skipping."
@@ -15020,142 +13905,6 @@ gc_flush_logs_hooks() {
 }
 # ---------------------------------------------------------------------------
 
-# --- Project root detection & absolute paths --------------------------------
-gc_repo_root_from_git() {
-  git rev-parse --show-toplevel 2>/dev/null || true
-}
-
-gc_search_up_for_markers() {
-  local dir="${PWD}"
-  while [[ -n "$dir" && "$dir" != "/" ]]; do
-    for marker in .gpt-creator .git package.json pnpm-workspace.yaml pyproject.toml requirements.txt setup.cfg poetry.lock Cargo.toml; do
-      if [[ -e "${dir}/${marker}" ]]; then
-        printf '%s\n' "$dir"
-        return 0
-      fi
-    done
-    dir="${dir%/*}"
-  done
-  printf '%s\n' "$PWD"
-}
-
-gc_detect_project_root() {
-  local configured="${GC_PROJECT_ROOT:-}"
-  if [[ -n "$configured" && -d "$configured" ]]; then
-    (cd "$configured" >/dev/null 2>&1 && pwd -P) && return 0
-  fi
-  local git_root
-  git_root="$(gc_repo_root_from_git)"
-  if [[ -n "$git_root" && -d "$git_root" ]]; then
-    (cd "$git_root" >/dev/null 2>&1 && pwd -P) && return 0
-  fi
-  gc_search_up_for_markers
-}
-
-gc_abs_from_project() {
-  local rel_path="${1:-}"
-  local base="${PROJECT_ROOT:-$(gc_detect_project_root)}"
-  if [[ -z "$rel_path" ]]; then
-    printf '%s\n' "$base"
-    return 0
-  fi
-  if [[ "$rel_path" == /* ]]; then
-    (cd "$(dirname "$rel_path")" >/dev/null 2>&1 && printf '%s/%s\n' "$(pwd -P)" "$(basename "$rel_path")") && return 0
-    printf '%s\n' "$rel_path"
-    return 0
-  fi
-  (
-    cd "$base" >/dev/null 2>&1 || exit 0
-    cd "$(dirname "$rel_path")" >/dev/null 2>&1 || exit 0
-    printf '%s/%s\n' "$(pwd -P)" "$(basename "$rel_path")"
-  )
-}
-
-gc_from_root() {
-  local rel="${1:-}"
-  local base="${PROJECT_ROOT:-$(gc_detect_project_root)}"
-  if [[ -z "$rel" ]]; then
-    printf '%s\n' "$base"
-    return 0
-  fi
-  if [[ "$rel" == /* ]]; then
-    printf '%s\n' "$rel"
-    return 0
-  fi
-  rel="${rel#./}"
-  printf '%s/%s\n' "${base%/}" "$rel"
-}
-
-gc_rel_from_root() {
-  local path="${1:-}"
-  local base="${PROJECT_ROOT:-$(gc_detect_project_root)}"
-  local prefix="${base%/}/"
-  if [[ "$path" == "$prefix"* ]]; then
-    printf '%s\n' "${path#$prefix}"
-  else
-    printf '%s\n' "$path"
-  fi
-}
-
-gc_guess_interpreter() {
-  local script="${1:?script path required}"
-  local first_line
-  if first_line="$(head -n 1 -- "$script" 2>/dev/null || true)"; then
-    if [[ "$first_line" == '#!'* ]]; then
-      local shebang="${first_line#\#!}"
-      shebang="${shebang#"${shebang%%[![:space:]]*}"}"
-      shebang="${shebang%"${shebang##*[![:space:]]}"}"
-      local exe="${shebang%%[[:space:]]*}"
-      local rest="${shebang#"$exe"}"
-      if [[ "${exe##*/}" == "env" && -n "$rest" ]]; then
-        exe="${rest#"${rest%%[![:space:]]*}"}"
-        exe="${exe%%[[:space:]]*}"
-      fi
-      if [[ -x "$exe" ]]; then
-        printf '%s\n' "$exe"
-        return 0
-      fi
-      if command -v "$exe" >/dev/null 2>&1; then
-        printf '%s\n' "$exe"
-        return 0
-      fi
-    fi
-  fi
-  case "$script" in
-    *.bash|*.sh)
-      if command -v bash >/dev/null 2>&1; then
-        echo bash
-      else
-        echo sh
-      fi
-      return 0
-      ;;
-    *.zsh)
-      command -v zsh >/dev/null 2>&1 && echo zsh && return 0
-      ;;
-    *.ksh)
-      command -v ksh >/dev/null 2>&1 && echo ksh && return 0
-      ;;
-    *.py)
-      if command -v python3 >/dev/null 2>&1; then
-        echo python3
-        return 0
-      elif command -v python >/dev/null 2>&1; then
-        echo python
-        return 0
-      fi
-      ;;
-    *.js|*.cjs|*.mjs)
-      command -v node >/dev/null 2>&1 && echo node && return 0
-      ;;
-  esac
-  if command -v bash >/dev/null 2>&1; then
-    echo bash
-  else
-    echo sh
-  fi
-}
-
 gc_load_required_vars() {
   local -a required=()
   if [[ -n "${GC_REQUIRED_VARS:-}" ]]; then
@@ -15375,204 +14124,6 @@ if [[ -z "${PROJECT_ROOT:-}" ]]; then
   PROJECT_ROOT="$(gc_detect_project_root)"
 fi
 export PROJECT_ROOT
-
-# --- Finalization & reporting (workspace-agnostic) ---------------------------
-gc_json_escape() {
-  local s="${1-}"
-  s=${s//\\/\\\\}; s=${s//\"/\\\"}
-  s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
-  printf '%s' "$s"
-}
-
-gc_end_scripts_dirs() {
-  local -a dirs=()
-  dirs+=("$(gc_from_root "scripts/end-of-task.d")")
-  local cli_root="${CLI_ROOT%/}"
-  dirs+=("${cli_root}/scripts/end-of-task.d")
-  printf '%s\n' "${dirs[@]}"
-}
-
-gc_run_end_scripts() {
-  local json_path="${1:?json payload path required}"
-  local status="${2:-}" reason="${3:-}"
-  local ran_any=0
-  local dir
-  local project_root; project_root="$(gc_from_root "")"
-  local cli_root="${CLI_ROOT%/}"
-  while IFS= read -r dir; do
-    [[ -d "$dir" ]] || continue
-    local run_dir="$project_root"
-    if [[ "$dir" == "${cli_root}/scripts/end-of-task.d" ]]; then
-      run_dir="$cli_root"
-    fi
-    while IFS= read -r script_path; do
-      [[ -f "$script_path" ]] || continue
-      local interpreter
-      interpreter="$(gc_guess_interpreter "$script_path")" || interpreter=""
-      [[ -n "$interpreter" ]] || continue
-      local rel_path="$script_path"
-      if [[ "$script_path" == "$run_dir/"* ]]; then
-        rel_path="${script_path#$run_dir/}"
-      fi
-      (
-        cd "$run_dir" >/dev/null 2>&1 || exit 0
-        if ! GC_TASK_FINAL_STATUS="$status" \
-          GC_TASK_FINAL_REASON="$reason" \
-          GC_TASK_FINAL_JSON="$json_path" \
-          "$interpreter" "$rel_path"
-        then
-          gc_error_summary_add "end-script failed: $(basename "$rel_path")"
-        fi
-      )
-      ran_any=1
-    done < <(find "$dir" -maxdepth 1 -type f ! -name '.*' 2>/dev/null | sort)
-  done < <(gc_end_scripts_dirs)
-
-  local finalize_script
-  finalize_script="$(gc_from_root "scripts/auto_finalize_task.sh")"
-  if [[ -f "$finalize_script" ]]; then
-    local interpreter
-    interpreter="$(gc_guess_interpreter "$finalize_script")" || interpreter=""
-    if [[ -n "$interpreter" ]]; then
-      local rel_finalize
-      rel_finalize="$(gc_rel_from_root "$finalize_script")"
-      (
-        cd "$(gc_from_root "")" >/dev/null 2>&1 || exit 0
-        if ! GC_TASK_FINAL_STATUS="$status" \
-          GC_TASK_FINAL_REASON="$reason" \
-          GC_TASK_FINAL_JSON="$json_path" \
-          "$interpreter" "$rel_finalize"
-        then
-          gc_error_summary_add "end-script failed: $(basename "$rel_finalize")"
-        fi
-      )
-      ran_any=1
-    fi
-  fi
-  return $ran_any
-}
-
-gc_finalize_and_report() {
-  local finalize_key
-  finalize_key="$(gc_finalize_lock_key)"
-  if [[ "${GC_FINALIZE_AND_REPORT_DONE:-}" == "$finalize_key" ]]; then
-    return 0
-  fi
-  if ! gc_try_acquire_finalize_lock; then
-    GC_FINALIZE_AND_REPORT_DONE="$finalize_key"
-    echo "[finalize] already completed for this task-run; skipping." >&2
-    return 0
-  fi
-  GC_FINALIZE_AND_REPORT_DONE="$finalize_key"
-
-  local status="${1:-}" reason="${2:-}"
-  local now_utc
-  now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-
-  local task_id="${GC_ACTIVE_TASK_ID:-${task_id:-}}"
-  local task_number="${GC_ACTIVE_TASK_NUMBER:-${task_number:-${task_index:-}}}"
-  local story_slug="${GC_ACTIVE_TASK_SLUG:-${slug:-}}"
-  local prompt_path="${GC_ACTIVE_TASK_PROMPT:-${prompt_path:-}}"
-  local output_path="${GC_ACTIVE_TASK_OUTPUT:-${output_path:-}}"
-  local run_stamp="${GC_ACTIVE_RUN_STAMP:-manual}"
-  local tokens_used="${GC_LAST_TOKENS_USED:-${task_tokens_total:-0}}"
-  local prompt_estimate="${GC_LAST_PROMPT_ESTIMATE:-${task_prompt_estimate:-0}}"
-  local failure_class="${GC_LAST_ERROR_CLASS:-NONE}"
-  local retry_attempts="${GC_RETRY_ATTEMPTS:-0}"
-  local timeout_record="${GC_LAST_TIMEOUT_SECONDS:-0}"
-
-  if [[ -z "$status" ]]; then
-    if [[ -n "${GC_LAST_ERROR_STATUS:-}" && "${GC_LAST_ERROR_STATUS}" != "0" ]]; then
-      status="failure"
-    else
-      status="success"
-    fi
-  fi
-
-  # git integration
-  local finalize_task_id="${GC_ACTIVE_TASK_ID:-${CURRENT_TASK_ID:-${TASK_ID:-${task_id:-unknown}}}}"
-  gc_git_finalize_task_branch "$finalize_task_id" "${status:-UNKNOWN}" "${FINAL_REASON_FILE:-}" || true
-
-  local reason_redacted
-  reason_redacted="$(gc_redact "$reason")"
-
-  local project_root="${PROJECT_ROOT:-}"
-  if [[ -z "$project_root" ]]; then
-    project_root="$(gc_detect_project_root)"
-  fi
-
-  local git_state_helper=""
-  local git_state_path="${project_root}/.gpt-creator/state/git-last.json"
-  if declare -F gc_clone_python_tool >/dev/null 2>&1; then
-    git_state_helper="$(gc_clone_python_tool "git_last_state.py" "$project_root")" || git_state_helper=""
-  fi
-  if [[ -z "$git_state_helper" && -n "${CLI_ROOT:-}" && -f "${CLI_ROOT}/scripts/python/git_last_state.py" ]]; then
-    git_state_helper="${CLI_ROOT}/scripts/python/git_last_state.py"
-  fi
-  if [[ -n "$git_state_helper" && -f "$git_state_path" ]]; then
-    local git_changed
-    git_changed="$(python3 "$git_state_helper" "$git_state_path" 2>/dev/null | awk -F= '$1=="changed"{print $2}' | tail -1)"
-    if [[ "$git_changed" =~ ^[0-9]+$ ]] && (( git_changed > 0 )); then
-      local normalized_status="${status,,}"
-      normalized_status="${normalized_status//_/-}"
-      if [[ "$normalized_status" == "completed-no-changes" ]]; then
-        info "[git] overriding task status to COMPLETED (${git_changed} files changed since branch start)"
-        status="completed"
-      fi
-    fi
-  fi
-
-  if declare -F render_task_end >/dev/null 2>&1; then
-    if [[ "${GC_LAST_RENDER_TASK_FOOTER:-}" != "$finalize_task_id" ]]; then
-      render_task_end "$finalize_task_id" "${status:-UNKNOWN}" || true
-    fi
-  fi
-  GC_LAST_RENDER_TASK_FOOTER=""
-
-  local reports_dir="${project_root}/.gpt-creator/reports"
-  mkdir -p "$reports_dir"
-  local key="${story_slug:-story}-${task_number:-unknown}"
-  key="${key//[\/ ]/_}"
-  local json_path="${reports_dir}/${key}-${run_stamp}.final.json"
-
-  {
-    printf '{'
-    printf '"task_id":"%s",'         "$(gc_json_escape "$task_id")"
-    printf '"task_number":"%s",'     "$(gc_json_escape "$task_number")"
-    printf '"story_slug":"%s",'      "$(gc_json_escape "$story_slug")"
-    printf '"status":"%s",'          "$(gc_json_escape "$status")"
-    printf '"reason":"%s",'          "$(gc_json_escape "$reason_redacted")"
-    printf '"timestamp":"%s",'       "$(gc_json_escape "$now_utc")"
-    printf '"run_stamp":"%s",'       "$(gc_json_escape "$run_stamp")"
-    printf '"prompt_path":"%s",'     "$(gc_json_escape "$prompt_path")"
-    printf '"output_path":"%s",'     "$(gc_json_escape "$output_path")"
-    printf '"tokens_used":%s,'       "${tokens_used:-0}"
-    printf '"prompt_estimate":%s,'   "${prompt_estimate:-0}"
-    printf '"failure_class":"%s",'   "$(gc_json_escape "$failure_class")"
-    printf '"attempts":%s,'          "${retry_attempts:-0}"
-    printf '"timeout_sec":%s'        "${timeout_record:-0}"
-    printf '}\n'
-  } >"$json_path"
-
-  gc_flush_logs_hooks || true
-  if declare -F gc_reports_flush >/dev/null 2>&1; then
-    gc_reports_flush || true
-  fi
-  sync || true
-  sleep 0.05 || true
-
-  gc_run_end_scripts "$json_path" "$status" "$reason_redacted" || true
-  gc_mark_finalize_done
-
-  export GC_LAST_FINAL_JSON="$json_path"
-  echo "[finalize] Wrote ${json_path}" >&2
-  GC_LAST_ERROR_CLASS="NONE"
-  GC_LAST_ERROR_REASON=""
-  GC_RETRY_ATTEMPTS=0
-  GC_LAST_TIMEOUT_SECONDS=0
-  GC_ERROR_SUMMARY_ARR=()
-}
-# --- end finalization --------------------------------------------------------
 
 main() {
   local cmd="${1:-help}"; shift || true

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import pathlib
-import re
 from typing import Iterable
 
 
@@ -30,11 +29,20 @@ def gather_text(paths: Iterable[pathlib.Path], limit: int = 200_000) -> str:
 def detect_surfaces(text: str) -> list[str]:
     text_lower = text.lower()
     surfaces: set[str] = set()
-    # Always include API; this is the core surface.
-    surfaces.add("api")
-    # Database is typically needed for backend scaffolds.
-    surfaces.add("db")
 
+    api_keywords = [
+        "api",
+        "endpoint",
+        "rest",
+        "graphql",
+        "backend",
+        "service",
+        "microservice",
+        "nest",
+        "nestjs",
+        "express",
+        "fastify",
+    ]
     web_keywords = [
         "frontend",
         "web app",
@@ -72,6 +80,8 @@ def detect_surfaces(text: str) -> list[str]:
         "orm",
     ]
 
+    if any(k in text_lower for k in api_keywords):
+        surfaces.add("api")
     if any(k in text_lower for k in web_keywords):
         surfaces.add("web")
     if any(k in text_lower for k in admin_keywords):
@@ -81,7 +91,7 @@ def detect_surfaces(text: str) -> list[str]:
     if any(k in text_lower for k in db_keywords):
         surfaces.add("db")
 
-    # Docker is required when any containerized surface is present.
+    # Add docker when any surface is requested.
     if surfaces:
         surfaces.add("docker")
 
@@ -112,7 +122,7 @@ def main() -> int:
     text = gather_text(candidates)
     surfaces = detect_surfaces(text)
     if not surfaces:
-        surfaces = ["api", "db", "docker"]
+        surfaces = []
     print(" ".join(surfaces))
     return 0
 

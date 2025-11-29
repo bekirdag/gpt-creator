@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import subprocess
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -42,9 +43,26 @@ def _docdex_cmd() -> str:
     raise DocDexError("docdex CLI not found in PATH; install via `npm i -g docdex`.")
 
 
+def _default_state_dir(repo_root: Path) -> Path:
+    """Fallback state dir under the gpt-creator installation for sandboxed environments."""
+    env_dir = os.environ.get("DOCDEX_STATE_DIR") or os.environ.get("GC_DOCDEX_STATE_DIR")
+    if env_dir:
+        return Path(env_dir).expanduser()
+    base = Path(__file__).resolve().parents[2] / ".docdex"
+    repo_hash = hashlib.sha1(str(repo_root).encode("utf-8")).hexdigest()[:12]
+    return base / repo_hash
+
+
 def _run_cli_json(args: Iterable[str], repo_root: Path) -> Dict[str, Any]:
     cmd = [_docdex_cmd(), *args]
     env = os.environ.copy()
+    # Default state dir under the CLI root (writable even when repo is sandboxed)
+    state_dir = _default_state_dir(repo_root)
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    env.setdefault("DOCDEX_STATE_DIR", str(state_dir))
     proc = subprocess.run(
         cmd,
         cwd=str(repo_root),
@@ -64,8 +82,15 @@ def _run_cli_json(args: Iterable[str], repo_root: Path) -> Dict[str, Any]:
 
 def _run_cli(args: Iterable[str], repo_root: Path) -> None:
     cmd = [_docdex_cmd(), *args]
+    env = os.environ.copy()
+    state_dir = _default_state_dir(repo_root)
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    env.setdefault("DOCDEX_STATE_DIR", str(state_dir))
     _log(f"running: {' '.join(cmd)}")
-    proc = subprocess.run(cmd, cwd=str(repo_root), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.run(cmd, cwd=str(repo_root), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if proc.returncode != 0:
         raise DocDexError(f"docdex CLI failed ({proc.returncode}): {proc.stderr.strip()}")
 
@@ -110,13 +135,20 @@ def search_docs(
 ) -> Dict[str, Any]:
     repo = _resolve_repo_root(repo_root)
     _log(f"search_docs(query='{query[:40]}', limit={limit}, repo={repo})")
-    payload = _run_cli_json(
-        ["query", "--repo", str(repo), "--query", query, "--limit", str(limit)],
-        repo,
-    )
-    if "hits" not in payload:
-        payload = {"hits": payload.get("hits", [])}
-    return payload
+    try:
+        payload = _run_cli_json(
+            ["query", "--repo", str(repo), "--query", query, "--limit", str(limit)],
+            repo,
+        )
+        if "hits" not in payload:
+            payload = {"hits": payload.get("hits", [])}
+        return payload
+    except DocDexError as err:
+        msg = str(err)
+        if "Lockfile" in msg or "LockBusy" in msg:
+            _log("docdex query skipped due to index lock; returning no hits.")
+            return {"hits": []}
+        raise
 
 
 def search_docs_cli(
@@ -138,10 +170,17 @@ def fetch_snippet(
     repo_root: Optional[Path] = None,
 ) -> Dict[str, Any]:
     repo = _resolve_repo_root(repo_root)
-    payload = _run_cli_json(
-        ["query", "--repo", str(repo), "--query", query or doc_id, "--limit", "12"],
-        repo,
-    )
+    try:
+        payload = _run_cli_json(
+            ["query", "--repo", str(repo), "--query", query or doc_id, "--limit", "12"],
+            repo,
+        )
+    except DocDexError as err:
+        msg = str(err)
+        if "Lockfile" in msg or "LockBusy" in msg:
+            _log("docdex snippet lookup skipped due to index lock; returning empty snippet.")
+            return {"doc": None, "snippet": None}
+        raise
     hits = payload.get("hits", [])
     for hit in hits:
         if hit.get("doc_id") == doc_id:

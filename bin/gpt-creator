@@ -10541,6 +10541,14 @@ PY
   if (( total_tasks_all == 0 )); then
     die "there are no tasks in the database"
   fi
+  local tasks_missing_ids
+  tasks_missing_ids="$(sqlite3 "$tasks_db" "SELECT COUNT(*) FROM tasks WHERE TRIM(COALESCE(task_id,''))='';" 2>/dev/null || echo 0)"
+  if ! [[ "$tasks_missing_ids" =~ ^[0-9]+$ ]]; then
+    tasks_missing_ids=0
+  fi
+  if (( tasks_missing_ids > 0 )); then
+    die "Task database has ${tasks_missing_ids} task(s) missing task_id; populate valid task ids and rerun work-on-tasks."
+  fi
 
   local now_ts
   now_ts="$(date +%s)"
@@ -10576,13 +10584,25 @@ PY
     fi
   fi
 
-  gc_align_task_story_slugs "$tasks_db"
-  gc_sync_story_totals "$tasks_db"
+  local use_story_metadata="${GC_USE_STORY_METADATA:-0}"
+  case "${use_story_metadata,,}" in
+    1|true|yes|on) use_story_metadata=1 ;;
+    *) use_story_metadata=0 ;;
+  esac
+
+  if (( use_story_metadata )); then
+    gc_align_task_story_slugs "$tasks_db"
+    gc_sync_story_totals "$tasks_db"
+  else
+    info "Skipping story metadata alignment for work-on-tasks (GC_USE_STORY_METADATA=${GC_USE_STORY_METADATA:-0})."
+  fi
 
   if (( force_reset )); then
     info "Resetting backlog progress to pending (--force)."
     gc_reset_task_progress "$tasks_db"
-    gc_sync_story_totals "$tasks_db"
+    if (( use_story_metadata )); then
+      gc_sync_story_totals "$tasks_db"
+    fi
   fi
 
   local migration_epoch_initial=0

@@ -431,6 +431,32 @@ ensure_docdex_cli() {
   return 1
 }
 
+docdex_supports_mcp() {
+  local bin
+  for candidate in docdexd docdex; do
+    if need_cmd "$candidate"; then
+      bin="$candidate"
+      break
+    fi
+  done
+  [[ -n "$bin" ]] || return 1
+  local tmp
+  tmp="$(mktemp 2>/dev/null || echo "")"
+  if [[ -n "$tmp" ]]; then
+    if "$bin" help-all >"$tmp" 2>/dev/null && grep -qi "mcp" "$tmp"; then
+      rm -f "$tmp"
+      return 0
+    fi
+    rm -f "$tmp"
+  else
+    # Fallback: tolerate broken pipes by not erroring the pipeline.
+    if "$bin" help-all 2>/dev/null | grep -qi "mcp"; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
 ensure_rust() {
   if need_cmd cargo; then
     echo "✔ Rust toolchain $(cargo --version 2>/dev/null || true) detected."
@@ -760,19 +786,6 @@ install_files
 ensure_runtime_permissions
 install_link
 install_completions
-  if [[ -d "${APP_DIR:-$REPO_DIR}" ]]; then
-    log_info "Registering docdex MCP helper for known clients…"
-    local mcp_root="${APP_DIR:-$REPO_DIR}"
-    if need_cmd docdex && docdex mcp-add --repo "$mcp_root" --log warn --max-results 8 >/dev/null 2>&1; then
-      echo "✔ docdex MCP helper registered (docdex)."
-    elif need_cmd docdexd && docdexd mcp-add --repo "$mcp_root" --log warn --max-results 8 >/dev/null 2>&1; then
-      echo "✔ docdex MCP helper registered (docdexd)."
-    elif need_cmd npx && npx -y docdex mcp-add --repo "$mcp_root" --log warn --max-results 8 >/dev/null 2>&1; then
-      echo "✔ docdex MCP helper registered (npx docdex)."
-    else
-      record_warning "docdex MCP helper registration failed; run 'docdex mcp-add --repo ${mcp_root} --log warn --max-results 8' manually."
-    fi
-  fi
   echo "✔ Installed. Try:"
   echo "    gpt-creator create-project /path/to/project"
 }

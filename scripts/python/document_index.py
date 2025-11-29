@@ -3337,9 +3337,9 @@ if file_entries:
                 except Exception:
                     start_line = end_line = None
                 if start_line is not None and end_line is not None:
-                    command_hint = f"sed -n '{start_line},{end_line}p' {rel_path}"
+                    command_hint = f'python3 "$GC_SAFE_SHOW_FILE_PY" {rel_path} --start {start_line} --end {end_line}'
             if not command_hint:
-                command_hint = f"sed -n '1,120p' {rel_path}"
+                command_hint = f'python3 "$GC_SAFE_SHOW_FILE_PY" {rel_path} --suggest'
         if command_hint:
             lines.append(f"  -> Reopen via `{command_hint}`")
         if rel_path:
@@ -3363,10 +3363,10 @@ append_instruction_lines(
     [
         "## Helper Checklist (before exploring code or docs)",
         "- Map the repo once via `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus apps/api` (helper is auto-cloned under .gpt-creator/shims/python/) instead of issuing repetitive `ls` commands.",
-        "- When you need to inspect code, run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
+        "- When you need to inspect code, run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern \"<needle>\" --paths <dirs>` first; view ranges via `python3 \"$GC_SAFE_SHOW_FILE_PY\" <path> --start N --end M` instead of sed/cat.",
         "- For SDS/PDR context or migrations, query the documentation catalog with `bash -lc 'python3 \"$GC_DOC_CATALOG_PY\" search --db \"$GC_DOCUMENTATION_DB_PATH\" --query \"<term>\" --limit 5'` rather than opening entire doc files or grepping blindly.",
         "- Validate REST endpoints via manifests and `python3 \"$GC_REST_CHECK_RUNNER_PY\" manifest.yaml` instead of writing bespoke HTTP scripts.",
-        "- Preview file ranges with `python3 \"$GC_SAFE_SHOW_FILE_PY\" <path> --suggest` before `sed`/`cat`.",
+        "- Preview file ranges with `python3 \"$GC_SAFE_SHOW_FILE_PY\" <path> --suggest`; avoid sed/cat entirely.",
         "- Use `python3 \"$GC_RUN_SNIPPET_PY\" /tmp/snippet.py` for temporary Python helpers; it rejects placeholder-only heredocs.",
     ]
 )
@@ -3392,7 +3392,7 @@ if compact_mode:
         [
             "- Prefer pnpm for scripts; note any commands that cannot run because of network limits.",
             "- When you need documentation context, query the catalog search/show helpers with precise section names; do not read doc files from the repository.",
-            "- Avoid repo-wide listings/searches; open only the code files you intend to edit and keep `sed`/`cat` ranges tight.",
+            "- Avoid repo-wide listings/searches; open only the code files you intend to edit and use the safe file helper for slices (no sed/cat).",
         ]
     )
 else:

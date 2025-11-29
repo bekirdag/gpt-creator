@@ -37,9 +37,13 @@ def _is_terminal(status: str) -> bool:
 
 
 def _task_filter_value(story_slug: str, task_id: str, position: int) -> str:
-    if task_id and task_id.strip():
-        return task_id.strip()
-    return f"{story_slug.lower()}:{position + 1}"
+    cleaned = (task_id or "").strip()
+    if cleaned:
+        return cleaned
+    raise SystemExit(
+        f"Task at global_order for story '{story_slug}' (position {position + 1}) is missing a task_id; "
+        "update tasks.db with real task ids before running work-on-tasks."
+    )
 
 
 def fetch_queue(db_path: Path) -> List[Tuple[int, str, str, int]]:

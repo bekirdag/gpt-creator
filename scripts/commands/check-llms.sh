@@ -3,6 +3,9 @@
 
 cmd_check_llms() {
   local root="" provider="" adapter="" json=0 dry_run=0 verbose=0 install_missing=0 health_check=0
+  case "${GC_DRY_RUN:-}" in
+    1|true|yes|on) dry_run=1 ;;
+  esac
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project)
@@ -67,4 +70,3 @@ cmd_check_llms() {
   gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" "${cli_args[@]}"
   return $?
 }
-

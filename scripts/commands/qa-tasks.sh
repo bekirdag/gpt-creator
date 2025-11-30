@@ -3,6 +3,9 @@
 
 cmd_qa_tasks() {
   local root="" db_override="" task_filter="" url="" head_mode="headless" dry_run=0 allow_console=0 allow_network=0 retry_mobile=1 fallback_cmd=""
+  case "${GC_DRY_RUN:-}" in
+    1|true|yes|on) dry_run=1 ;;
+  esac
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project|--root)

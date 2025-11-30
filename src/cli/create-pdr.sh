@@ -20,6 +20,9 @@ MODEL="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex}}
 DRY_RUN=0
 FORCE=0
 AGENT_NAME=""
+case "${GC_DRY_RUN:-}" in
+  1|true|yes|on) DRY_RUN=1 ;;
+esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

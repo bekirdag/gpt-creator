@@ -98,6 +98,9 @@ usage() {
 : "${CODEX_MODEL:=${GC_DEFAULT_MODEL}}"
 DRY_RUN=0
 TASKS_FILE=""
+case "${GC_DRY_RUN:-}" in
+  1|true|yes|on) DRY_RUN=1 ;;
+esac
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

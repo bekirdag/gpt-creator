@@ -135,6 +135,18 @@ gc_env_truthy() {
   return 1
 }
 
+gc_dry_run_enabled() {
+  gc_env_truthy "${GC_DRY_RUN:-0}"
+}
+
+gc_dry_run_notice() {
+  if gc_dry_run_enabled; then
+    warn "Dry-run mode enabled; commands will avoid side effects when supported."
+    return 0
+  fi
+  return 1
+}
+
 resolve_cli_root() {
   local source="${BASH_SOURCE[0]}"
   while [[ -L "$source" ]]; do
@@ -1770,6 +1782,9 @@ gc_reports_extract_global_flags() {
       --)
         GC_FILTERED_ARGS+=("${args[@]:idx}")
         return 0
+        ;;
+      --dry-run|--dryrun)
+        GC_DRY_RUN=1
         ;;
       --reports-on)
         GC_REPORTS_ON=1
@@ -4455,6 +4470,13 @@ gc_load_api_keys
 GC_ORIGINAL_ARGS=("$@")
 gc_reports_extract_global_flags "$@"
 set -- "${GC_FILTERED_ARGS[@]}"
+if gc_env_truthy "${GC_DRY_RUN:-0}"; then
+  GC_DRY_RUN=1
+else
+  GC_DRY_RUN=0
+fi
+export GC_DRY_RUN
+gc_dry_run_notice || true
 
 GC_INVOCATION="$0"
 if ((${#GC_ORIGINAL_ARGS[@]})); then

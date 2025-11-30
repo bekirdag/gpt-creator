@@ -3,6 +3,9 @@
 
 cmd_refine_tasks() {
   local root="" story_filter="" model_override="" dry_run=0 force=0
+  case "${GC_DRY_RUN:-}" in
+    1|true|yes|on) dry_run=1 ;;
+  esac
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project) root="$(abs_path "$2")"; shift 2;;

@@ -3,6 +3,9 @@
 
 cmd_install_llm() {
   local root="" provider="" adapter="" os_choice="default" json=0 dry_run=0 run=0 yes=0 verbose=0
+  case "${GC_DRY_RUN:-}" in
+    1|true|yes|on) dry_run=1 ;;
+  esac
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project)
@@ -72,4 +75,3 @@ cmd_install_llm() {
   gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" "${cli_args[@]}"
   return $?
 }
-

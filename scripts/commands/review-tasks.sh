@@ -3,6 +3,9 @@
 
 cmd_review_tasks() {
   local root="" agent="" db_override="" task_filter="" dry_run=0 client_override="" model_override="" max_issues=10 max_output=4000
+  case "${GC_DRY_RUN:-}" in
+    1|true|yes|on) dry_run=1 ;;
+  esac
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project|--root)

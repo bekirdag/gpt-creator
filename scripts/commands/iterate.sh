@@ -5,6 +5,9 @@ cmd_iterate() {
   warn "'iterate' is deprecated; running 'create-tasks' followed by 'work-on-tasks'. Use those commands directly for finer control."
 
   local root="" jira="" dry_run=0 force=0
+  case "${GC_DRY_RUN:-}" in
+    1|true|yes|on) dry_run=1 ;;
+  esac
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --project)

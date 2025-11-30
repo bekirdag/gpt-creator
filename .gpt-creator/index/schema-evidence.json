@@ -171,6 +171,11 @@
       "kind": "sql"
     },
     {
+      "name": "task_comments",
+      "file": "scripts/python/task_comments.py",
+      "kind": "sql"
+    },
+    {
       "name": "task_dependencies",
       "file": "scripts/python/update_global_task_order.py",
       "kind": "sql"
@@ -481,6 +486,11 @@
       "kind": "sql"
     },
     {
+      "name": "--",
+      "file": "scripts/python/refresh_stack_db.py",
+      "kind": "knex"
+    },
+    {
       "name": "idx_documents_sha",
       "on": "documents",
       "file": "scripts/python/scan_project.py",
@@ -490,6 +500,24 @@
       "name": "idx_documents_kind",
       "on": "documents",
       "file": "scripts/python/scan_project.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_comments_task",
+      "on": "task_comments",
+      "file": "scripts/python/task_comments.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_comments_story_ref",
+      "on": "task_comments",
+      "file": "scripts/python/task_comments.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_comments_commenter",
+      "on": "task_comments",
+      "file": "scripts/python/task_comments.py",
       "kind": "sql"
     },
     {
@@ -572,6 +600,7 @@
     "scripts/python/progress_migration.py",
     "scripts/python/record_task_progress.py",
     "scripts/python/scan_project.py",
+    "scripts/python/task_comments.py",
     "scripts/python/update_global_task_order.py",
     "scripts/python/update_throughput_metrics.py",
     "src/lib/create-jira-tasks/to_sqlite.py",
@@ -582,6 +611,7 @@
     "test/python/test_agents_repository.py",
     "test/python/test_estimate_and_backlog.py",
     "test/python/test_progress_migration.py",
-    "test/python/test_prompt_budget.py"
+    "test/python/test_prompt_budget.py",
+    "scripts/python/refresh_stack_db.py"
   ]
 }

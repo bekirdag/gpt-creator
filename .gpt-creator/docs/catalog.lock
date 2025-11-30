@@ -1,1 +1,1 @@
-{ "db": "/Users/bekirdag/Documents/apps/gpt-creator/.gpt-creator/staging/plan/tasks/tasks.db", "enabled": 1, "mode": "lazy" }
+{ "db": "./.gpt-creator/docs/catalog.db", "enabled": 1, "mode": "lazy" }

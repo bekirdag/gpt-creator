@@ -2,33 +2,56 @@
 # shellcheck shell=bash
 
 cmd_iterate() {
-  warn "'iterate' is deprecated; prefer 'gpt-creator create-tasks' followed by 'gpt-creator work-on-tasks'."
+  warn "'iterate' is deprecated; running 'create-tasks' followed by 'work-on-tasks'. Use those commands directly for finer control."
 
-  local root="" jira=""
+  local root="" jira="" dry_run=0 force=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --project) root="$(abs_path "$2")"; shift 2;;
-      --jira) jira="$(abs_path "$2")"; shift 2;;
-      --no-verify) shift;;
-      --verify) shift;;
-      *) break;;
+      --project)
+        root="$(abs_path "$2")"
+        shift 2
+        ;;
+      --jira|--tasks-file)
+        jira="$(abs_path "$2")"
+        shift 2
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      --force)
+        force=1
+        shift
+        ;;
+      --no-verify|--verify)
+        # Legacy flags kept for compatibility; no-op in the new flow.
+        shift
+        ;;
+      -h|--help)
+        if tmpl="$(gc_help_template_for_cmd iterate)"; then
+          gc_render_template "${tmpl}"
+        else
+          gc_render_template "help/iterate_usage.txt"
+        fi
+        return 0
+        ;;
+      *)
+        break
+        ;;
     esac
   done
+
   ensure_ctx "$root"
   [[ -n "$jira" ]] || jira="${INPUT_DIR}/jira.md"
   [[ -f "$jira" ]] || die "Jira tasks file not found: ${jira}"
 
-  local tasks_json_local="${PLAN_DIR}/jira-tasks.local.json"
-  gc_parse_jira_tasks "$jira" "$tasks_json_local"
-  ok "Parsed Jira tasks → ${tasks_json_local}"
-  local tasks_json="${tasks_json_local}"
+  gc_load_cmd create-tasks
+  gc_load_cmd work-on-tasks
 
-  local codex_parse_prompt="${PLAN_DIR}/iterate-codex-parse.md"
-  local codex_raw_json="${PLAN_DIR}/jira-tasks.codex.raw.txt"
-  local codex_json="${PLAN_DIR}/jira-tasks.codex.json"
-  {
-    gc_render_template "prompts/iterate_parse_prefix.md" >"$codex_parse_prompt"
-    cat "$jira" >>"$codex_parse_prompt"
-    printf '\n' >>"$codex_parse_prompt"
-    gc_render_template "prompts/iterate_parse_suffix.md" >>"$codex_parse_prompt"
-  }
+  local -a create_args=(--project "$PROJECT_ROOT" --jira "$jira")
+  (( force )) && create_args+=(--force)
+  cmd_create_tasks "${create_args[@]}"
+
+  (( dry_run )) && return 0
+  cmd_work_on_tasks --project "$PROJECT_ROOT"
+}

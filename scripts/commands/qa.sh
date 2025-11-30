@@ -79,7 +79,7 @@ cmd_qa() {
         GC_WEB_HOST_PORT="$detected"; WEB_HOST_PORT="$detected"; ports_updated=1
       fi
     fi
-    if detected="$(gc_compose_port "$compose_file" admin 5173)"; then
+    if detected="$(gc_compose_port "$compose_file" admin 5174)"; then
       if [[ -n "$detected" && "$detected" != "$GC_ADMIN_HOST_PORT" ]]; then
         GC_ADMIN_HOST_PORT="$detected"; ADMIN_HOST_PORT="$detected"; ports_updated=1
       fi
@@ -401,4 +401,3 @@ print(json.dumps(summary, ensure_ascii=False))'
   fi
   ok "QA complete — pass=${pass} skip=${skip}"
 }
-

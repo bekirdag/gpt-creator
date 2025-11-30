@@ -132,18 +132,7 @@ cmd_create_agent() {
       fi
       return "$status"
     fi
-    printf '%s\n' "$output" | gc_agents_emit_agent_json 0
-    return 0
-  fi
-  if (( json )); then
-    local output status
-    if ! output="$(gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" "${cli_args[@]}")"; then
-      status=$?
-      if [[ -n "$output" ]]; then
-        printf '%s\n' "$output"
-      fi
-      return "$status"
-    fi
+    # Pretty-print JSON for readability while preserving machine parsability.
     printf '%s\n' "$output" | gc_agents_emit_agent_json 2
     return 0
   fi
@@ -151,4 +140,3 @@ cmd_create_agent() {
   gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" "${cli_args[@]}"
   return $?
 }
-

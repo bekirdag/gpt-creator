@@ -31,6 +31,7 @@ cmd_next() {
   local tasks_db="${PLAN_DIR}/tasks/tasks.db"
   [[ -f "$tasks_db" ]] || die "Tasks database not found at ${tasks_db}. Run 'gpt-creator create-tasks' first."
 
+  local python_bin="${PYTHON_BIN:-python3}"
   local story_plan_helper
   story_plan_helper="$(gc_clone_python_tool "story_scheduler.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   "$python_bin" "$story_plan_helper" "$tasks_db" "${story:-}" "1" >/dev/null 2>&1 || true
@@ -41,6 +42,5 @@ cmd_next() {
   if [[ -n "$story" ]]; then
     helper_args+=(--story "$story")
   fi
-  python3 "$dag_helper" "${helper_args[@]}"
+  "$python_bin" "$dag_helper" "${helper_args[@]}"
 }
-

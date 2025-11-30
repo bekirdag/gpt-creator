@@ -39,18 +39,14 @@ cmd_dag() {
             story="$2"
             shift 2
             ;;
-          --help|-h)
-        if tmpl="$(gc_help_template_for_cmd dag)"; then
-          gc_render_template "${tmpl}"
-        else
-      -h|--help)
-        if tmpl="$(gc_help_template_for_cmd dag)"; then
-          gc_render_template "${tmpl}"
-        else
-          gc_render_template "help/dag_validate_usage.txt"
-        fi
-        return 0
-        ;;
+          -h|--help)
+            if tmpl="$(gc_help_template_for_cmd dag-validate)"; then
+              gc_render_template "${tmpl}"
+            else
+              gc_render_template "help/dag_validate_usage.txt"
+            fi
+            return 0
+            ;;
           *)
             die "Unknown argument for dag validate: $1"
             ;;
@@ -69,4 +65,3 @@ cmd_dag() {
       ;;
   esac
 }
-

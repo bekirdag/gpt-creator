@@ -31,14 +31,8 @@ cmd_tokens() {
     esac
   done
 
-  local project_root=""
-  if [[ -n "$root" ]]; then
-    project_root="$root"
-  elif [[ -n "${PROJECT_ROOT:-}" ]]; then
-    project_root="$PROJECT_ROOT"
-  else
-    project_root="$PWD"
-  fi
+  ensure_ctx "$root"
+  local project_root="${PROJECT_ROOT:-$PWD}"
 
   local usage_file="${project_root}/.gpt-creator/logs/codex-usage.ndjson"
   if [[ ! -f "$usage_file" ]]; then
@@ -46,8 +40,7 @@ cmd_tokens() {
     return 1
   fi
   local helper_path
-  helper_path="$(gc_clone_python_tool "tokens_report.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  helper_path="$(gc_clone_python_tool "tokens_report.py" "$project_root")" || return 1
   python3 "$helper_path" "$usage_file" "$details" "$json_output"
 }
-
 

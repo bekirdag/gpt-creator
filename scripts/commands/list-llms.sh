@@ -92,7 +92,7 @@ cmd_list_llms() {
   fi
   if (( needs_key )); then
     cli_args+=("--needs-key")
-    (( warn_keys )) || cli_args+=("--warn-keys")
+    (( warn_keys )) || cli_args+=("--no-warn-keys")
   else
     (( warn_keys )) || cli_args+=("--no-warn-keys")
   fi
@@ -115,4 +115,3 @@ cmd_list_llms() {
   fi
   return 1
 }
-

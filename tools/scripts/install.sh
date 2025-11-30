@@ -4,6 +4,15 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
+# When invoked via the scripts/ -> tools/scripts symlink, REPO_DIR resolves to
+# .../tools. Walk one level up if the main bin does not exist.
+if [[ ! -f "${REPO_DIR}/bin/gpt-creator" && -f "${REPO_DIR}/../bin/gpt-creator" ]]; then
+  REPO_DIR="$(cd "${REPO_DIR}/.." && pwd -P)"
+fi
+if [[ ! -f "${REPO_DIR}/bin/gpt-creator" ]]; then
+  echo "Unable to locate repo root from ${SCRIPT_DIR} (missing bin/gpt-creator)" >&2
+  exit 1
+fi
 HELP_DIR="${REPO_DIR}/assets/templates/help"
 
 INSTALL_PREFIX="${PREFIX:-/usr/local}"

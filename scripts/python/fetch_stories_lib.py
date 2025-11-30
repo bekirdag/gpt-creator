@@ -1184,8 +1184,9 @@ def print_progress():
     print(f"  Ready for QA:      {ready_qa:,} ({ready_qa_pct:0.1f}%)")
     print(f"  In-progress:       {effective_in_progress:,} ({in_progress_pct:0.1f}%)")
     print(f"  Pending:           {effective_pending:,} ({pending_pct:0.1f}%)")
+    print(f"Completed tasks (effective): {effective_completed:,} ({percent:0.1f}%)")
     print(f"Completed tasks (canonical): {canonical_completed:,}")
-    if detection_pending:
+    if detection_pending or canonical_completed != effective_completed:
         print(f"Detections pending apply: {detection_pending:,}")
     print(f"Remaining (canonical): {canonical_remaining:,}")
     print(f"Total tasks: {total:,}")

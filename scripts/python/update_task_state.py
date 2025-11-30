@@ -47,6 +47,23 @@ def update_task_state(
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
+    cur.execute("PRAGMA table_info(tasks)")
+    existing_columns = {row["name"] for row in cur.fetchall()}
+    for column, ddl in (
+        ("started_at", "TEXT"),
+        ("completed_at", "TEXT"),
+        ("locked_by_migration", "INTEGER DEFAULT 0"),
+        ("reopened_by_migration", "INTEGER DEFAULT 0"),
+        ("reopened_by_migration_at", "TEXT"),
+        ("last_run", "TEXT"),
+        ("updated_at", "TEXT"),
+    ):
+        if column not in existing_columns:
+            try:
+                cur.execute(f"ALTER TABLE tasks ADD COLUMN {column} {ddl}")
+                existing_columns.add(column)
+            except sqlite3.DatabaseError:
+                pass
     row = cur.execute(
         """
         SELECT id, status, started_at, completed_at, locked_by_migration,
@@ -65,9 +82,7 @@ def update_task_state(
 
         if locked_by_migration and status_lower not in LOCKABLE_STATUSES and not _is_blocked_dependency(status_lower):
             allow_reopen = False
-            if status_lower in {"pending", "in-progress"}:
-                allow_reopen = True
-            elif status_lower == current_status:
+            if status_lower == current_status:
                 allow_reopen = True
             elif status_lower == "blocked-migration-transition":
                 allow_reopen = True

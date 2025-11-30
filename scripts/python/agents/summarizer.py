@@ -34,7 +34,11 @@ class AgentSummarizer:
         *,
         env_overrides: Optional[dict[str, str]] = None,
     ) -> str:
-        pair = self.registry.validate_pair(client, model)
+        try:
+            pair = self.registry.validate_pair(client, model)
+        except Exception as exc:
+            logger.warning("agent summarizer: falling back to deterministic summary (%s)", exc)
+            return summarize_text(text)
         adapter = pair.get("adapter") or "codex_cli"
         env_overrides = env_overrides or {}
         temp_env: dict[str, Optional[str]] = {}

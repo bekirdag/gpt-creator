@@ -1,5 +1,7 @@
 """Agent domain package."""
 
+from typing import TYPE_CHECKING
+
 from .model import (
     Agent,
     AgentCreate,
@@ -10,7 +12,9 @@ from .model import (
     PromptBundle,
 )
 from .repository import AgentRepository
-from .service import AgentService, DocSource
+
+if TYPE_CHECKING:  # pragma: no cover - avoids import cycles at runtime
+    from .service import AgentService, DocSource
 
 __all__ = [
     "Agent",
@@ -24,3 +28,11 @@ __all__ = [
     "AgentService",
     "DocSource",
 ]
+
+
+def __getattr__(name):
+    if name in {"AgentService", "DocSource"}:
+        from .service import AgentService, DocSource
+
+        return AgentService if name == "AgentService" else DocSource
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

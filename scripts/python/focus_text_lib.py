@@ -147,9 +147,11 @@ def compile_safe(pattern: str, flags: int = 0):
         return compile_user_pattern(pattern, flags=flags, allow_regex=False)
 
 
-re.compile = compile_safe
-if _original_re__compile is not None:
-    re._compile = compile_safe
+# Avoid recursion when narrowing commands; skip monkey-patching if GC_RG_NARROW is set.
+if os.getenv("GC_RG_NARROW", "").strip() == "":
+    re.compile = compile_safe
+    if _original_re__compile is not None:
+        re._compile = compile_safe
 
 apply_timeout_env = os.environ.get("GC_APPLY_PHASE_TIMEOUT_SECONDS", "1500")
 try:
@@ -427,6 +429,11 @@ if not focus_valid:
     pending_commands = payload.get('commands')
     has_changes = isinstance(pending_changes, list) and any(pending_changes)
     has_commands = isinstance(pending_commands, list) and any(pending_commands)
+    if not focus_valid and has_commands and os.getenv("GC_RG_NARROW", "").strip():
+        # Allow rg narrowing to proceed even when the focus list is missing.
+        focus_targets = focus_targets or []
+        payload['focus'] = focus_targets
+        focus_valid = True
     if not has_changes and not has_commands:
         focus_targets = []
         payload['focus'] = focus_targets

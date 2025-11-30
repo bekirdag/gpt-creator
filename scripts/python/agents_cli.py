@@ -33,6 +33,7 @@ else:
 from agents import AgentFilter, AgentService, DocSource, LLMFilter
 from agents.repository import AgentRepository  # type: ignore  # noqa: E402
 from agents.model import Agent
+from agents_validate import parse_tags
 from llm_client_factory import create_llm_client
 
 

@@ -25,6 +25,9 @@
 #   DATE_FIELD          — jq field path candidates. Default: .startDate,.date
 set -Eeuo pipefail
 
+# shellcheck source=tools/scripts/lib/python_clone.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/scripts/lib/python_clone.sh"
+
 API_BASE="${1:-${GC_DEFAULT_API_URL:-http://localhost:3000/api/v1}}"
 PROGRAMS_ENDPOINT="${PROGRAMS_ENDPOINT:-${API_BASE%/}/programs}"
 
@@ -46,56 +49,6 @@ info() { printf 'ℹ️  %s\n' "$*"; }
 need() { command -v "$1" >/dev/null 2>&1 || { bad "Missing dependency: $1"; exit 2; }; }
 need curl
 need jq
-
-clone_python_tool() {
-  local script_name="${1:?python script name required}"
-  local project_root="${2:-${PROJECT_ROOT:-$PWD}}"
-
-  if declare -f gc_clone_python_tool >/dev/null 2>&1; then
-    gc_clone_python_tool "$script_name" "$project_root"
-    return
-  fi
-
-  local cli_root
-  if [[ -n "${GC_ROOT:-}" ]]; then
-    cli_root="$GC_ROOT"
-  else
-    cli_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  fi
-  local scripts_root="${GC_SCRIPTS_ROOT:-${cli_root}/scripts}"
-
-  local source_path="${scripts_root}/python/${script_name}"
-  if [[ ! -f "$source_path" ]]; then
-    bad "Python helper missing at ${source_path}"
-    exit 1
-  fi
-
-  local work_dir_name="${GC_WORK_DIR_NAME:-.gpt-creator}"
-  local target_dir="${project_root%/}/${work_dir_name}/shims/python"
-  local target_path="${target_dir}/${script_name}"
-
-  if [[ ! -d "$target_dir" ]]; then
-    mkdir -p "$target_dir" || { bad "Failed to create ${target_dir}"; exit 1; }
-  fi
-
-  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
-    cp "$source_path" "$target_path" || { bad "Failed to copy ${script_name} helper"; exit 1; }
-  fi
-
-  if [[ "$script_name" == *.py ]]; then
-    local base_name="${script_name%.py}"
-    local sidecar="${base_name}_lib.py"
-    local sidecar_source="${scripts_root}/python/${sidecar}"
-    local sidecar_target="${target_dir}/${sidecar}"
-    if [[ -f "$sidecar_source" ]]; then
-      if [[ ! -f "$sidecar_target" || "$sidecar_source" -nt "$sidecar_target" ]]; then
-        cp "$sidecar_source" "$sidecar_target" || { bad "Failed to copy ${sidecar} helper"; exit 1; }
-      fi
-    fi
-  fi
-
-  printf '%s\n' "$target_path"
-}
 
 urlencode() {
   local LC_ALL=C

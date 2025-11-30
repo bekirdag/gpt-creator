@@ -214,6 +214,11 @@ if [[ -f "${GC_SCRIPTS_ROOT}/lib/git-branches.sh" ]]; then
   # shellcheck disable=SC1090
   . "${GC_SCRIPTS_ROOT}/lib/git-branches.sh"
 fi
+# Shared python helper cloning utilities
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/python_clone.sh" ]]; then
+  # shellcheck source=tools/scripts/lib/python_clone.sh
+  . "${GC_SCRIPTS_ROOT}/lib/python_clone.sh"
+fi
 if [[ -f "${GC_SCRIPTS_ROOT}/render_task_footer.sh" ]]; then
   # shellcheck disable=SC1090
   . "${GC_SCRIPTS_ROOT}/render_task_footer.sh"

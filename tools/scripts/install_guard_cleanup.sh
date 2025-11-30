@@ -4,50 +4,11 @@ set -Eeuo pipefail
 PROJECT_ROOT=""
 FORCE=0
 
+# shellcheck source=tools/scripts/lib/python_clone.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/lib/python_clone.sh"
+
 clone_python_tool() {
-  local script_name="${1:?python script name required}"
-  local root_param="${2:-}"
-  local root="${root_param:-${PROJECT_ROOT:-$PWD}}"
-  if command -v gc_clone_python_tool >/dev/null 2>&1; then
-    gc_clone_python_tool "$script_name" "$root"
-    return
-  fi
-  local cli_root="${CLI_ROOT:-}"
-  local scripts_root=""
-  if [[ -z "$cli_root" ]]; then
-    cli_root="$(cd "$(dirname "$0")/.." && pwd -P)" || cli_root=""
-  fi
-  scripts_root="${GC_SCRIPTS_ROOT:-${cli_root}/scripts}"
-  if [[ -z "$cli_root" ]]; then
-    echo "Unable to determine CLI root while preparing ${script_name}" >&2
-    return 1
-  fi
-  local source_path="${scripts_root}/python/${script_name}"
-  if [[ ! -f "$source_path" ]]; then
-    echo "Python helper missing at ${source_path}" >&2
-    return 1
-  fi
-  local work_dir_name="${GC_WORK_DIR_NAME:-.gpt-creator}"
-  local target_dir="${root%/}/${work_dir_name}/shims/python"
-  local target_path="${target_dir}/${script_name}"
-  if [[ ! -d "$target_dir" ]]; then
-    mkdir -p "$target_dir" || return 1
-  fi
-  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
-    cp "$source_path" "$target_path" || return 1
-  fi
-  if [[ "$script_name" == *.py ]]; then
-    local base_name="${script_name%.py}"
-    local sidecar="${base_name}_lib.py"
-    local sidecar_source="${scripts_root}/python/${sidecar}"
-    local sidecar_target="${target_dir}/${sidecar}"
-    if [[ -f "$sidecar_source" ]]; then
-      if [[ ! -f "$sidecar_target" || "$sidecar_source" -nt "$sidecar_target" ]]; then
-        cp "$sidecar_source" "$sidecar_target" || return 1
-      fi
-    fi
-  fi
-  printf '%s\n' "$target_path"
+  gc_clone_python_tool "$@"
 }
 
 usage() {

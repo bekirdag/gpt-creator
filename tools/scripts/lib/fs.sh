@@ -1,39 +1,8 @@
 #!/usr/bin/env bash
 # Shared filesystem/navigation helpers for gpt-creator.
 
-gc_clone_python_tool() {
-  local script_name="${1:?python script name required}"
-  local root_param="${2:-}"
-  local root="${root_param:-${PROJECT_ROOT:-$PWD}}"
-  local scripts_root="${GC_SCRIPTS_ROOT:-${CLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts}"
-  if [[ -z "$root" ]]; then
-    die "Unable to determine project root while preparing ${script_name}"
-  fi
-  local source_path="${scripts_root}/python/${script_name}"
-  if [[ ! -f "$source_path" ]]; then
-    die "Python helper missing at ${source_path}"
-  fi
-  local target_dir="${root}/.gpt-creator/shims/python"
-  if [[ ! -d "$target_dir" ]]; then
-    mkdir -p "$target_dir" || die "Failed to create ${target_dir}"
-  fi
-  local target_path="${target_dir}/${script_name}"
-  if [[ ! -f "$target_path" ]] || ! cmp -s "$source_path" "$target_path"; then
-    cp "$source_path" "$target_path" || die "Failed to copy ${script_name} helper"
-  fi
-  if [[ "$script_name" == *.py ]]; then
-    local base_name="${script_name%.py}"
-    local sidecar="${base_name}_lib.py"
-    local sidecar_source="${scripts_root}/python/${sidecar}"
-    local sidecar_target="${target_dir}/${sidecar}"
-    if [[ -f "$sidecar_source" ]]; then
-      if [[ ! -f "$sidecar_target" ]] || ! cmp -s "$sidecar_source" "$sidecar_target"; then
-        cp "$sidecar_source" "$sidecar_target" || die "Failed to copy ${sidecar} helper"
-      fi
-    fi
-  fi
-  echo "$target_path"
-}
+# shellcheck source=tools/scripts/lib/python_clone.sh
+. "${GC_SCRIPTS_ROOT:-${CLI_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/tools/scripts}/lib/python_clone.sh"
 
 gc_repo_root_from_git() {
   git rev-parse --show-toplevel 2>/dev/null || true

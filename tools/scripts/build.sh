@@ -7,6 +7,8 @@ if ! ROOT_DIR="$(cd "${ROOT_DIR}" && pwd)"; then
   exit 1
 fi
 CLI_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tools/scripts/lib/python_clone.sh
+. "${CLI_ROOT}/lib/python_clone.sh"
 
 log() {
   printf "[build] %s\n" "$*" >&2
@@ -27,53 +29,6 @@ run_cmd() {
 ci_best_effort="${CI_BUILD_BEST_EFFORT:-0}"
 
 cd "$ROOT_DIR"
-
-gc_clone_python_tool() {
-  local script_name="${1:?python script name required}"
-  local root="${2:-$ROOT_DIR}"
-  local scripts_root="${GC_SCRIPTS_ROOT:-${CLI_ROOT:-$ROOT_DIR}/scripts}"
-
-  if [[ -z "$root" ]]; then
-    log "Unable to determine project root while preparing ${script_name}"
-    return 1
-  fi
-
-  local source_path="${scripts_root}/python/${script_name}"
-  if [[ ! -f "$source_path" ]]; then
-    log "Python helper missing at ${source_path}"
-    return 1
-  fi
-
-  local target_dir="${root}/${GC_WORK_DIR_NAME:-.gpt-creator}/shims/python"
-  local target_path="${target_dir}/${script_name}"
-  if [[ ! -d "$target_dir" ]]; then
-    mkdir -p "$target_dir" || {
-      log "Failed to create ${target_dir}"
-      return 1
-    }
-  fi
-  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
-    cp "$source_path" "$target_path" || {
-      log "Failed to copy ${script_name} helper"
-      return 1
-    }
-  fi
-  if [[ "$script_name" == *.py ]]; then
-    local base_name="${script_name%.py}"
-    local sidecar="${base_name}_lib.py"
-    local sidecar_source="${scripts_root}/python/${sidecar}"
-    local sidecar_target="${target_dir}/${sidecar}"
-    if [[ -f "$sidecar_source" ]]; then
-      if [[ ! -f "$sidecar_target" || "$sidecar_source" -nt "$sidecar_target" ]]; then
-        cp "$sidecar_source" "$sidecar_target" || {
-          log "Failed to copy ${sidecar} helper"
-          return 1
-        }
-      fi
-    fi
-  fi
-  printf '%s\n' "$target_path"
-}
 
 has_package_script() {
   local script="$1"

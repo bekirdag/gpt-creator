@@ -38,58 +38,11 @@ cli_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CMD=("${GC_CLI_BIN:-${cli_root}/bin/gpt-creator}" work-on-tasks --project "$PROJECT_ROOT")
 python_bin="${PYTHON_BIN:-python3}"
 
+# shellcheck source=tools/scripts/lib/python_clone.sh
+. "${cli_root}/tools/scripts/lib/python_clone.sh"
+
 run_pid=
 run_pgid=
-
-clone_python_tool() {
-  local script_name="${1:?python script name required}"
-  local project_root="${2:-${PROJECT_ROOT:-$PWD}}"
-
-  if declare -f gc_clone_python_tool >/dev/null 2>&1; then
-    gc_clone_python_tool "$script_name" "$project_root"
-    return
-  fi
-
-  local cli_root
-  if [[ -n "${GC_ROOT:-}" ]]; then
-    cli_root="$GC_ROOT"
-  else
-    cli_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  fi
-  local scripts_root="${GC_SCRIPTS_ROOT:-${cli_root}/scripts}"
-
-  local source_path="${scripts_root}/python/${script_name}"
-  if [[ ! -f "$source_path" ]]; then
-    printf 'Python helper missing at %s\n' "$source_path" >&2
-    exit 1
-  fi
-
-  local work_dir_name="${GC_WORK_DIR_NAME:-.gpt-creator}"
-  local target_dir="${project_root%/}/${work_dir_name}/shims/python"
-  local target_path="${target_dir}/${script_name}"
-
-  if [[ ! -d "$target_dir" ]]; then
-    mkdir -p "$target_dir"
-  fi
-
-  if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
-    cp "$source_path" "$target_path"
-  fi
-
-  if [[ "$script_name" == *.py ]]; then
-    local base_name="${script_name%.py}"
-    local sidecar="${base_name}_lib.py"
-    local sidecar_source="${scripts_root}/python/${sidecar}"
-    local sidecar_target="${target_dir}/${sidecar}"
-    if [[ -f "$sidecar_source" ]]; then
-      if [[ ! -f "$sidecar_target" || "$sidecar_source" -nt "$sidecar_target" ]]; then
-        cp "$sidecar_source" "$sidecar_target"
-      fi
-    fi
-  fi
-
-  printf '%s\n' "$target_path"
-}
 
 mark_interrupted() {
   local signal="$1"

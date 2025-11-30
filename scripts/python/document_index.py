@@ -9,8 +9,11 @@ FILE_DIR = Path(__file__).resolve().parent
 if str(FILE_DIR) not in sys.path:
     sys.path.insert(0, str(FILE_DIR))
 
-import document_index_lib as _lib
-from document_index_lib import *  # re-export for compatibility  # noqa: F401,F403
+try:
+    import document_index_lib as _lib
+    from document_index_lib import *  # re-export for compatibility  # noqa: F401,F403
+except ModuleNotFoundError as exc:
+    raise SystemExit("document_index_lib.py missing from shims; rerun gpt-creator to clone helpers.") from exc
 
 
 def main() -> None:

@@ -1701,5 +1701,5 @@ def main(argv: Optional[list[str]] = None) -> None:
     raise SystemExit(exit_code)
 
 
-def main():
-        main()
+if __name__ == "__main__":
+    main()

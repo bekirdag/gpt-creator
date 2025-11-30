@@ -147,9 +147,13 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
    ```
    - A `.gpt-creator` workspace is created under the project root.
    - Generated code lands in `/apps/api`, `/apps/web`, `/apps/admin`, `/db`, `/docker`.
-   - A `.env` file with random database credentials is created automatically; reuse it for local scripts and CI secrets.
+  - A `.env` file with random database credentials is created automatically; reuse it for local scripts and CI secrets.
   - The automated testing stage has been removed; gpt-creator now focuses exclusively on code creation.
   - Templates live under `project_templates/`. Add subdirectories (optionally with `tags.txt` or `template.json`) to seed new projects; `--template auto` attempts to match the staged RFP/PDR, or pass `--template <name>` / `--skip-template` to override.
+
+### Testing
+
+- Run `npm test` (alias for `npx vitest run`). The default config uses the `vmThreads` pool with a single worker for sandbox compatibility; increase workers or switch pools in `vitest.config.mts` if your environment supports it.
 
 ### Contributor Quick Reference
 

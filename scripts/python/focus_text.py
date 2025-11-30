@@ -9,8 +9,11 @@ FILE_DIR = Path(__file__).resolve().parent
 if str(FILE_DIR) not in sys.path:
     sys.path.insert(0, str(FILE_DIR))
 
-import focus_text_lib as _lib
-from focus_text_lib import *  # re-export for compatibility  # noqa: F401,F403
+try:
+    import focus_text_lib as _lib
+    from focus_text_lib import *  # re-export for compatibility  # noqa: F401,F403
+except ModuleNotFoundError as exc:
+    raise SystemExit("focus_text_lib.py missing from shims; rerun gpt-creator to clone helpers.") from exc
 
 if __name__ == '__main__':
     if hasattr(_lib, 'main') and callable(getattr(_lib, 'main')):

@@ -13,12 +13,23 @@ gc_clone_python_tool() {
     die "Python helper missing at ${source_path}"
   fi
   local target_dir="${root}/.gpt-creator/shims/python"
-  local target_path="${target_dir}/${script_name}"
   if [[ ! -d "$target_dir" ]]; then
     mkdir -p "$target_dir" || die "Failed to create ${target_dir}"
   fi
+  local target_path="${target_dir}/${script_name}"
   if [[ ! -f "$target_path" ]] || ! cmp -s "$source_path" "$target_path"; then
     cp "$source_path" "$target_path" || die "Failed to copy ${script_name} helper"
+  fi
+  if [[ "$script_name" == *.py ]]; then
+    local base_name="${script_name%.py}"
+    local sidecar="${base_name}_lib.py"
+    local sidecar_source="${CLI_ROOT}/scripts/python/${sidecar}"
+    local sidecar_target="${target_dir}/${sidecar}"
+    if [[ -f "$sidecar_source" ]]; then
+      if [[ ! -f "$sidecar_target" ]] || ! cmp -s "$sidecar_source" "$sidecar_target"; then
+        cp "$sidecar_source" "$sidecar_target" || die "Failed to copy ${sidecar} helper"
+      fi
+    fi
   fi
   echo "$target_path"
 }

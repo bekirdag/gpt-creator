@@ -252,37 +252,37 @@
     },
     {
       "name": "documentation",
-      "file": "src/lib/doc_registry.py",
+      "file": "src/lib/doc_registry_lib.py",
       "kind": "sql"
     },
     {
       "name": "documentation_changes",
-      "file": "src/lib/doc_registry.py",
+      "file": "src/lib/doc_registry_lib.py",
       "kind": "sql"
     },
     {
       "name": "documentation_sections",
-      "file": "src/lib/doc_registry.py",
+      "file": "src/lib/doc_registry_lib.py",
       "kind": "sql"
     },
     {
       "name": "documentation_excerpts",
-      "file": "src/lib/doc_registry.py",
+      "file": "src/lib/doc_registry_lib.py",
       "kind": "sql"
     },
     {
       "name": "documentation_summaries",
-      "file": "src/lib/doc_registry.py",
+      "file": "src/lib/doc_registry_lib.py",
       "kind": "sql"
     },
     {
       "name": "documentation_index_state",
-      "file": "src/lib/doc_registry.py",
+      "file": "src/lib/doc_registry_lib.py",
       "kind": "sql"
     },
     {
       "name": "task_artifacts",
-      "file": "src/lib/work_on_tasks_runtime.py",
+      "file": "src/lib/work_on_tasks_apply_impl.py",
       "kind": "sql"
     },
     {
@@ -559,25 +559,25 @@
     {
       "name": "idx_documentation_sections_doc",
       "on": "documentation_sections",
-      "file": "src/lib/doc_registry.py",
+      "file": "src/lib/doc_registry_lib.py",
       "kind": "sql"
     },
     {
       "name": "idx_documentation_sections_parent",
       "on": "documentation_sections",
-      "file": "src/lib/doc_registry.py",
+      "file": "src/lib/doc_registry_lib.py",
       "kind": "sql"
     },
     {
       "name": "idx_documentation_excerpts_doc",
       "on": "documentation_excerpts",
-      "file": "src/lib/doc_registry.py",
+      "file": "src/lib/doc_registry_lib.py",
       "kind": "sql"
     },
     {
       "name": "idx_documentation_excerpts_section",
       "on": "documentation_excerpts",
-      "file": "src/lib/doc_registry.py",
+      "file": "src/lib/doc_registry_lib.py",
       "kind": "sql"
     },
     {
@@ -606,8 +606,8 @@
     "src/lib/create-jira-tasks/to_sqlite.py",
     "src/lib/create-jira-tasks/upsert_story_into_db.py",
     "src/lib/doc_indexer.py",
-    "src/lib/doc_registry.py",
-    "src/lib/work_on_tasks_runtime.py",
+    "src/lib/doc_registry_lib.py",
+    "src/lib/work_on_tasks_apply_impl.py",
     "test/python/test_agents_repository.py",
     "test/python/test_estimate_and_backlog.py",
     "test/python/test_progress_migration.py",

@@ -23,6 +23,17 @@ gc_clone_python_tool() {
   if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
     cp "$source_path" "$target_path" || { echo "Failed to copy ${script_name}" >&2; return 1; }
   fi
+  if [[ "$script_name" == *.py ]]; then
+    local base_name="${script_name%.py}"
+    local sidecar="${base_name}_lib.py"
+    local sidecar_source="${ROOT_DIR}/scripts/python/${sidecar}"
+    local sidecar_target="${target_dir}/${sidecar}"
+    if [[ -f "$sidecar_source" ]]; then
+      if [[ ! -f "$sidecar_target" || "$sidecar_source" -nt "$sidecar_target" ]]; then
+        cp "$sidecar_source" "$sidecar_target" || { echo "Failed to copy ${sidecar}" >&2; return 1; }
+      fi
+    fi
+  fi
   printf '%s\n' "$target_path"
 }
 

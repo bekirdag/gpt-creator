@@ -45,6 +45,19 @@ cjt::clone_python_tool() {
   if [[ ! -f "$target_path" || "$source_path" -nt "$target_path" ]]; then
     cp "$source_path" "$target_path" || cjt::die "Failed to copy ${script_name} helper"
   fi
+
+  if [[ "$script_name" == *.py ]]; then
+    local base_name="${script_name%.py}"
+    local sidecar="${base_name}_lib.py"
+    local sidecar_source="${cli_root}/scripts/python/${sidecar}"
+    local sidecar_target="${target_dir}/${sidecar}"
+    if [[ -f "$sidecar_source" ]]; then
+      if [[ ! -f "$sidecar_target" || "$sidecar_source" -nt "$sidecar_target" ]]; then
+        cp "$sidecar_source" "$sidecar_target" || cjt::die "Failed to copy ${sidecar} helper"
+      fi
+    fi
+  fi
+
   printf '%s\n' "$target_path"
 }
 
@@ -158,6 +171,7 @@ cjt::init() {
 
   CJT_WORK_DIR="$(gc::ensure_workspace "$CJT_PROJECT_ROOT")"
   CJT_STAGING_DIR="$CJT_WORK_DIR/staging"
+  CJT_INPUT_DIR="$CJT_STAGING_DIR/inputs"
   CJT_PLAN_DIR="$CJT_STAGING_DIR/plan"
   CJT_PIPELINE_DIR="$CJT_PLAN_DIR/create-jira-tasks"
   CJT_PROMPTS_DIR="$CJT_PIPELINE_DIR/prompts"
@@ -205,7 +219,17 @@ cjt::init() {
 
   CJT_INCREMENTAL_DB=0
 
-  if [[ -f "$CJT_STAGING_DIR/docs/pdr.md" ]]; then
+  cjt::resolve_core_paths
+
+  cjt::state_init
+}
+
+cjt::resolve_core_paths() {
+  CJT_INPUT_DIR="${INPUT_DIR:-$CJT_STAGING_DIR/inputs}"
+
+  if [[ -f "$CJT_INPUT_DIR/pdr.md" ]]; then
+    CJT_PDR_PATH="$CJT_INPUT_DIR/pdr.md"
+  elif [[ -f "$CJT_STAGING_DIR/docs/pdr.md" ]]; then
     CJT_PDR_PATH="$CJT_STAGING_DIR/docs/pdr.md"
   elif [[ -f "$CJT_STAGING_DIR/pdr.md" ]]; then
     CJT_PDR_PATH="$CJT_STAGING_DIR/pdr.md"
@@ -215,34 +239,31 @@ cjt::init() {
     CJT_PDR_PATH=""
   fi
 
-  if [[ -f "$CJT_STAGING_DIR/sql/dump.sql" ]]; then
+  if [[ -f "$CJT_INPUT_DIR/sql/dump.sql" ]]; then
+    CJT_SQL_PATH="$CJT_INPUT_DIR/sql/dump.sql"
+  elif [[ -f "$CJT_STAGING_DIR/sql/dump.sql" ]]; then
     CJT_SQL_PATH="$CJT_STAGING_DIR/sql/dump.sql"
   else
     CJT_SQL_PATH=""
-    if [[ -d "$CJT_STAGING_DIR/sql" ]]; then
+    if [[ -d "$CJT_INPUT_DIR/sql" ]]; then
+      local first_sql
+      first_sql="$(find "$CJT_INPUT_DIR/sql" -maxdepth 1 -type f -name '*.sql' | head -n1 || true)"
+      CJT_SQL_PATH="$first_sql"
+    elif [[ -d "$CJT_STAGING_DIR/sql" ]]; then
       local first_sql
       first_sql="$(find "$CJT_STAGING_DIR/sql" -maxdepth 1 -type f -name '*.sql' | head -n1 || true)"
       CJT_SQL_PATH="$first_sql"
     fi
   fi
-
-  cjt::state_init
 }
 
 cjt::prepare_inputs() {
   cjt::log "Discovering documentation under $CJT_PROJECT_ROOT"
-  gc::discover "$CJT_PROJECT_ROOT" "$CJT_PIPELINE_DIR/discovery.yaml"
-
-  cjt::log "Normalizing source documents into staging workspace"
-  local _had_nounset=0
-  if [[ $- == *u* ]]; then
-    _had_nounset=1
-    set +u
-  fi
-  gc::normalize_to_staging "$CJT_PROJECT_ROOT" >/dev/null
-  if (( _had_nounset )); then
-    set -u
-  fi
+  gc_load_cmd scan
+  gc_load_cmd normalize
+  cmd_scan --project "$CJT_PROJECT_ROOT"
+  cmd_normalize --project "$CJT_PROJECT_ROOT"
+  cjt::resolve_core_paths
 
   cjt::log "Compiling context excerpts"
   cjt::build_context_files
@@ -252,13 +273,18 @@ cjt::collect_source_files() {
   CJT_DOC_FILES=()
   local pattern
   for pattern in \
+    "$CJT_INPUT_DIR"/*.md \
+    "$CJT_INPUT_DIR/docs"/*.md \
     "$CJT_STAGING_DIR/docs"/*.md \
     "$CJT_PLAN_DIR"/sds/*.md \
     "$CJT_PLAN_DIR"/pdr/*.md \
     "$CJT_PLAN_DIR"/*.md \
     "$CJT_STAGING_DIR"/*.md \
     "$CJT_STAGING_DIR"/*.txt \
+    "$CJT_INPUT_DIR/openapi"/* \
     "$CJT_STAGING_DIR/openapi"/* \
+    "$CJT_INPUT_DIR"/openapi.* \
+    "$CJT_INPUT_DIR/sql"/*.sql \
     "$CJT_STAGING_DIR/sql"/*.sql; do
     [[ -f "$pattern" ]] || continue
     CJT_DOC_FILES+=("$pattern")

@@ -86,6 +86,18 @@ gc::clone_python_tool() {
     cp "$source_path" "$target_path" || gc::die "Failed to copy ${script_name}"
   fi
 
+  if [[ "$script_name" == *.py ]]; then
+    local base_name="${script_name%.py}"
+    local sidecar="${base_name}_lib.py"
+    local sidecar_source="${GC_ROOT}/scripts/python/${sidecar}"
+    local sidecar_target="${target_dir}/${sidecar}"
+    if [[ -f "$sidecar_source" ]]; then
+      if [[ ! -f "$sidecar_target" || "$sidecar_source" -nt "$sidecar_target" ]]; then
+        cp "$sidecar_source" "$sidecar_target" || gc::die "Failed to copy ${sidecar}"
+      fi
+    fi
+  fi
+
   printf '%s\n' "$target_path"
 }
 

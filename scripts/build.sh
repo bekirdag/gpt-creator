@@ -58,6 +58,20 @@ gc_clone_python_tool() {
       return 1
     }
   fi
+  if [[ "$script_name" == *.py ]]; then
+    local base_name="${script_name%.py}"
+    local sidecar="${base_name}_lib.py"
+    local sidecar_source="${cli_root}/scripts/python/${sidecar}"
+    local sidecar_target="${target_dir}/${sidecar}"
+    if [[ -f "$sidecar_source" ]]; then
+      if [[ ! -f "$sidecar_target" || "$sidecar_source" -nt "$sidecar_target" ]]; then
+        cp "$sidecar_source" "$sidecar_target" || {
+          log "Failed to copy ${sidecar} helper"
+          return 1
+        }
+      fi
+    fi
+  fi
   printf '%s\n' "$target_path"
 }
 

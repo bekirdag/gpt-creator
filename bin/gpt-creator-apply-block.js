@@ -7,19 +7,29 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
+function writeOut(message) {
+  fs.writeSync(process.stdout.fd, `${message}\n`);
+}
+
+function writeErr(message) {
+  fs.writeSync(process.stderr.fd, `${message}\n`);
+}
+
 function run(cmd, opts = {}) {
   const res = spawnSync(cmd, {
     shell: true,
     encoding: 'utf8',
     ...opts,
   });
-  if (res.status !== 0) {
+  const failed = res.status !== 0 || res.signal;
+  if (failed) {
     const err = new Error(
-      `Command failed (${cmd}): ${(res.stderr || res.stdout || '').trim()}`
+      `Command failed (${cmd}): ${(res.stderr || res.stdout || res.error?.message || '').trim()}`
     );
     err.code = res.status;
     throw err;
   }
+  // Some sandboxes populate res.error even when the command succeeds; tolerate that.
   return res.stdout || '';
 }
 
@@ -61,7 +71,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`Usage:
+  writeOut(`Usage:
   gpt-creator apply-block [options]
 
 Options:
@@ -432,9 +442,9 @@ function main() {
 
   const report = { ok: true, applied, skipped, committed, commitSha, actions };
   if (args.json) {
-    console.log(JSON.stringify(report, null, 2));
+    writeOut(JSON.stringify(report, null, 2));
   } else {
-    console.log(
+    writeOut(
       [
         `[apply-block] applied=${applied.length}`,
         `skipped=${skipped.length}`,
@@ -447,6 +457,6 @@ function main() {
 try {
   main();
 } catch (error) {
-  console.error(`[apply-block] ${error.message || error}`);
+  writeErr(`[apply-block] ${error.message || error}`);
   process.exit(1);
 }

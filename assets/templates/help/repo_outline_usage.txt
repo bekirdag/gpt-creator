@@ -1,6 +1,6 @@
 Usage:
   python3 "$GC_REPO_OUTLINE_PY" [options]
-  # Fallback outside gpt-creator: python3 scripts/python/repo_outline.py [options]
+  # Fallback outside gpt-creator: python3 tools/scripts/python/repo_outline.py [options]
 
 Purpose:
   Print a concise directory outline (and a few representative files) so you can

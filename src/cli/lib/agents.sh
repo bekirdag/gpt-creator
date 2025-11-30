@@ -15,7 +15,8 @@ gc_cli__log() {
 
 gc_cli__registry_validate() {
   local client="$1" model="$2"
-  local registry_script="${ROOT_DIR}/scripts/python/agents_registry.py"
+  local scripts_root="${GC_SCRIPTS_ROOT:-${ROOT_DIR}/scripts}"
+  local registry_script="${scripts_root}/python/agents_registry.py"
   [[ -f "$registry_script" ]] || return 1
   "${PYTHON_BIN:-python3}" "$registry_script" validate --client "$client" --model "$model"
 }
@@ -32,8 +33,9 @@ gc_cli__agents_helper_path() {
     return
   fi
   local cli_root="${GC_ROOT:-${CLI_ROOT:-${ROOT_DIR:-}}}"
-  if [[ -n "$cli_root" && -f "${cli_root}/scripts/python/${helper}" ]]; then
-    printf '%s/scripts/python/%s\n' "$cli_root" "$helper"
+  local scripts_root="${GC_SCRIPTS_ROOT:-${cli_root}/scripts}"
+  if [[ -n "$cli_root" && -f "${scripts_root}/python/${helper}" ]]; then
+    printf '%s/python/%s\n' "$scripts_root" "$helper"
     return 0
   fi
   return 1
@@ -96,7 +98,7 @@ gc_cli_resolve_agent_model() {
     printf ''
     return 1
   fi
-  helper="${ROOT_DIR}/scripts/python/agents_cli.py"
+  helper="${GC_SCRIPTS_ROOT:-${ROOT_DIR}/scripts}/python/agents_cli.py"
   if [[ ! -f "$helper" ]]; then
     printf ''
     return 1

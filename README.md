@@ -22,7 +22,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Backlog ETA**: `estimate` aggregates remaining story points in `.gpt-creator/staging/plan/tasks/tasks.db` and translates them into a formatted duration using the throughput observed during `work-on-tasks` runs (defaults to a 10-task window at 15 story points per hour until telemetry is captured). Use `--recent-tasks COUNT|all` to widen the sample window and `--project` to point at another workspace when needed.
 - **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
 - **Safety preflights**: Every CLI entry now runs through workspace/doc catalog/dependency guards so stale or unsafe paths are rejected, lockfiles are rebuilt automatically, and missing dependencies fall back to mock mode instead of crashing active runs.
-- **Guarded file writes**: `gpt-creator apply-block` (and the legacy `scripts/python/write_block.py`) are the only approved writers; Husky/CI guards reject heredocs, ellipses, and curl-to-shell pipelines so every change lands through an audited, atomic workflow.
+- **Guarded file writes**: `gpt-creator apply-block` (or the guarded helper `tools/scripts/python/write_block.py`, also reachable via the legacy `scripts/` symlink) are the only approved writers; Husky/CI guards reject heredocs, ellipses, and curl-to-shell pipelines so every change lands through an audited, atomic workflow.
 - **Schema evidence index**: A stack-neutral inspector builds an index of tables/indexes across SQL, Prisma, Knex, Rails, TypeORM, and Django sources. Commands such as `gc_assert table publish_jobs` use this cache so schema checks become tolerant hints rather than brittle `rg` probes.
 - **Runtime overlays**: A Jest/Vitest decorator enforces single-process execution, injects a transpile-only TypeScript preloader, shims heavy native modules (@prisma/client, sharp, multer, prom-client, etc.), and remaps missing `dist/` imports to `src/lib/build/out`, keeping tests runnable even when installs or builds fail.
 
@@ -32,11 +32,11 @@ Codex agents should prefer the purpose-built helpers below instead of ad‑hoc `
 
 | Tool | When to use it | Usage doc |
 |------|----------------|-----------|
-| `python3 "$GC_REPO_OUTLINE_PY"` | Get a concise directory tree (with optional focus paths) instead of running dozens of `ls` commands. (If running outside `gpt-creator`, call `scripts/python/repo_outline.py` directly.) | `assets/templates/help/repo_outline_usage.txt` |
-| `python3 "$GC_TARGETED_SEARCH_PY"` | Search for strings/regex within a bounded set of files (depth/extension limited) instead of walking the entire repo. Supports multiple patterns and optional context output. (Fallback: `scripts/python/targeted_search.py`.) | `assets/templates/help/targeted_search_usage.txt` |
-| `python3 "$GC_REST_CHECK_RUNNER_PY"` | Run declarative REST smoke tests defined in a YAML/TOML manifest (auth, payloads, predicates) instead of writing bespoke HTTP scripts each turn. (Fallback: `scripts/python/rest_check_runner.py`.) | `assets/templates/help/rest_check_runner_usage.txt` |
-| `python3 "$GC_SAFE_SHOW_FILE_PY"` | Preview file slices and get real path suggestions before running `sed`/`cat`, preventing token waste on missing files. (Fallback: `scripts/python/safe_show_file.py`.) | `assets/templates/help/safe_show_file_usage.txt` |
-| `python3 "$GC_RUN_SNIPPET_PY"` | Execute temporary Python helpers safely; refuses placeholder-only heredocs so commands stay valid. (Fallback: `scripts/python/run_snippet.py`.) | `assets/templates/help/run_snippet_usage.txt` |
+| `python3 "$GC_REPO_OUTLINE_PY"` | Get a concise directory tree (with optional focus paths) instead of running dozens of `ls` commands. (If running outside `gpt-creator`, call `tools/scripts/python/repo_outline.py` directly.) | `assets/templates/help/repo_outline_usage.txt` |
+| `python3 "$GC_TARGETED_SEARCH_PY"` | Search for strings/regex within a bounded set of files (depth/extension limited) instead of walking the entire repo. Supports multiple patterns and optional context output. (Fallback: `tools/scripts/python/targeted_search.py`.) | `assets/templates/help/targeted_search_usage.txt` |
+| `python3 "$GC_REST_CHECK_RUNNER_PY"` | Run declarative REST smoke tests defined in a YAML/TOML manifest (auth, payloads, predicates) instead of writing bespoke HTTP scripts each turn. (Fallback: `tools/scripts/python/rest_check_runner.py`.) | `assets/templates/help/rest_check_runner_usage.txt` |
+| `python3 "$GC_SAFE_SHOW_FILE_PY"` | Preview file slices and get real path suggestions before running `sed`/`cat`, preventing token waste on missing files. (Fallback: `tools/scripts/python/safe_show_file.py`.) | `assets/templates/help/safe_show_file_usage.txt` |
+| `python3 "$GC_RUN_SNIPPET_PY"` | Execute temporary Python helpers safely; refuses placeholder-only heredocs so commands stay valid. (Fallback: `tools/scripts/python/run_snippet.py`.) | `assets/templates/help/run_snippet_usage.txt` |
 
 These helpers are mandatory during `work-on-tasks` sessions: mention them in your task notes, keep token-heavy scans capped, and extend the manifest/usage templates rather than cloning new tooling.
 
@@ -158,23 +158,23 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
 ### Contributor Quick Reference
 
 - **Response template:** Every assistant reply must use the `Plan`, `Focus`, `Commands`, `Notes` headings (each on its own line). Keep the sections terse—bulleted steps with `Action: … | Result: …` phrasing where possible.
-- **Narration limits:** The runtime auto-warns after two narration-style notes and will block on the third. Convert prose into checklist bullets immediately; if you need to preserve detail, pipe it through `python3 scripts/python/summarize_note.py "label"` and paste the generated summary pointer.
-- **Command helper:** Use `python3 scripts/python/command_scaffold.py "label" 'cd apps/api' 'pnpm test'` to produce a placeholder-free `bash -lc` entry instead of typing ellipses.
+- **Narration limits:** The runtime auto-warns after two narration-style notes and will block on the third. Convert prose into checklist bullets immediately; if you need to preserve detail, pipe it through `python3 tools/scripts/python/summarize_note.py "label"` and paste the generated summary pointer.
+- **Command helper:** Use `python3 tools/scripts/python/command_scaffold.py "label" 'cd apps/api' 'pnpm test'` to produce a placeholder-free `bash -lc` entry instead of typing ellipses.
 - **Code samples:** Instead of pasting diffs or source blobs, reference the touched paths (e.g., ``apps/api/src/foo.ts:42``). The response guard flags raw code fences and will auto-format them away.
-- **Guard telemetry:** If any guard triggers, check `logs/guardrails/events.jsonl` (or the `guard-telemetry` note) to see which rule fired and how often. Run `python3 scripts/python/guardrails_report.py --json` (or `--fail-on-placeholder N`) to aggregate hits or fail CI when placeholders pop up.
+- **Guard telemetry:** If any guard triggers, check `logs/guardrails/events.jsonl` (or the `guard-telemetry` note) to see which rule fired and how often. Run `python3 tools/scripts/python/guardrails_report.py --json` (or `--fail-on-placeholder N`) to aggregate hits or fail CI when placeholders pop up.
 - **Final reminder:** The prompt banner reiterates the response-format rules before every run—use it as a checklist before submitting so guardrails never fire in the first place. See `docs/onboarding/response_format.md` for the full guide.
 
 #### Command Writing Checklist
 
 - No placeholders: commands must be fully formed (no `...` or `…`).
 - Heredocs require matching terminators (`cat <<'EOF' ... EOF`).
-- Prefer `python3 scripts/python/command_scaffold.py` to generate `bash -lc` entries.
-- Use `python3 scripts/python/show_file_excerpt.py <path> --start 1 --end 120` for quick file views instead of `nl`/`sed` pipelines.
+- Prefer `python3 tools/scripts/python/command_scaffold.py` to generate `bash -lc` entries.
+- Use `python3 tools/scripts/python/show_file_excerpt.py <path> --start 1 --end 120` for quick file views instead of `nl`/`sed` pipelines.
 - Re-run the `commands-fill-placeholders` guard (apply phase) if you edit commands after tests to ensure no TODO markers remain.
 
 #### Documentation Catalog Helper
 
-- Query documentation via `python3 scripts/python/doc_catalog_query.py list|search|show ...`; it wraps `doc_catalog.py` with supported flags and falls back to repo scanning when the SQLite DB is absent. No need to remember the raw `$GC_DOC_CATALOG_PY` command.
+- Query documentation via `python3 tools/scripts/python/doc_catalog_query.py list|search|show ...`; it wraps `doc_catalog.py` with supported flags and falls back to repo scanning when the SQLite DB is absent. No need to remember the raw `$GC_DOC_CATALOG_PY` command.
 
    To drive the entire flow (PDR → SDS → Jira tasks → stack generation) in one shot:
 
@@ -248,7 +248,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
   - **xAI (Grok)**: `GROK_API_KEY` (optional `GROK_API_BASE`, `GROK_ORG_ID`)
   Run `gpt-creator keys set <service>` (`openai`, `anthropic`, `grok`) to store these securely under `~/.config/gpt-creator/api-keys.env`.
 - The agent registry is LLM-agnostic. `config/agent_clients.json` accepts adapter metadata so you can wire up any CLI-based client (Codex, Gemini, custom wrappers, etc.) without code changes. Use `adapter: "command"` with a `command` array (placeholders like `{model}` substituted at runtime) and optional env overrides. Point `GC_AGENT_REGISTRY_PATH` at another file when each project needs its own catalog (see `docs/agents.md` for examples).
-- Providers/models from the [Catwalk](https://catwalk.charm.sh) catalog are fetched automatically every 24 hours and merged into `list-clients` output. The cache (`~/.config/gpt-creator/cache/llm_catalog.json`) is used offline; `python3 scripts/python/agents_registry.py catalog --refresh` forces an update. Set `GC_AGENT_CATALOG_DISABLE=1` to skip the sync. To persist the catalog into a workspace DB, run `python3 scripts/python/llm_catalog.py --db-path /path/to/tasks.db` (add `--refresh` to bypass the TTL).
+- Providers/models from the [Catwalk](https://catwalk.charm.sh) catalog are fetched automatically every 24 hours and merged into `list-clients` output. The cache (`~/.config/gpt-creator/cache/llm_catalog.json`) is used offline; `python3 tools/scripts/python/agents_registry.py catalog --refresh` forces an update. Set `GC_AGENT_CATALOG_DISABLE=1` to skip the sync. To persist the catalog into a workspace DB, run `python3 tools/scripts/python/llm_catalog.py --db-path /path/to/tasks.db` (add `--refresh` to bypass the TTL).
 - Use `gpt-creator list-llms` to inspect the catalog (filters: `--provider`, `--adapter`, `--source`, `--model`, `--name-like`, `--status`, `--needs-key`). Output highlights API key warnings (disable with `--no-warn-keys`). `gpt-creator check-llms` records which adapters are installed locally; add `--install-missing` to run each stored installer (Claude Code, Gemini CLI, Codestral, DeepSeek, Code Llama, StarCoder2, Qwen Code, etc.) and `--health-check` for lightweight `--version` probes. `gpt-creator install-llm --provider <id> [--run --yes]` runs a single installer; `gpt-creator sync-llms` seeds all registry entries (optionally `--refresh`) and use `--require-adapters --require-keys` (or `--ci`) to fail early in CI when adapters/keys are missing.
 - `create-agent --summarize` (and `edit-agent --resummarize --summarize`) call the active LLM to produce concise job/character summaries; override via `GC_AGENT_SUMMARIZER_CLIENT` / `GC_AGENT_SUMMARIZER_MODEL` or `--summarize-client` / `--summarize-model` to pick a cheaper tier.
 - Backlog automation notes:
@@ -265,7 +265,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
 All multi-line edits—manual or Codex-driven—must flow through an approved writer. Husky (`.husky/pre-commit`) and CI (`scripts/guards/no_heredoc.js`, invoked from `.github/workflows/ci.yml`) block heredocs, ellipses, and curl-to-shell pipes before they ever reach `git add`. Use one of:
 
 - `gpt-creator apply-block` (preferred): accepts block JSON from repeated `--file <path>` arguments or stdin, validates allowed writers declared in `gpt-creator.config.json`, writes atomically, stages, optionally runs `pnpm -w fmt`, and commits with an `apply-block:` prefix.
-- `scripts/python/write_block.py`: a lighter-weight helper for single overwrites/appends when you do not need staging/commit automation.
+- `tools/scripts/python/write_block.py`: a lighter-weight helper for single overwrites/appends when you do not need staging/commit automation.
 
 A block JSON looks like this (note the explicit newline at the end of `content`):
 

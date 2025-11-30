@@ -65,13 +65,14 @@ gc::ensure_workspace() {
 gc::clone_python_tool() {
   local script_name="${1:?python script name required}"
   local project_root="${2:-${PROJECT_ROOT:-$PWD}}"
+  local scripts_root="${GC_SCRIPTS_ROOT:-${GC_ROOT}/scripts}"
 
   if declare -f gc_clone_python_tool >/dev/null 2>&1; then
     gc_clone_python_tool "$script_name" "$project_root"
     return
   fi
 
-  local source_path="${GC_ROOT}/scripts/python/${script_name}"
+  local source_path="${scripts_root}/python/${script_name}"
   if [[ ! -f "$source_path" ]]; then
     gc::die "Python helper missing at ${source_path}"
   fi
@@ -89,7 +90,7 @@ gc::clone_python_tool() {
   if [[ "$script_name" == *.py ]]; then
     local base_name="${script_name%.py}"
     local sidecar="${base_name}_lib.py"
-    local sidecar_source="${GC_ROOT}/scripts/python/${sidecar}"
+    local sidecar_source="${scripts_root}/python/${sidecar}"
     local sidecar_target="${target_dir}/${sidecar}"
     if [[ -f "$sidecar_source" ]]; then
       if [[ ! -f "$sidecar_target" || "$sidecar_source" -nt "$sidecar_target" ]]; then

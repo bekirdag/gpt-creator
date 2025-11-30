@@ -1,6 +1,6 @@
 # Appending Trimmed Context Snippets
 
-`scripts/python/append_file_with_line_limit.py` copies a bounded slice of a source file into a destination file, respecting both line and character limits. Use it whenever you need to provide Codex with a glimpse of logs, seeds, or generated artifacts without pasting the entire file into the prompt.
+`tools/scripts/python/append_file_with_line_limit.py` copies a bounded slice of a source file into a destination file, respecting both line and character limits. Use it whenever you need to provide Codex with a glimpse of logs, seeds, or generated artifacts without pasting the entire file into the prompt.
 
 ## Workflow
 
@@ -14,7 +14,7 @@ If the snippet hits either limit, the script automatically appends `... (truncat
 ## Command
 
 ```
-python3 scripts/python/append_file_with_line_limit.py <src-file> <dest-file> <max-lines> <max-chars>
+python3 tools/scripts/python/append_file_with_line_limit.py <src-file> <dest-file> <max-lines> <max-chars>
 ```
 
 - `<src-file>`: path to the large file (missing files are treated as empty).
@@ -24,7 +24,7 @@ python3 scripts/python/append_file_with_line_limit.py <src-file> <dest-file> <ma
 Example:
 
 ```bash
-python3 scripts/python/append_file_with_line_limit.py \
+python3 tools/scripts/python/append_file_with_line_limit.py \
   logs/create-jira-tasks.txt \
   .gpt-creator/staging/context/cjt-snippet.txt \
   120 4000

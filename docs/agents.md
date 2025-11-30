@@ -64,13 +64,13 @@ reuse it across every `work-on-tasks` run.
   allowing agents to target bespoke CLIs or wrapper scripts for any LLM.
 - The CLI automatically syncs the [Catwalk](https://catwalk.charm.sh) provider
   catalog once every 24 hours (cached at
-  `~/.config/gpt-creator/cache/llm_catalog.json`). `python3 scripts/python/agents_registry.py
+  `~/.config/gpt-creator/cache/llm_catalog.json`). `python3 tools/scripts/python/agents_registry.py
   catalog --refresh` forces an immediate refresh, while setting
   `GC_AGENT_CATALOG_DISABLE=1` skips the sync entirely (useful for air-gapped
   hosts). Offline runs fall back to the cached JSON so `list-clients` continues
   to show available providers/models even when Catwalk is unreachable. When you
   want the synced catalog written straight into `tasks.db`, run
-  `python3 scripts/python/llm_catalog.py --refresh --db-path /path/to/tasks.db`
+  `python3 tools/scripts/python/llm_catalog.py --refresh --db-path /path/to/tasks.db`
   (the same helper accepts `--json` if you want to inspect the full payload).
 
 ## CLI commands

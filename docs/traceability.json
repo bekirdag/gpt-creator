@@ -1,6 +1,6 @@
 {
   "meta": {
-    "generator": "scripts/python/update_traceability.py",
+    "generator": "tools/scripts/python/update_traceability.py",
     "version": 1,
     "sources": {
       "docs/PDR.md": "DOC-E89DE7B8"

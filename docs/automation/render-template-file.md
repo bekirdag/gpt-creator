@@ -1,6 +1,6 @@
 # Rendering Infra/App Templates
 
-Use `scripts/python/render_template_file.py` whenever a task needs an environment-specific config file or manifest derived from a reusable template. The helper replaces placeholder tokens with the values you provide, so Codex never has to hand-edit secrets or long boilerplate blocks.
+Use `tools/scripts/python/render_template_file.py` whenever a task needs an environment-specific config file or manifest derived from a reusable template. The helper replaces placeholder tokens with the values you provide, so Codex never has to hand-edit secrets or long boilerplate blocks.
 
 ## Workflow
 
@@ -12,7 +12,7 @@ Use `scripts/python/render_template_file.py` whenever a task needs an environmen
 ## Arguments
 
 ```
-python3 scripts/python/render_template_file.py \
+python3 tools/scripts/python/render_template_file.py \
   <source-template> <destination-path> \
   <DB_NAME> <DB_USER> <DB_PASSWORD> <DB_HOST_PORT> <DB_ROOT_PASSWORD> \
   <PROJECT_SLUG> <API_HOST_PORT> <WEB_HOST_PORT> <ADMIN_HOST_PORT> <PROXY_HOST_PORT>
@@ -29,7 +29,7 @@ The script reads the template, performs simple `str.replace` calls for each toke
 ## Example
 
 ```bash
-python3 scripts/python/render_template_file.py \
+python3 tools/scripts/python/render_template_file.py \
   assets/templates/docker/.env.tmpl .gpt-creator/staging/docker/.env \
   yoga_db yoga_app yoga_pass 3306 root_pass adm-06 4000 5173 5174 8080
 ```

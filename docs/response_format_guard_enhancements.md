@@ -36,7 +36,7 @@ task completion rates high—we should implement the following improvements.
   “Action: … | Result: …” pointer so the guard never fires.
 - Bundle a `notes-to-plan` command that converts prose into the required
   templated bullets in place, minimizing manual editing.
-- ✅ Added `scripts/python/summarize_note.py`, which reads piped narration, archives
+- ✅ Added `tools/scripts/python/summarize_note.py`, which reads piped narration, archives
   it under `logs/notes/`, and prints the ready-to-paste
   `Action: summarize-note | Result: …` pointer so assistants can quickly replace
   long-form explanations with compliant notes.
@@ -63,7 +63,7 @@ task completion rates high—we should implement the following improvements.
   `src/lib/work_on_tasks_runtime.py`, persist as JSONL under
   `logs/guardrails/events.jsonl`, and emit a `guard-telemetry` summary note per
   run (with counts) for quick alerting. Use
-  `python3 scripts/python/guardrails_report.py --json` (and the
+  `python3 tools/scripts/python/guardrails_report.py --json` (and the
   `--fail-on-placeholder` gate) to surface repeated placeholder hits in CI or
   dashboards.
 
@@ -75,7 +75,7 @@ task completion rates high—we should implement the following improvements.
   remember the constraints before they type.
 - ✅ The README “Contributor Quick Start” section now explains the
   Plan/Focus/Commands/Notes template, the narration guard limits, and tips for
-  using `scripts/python/summarize_note.py`. We also added a response-format
+  using `tools/scripts/python/summarize_note.py`. We also added a response-format
   reminder banner to the prompt instructions, highlighting the Action/Result
   requirement.
 
@@ -84,6 +84,6 @@ violations, and keep expensive tasks from repeating solely due to reporting
 errors.
 
 ## 7. Docdex Usage & Catalog Helpers
-- Always pull SDS/PDR context via `python3 "$GC_DOC_CATALOG_PY" search|show …` (or `python3 scripts/python/doc_catalog_query.py …`) instead of grepping entire docs; the helper already routes through the docdex daemon and only falls back to SQLite/vector search or the CLI JSON query when docdex is unreachable.
+- Always pull SDS/PDR context via `python3 "$GC_DOC_CATALOG_PY" search|show …` (or `python3 tools/scripts/python/doc_catalog_query.py …`) instead of grepping entire docs; the helper already routes through the docdex daemon and only falls back to SQLite/vector search or the CLI JSON query when docdex is unreachable.
 - Docdex hits/snippets satisfy the response-format guard automatically—cite the doc ID/path rather than pasting code blocks, and let the catalog helper fetch the exact slice.
 - When localhost HTTP access is blocked, the client transparently shells out to `docdexd query --json`, so it’s safe to rely on these helpers even in restricted environments (the fallback is noted in guard telemetry if it triggers).

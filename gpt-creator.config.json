@@ -1,5 +1,5 @@
 {
-  "allowedWriters": ["gpt-creator", "scripts/python/write_block.py"],
+  "allowedWriters": ["gpt-creator", "scripts/python/write_block.py", "tools/scripts/python/write_block.py"],
   "commitPrefix": "apply-block:",
   "disallowEllipses": true,
   "disallowHeredocs": true,

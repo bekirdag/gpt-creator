@@ -1,4 +1,4 @@
-# Example manifest for scripts/python/rest_check_runner.py
+# Example manifest for tools/scripts/python/rest_check_runner.py
 name: postman-echo-smoke
 description: Demo checks against https://postman-echo.com to illustrate runner features.
 base_url: https://postman-echo.com

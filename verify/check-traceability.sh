@@ -9,7 +9,7 @@ bad()  { printf '❌ %s\n' "$*" >&2; }
 info() { printf 'ℹ️  %s\n' "$*"; }
 
 info "Validating traceability matrix…"
-if ! python3 "${ROOT_DIR}/scripts/python/update_traceability.py" --check; then
+if ! python3 "${GC_SCRIPTS_ROOT:-${ROOT_DIR}/scripts}/python/update_traceability.py" --check; then
   bad "Traceability matrix out of date. Run: pnpm trace:update"
   exit 1
 fi

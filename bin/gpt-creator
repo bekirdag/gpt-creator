@@ -170,7 +170,14 @@ cmd_task_convert() {
 CLI_ROOT="$(resolve_cli_root)"
 unset -f resolve_cli_root
 
-GC_CMD_DIR="${CLI_ROOT}/scripts/commands"
+if [[ -d "${CLI_ROOT}/tools/scripts" ]]; then
+  GC_SCRIPTS_ROOT="${CLI_ROOT}/tools/scripts"
+else
+  GC_SCRIPTS_ROOT="${CLI_ROOT}/scripts"
+fi
+export GC_SCRIPTS_ROOT
+
+GC_CMD_DIR="${GC_SCRIPTS_ROOT}/commands"
 gc_load_cmd() {
   local name="${1:-}"
   local path="${GC_CMD_DIR}/${name}.sh"
@@ -203,81 +210,81 @@ gc_usage_commands() {
   printf '%s\n' "${cmds[@]}" | awk 'NF' | sort -u
 }
 
-if [[ -f "${CLI_ROOT}/scripts/lib/git-branches.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/git-branches.sh" ]]; then
   # shellcheck disable=SC1090
-  . "${CLI_ROOT}/scripts/lib/git-branches.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/git-branches.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/render_task_footer.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/render_task_footer.sh" ]]; then
   # shellcheck disable=SC1090
-  . "${CLI_ROOT}/scripts/render_task_footer.sh"
+  . "${GC_SCRIPTS_ROOT}/render_task_footer.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/fs.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/fs.sh" ]]; then
   # shellcheck source=scripts/lib/fs.sh
-  . "${CLI_ROOT}/scripts/lib/fs.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/fs.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/budget.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/budget.sh" ]]; then
   # shellcheck source=scripts/lib/budget.sh
-  . "${CLI_ROOT}/scripts/lib/budget.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/budget.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/util.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/util.sh" ]]; then
   # shellcheck source=scripts/lib/util.sh
-  . "${CLI_ROOT}/scripts/lib/util.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/util.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/env.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/env.sh" ]]; then
   # shellcheck source=scripts/lib/env.sh
-  . "${CLI_ROOT}/scripts/lib/env.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/env.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/retry.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/retry.sh" ]]; then
   # shellcheck source=scripts/lib/retry.sh
-  . "${CLI_ROOT}/scripts/lib/retry.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/retry.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/error.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/error.sh" ]]; then
   # shellcheck source=scripts/lib/error.sh
-  . "${CLI_ROOT}/scripts/lib/error.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/error.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/docs.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/docs.sh" ]]; then
   # shellcheck source=scripts/lib/docs.sh
-  . "${CLI_ROOT}/scripts/lib/docs.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/docs.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/http.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/http.sh" ]]; then
   # shellcheck source=scripts/lib/http.sh
-  . "${CLI_ROOT}/scripts/lib/http.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/http.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/render.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/render.sh" ]]; then
   # shellcheck source=scripts/lib/render.sh
-  . "${CLI_ROOT}/scripts/lib/render.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/render.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/surfaces.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/surfaces.sh" ]]; then
   # shellcheck source=scripts/lib/surfaces.sh
-  . "${CLI_ROOT}/scripts/lib/surfaces.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/surfaces.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/templates.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/templates.sh" ]]; then
   # shellcheck source=scripts/lib/templates.sh
-  . "${CLI_ROOT}/scripts/lib/templates.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/templates.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/help.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/help.sh" ]]; then
   # shellcheck source=scripts/lib/help.sh
-  . "${CLI_ROOT}/scripts/lib/help.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/help.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/codex.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/codex.sh" ]]; then
   # shellcheck source=scripts/lib/codex.sh
-  . "${CLI_ROOT}/scripts/lib/codex.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/codex.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/binder.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/binder.sh" ]]; then
   # shellcheck source=scripts/lib/binder.sh
-  . "${CLI_ROOT}/scripts/lib/binder.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/binder.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/finalize.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/finalize.sh" ]]; then
   # shellcheck source=scripts/lib/finalize.sh
-  . "${CLI_ROOT}/scripts/lib/finalize.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/finalize.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/docdex.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/docdex.sh" ]]; then
   # shellcheck source=scripts/lib/docdex.sh
-  . "${CLI_ROOT}/scripts/lib/docdex.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/docdex.sh"
 fi
-if [[ -f "${CLI_ROOT}/scripts/lib/progress.sh" ]]; then
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/progress.sh" ]]; then
   # shellcheck source=scripts/lib/progress.sh
-  . "${CLI_ROOT}/scripts/lib/progress.sh"
+  . "${GC_SCRIPTS_ROOT}/lib/progress.sh"
 fi
 
 GC_TEMPLATE_DIR="${CLI_ROOT}/assets/templates"
@@ -443,7 +450,7 @@ gc_assert() {
     warn "gc_assert usage: gc_assert <table|index> <name>"
     return 2
   fi
-  local script="${CLI_ROOT}/scripts/schema_evidence.js"
+  local script="${GC_SCRIPTS_ROOT}/schema_evidence.js"
   local index_path="${GC_SCHEMA_EVIDENCE_PATH:-${GC_WORKSPACE_DIR:-$PWD}/.gpt-creator/index/schema-evidence.json}"
   if ! command -v node >/dev/null 2>&1; then
     warn "Node.js required for schema assertions"
@@ -808,7 +815,7 @@ gc_renderer_path_if_enabled() {
   if [[ -n "${CLI_ROOT:-}" ]]; then
     copy_sources+=("${CLI_ROOT}/render_gpt_creator.sh")
     copy_sources+=("${CLI_ROOT}/bin/render_gpt_creator.sh")
-    copy_sources+=("${CLI_ROOT}/scripts/render_task_footer.sh")
+    copy_sources+=("${GC_SCRIPTS_ROOT}/render_task_footer.sh")
     candidates+=("${copy_sources[@]}")
   fi
 
@@ -1967,7 +1974,7 @@ gc_record_codex_usage() {
     return 1
   }
 
-  local usage_source="${CLI_ROOT}/scripts/python/record_codex_usage.py"
+  local usage_source="${GC_SCRIPTS_ROOT}/python/record_codex_usage.py"
   if [[ ! -f "$usage_source" ]]; then
     warn "Codex usage recorder missing at ${usage_source}"
     rm -f "$tmp_output" "$usage_script_py" || true
@@ -2325,7 +2332,7 @@ gc_log_blocked_quota() {
   local log_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
   local log_path="${log_dir}/work-on-tasks/blocked-quota.ndjson"
 
-  python3 "${CLI_ROOT}/scripts/python/log_blocked_quota.py" \
+  python3 "${GC_SCRIPTS_ROOT}/python/log_blocked_quota.py" \
     --meta "$meta_path" \
     --task-id "$task_id" \
     --story-slug "$story_slug" \
@@ -4484,9 +4491,9 @@ if ((${#GC_ORIGINAL_ARGS[@]})); then
   GC_INVOCATION="${GC_INVOCATION% }"
 fi
 
-WORKSPACE_GUARD_PATH="${CLI_ROOT}/scripts/workspace_guard.sh"
-DOC_CATALOG_GUARD_PATH="${CLI_ROOT}/scripts/doc_catalog_guard.sh"
-DEP_GUARD_PATH="${CLI_ROOT}/scripts/dep_guard.sh"
+WORKSPACE_GUARD_PATH="${GC_SCRIPTS_ROOT}/workspace_guard.sh"
+DOC_CATALOG_GUARD_PATH="${GC_SCRIPTS_ROOT}/doc_catalog_guard.sh"
+DEP_GUARD_PATH="${GC_SCRIPTS_ROOT}/dep_guard.sh"
 
 # shellcheck source=scripts/workspace_guard.sh
 . "$WORKSPACE_GUARD_PATH" "$@"
@@ -4535,7 +4542,7 @@ if command -v id >/dev/null 2>&1; then
   export GC_STACK_UID GC_STACK_GID
 fi
 
-GC_RUNTIME_HOOKS_DIR="${CLI_ROOT}/scripts/runtime-hooks"
+GC_RUNTIME_HOOKS_DIR="${GC_SCRIPTS_ROOT}/runtime-hooks"
 GC_NODE_TRAP_MODULE="${GC_RUNTIME_HOOKS_DIR}/node-global-trap.cjs"
 if [[ -d "$GC_RUNTIME_HOOKS_DIR" ]]; then
   case ":${PYTHONPATH:-}:" in

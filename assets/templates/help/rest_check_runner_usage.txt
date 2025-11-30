@@ -1,6 +1,6 @@
 Usage:
   python3 "$GC_REST_CHECK_RUNNER_PY" path/to/manifest.[yaml|toml] [options]
-  # Fallback outside gpt-creator: python3 scripts/python/rest_check_runner.py …
+  # Fallback outside gpt-creator: python3 tools/scripts/python/rest_check_runner.py …
 
 Requirements:
   python3.9+ plus `pip install httpx pyyaml`

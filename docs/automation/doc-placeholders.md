@@ -5,7 +5,7 @@
 ## Workflow
 
 1. Determine the path mentioned in the task or checklist.
-2. Run `scripts/create-doc-placeholder.sh <path> --owner "Team or Role" --summary "Purpose"` (see usage below).
+2. Run `tools/scripts/create-doc-placeholder.sh <path> --owner "Team or Role" --summary "Purpose"` (see usage below; `scripts/` symlink still works for legacy callers).
 3. Patch the generated stub instead of writing the whole document inline.
 4. Commit the placeholder along with the changes that referenced it.
 
@@ -14,7 +14,7 @@ The helper keeps everything project-agnostic: it accepts any path, creates paren
 ## Script Usage
 
 ```bash
-scripts/create-doc-placeholder.sh docs/placeholders/example/checklist.md \
+tools/scripts/create-doc-placeholder.sh docs/placeholders/example/checklist.md \
   --owner "Release PM" \
   --summary "Guardrail release checklist"
 ```
@@ -32,7 +32,7 @@ Using this approach prevents missing-doc blockers while keeping the repository p
 
 ## Under the Hood
 
-- `scripts/create-doc-placeholder.sh` shells out to `scripts/python/render_doc_placeholder.py`, copying the helper into `.gpt-creator/shims/python/` automatically if it is missing. This keeps the call fast for Codex but also means you can run the Python script yourself when building custom workflows.
+- `tools/scripts/create-doc-placeholder.sh` shells out to `tools/scripts/python/render_doc_placeholder.py`, copying the helper into `.gpt-creator/shims/python/` automatically if it is missing. This keeps the call fast for Codex but also means you can run the Python script yourself when building custom workflows.
 - `render_doc_placeholder.py` injects the owner, summary, timestamp, and CSV-friendly metadata into template files stored under `assets/templates/doc_placeholders/`. Those templates already include TODO markers, so the agent only has to refine the relevant paragraphs later.
 
-If you ever forget the exact flags, run `scripts/create-doc-placeholder.sh --help` or open `scripts/usage/create-doc-placeholder.txt` for an annotated example.
+If you ever forget the exact flags, run `tools/scripts/create-doc-placeholder.sh --help` or open `tools/scripts/usage/create-doc-placeholder.txt` for an annotated example (the `scripts/` symlink still points here for backwards compatibility).

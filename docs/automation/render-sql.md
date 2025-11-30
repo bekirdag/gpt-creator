@@ -1,6 +1,6 @@
 # Rendering Safe SQL Migrations
 
-`scripts/python/render_sql.py` converts ALTER TABLE statements that use `ADD COLUMN IF NOT EXISTS`, `ADD KEY`, and `ADD CONSTRAINT` into idempotent SQL blocks backed by INFORMATION_SCHEMA checks. Use it before committing ADM-06 (and similar) migrations so Codex no longer has to reason about guard clauses or manual `IF NOT EXISTS` branching.
+`tools/scripts/python/render_sql.py` converts ALTER TABLE statements that use `ADD COLUMN IF NOT EXISTS`, `ADD KEY`, and `ADD CONSTRAINT` into idempotent SQL blocks backed by INFORMATION_SCHEMA checks. Use it before committing ADM-06 (and similar) migrations so Codex no longer has to reason about guard clauses or manual `IF NOT EXISTS` branching.
 
 ## Workflow
 
@@ -12,7 +12,7 @@
 ## Command
 
 ```
-python3 scripts/python/render_sql.py <src-template.sql> <dest.sql> <DB_NAME> <DB_USER> <DB_PASSWORD>
+python3 tools/scripts/python/render_sql.py <src-template.sql> <dest.sql> <DB_NAME> <DB_USER> <DB_PASSWORD>
 ```
 
 - `<src-template.sql>`: file containing the non-idempotent ALTER statements.
@@ -28,7 +28,7 @@ The script performs three key tasks:
 ## Example (ADM-06 events migration)
 
 ```bash
-python3 scripts/python/render_sql.py \
+python3 tools/scripts/python/render_sql.py \
   sql/migrations/adm06/events_template.sql \
   sql/migrations/adm06/events.sql \
   yoga_db yoga_app yoga_pass

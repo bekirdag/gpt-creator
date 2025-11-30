@@ -4257,7 +4257,7 @@ def run_apply(args: List[str]) -> None:
             sample = _truncate_command_text(precheck_non_whitelisted[0])
             hint = ""
             if any(cmd.strip().startswith("nl ") or " sed " in cmd or "| sed" in cmd for cmd in precheck_non_whitelisted):
-                hint = " Use `python3 scripts/python/show_file_excerpt.py <path> --start 1 --end 120` instead of `nl|sed` pipelines."
+                hint = " Use `python3 tools/scripts/python/show_file_excerpt.py <path> --start 1 --end 120` instead of `nl|sed` pipelines."
             manual_notes.append(
                 _format_action_result(
                     "command-precheck",
@@ -4803,7 +4803,7 @@ def run_apply(args: List[str]) -> None:
             manual_notes.append(
                 _format_action_result(
                     "commands-remediation",
-                    "replace blocked commands with approved workflows (gpt-creator apply-block, python3 scripts/python/write_block.py, pnpm --filter …) before retrying"
+                    "replace blocked commands with approved workflows (gpt-creator apply-block, python3 tools/scripts/python/write_block.py, pnpm --filter …) before retrying"
                 )
             )
         blocked_command_requires_reporting = not safe_block_only
@@ -4925,7 +4925,7 @@ def run_apply(args: List[str]) -> None:
             os.getenv("GC_DOC_CATALOG_HELPER", "").strip()
             or os.getenv("doc_catalog", "").strip()
         )
-        default_doc_catalog = Path("scripts/python/doc_catalog_refresh.py").resolve()
+        default_doc_catalog = Path("tools/scripts/python/doc_catalog_refresh.py").resolve()
         doc_indexer_helper_local = (
             globals().get("doc_indexer_helper")
             or os.getenv("GC_DOC_INDEXER_PY", "").strip()
@@ -4993,7 +4993,7 @@ def run_apply(args: List[str]) -> None:
             notes.append(
                 _format_action_result(
                     "doc-catalog-refresh-remediation",
-                    "run `python3 scripts/python/doc_catalog_query.py list --limit 10` or `gpt-creator scan` to regenerate the catalog before retrying",
+                    "run `python3 tools/scripts/python/doc_catalog_query.py list --limit 10` or `gpt-creator scan` to regenerate the catalog before retrying",
                 )
             )
             return notes

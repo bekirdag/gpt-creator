@@ -1,0 +1,21 @@
+# append_file_with_line_limit.py
+
+Append a clipped section of a large file into another file so prompts stay concise.
+
+## Usage
+
+```
+python3 tools/scripts/python/append_file_with_line_limit.py \
+  logs/token_usage4.txt \
+  .gpt-creator/staging/context/token-usage-snippet.txt \
+  80 3000
+```
+
+Arguments:
+
+1. Source file path (missing file ⇒ empty snippet).
+2. Destination path (appended; create directories first).
+3. `max_lines` (0 to skip the line limit).
+4. `max_chars` (0 to skip the char limit).
+
+The script preserves newline endings, appends a blank line, and adds `... (truncated; see consolidated context for more)` when either limit truncates the output. Use it when dumping log/seed excerpts into staging files instead of pasting the whole content into Codex prompts.

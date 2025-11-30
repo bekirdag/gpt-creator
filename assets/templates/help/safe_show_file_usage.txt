@@ -1,6 +1,6 @@
 Usage:
   python3 "$GC_SAFE_SHOW_FILE_PY" <path-or-name> [options]
-  # Fallback outside gpt-creator: python3 scripts/python/safe_show_file.py …
+  # Fallback outside gpt-creator: python3 tools/scripts/python/safe_show_file.py …
 
 Purpose:
   Preview files (and get suggestions) without wasting tokens on `sed` failures

@@ -110,7 +110,7 @@ function loadConfig(root) {
   const cfgPath = path.join(root, 'gpt-creator.config.json');
   if (!fs.existsSync(cfgPath)) {
     return {
-      allowedWriters: ['gpt-creator', 'scripts/python/write_block.py'],
+      allowedWriters: ['gpt-creator', 'scripts/python/write_block.py', 'tools/scripts/python/write_block.py'],
       commitPrefix: 'apply-block:',
       disallowEllipses: true,
       disallowHeredocs: true,

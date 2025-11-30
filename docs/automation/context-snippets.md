@@ -2,8 +2,8 @@
 
 Two helpers keep `work-on-tasks` prompts slim by trimming documentation excerpts and deduplicating boilerplate:
 
-- `scripts/python/render_context_snippet.py` — extracts bounded sections from manifest/catalog inputs and writes a compact snippet file.
-- `scripts/python/compose_sections.py` — merges multiple prompt sections while emitting the "System"/"Preamble" block only once and removing duplicate text.
+- `tools/scripts/python/render_context_snippet.py` — extracts bounded sections from manifest/catalog inputs and writes a compact snippet file.
+- `tools/scripts/python/compose_sections.py` — merges multiple prompt sections while emitting the "System"/"Preamble" block only once and removing duplicate text.
 
 Use them together whenever a task needs large doc/index references or multiple prompt fragments.
 
@@ -16,7 +16,7 @@ Use them together whenever a task needs large doc/index references or multiple p
 Key arguments:
 
 ```
-python3 scripts/python/render_context_snippet.py \
+python3 tools/scripts/python/render_context_snippet.py \
   --manifest .gpt-creator/staging/plan/work/doc-manifest.txt \
   --output .gpt-creator/staging/context/doc-snippet.md \
   --catalog .gpt-creator/staging/plan/work/doc-catalog.json \

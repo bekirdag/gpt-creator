@@ -953,7 +953,7 @@ def run_prompt(args: List[str]) -> None:
             f"- JSON catalog (doc/snippet map) at `{doc_catalog_path_str}` keeps scripted lookups fast while prompts stay lean."
         )
         documentation_asset_lines.append(
-            "- Path is also exported as `$GC_DOC_CATALOG_PATH`; quick listing: `python3 scripts/python/doc_catalog_query.py list --limit 10` (falls back to repo scan when the SQLite DB is missing)."
+            "- Path is also exported as `$GC_DOC_CATALOG_PATH`; quick listing: `python3 tools/scripts/python/doc_catalog_query.py list --limit 10` (falls back to repo scan when the SQLite DB is missing)."
         )
     else:
         documentation_asset_lines.append(
@@ -1009,7 +1009,7 @@ def run_prompt(args: List[str]) -> None:
     _BUILTIN_WORK_PROMPT_FALLBACK_LINES: List[str] = [
         "## work-on-tasks Prompt",
         "- Load the task details and acceptance criteria from the context section.",
-            "- Consult the documentation catalog (`python3 scripts/python/doc_catalog_query.py search|show …`) before modifying files.",
+            "- Consult the documentation catalog (`python3 tools/scripts/python/doc_catalog_query.py search|show …`) before modifying files.",
         "- Outline a concise plan (<=3 bullets focused on actions), execute the required edits, and capture final status notes with clear pass/fail decisions.",
         "- Never create files named `PLAN.md` (or any case variant); summarize plans inline instead of emitting that artifact.",
         "- Apply changes by editing files directly via shell commands (no diff/patch output).",
@@ -1393,9 +1393,9 @@ def run_prompt(args: List[str]) -> None:
         lines.append('- Schema quick look: sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables" or ".schema documentation"')
         lines.append("- Vector DB ($GC_DOCUMENTATION_INDEX_PATH) table `vectors`: embeddings per surface (embedding_id PK, doc_id, section_id, vector_json, dims, metadata_json, updated_at).")
         lines.append("Common catalog commands (wrap inner commands in single quotes so the environment variables remain quoted):")
-        lines.append('- List recent docs: python3 scripts/python/doc_catalog_query.py list --limit 10')
-        lines.append('- Full-text search: python3 scripts/python/doc_catalog_query.py search --query "lockout" --limit 15')
-        lines.append('- Show document by id: python3 scripts/python/doc_catalog_query.py show DOC-1234ABCD --start 500 --end 540')
+        lines.append('- List recent docs: python3 tools/scripts/python/doc_catalog_query.py list --limit 10')
+        lines.append('- Full-text search: python3 tools/scripts/python/doc_catalog_query.py search --query "lockout" --limit 15')
+        lines.append('- Show document by id: python3 tools/scripts/python/doc_catalog_query.py show DOC-1234ABCD --start 500 --end 540')
         lines.append("- Docdex-powered search/snippets: the doc catalog helper automatically talks to the running docdex daemon—use the commands above instead of `rg`/`cat` when you need to locate docs or quote a snippet.")
         lines.append('- Rebuild semantic index: bash -lc \'python3 "$GC_DOC_INDEXER_PY" rebuild --db "$GC_DOCUMENTATION_DB_PATH" --out "$GC_DOC_VECTOR_INDEX_PATH"\'')
         lines.append('- Register or sync discovery TSV: bash -lc \'python3 "$GC_DOC_REGISTRY_PY" register --db "$GC_DOCUMENTATION_DB_PATH" --tsv ".gpt-creator/manifests/<latest>.tsv"\'')
@@ -1430,7 +1430,7 @@ def run_prompt(args: List[str]) -> None:
         lines.append('    "SELECT doc_id, path, changed_at FROM documentation_changes ORDER BY changed_at DESC LIMIT 10;"')
         lines.append("- Schema quick look:")
         lines.append('  sqlite3 "$GC_DOCUMENTATION_DB_PATH" ".tables"')
-        lines.append("- When docdex is available, `python3 scripts/python/doc_catalog_query.py search|show ...` still routes through it automatically; otherwise it falls back to the SQLite/vector index (or CLI JSON query). Use that helper instead of ad-hoc `rg`/`cat` when you need doc snippets.")
+        lines.append("- When docdex is available, `python3 tools/scripts/python/doc_catalog_query.py search|show ...` still routes through it automatically; otherwise it falls back to the SQLite/vector index (or CLI JSON query). Use that helper instead of ad-hoc `rg`/`cat` when you need doc snippets.")
         if not documentation_db_available:
             lines.append("- (Documentation catalog helpers unavailable without the SQLite database; regenerate with `gpt-creator scan` before running catalog commands.)")
         else:
@@ -2277,7 +2277,7 @@ def run_prompt(args: List[str]) -> None:
             doc_id_token = shlex.quote(example_doc_id)
         lines.append(
             "Use the catalog below to pick a section, then run "
-            f"`python3 scripts/python/doc_catalog_query.py show {doc_id_token} --start 1 --end 200` for a narrow excerpt. "
+            f"`python3 tools/scripts/python/doc_catalog_query.py show {doc_id_token} --start 1 --end 200` for a narrow excerpt. "
             "Avoid reading the raw documentation files directly."
         )
         for entry in doc_catalog_entries[:6]:
@@ -2593,13 +2593,13 @@ def run_prompt(args: List[str]) -> None:
             "## Helper Checklist (before exploring code or docs)",
             "- Map the repo once via `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus apps/api` (helper is auto-cloned under .gpt-creator/shims/python/) instead of issuing repetitive `ls` commands.",
             "- When you need to inspect code, run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern \"<needle>\" --paths <dirs>` first; only fall back to `sed`/`cat` for the exact ranges you discover there.",
-            "- For SDS/PDR context or migrations, run `python3 scripts/python/doc_catalog_query.py search --query \"<term>\" --limit 5` instead of opening doc files or grepping blindly.",
+            "- For SDS/PDR context or migrations, run `python3 tools/scripts/python/doc_catalog_query.py search --query \"<term>\" --limit 5` instead of opening doc files or grepping blindly.",
             "- Validate REST endpoints via manifests and `python3 \"$GC_REST_CHECK_RUNNER_PY\" manifest.yaml` instead of crafting ad-hoc HTTP scripts.",
             "- Preview file ranges safely using `python3 \"$GC_SAFE_SHOW_FILE_PY\" <path> --suggest` before `sed`/`cat`, so you avoid missing-file retries.",
-            "- Need a quick view of specific lines? Run `python3 scripts/python/show_file_excerpt.py <path> --start 1 --end 200` instead of `nl|sed` pipelines.",
+            "- Need a quick view of specific lines? Run `python3 tools/scripts/python/show_file_excerpt.py <path> --start 1 --end 200` instead of `nl|sed` pipelines.",
             "- Need a quick Python helper? Create /tmp/snippet.py and run `python3 \"$GC_RUN_SNIPPET_PY\" /tmp/snippet.py`; the script refuses placeholder-only heredocs and keeps commands deterministic.",
-            '- Building command entries? Run `python3 scripts/python/command_scaffold.py "label" \'cd apps/api\' \'pnpm test\'` to emit a ready-to-paste "bash -lc ..." block without ellipses.',
-            "- Monitoring guardrail hits? Run `python3 scripts/python/guardrails_report.py --json` (or `--fail-on-placeholder N`) to summarize events or fail CI when placeholders persist.",
+            '- Building command entries? Run `python3 tools/scripts/python/command_scaffold.py "label" \'cd apps/api\' \'pnpm test\'` to emit a ready-to-paste "bash -lc ..." block without ellipses.',
+            "- Monitoring guardrail hits? Run `python3 tools/scripts/python/guardrails_report.py --json` (or `--fail-on-placeholder N`) to summarize events or fail CI when placeholders persist.",
         ]
     )
 
@@ -2607,12 +2607,12 @@ def run_prompt(args: List[str]) -> None:
         "## Instructions",
         "### Response Format",
         "- Organize your reply with the headings `Plan`, `Focus`, `Commands`, and `Notes` (in that order).",
-        "- Keep notes in Action/Result form; when narration is unavoidable, pipe it through `python3 scripts/python/summarize_note.py \"label\"` and paste the emitted summary pointer.",
+        "- Keep notes in Action/Result form; when narration is unavoidable, pipe it through `python3 tools/scripts/python/summarize_note.py \"label\"` and paste the emitted summary pointer.",
         "- Write each heading exactly as shown (e.g., `Plan` on its own line) with no surrounding Markdown styling or punctuation.",
         "- Keep each section to short bullet items or terse sentences; skip JSON, code fences, and closing summaries.",
         "- Do not include source code, config snippets, or test case bodies; describe changes and evidence at a high level only.",
         "- Make repository edits by listing the exact shell commands you will run under `Commands` (use `bash` to write files when needed).",
-        '  Example: `bash -lc "python3 scripts/python/summarize_note.py "label" <<\'EOF\' ... EOF"`',
+        '  Example: `bash -lc "python3 tools/scripts/python/summarize_note.py "label" <<\'EOF\' ... EOF"`',
         "- Ensure the `Commands` section lists actionable shell commands; if none are required, include a single bullet `- (none)` beneath the heading.",
             "- Placeholders (`...`, `…`, `cat <<'EOF'` without a closing `EOF`, etc.) immediately trigger the commands-fill-placeholders guard—fully expand every command before submitting.",
         "- Do not generate diffs or patches; apply edits directly through those shell commands.",
@@ -2623,7 +2623,7 @@ def run_prompt(args: List[str]) -> None:
         "- Push your work once committed (e.g., `git push origin <branch>`), and include that command under `Commands` as well.",
         "- Capture blockers or follow-ups in `Notes`.",
         "- Review `Known Command Failures` and `Command Guard Alerts` before retrying a command; prefer remediation steps over blind reruns.",
-        "- Use `python3 scripts/python/doc_catalog_query.py search --query \"<term>\" --limit 5` (or `show DOC-ID --start 500 --end 520`) for SDS/PDR context instead of opening doc files directly.",
+        "- Use `python3 tools/scripts/python/doc_catalog_query.py search --query \"<term>\" --limit 5` (or `show DOC-ID --start 500 --end 520`) for SDS/PDR context instead of opening doc files directly.",
         "- Need a repo overview? Run `python3 \"$GC_REPO_OUTLINE_PY\" --max-depth 1 --focus <path>` (see `assets/templates/help/repo_outline_usage.txt`).",
         "- Searching for symbols? Run `python3 \"$GC_TARGETED_SEARCH_PY\" --pattern <needle> --paths <dirs> [--ext .ts]` instead of repo-wide `rg`/`python os.walk` loops (`assets/templates/help/targeted_search_usage.txt`).",
         "- Validating REST endpoints? Define a manifest and run `python3 \"$GC_REST_CHECK_RUNNER_PY\" <manifest.yaml>` (`assets/templates/help/rest_check_runner_usage.txt`).",

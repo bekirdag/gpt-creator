@@ -1,6 +1,6 @@
 Usage:
   python3 "$GC_TARGETED_SEARCH_PY" --pattern PATTERN --paths DIR [options]
-  # Fallback outside gpt-creator: python3 scripts/python/targeted_search.py …
+  # Fallback outside gpt-creator: python3 tools/scripts/python/targeted_search.py …
 
 Purpose:
   Search a focused slice of the repo (limited depth/file count) instead of

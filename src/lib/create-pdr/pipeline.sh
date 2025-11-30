@@ -116,7 +116,9 @@ cpdr::clone_python_tool() {
     cli_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
   fi
 
-  local source_path="${cli_root}/scripts/python/${script_name}"
+  local scripts_root="${GC_SCRIPTS_ROOT:-${cli_root}/scripts}"
+
+  local source_path="${scripts_root}/python/${script_name}"
   if [[ ! -f "$source_path" ]]; then
     cpdr::die "Python helper missing at ${source_path}"
   fi
@@ -136,7 +138,7 @@ cpdr::clone_python_tool() {
   if [[ "$script_name" == *.py ]]; then
     local base_name="${script_name%.py}"
     local sidecar="${base_name}_lib.py"
-    local sidecar_source="${cli_root}/scripts/python/${sidecar}"
+    local sidecar_source="${scripts_root}/python/${sidecar}"
     local sidecar_target="${target_dir}/${sidecar}"
     if [[ -f "$sidecar_source" ]]; then
       if [[ ! -f "$sidecar_target" || "$sidecar_source" -nt "$sidecar_target" ]]; then

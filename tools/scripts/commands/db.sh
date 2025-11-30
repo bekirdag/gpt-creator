@@ -17,6 +17,23 @@ cmd_db() {
   case "$action" in
     provision)
       [[ -f "$compose_file" ]] || die "Compose file not found at ${compose_file}; run 'gpt-creator generate docker'."
+      gc_load_cmd generate
+      local current_port="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-${MYSQL_HOST_PORT:-3306}}}"
+      local chosen_port="$current_port"
+      if port_in_use "$current_port"; then
+        chosen_port="$(find_free_port "$current_port")"
+        info "Port ${current_port} in use; remapping DB to ${chosen_port}"
+      fi
+      if [[ "$chosen_port" != "$current_port" ]]; then
+        GC_DB_HOST_PORT="$chosen_port"
+        DB_HOST_PORT="$chosen_port"
+        MYSQL_HOST_PORT="$chosen_port"
+        gc_set_env_var DB_HOST_PORT "$chosen_port"
+        gc_set_env_var MYSQL_HOST_PORT "$chosen_port"
+        gc_set_env_var GC_DB_HOST_PORT "$chosen_port"
+        GC_DOCKER_SERVICES="${GC_DOCKER_SERVICES:-db api web admin proxy mobile}" cmd_generate docker --project "$PROJECT_ROOT"
+        compose_file="$PROJECT_ROOT/docker/docker-compose.yml"
+      fi
       info "Starting database service via docker compose"
       docker_compose -f "$compose_file" up -d db
       ok "MySQL container provisioned"
@@ -72,4 +89,3 @@ cmd_db() {
     *) die "Unknown db action: ${action}";;
   esac
 }
-

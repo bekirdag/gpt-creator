@@ -37,6 +37,28 @@ cmd_generate() {
       local out="$PROJECT_ROOT/db"
       mkdir -p "$out"
       copy_template_tree "$templates/db/mysql" "$out"
+      # Render DB templates (*.tmpl) with environment defaults and drop the suffix
+      local python_bin="${PYTHON_BIN:-python3}"
+      for tmpl in "$out"/*.tmpl; do
+        [[ -f "$tmpl" ]] || continue
+        local dest="${tmpl%.tmpl}"
+        if command -v "$python_bin" >/dev/null 2>&1; then
+          "$python_bin" - "$tmpl" "$dest" <<'PY'
+import os, re, sys
+src, dst = sys.argv[1:3]
+data = open(src, "r", encoding="utf-8").read()
+def repl(match):
+    key = match.group(1)
+    return os.environ.get(key, match.group(0))
+data = re.sub(r"\{\{([A-Za-z0-9_]+)\}\}", repl, data)
+with open(dst, "w", encoding="utf-8") as fh:
+    fh.write(data)
+PY
+        else
+          cp "$tmpl" "$dest"
+        fi
+      done
+      rm -f "$out"/*.tmpl 2>/dev/null || true
       ok "DB artifacts scaffolded → ${out}"
       ;;
     docker)
@@ -140,6 +162,28 @@ cmd_generate() {
       if [[ -f "$out/pnpm-entry.sh" ]]; then
         chmod +x "$out/pnpm-entry.sh" || true
       fi
+      # Render docker templates (*.tmpl) with environment defaults and drop the suffix
+      local python_bin="${PYTHON_BIN:-python3}"
+      for tmpl in "$out"/*.tmpl; do
+        [[ -f "$tmpl" ]] || continue
+        local dest="${tmpl%.tmpl}"
+        if command -v "$python_bin" >/dev/null 2>&1; then
+          "$python_bin" - "$tmpl" "$dest" <<'PY'
+import os, re, sys
+src, dst = sys.argv[1:3]
+data = open(src, "r", encoding="utf-8").read()
+def repl(match):
+    key = match.group(1)
+    return os.environ.get(key, match.group(0))
+data = re.sub(r"\{\{([A-Za-z0-9_]+)\}\}", repl, data)
+with open(dst, "w", encoding="utf-8") as fh:
+    fh.write(data)
+PY
+        else
+          cp "$tmpl" "$dest"
+        fi
+      done
+      rm -f "$out"/*.tmpl 2>/dev/null || true
       # Prune docker-compose.yml to selected services
       local keep_services=()
       for svc in "${docker_services[@]}"; do

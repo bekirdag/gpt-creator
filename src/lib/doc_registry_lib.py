@@ -1340,6 +1340,7 @@ def _handle_search(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    """CLI entrypoint for doc registry helpers."""
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "register":
@@ -1352,5 +1353,5 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
-def main():
-        sys.exit(main(sys.argv[1:]))
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

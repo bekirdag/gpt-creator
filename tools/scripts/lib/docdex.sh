@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Docdex helpers for gpt-creator.
 
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
 gc_docdex_bin() {
   local preferred="${GC_DOCDEX_BIN:-}"
   # Separate the command check to satisfy shells that reject command invocations inside [[ ... && ... ]].

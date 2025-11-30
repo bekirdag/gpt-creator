@@ -7,6 +7,8 @@
     "work:tasks": "bash ops/scripts/preflight-metadata.sh && gpt-creator work-on-tasks --project .",
     "work:packed": "bash ops/scripts/preflight-metadata.sh && GC_SOFT_CONTEXT=95000 GC_HARD_CONTEXT=105000 GC_MIN_OUTPUT=5000 GC_MAX_SNIPPET_LINES=120 gpt-creator work-on-tasks --project . | node .gpt-creator/shims/context-packer.mjs",
     "work:sigint-safe": "bash ops/scripts/run_tasks_sigint_safe.sh",
+    "lint:shell": "scripts/verify/shellcheck.sh",
+    "help:index": "python3 scripts/verify/gen_help_index.py",
     "doc:search": "python3 src/lib/doc_registry.py search",
     "doc:register": "python3 src/lib/doc_registry.py register",
     "doc:index:check": "python3 src/lib/doc_indexer.py --check",

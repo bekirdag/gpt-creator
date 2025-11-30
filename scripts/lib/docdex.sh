@@ -3,7 +3,8 @@
 
 gc_docdex_bin() {
   local preferred="${GC_DOCDEX_BIN:-}"
-  if [[ -n "$preferred" && command -v "$preferred" >/dev/null 2>&1 ]]; then
+  # Separate the command check to satisfy shells that reject command invocations inside [[ ... && ... ]].
+  if [[ -n "$preferred" ]] && command -v "$preferred" >/dev/null 2>&1; then
     printf '%s' "$preferred"
     return 0
   fi

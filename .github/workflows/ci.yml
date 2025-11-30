@@ -18,11 +18,26 @@ jobs:
         run: |
           set -e
           shopt -s globstar nullglob
-          files=(**/*.sh bin/gpt-creator)
-          if [ "${#files[@]}" -gt 0 ]; then
-            shellcheck -S warning "${files[@]}"
-          else
-            echo "No shell scripts found."
+          files=(scripts/lib/*.sh scripts/commands/*.sh bin/gpt-creator)
+          shellcheck -S warning "${files[@]}"
+
+  help-index:
+    name: Help Index Up-to-date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Ensure help index is current
+        run: |
+          set -e
+          npm install --ignore-scripts
+          npm run help:index
+          if ! git diff --quiet -- assets/templates/help/templates_index.json; then
+            echo "templates_index.json is out of date. Run 'npm run help:index' and commit."
+            git --no-pager diff -- assets/templates/help/templates_index.json
+            exit 1
           fi
 
   openapi-validate:

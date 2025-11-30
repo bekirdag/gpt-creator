@@ -1,0 +1,254 @@
+[
+  {
+    "command": "agent-check",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/agent_check_usage.txt"
+  },
+  {
+    "command": "backlog",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/backlog_usage.txt"
+  },
+  {
+    "command": "binder-clear",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/binder_clear_usage.txt"
+  },
+  {
+    "command": "binder",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/binder_usage.txt"
+  },
+  {
+    "command": "bootstrap",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/bootstrap_usage.txt"
+  },
+  {
+    "command": "check-llms",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/check_llms_usage.txt"
+  },
+  {
+    "command": "create-agent",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/create_agent_usage.txt"
+  },
+  {
+    "command": "create-db-dump",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/create_db_dump_usage.txt"
+  },
+  {
+    "command": "create-doc-placeholder",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/create_doc_placeholder_usage.txt"
+  },
+  {
+    "command": "create-jira-tasks",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/create_jira_tasks_usage.txt"
+  },
+  {
+    "command": "create-pdr",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/create_pdr_usage.txt"
+  },
+  {
+    "command": "create-project",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/create_project_usage.txt"
+  },
+  {
+    "command": "create-sds",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/create_sds_usage.txt"
+  },
+  {
+    "command": "create-tasks",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/create_tasks_usage.txt"
+  },
+  {
+    "command": "dag",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/dag_usage.txt"
+  },
+  {
+    "command": "dag-validate",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/dag_validate_usage.txt"
+  },
+  {
+    "command": "db-import",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/db_import_usage.txt"
+  },
+  {
+    "command": "db-provision",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/db_provision_usage.txt"
+  },
+  {
+    "command": "db-seed",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/db_seed_usage.txt"
+  },
+  {
+    "command": "db",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/db_usage.txt"
+  },
+  {
+    "command": "delete-agent",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/delete_agent_usage.txt"
+  },
+  {
+    "command": "edit-agent",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/edit_agent_usage.txt"
+  },
+  {
+    "command": "estimate",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/estimate_usage.txt"
+  },
+  {
+    "command": "export-agents",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/export_agents_usage.txt"
+  },
+  {
+    "command": "generate-admin",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/generate_admin_usage.txt"
+  },
+  {
+    "command": "generate-api",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/generate_api_usage.txt"
+  },
+  {
+    "command": "generate-db",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/generate_db_usage.txt"
+  },
+  {
+    "command": "generate-docker",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/generate_docker_usage.txt"
+  },
+  {
+    "command": "generate",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/generate_usage.txt"
+  },
+  {
+    "command": "generate-web",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/generate_web_usage.txt"
+  },
+  {
+    "command": "global",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/global_usage.txt"
+  },
+  {
+    "command": "import-agents",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/import_agents_usage.txt"
+  },
+  {
+    "command": "install-latest",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/install_latest_usage.txt"
+  },
+  {
+    "command": "install-llm",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/install_llm_usage.txt"
+  },
+  {
+    "command": "install",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/install_usage.txt"
+  },
+  {
+    "command": "iterate",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/iterate_usage.txt"
+  },
+  {
+    "command": "keys",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/keys_usage.txt"
+  },
+  {
+    "command": "list-agents",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/list_agents_usage.txt"
+  },
+  {
+    "command": "list-llms",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/list_llms_usage.txt"
+  },
+  {
+    "command": "migrate-tasks",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/migrate_tasks_usage.txt"
+  },
+  {
+    "command": "next",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/next_usage.txt"
+  },
+  {
+    "command": "refine-tasks",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/refine_tasks_usage.txt"
+  },
+  {
+    "command": "refresh-stack",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/refresh_stack_usage.txt"
+  },
+  {
+    "command": "repo-outline",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/repo_outline_usage.txt"
+  },
+  {
+    "command": "reports",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/reports_usage.txt"
+  },
+  {
+    "command": "rest-check-runner",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/rest_check_runner_usage.txt"
+  },
+  {
+    "command": "run-compose-up",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/run_compose_up_usage.txt"
+  },
+  {
+    "command": "run-logs",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/run_logs_usage.txt"
+  },
+  {
+    "command": "run-open",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/run_open_usage.txt"
+  },
+  {
+    "command": "run-snippet",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/run_snippet_usage.txt"
+  },
+  {
+    "command": "run",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/run_usage.txt"
+  },
+  {
+    "command": "safe-show-file",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/safe_show_file_usage.txt"
+  },
+  {
+    "command": "show-agent",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/show_agent_usage.txt"
+  },
+  {
+    "command": "show-file",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/show_file_usage.txt"
+  },
+  {
+    "command": "sweep-artifacts",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/sweep_artifacts_usage.txt"
+  },
+  {
+    "command": "sync-llms",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/sync_llms_usage.txt"
+  },
+  {
+    "command": "targeted-search",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/targeted_search_usage.txt"
+  },
+  {
+    "command": "tokens",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/tokens_usage.txt"
+  },
+  {
+    "command": "update",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/update_usage.txt"
+  },
+  {
+    "command": "verify",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/verify_usage.txt"
+  },
+  {
+    "command": "why",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/why_usage.txt"
+  },
+  {
+    "command": "work-on-tasks-retry",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/work_on_tasks_retry_usage.txt"
+  },
+  {
+    "command": "work-on-tasks",
+    "template": "/home/wodo/apps/gpt-creator/assets/templates/help/work_on_tasks_usage.txt"
+  }
+]

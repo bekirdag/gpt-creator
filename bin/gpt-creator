@@ -189,11 +189,17 @@ gc_load_cmd() {
 
 gc_usage_commands() {
   local -a cmds=()
+  local -a skip=("work_on_tasks_impl")
   if [[ -d "$GC_CMD_DIR" ]]; then
     local f
     for f in "$GC_CMD_DIR"/*.sh; do
       [[ -f "$f" ]] || continue
-      cmds+=("$(basename "$f" .sh)")
+      local name
+      name="$(basename "$f" .sh)"
+      case " ${skip[*]} " in
+        *" ${name} "*) continue ;;
+      esac
+      cmds+=("$name")
     done
   fi
   # Include commands handled outside scripts/commands or via direct scripts.
@@ -202,6 +208,9 @@ gc_usage_commands() {
     create-pdr
     create-jira-tasks
     create-db-dump
+    sweep-artifacts
+    tidy-progress
+    task-convert
     docdex
     binder
     help

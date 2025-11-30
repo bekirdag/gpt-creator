@@ -66,136 +66,6 @@
       "kind": "sql"
     },
     {
-      "name": "documents",
-      "file": "scripts/python/bootstrap_min_catalog.py",
-      "kind": "sql"
-    },
-    {
-      "name": "sections",
-      "file": "scripts/python/bootstrap_min_catalog.py",
-      "kind": "sql"
-    },
-    {
-      "name": "meta",
-      "file": "scripts/python/bootstrap_min_catalog.py",
-      "kind": "sql"
-    },
-    {
-      "name": "metadata",
-      "file": "scripts/python/build_tasks_db.py",
-      "kind": "sql"
-    },
-    {
-      "name": "epics",
-      "file": "scripts/python/build_tasks_db.py",
-      "kind": "sql"
-    },
-    {
-      "name": "stories",
-      "file": "scripts/python/build_tasks_db.py",
-      "kind": "sql"
-    },
-    {
-      "name": "tasks",
-      "file": "scripts/python/build_tasks_db.py",
-      "kind": "sql"
-    },
-    {
-      "name": "task_progress",
-      "file": "scripts/python/build_tasks_db.py",
-      "kind": "sql"
-    },
-    {
-      "name": "doc_observations",
-      "file": "scripts/python/build_tasks_db.py",
-      "kind": "sql"
-    },
-    {
-      "name": "task_dependencies",
-      "file": "scripts/python/build_tasks_db.py",
-      "kind": "sql"
-    },
-    {
-      "name": "agents",
-      "file": "scripts/python/ensure_agents_schema.py",
-      "kind": "sql"
-    },
-    {
-      "name": "llm_providers",
-      "file": "scripts/python/ensure_agents_schema.py",
-      "kind": "sql"
-    },
-    {
-      "name": "llm_models",
-      "file": "scripts/python/ensure_agents_schema.py",
-      "kind": "sql"
-    },
-    {
-      "name": "task_dependencies",
-      "file": "scripts/python/populate_task_dependencies.py",
-      "kind": "sql"
-    },
-    {
-      "name": "task_id_map",
-      "file": "scripts/python/progress_migration.py",
-      "kind": "sql"
-    },
-    {
-      "name": "progress_migration_journal",
-      "file": "scripts/python/progress_migration.py",
-      "kind": "sql"
-    },
-    {
-      "name": "progress_migration_audit",
-      "file": "scripts/python/progress_migration.py",
-      "kind": "sql"
-    },
-    {
-      "name": "progress_migration_snapshots",
-      "file": "scripts/python/progress_migration.py",
-      "kind": "sql"
-    },
-    {
-      "name": "task_progress",
-      "file": "scripts/python/record_task_progress.py",
-      "kind": "sql"
-    },
-    {
-      "name": "doc_observations",
-      "file": "scripts/python/record_task_progress.py",
-      "kind": "sql"
-    },
-    {
-      "name": "documents",
-      "file": "scripts/python/scan_project.py",
-      "kind": "sql"
-    },
-    {
-      "name": "task_comments",
-      "file": "scripts/python/task_comments.py",
-      "kind": "sql"
-    },
-    {
-      "name": "task_dependencies",
-      "file": "scripts/python/update_global_task_order.py",
-      "kind": "sql"
-    },
-    {
-      "name": "metadata",
-      "file": "scripts/python/update_global_task_order.py",
-      "kind": "sql"
-    },
-    {
-      "name": "metadata",
-      "file": "scripts/python/update_throughput_metrics.py",
-      "kind": "sql"
-    },
-    {
-      "name": "metric_samples",
-      "file": "scripts/python/update_throughput_metrics.py",
-      "kind": "sql"
-    },
-    {
       "name": "metadata",
       "file": "src/lib/create-jira-tasks/to_sqlite.py",
       "kind": "sql"
@@ -344,6 +214,136 @@
       "name": "tasks",
       "file": "test/python/test_prompt_budget.py",
       "kind": "sql"
+    },
+    {
+      "name": "documents",
+      "file": "tools/scripts/python/bootstrap_min_catalog.py",
+      "kind": "sql"
+    },
+    {
+      "name": "sections",
+      "file": "tools/scripts/python/bootstrap_min_catalog.py",
+      "kind": "sql"
+    },
+    {
+      "name": "meta",
+      "file": "tools/scripts/python/bootstrap_min_catalog.py",
+      "kind": "sql"
+    },
+    {
+      "name": "metadata",
+      "file": "tools/scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "epics",
+      "file": "tools/scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "stories",
+      "file": "tools/scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "tasks",
+      "file": "tools/scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_progress",
+      "file": "tools/scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "doc_observations",
+      "file": "tools/scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_dependencies",
+      "file": "tools/scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "agents",
+      "file": "tools/scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "llm_providers",
+      "file": "tools/scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "llm_models",
+      "file": "tools/scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_dependencies",
+      "file": "tools/scripts/python/populate_task_dependencies.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_id_map",
+      "file": "tools/scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "progress_migration_journal",
+      "file": "tools/scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "progress_migration_audit",
+      "file": "tools/scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "progress_migration_snapshots",
+      "file": "tools/scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_progress",
+      "file": "tools/scripts/python/record_task_progress.py",
+      "kind": "sql"
+    },
+    {
+      "name": "doc_observations",
+      "file": "tools/scripts/python/record_task_progress.py",
+      "kind": "sql"
+    },
+    {
+      "name": "documents",
+      "file": "tools/scripts/python/scan_project.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_comments",
+      "file": "tools/scripts/python/task_comments.py",
+      "kind": "sql"
+    },
+    {
+      "name": "task_dependencies",
+      "file": "tools/scripts/python/update_global_task_order.py",
+      "kind": "sql"
+    },
+    {
+      "name": "metadata",
+      "file": "tools/scripts/python/update_global_task_order.py",
+      "kind": "sql"
+    },
+    {
+      "name": "metadata",
+      "file": "tools/scripts/python/update_throughput_metrics.py",
+      "kind": "sql"
+    },
+    {
+      "name": "metric_samples",
+      "file": "tools/scripts/python/update_throughput_metrics.py",
+      "kind": "sql"
     }
   ],
   "indexes": [
@@ -384,173 +384,6 @@
       "kind": "sql"
     },
     {
-      "name": "idx_task_dependencies_unique",
-      "on": "task_dependencies",
-      "file": "scripts/python/build_tasks_db.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_task_dependencies_task",
-      "on": "task_dependencies",
-      "file": "scripts/python/build_tasks_db.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_task_dependencies_blocker",
-      "on": "task_dependencies",
-      "file": "scripts/python/build_tasks_db.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_tasks_uid",
-      "on": "tasks",
-      "file": "scripts/python/build_tasks_db.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_agents_name_normalized",
-      "on": "agents",
-      "file": "scripts/python/ensure_agents_schema.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_agents_client",
-      "on": "agents",
-      "file": "scripts/python/ensure_agents_schema.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_agents_model",
-      "on": "agents",
-      "file": "scripts/python/ensure_agents_schema.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_agents_active",
-      "on": "agents",
-      "file": "scripts/python/ensure_agents_schema.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_agents_last_used",
-      "on": "agents",
-      "file": "scripts/python/ensure_agents_schema.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_llm_providers_type",
-      "on": "llm_providers",
-      "file": "scripts/python/ensure_agents_schema.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_llm_models_provider",
-      "on": "llm_models",
-      "file": "scripts/python/ensure_agents_schema.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_llm_models_name",
-      "on": "llm_models",
-      "file": "scripts/python/ensure_agents_schema.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_task_dependencies_unique",
-      "on": "task_dependencies",
-      "file": "scripts/python/populate_task_dependencies.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_task_dependencies_task",
-      "on": "task_dependencies",
-      "file": "scripts/python/populate_task_dependencies.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_task_dependencies_blocker",
-      "on": "task_dependencies",
-      "file": "scripts/python/populate_task_dependencies.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_tasks_uid",
-      "on": "tasks",
-      "file": "scripts/python/progress_migration.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_progress_migration_audit_plan",
-      "on": "progress_migration_audit",
-      "file": "scripts/python/progress_migration.py",
-      "kind": "sql"
-    },
-    {
-      "name": "--",
-      "file": "scripts/python/refresh_stack_db.py",
-      "kind": "knex"
-    },
-    {
-      "name": "idx_documents_sha",
-      "on": "documents",
-      "file": "scripts/python/scan_project.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_documents_kind",
-      "on": "documents",
-      "file": "scripts/python/scan_project.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_task_comments_task",
-      "on": "task_comments",
-      "file": "scripts/python/task_comments.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_task_comments_story_ref",
-      "on": "task_comments",
-      "file": "scripts/python/task_comments.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_task_comments_commenter",
-      "on": "task_comments",
-      "file": "scripts/python/task_comments.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_task_dependencies_unique",
-      "on": "task_dependencies",
-      "file": "scripts/python/update_global_task_order.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_task_dependencies_task",
-      "on": "task_dependencies",
-      "file": "scripts/python/update_global_task_order.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_task_dependencies_blocker",
-      "on": "task_dependencies",
-      "file": "scripts/python/update_global_task_order.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_metric_samples_task",
-      "on": "metric_samples",
-      "file": "scripts/python/update_throughput_metrics.py",
-      "kind": "sql"
-    },
-    {
-      "name": "idx_metric_samples_time",
-      "on": "metric_samples",
-      "file": "scripts/python/update_throughput_metrics.py",
-      "kind": "sql"
-    },
-    {
       "name": "idx_vectors_doc",
       "on": "vectors",
       "file": "src/lib/doc_indexer.py",
@@ -585,6 +418,173 @@
       "on": "agents",
       "file": "test/python/test_agents_repository.py",
       "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_unique",
+      "on": "task_dependencies",
+      "file": "tools/scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_task",
+      "on": "task_dependencies",
+      "file": "tools/scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_blocker",
+      "on": "task_dependencies",
+      "file": "tools/scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_tasks_uid",
+      "on": "tasks",
+      "file": "tools/scripts/python/build_tasks_db.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_agents_name_normalized",
+      "on": "agents",
+      "file": "tools/scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_agents_client",
+      "on": "agents",
+      "file": "tools/scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_agents_model",
+      "on": "agents",
+      "file": "tools/scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_agents_active",
+      "on": "agents",
+      "file": "tools/scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_agents_last_used",
+      "on": "agents",
+      "file": "tools/scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_llm_providers_type",
+      "on": "llm_providers",
+      "file": "tools/scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_llm_models_provider",
+      "on": "llm_models",
+      "file": "tools/scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_llm_models_name",
+      "on": "llm_models",
+      "file": "tools/scripts/python/ensure_agents_schema.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_unique",
+      "on": "task_dependencies",
+      "file": "tools/scripts/python/populate_task_dependencies.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_task",
+      "on": "task_dependencies",
+      "file": "tools/scripts/python/populate_task_dependencies.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_blocker",
+      "on": "task_dependencies",
+      "file": "tools/scripts/python/populate_task_dependencies.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_tasks_uid",
+      "on": "tasks",
+      "file": "tools/scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_progress_migration_audit_plan",
+      "on": "progress_migration_audit",
+      "file": "tools/scripts/python/progress_migration.py",
+      "kind": "sql"
+    },
+    {
+      "name": "--",
+      "file": "tools/scripts/python/refresh_stack_db.py",
+      "kind": "knex"
+    },
+    {
+      "name": "idx_documents_sha",
+      "on": "documents",
+      "file": "tools/scripts/python/scan_project.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_documents_kind",
+      "on": "documents",
+      "file": "tools/scripts/python/scan_project.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_comments_task",
+      "on": "task_comments",
+      "file": "tools/scripts/python/task_comments.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_comments_story_ref",
+      "on": "task_comments",
+      "file": "tools/scripts/python/task_comments.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_comments_commenter",
+      "on": "task_comments",
+      "file": "tools/scripts/python/task_comments.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_unique",
+      "on": "task_dependencies",
+      "file": "tools/scripts/python/update_global_task_order.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_task",
+      "on": "task_dependencies",
+      "file": "tools/scripts/python/update_global_task_order.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_task_dependencies_blocker",
+      "on": "task_dependencies",
+      "file": "tools/scripts/python/update_global_task_order.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_metric_samples_task",
+      "on": "metric_samples",
+      "file": "tools/scripts/python/update_throughput_metrics.py",
+      "kind": "sql"
+    },
+    {
+      "name": "idx_metric_samples_time",
+      "on": "metric_samples",
+      "file": "tools/scripts/python/update_throughput_metrics.py",
+      "kind": "sql"
     }
   ],
   "models": [],
@@ -593,16 +593,6 @@
     "config/bootstrap_docs_catalog.sql",
     "docs/document-catalog-schema.sql",
     "examples/sample-project/sql/schema.sql",
-    "scripts/python/bootstrap_min_catalog.py",
-    "scripts/python/build_tasks_db.py",
-    "scripts/python/ensure_agents_schema.py",
-    "scripts/python/populate_task_dependencies.py",
-    "scripts/python/progress_migration.py",
-    "scripts/python/record_task_progress.py",
-    "scripts/python/scan_project.py",
-    "scripts/python/task_comments.py",
-    "scripts/python/update_global_task_order.py",
-    "scripts/python/update_throughput_metrics.py",
     "src/lib/create-jira-tasks/to_sqlite.py",
     "src/lib/create-jira-tasks/upsert_story_into_db.py",
     "src/lib/doc_indexer.py",
@@ -612,6 +602,16 @@
     "test/python/test_estimate_and_backlog.py",
     "test/python/test_progress_migration.py",
     "test/python/test_prompt_budget.py",
-    "scripts/python/refresh_stack_db.py"
+    "tools/scripts/python/bootstrap_min_catalog.py",
+    "tools/scripts/python/build_tasks_db.py",
+    "tools/scripts/python/ensure_agents_schema.py",
+    "tools/scripts/python/populate_task_dependencies.py",
+    "tools/scripts/python/progress_migration.py",
+    "tools/scripts/python/record_task_progress.py",
+    "tools/scripts/python/scan_project.py",
+    "tools/scripts/python/task_comments.py",
+    "tools/scripts/python/update_global_task_order.py",
+    "tools/scripts/python/update_throughput_metrics.py",
+    "tools/scripts/python/refresh_stack_db.py"
   ]
 }

@@ -19,7 +19,7 @@ def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path) -
         "-lc",
         (
             f"codex exec --model \"${{CODEX_MODEL:-{os.getenv('CODEX_MODEL','gpt-5.1-codex')}}}\" "
-            f"--output '{output_path}' --step '{step}' < '{prompt_path}'"
+            f"--step '{step}' < '{prompt_path}' > '{output_path}'"
         ),
     ]
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

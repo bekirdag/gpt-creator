@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -126,11 +127,12 @@ def _load_adapter_config(cur: sqlite3.Cursor, provider_id: str) -> Tuple[str, Di
 def _load_agent_from_env() -> Optional[Tuple[str, Dict[str, Any], str]]:
     adapter = (os.getenv("GC_ACTIVE_AGENT_ADAPTER") or "").strip()
     model = (
-        os.getenv("GC_ACTIVE_AGENT_MODEL")
+        os.getenv("DEFAULT_LLM")
+        or os.getenv("GC_ACTIVE_AGENT_MODEL")
         or os.getenv("CODEX_MODEL")
-        or "gpt-5.1-codex"
+        or "gpt-5.1-codex-max"
     )
-    if not adapter:
+    if not adapter and not os.getenv("DEFAULT_AGENT"):
         return None
     config: Dict[str, Any] = {}
     agent_file = (os.getenv("GC_ACTIVE_AGENT_FILE") or "").strip()
@@ -153,6 +155,27 @@ def _load_agent_from_env() -> Optional[Tuple[str, Dict[str, Any], str]]:
             except Exception:
                 pass
     return adapter, config, model
+
+
+def _record_usage(project_root: Path, task_ref: str, model: str, adapter: str, prompt_tokens: int, completion_tokens: int, exit_code: int = 0) -> None:
+    usage_file = project_root / ".gpt-creator" / "logs" / "codex-usage.ndjson"
+    try:
+        usage_file.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "task": task_ref,
+            "model": model,
+            "adapter": adapter,
+            "prompt_tokens": int(prompt_tokens or 0),
+            "completion_tokens": int(completion_tokens or 0),
+            "total_tokens": int((prompt_tokens or 0) + (completion_tokens or 0)),
+            "exit": int(exit_code),
+            "usage_captured": True,
+        }
+        with usage_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
 
 
 def _build_prompt(task_brief: str) -> Tuple[str, List[str]]:
@@ -181,7 +204,12 @@ def qa_tasks_llm(
 
     adapter = "codex_cli"
     config: Dict[str, Any] = {}
-    model = model_override or os.getenv("CODEX_MODEL") or "gpt-5.1-codex"
+    model = (
+        model_override
+        or os.getenv("DEFAULT_LLM")
+        or os.getenv("CODEX_MODEL")
+        or "gpt-5.1-codex-max"
+    )
 
     env_agent = _load_agent_from_env()
     if env_agent:
@@ -206,6 +234,9 @@ def qa_tasks_llm(
 
     client = create_llm_client(adapter, config)
 
+    if not agent_name:
+        agent_name = os.getenv("DEFAULT_AGENT", "")
+
     tasks = _fetch_tasks(cur, task_ref)
     if not tasks:
         print("No tasks with status ready-for-qa found.", file=sys.stderr)
@@ -223,6 +254,9 @@ def qa_tasks_llm(
             workdir=str(project_root),
             sandbox="workspace-write",
         )
+        tokens_prompt = getattr(getattr(result, "tokens", None), "prompt", 0) or 0
+        tokens_completion = getattr(getattr(result, "tokens", None), "completion", 0) or 0
+        _record_usage(project_root, task_ref_text, model, adapter, tokens_prompt, tokens_completion, exit_code=0)
         print(f"# {task_ref_text}")
         print(result.content.strip())
         print()
@@ -255,4 +289,3 @@ def main(argv: Sequence[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-

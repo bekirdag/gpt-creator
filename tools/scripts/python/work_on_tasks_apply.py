@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 
 from llm_client_factory import create_llm_client
 from llm_client import ChatResult
+import record_codex_usage_lib as codex_usage  # type: ignore
 
 
 def resolve_cli_root() -> Path:
@@ -63,6 +64,32 @@ def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, p
     # Stream stderr to the user (inherited), while also tee'ing into a logfile.
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True)
     return proc, stderr_log
+
+
+def record_usage(project_root: Path, task_id: str, model: str, stderr_log: Path, prompt_path: Path, output_path: Path, rc: int) -> None:
+    """Append a usage entry to codex-usage.ndjson."""
+    usage_file = project_root / ".gpt-creator" / "logs" / "codex-usage.ndjson"
+    usage_file.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.utcnow().isoformat() + "Z"
+    try:
+        # We don't have token counts; use 0s but capture rc and log path for auditing.
+        entry = {
+            "timestamp": ts,
+            "task": task_id,
+            "model": model,
+            "prompt_path": str(prompt_path),
+            "output_path": str(output_path),
+            "stderr_log": str(stderr_log),
+            "exit": rc,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "captured": False,
+        }
+        with usage_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    except Exception as exc:
+        log_debug(project_root, f"[usage] failed to record codex usage: {exc}")
 
 
 def run_generic_agent(adapter: str, model: str, prompt_path: Path, output_path: Path, project_root: Path) -> ChatResult:
@@ -171,12 +198,18 @@ def main(argv: List[str]) -> int:
 
     diff_before = fingerprint_diff() if args.diff_guard else ""
     adapter = (os.getenv("GC_ACTIVE_AGENT_ADAPTER", "codex_cli") or "codex_cli").strip().lower()
-    model = os.getenv("CODEX_MODEL", os.getenv("GC_ACTIVE_AGENT_MODEL", "gpt-5.1-codex"))
+    model = (
+        os.getenv("DEFAULT_LLM")
+        or os.getenv("CODEX_MODEL")
+        or os.getenv("GC_ACTIVE_AGENT_MODEL")
+        or "gpt-5.1-codex-max"
+    )
     chat_result: Optional[ChatResult] = None
 
     if adapter in {"codex_cli", "openai_cli", "openai", ""}:
         proc, stderr_log = run_codex(args.call_name, args.step, prompt_path, output_path, project_root)
         log_debug(project_root, f"[codex] completed rc={proc.returncode} (see stderr log at {stderr_log})")
+        record_usage(project_root, args.call_name, model, stderr_log, prompt_path, output_path, proc.returncode)
         if proc.returncode != 0:
             result["status"] = "codex-failed"
             stderr_snippet = ""

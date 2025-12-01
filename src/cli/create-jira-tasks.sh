@@ -16,10 +16,20 @@ usage() {
 }
 
 PROJECT_PATH="$PWD"
-MODEL="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex}}}"
+# Default model/agent from env for easy overrides
+DEFAULT_MODEL="${DEFAULT_LLM:-${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex-max}}}}"
+MODEL="$DEFAULT_MODEL"
 FORCE=0
 DRY_RUN=0
 AGENT_NAME=""
+# Allow default agent from env without explicit flag
+if [[ -z "$AGENT_NAME" && -n "${DEFAULT_AGENT:-}" ]]; then
+  AGENT_NAME="$DEFAULT_AGENT"
+fi
+if [[ -n "${DEFAULT_AGENT_REASONING:-}" ]]; then
+  export CODEX_REASONING_EFFORT="${DEFAULT_AGENT_REASONING}"
+  export CODEX_REASONING_EFFORT_NON_CODE="${DEFAULT_AGENT_REASONING}"
+fi
 case "${GC_DRY_RUN:-}" in
   1|true|yes|on) DRY_RUN=1 ;;
 esac

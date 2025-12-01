@@ -1182,7 +1182,10 @@ slugify_name() {
 # Context directories inside project
 ensure_ctx() {
   local root="${1:-}" TMP_DIR=""
-  if [[ -z "${root}" ]]; then root="${PROJECT_ROOT:-$PWD}"; fi
+  # Default to the current working directory when --project is not provided.
+  if [[ -z "${root}" ]]; then
+    root="$PWD"
+  fi
   PROJECT_ROOT="$(abs_path "$root")"
   GC_DIR="${PROJECT_ROOT}/.gpt-creator"
   STAGING_DIR="${GC_DIR}/staging"

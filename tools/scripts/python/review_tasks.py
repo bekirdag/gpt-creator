@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -72,6 +73,38 @@ def _load_adapter_config(cur: sqlite3.Cursor, provider_id: str) -> Tuple[str, Di
     if "maxOutputTokens" not in metadata:
         metadata["maxOutputTokens"] = metadata.get("default_max_tokens")
     return adapter or "codex_cli", metadata
+
+
+def _load_agent_from_env() -> Optional[Tuple[str, Dict[str, Any], str]]:
+    adapter = (os.getenv("GC_ACTIVE_AGENT_ADAPTER") or "").strip()
+    model = (
+        os.getenv("GC_ACTIVE_AGENT_MODEL")
+        or os.getenv("CODEX_MODEL")
+        or "gpt-5.1-codex"
+    )
+    if not adapter:
+        return None
+    config: Dict[str, Any] = {}
+    agent_file = (os.getenv("GC_ACTIVE_AGENT_FILE") or "").strip()
+    if agent_file:
+        try:
+            data = json.loads(Path(agent_file).read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                config = data.get("agent") or data  # type: ignore[assignment]
+                if not isinstance(config, dict):
+                    config = {}
+        except Exception:
+            config = {}
+    if not config:
+        raw_cfg = (os.getenv("GC_AGENT_CONFIG_JSON") or "").strip()
+        if raw_cfg:
+            try:
+                loaded = json.loads(raw_cfg)
+                if isinstance(loaded, dict):
+                    config = loaded
+            except Exception:
+                pass
+    return adapter, config, model
 
 
 def _fetch_tasks(cur: sqlite3.Cursor, specific: Optional[str] = None) -> List[sqlite3.Row]:
@@ -293,7 +326,14 @@ def review_tasks(
 
     adapter = "codex_cli"
     config: Dict[str, Any] = {}
-    model = model_override or "gpt-4o-mini"
+    model = model_override or os.getenv("CODEX_MODEL") or "gpt-5.1-codex"
+
+    # Highest precedence: active agent environment (registry).
+    env_agent = _load_agent_from_env()
+    if env_agent:
+        adapter, config, env_model = env_agent
+        if not model_override:
+            model = env_model
 
     # Resolve adapter/config/model from agents table when provided.
     if agent_name:
@@ -324,7 +364,17 @@ def review_tasks(
         context_text = _render_task_context(task, project_root, cur)
         system, messages = _build_prompt(context_text)
         start_ts = time.time()
-        result = client.send_chat(messages, model, system=system)
+        try:
+            result = client.send_chat(
+                messages,
+                model,
+                system=system,
+                workdir=str(project_root),
+                sandbox="workspace-write",
+            )
+        except Exception as exc:
+            print(f"Review for {task_ref_text} failed: {exc}", file=sys.stderr)
+            return 1
         duration_s = time.time() - start_ts
         parsed = _parse_review_response(result.content)
         verdict = (parsed.get("verdict") or "").strip().lower()

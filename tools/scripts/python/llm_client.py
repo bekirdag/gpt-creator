@@ -57,13 +57,29 @@ class CodexCLIClient(LLMClient):
         self.binary = binary
 
     def send_chat(self, messages: Sequence[str], model: str, **kwargs) -> ChatResult:
-        prompt = "\n\n".join(messages)
+        system = (kwargs.get("system") or "").strip()
+        workdir = kwargs.get("workdir") or None
+        sandbox = kwargs.get("sandbox") or "workspace-write"
+        prompt_parts: List[str] = []
+        if system:
+            prompt_parts.append(system)
+        prompt_parts.extend(str(msg) for msg in messages)
+        prompt = "\n\n".join(prompt_parts)
+        cmd: List[str] = [self.binary, "exec", "--model", model]
+        if sandbox:
+            cmd.extend(["--sandbox", sandbox])
+        if workdir:
+            cmd.extend(["--cd", str(workdir)])
+        cmd.append("--full-auto")
         proc = subprocess.run(
-            [self.binary, "exec", "--model", model],
+            cmd,
             input=prompt.encode("utf-8"),
             capture_output=True,
             check=False,
         )
+        if proc.returncode != 0:
+            stderr_text = proc.stderr.decode("utf-8", "ignore")
+            raise RuntimeError(f"codex exec failed (rc={proc.returncode}): {stderr_text}")
         content = proc.stdout.decode("utf-8", "ignore")
         return ChatResult(content=content, tokens=TokenCounts(prompt=0, completion=0), model=model)
 

@@ -4360,6 +4360,10 @@ main() {
       gc_load_cmd qa
       cmd_qa "$@"
       ;;
+    qa-llm)
+      gc_load_cmd qa-llm
+      cmd_qa_llm "$@"
+      ;;
     verify)
       gc_load_cmd verify
       cmd_verify "$@"

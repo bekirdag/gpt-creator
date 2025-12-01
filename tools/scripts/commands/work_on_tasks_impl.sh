@@ -3269,6 +3269,14 @@ print(error)'
         task_notes=("${_task_notes_refreshed[@]}")
       fi
 
+      # Normalize successful outcomes to ready-to-review so downstream git + reporting
+      # flows treat all successes the same way.
+      case "$task_result_status" in
+        complete|completed|completed-no-changes|ready-to-review-no-changes)
+          task_result_status="ready-to-review"
+          ;;
+      esac
+
       local story_status_hint="in-progress"
       case "$task_result_status" in
         blocked|blocked-budget|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|retryable|blocked-push|dead-letter|permanent-fail) story_status_hint="blocked" ;;

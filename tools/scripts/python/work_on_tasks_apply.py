@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -37,6 +38,41 @@ def log_debug(project_root: Path, message: str) -> None:
     except Exception:
         # Never block on logging; this is best-effort only.
         pass
+
+
+def parse_token_counts(log_path: Path) -> Dict[str, int]:
+    """Best-effort token extraction from Codex stderr log."""
+    counts: Dict[str, int] = {}
+    if not log_path.exists():
+        return counts
+
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return counts
+
+    def parse_number(value: str) -> int:
+        cleaned = value.strip().replace(",", "").replace("_", "").replace(" ", "")
+        return int(cleaned) if cleaned and cleaned.isdigit() else 0
+
+    patterns = {
+        "total": re.compile(r"tokens?\s+used[:\s]+([0-9][0-9,._ ]*)", re.IGNORECASE),
+        "prompt": re.compile(r"prompt\s+tokens?[:\s]+([0-9][0-9,._ ]*)", re.IGNORECASE),
+        "completion": re.compile(r"completion\s+tokens?[:\s]+([0-9][0-9,._ ]*)", re.IGNORECASE),
+    }
+
+    for line in text.splitlines():
+        for key, pattern in patterns.items():
+            match = pattern.search(line)
+            if match:
+                value = parse_number(match.group(1))
+                if value:
+                    counts[key] = value
+
+    if "total" not in counts and ("prompt" in counts or "completion" in counts):
+        counts["total"] = counts.get("prompt", 0) + counts.get("completion", 0)
+
+    return counts
 
 
 def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, project_root: Path) -> tuple[subprocess.CompletedProcess, Path]:
@@ -209,6 +245,7 @@ def main(argv: List[str]) -> int:
         proc, stderr_log = run_codex(args.call_name, args.step, prompt_path, output_path, project_root)
         log_debug(project_root, f"[codex] completed rc={proc.returncode} (see stderr log at {stderr_log})")
         record_usage(project_root, args.call_name, model, stderr_log, prompt_path, output_path, proc.returncode)
+        parsed_tokens = parse_token_counts(stderr_log)
         if proc.returncode != 0:
             result["status"] = "codex-failed"
             stderr_snippet = ""
@@ -233,6 +270,7 @@ def main(argv: List[str]) -> int:
             result["notes"].append(f"Agent adapter '{adapter}' failed: {exc}")
             emit_plain(result)
             return 0
+        parsed_tokens = {}
 
     # Token accounting from environment if available
     prompt_tokens = int(os.getenv("GC_LAST_CODEX_PROMPT_TOKENS", "0") or 0)
@@ -242,6 +280,15 @@ def main(argv: List[str]) -> int:
         prompt_tokens = getattr(chat_result.tokens, "prompt", prompt_tokens)
         completion_tokens = getattr(chat_result.tokens, "completion", completion_tokens)
         total_tokens = prompt_tokens + completion_tokens
+    if parsed_tokens:
+        if prompt_tokens == 0 and parsed_tokens.get("prompt", 0):
+            prompt_tokens = parsed_tokens["prompt"]
+        if completion_tokens == 0 and parsed_tokens.get("completion", 0):
+            completion_tokens = parsed_tokens["completion"]
+        if total_tokens == 0 and parsed_tokens.get("total", 0):
+            total_tokens = parsed_tokens["total"]
+        if total_tokens == 0:
+            total_tokens = prompt_tokens + completion_tokens
     result["tokens"] = {"prompt": prompt_tokens, "completion": completion_tokens, "total": total_tokens}
 
     if not output_path.exists() or output_path.stat().st_size == 0:

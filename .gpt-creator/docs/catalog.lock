@@ -1,1 +1,1 @@
-{ "db": "./.gpt-creator/docs/catalog.db", "enabled": 1, "mode": "lazy" }
+{ "db": "/home/wodo/apps/gpt-creator/.gpt-creator/docs/catalog.db", "enabled": 1, "mode": "lazy" }

@@ -100,7 +100,7 @@ gc_git_status_ok() {
   local s
   s="$(printf "%s" "${1:-}" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
   case "$s" in
-    SUCCESS|COMPLETE|COMPLETED|COMPLETED_OK) return 0 ;;
+    SUCCESS|COMPLETE|COMPLETED|COMPLETED_OK|READY_TO_REVIEW|READY_TO_REVIEW_NO_CHANGES) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -223,7 +223,7 @@ gc_git_finalize_task_branch() {
   gc_git_log "[git] files changed since task start: ${changed_count}"
 
   local should_merge=0
-  if gc_git_status_ok "$status" && [[ "${changed_count:-0}" =~ ^[0-9]+$ ]] && (( changed_count > 0 )); then
+  if gc_git_status_ok "$status"; then
     should_merge=1
   fi
   if (( should_merge )) && [[ -n "${GC_GIT_CURRENT_TASK_BRANCH:-}" ]]; then

@@ -555,6 +555,25 @@ cjt::wrap_json_extractor() {
   python3 "$helper_path" "$infile" "$outfile"
 }
 
+cjt::tasks_json_has_entries() {
+  local json_path="${1:?json path required}"
+  if [[ ! -s "$json_path" ]]; then
+    return 1
+  fi
+  python3 - "$json_path" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    data = json.loads(open(path, "r", encoding="utf-8").read())
+except Exception:
+    sys.exit(1)
+tasks = data.get("tasks")
+if not isinstance(tasks, list) or len(tasks) == 0:
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
 cjt::write_epics_prompt() {
   local prompt_file="${1:?prompt file required}"
   local helper_path
@@ -725,7 +744,12 @@ cjt::generate_tasks() {
     cjt::write_task_prompt "$story_file" "$prompt_file"
     cjt::log "Generating tasks for story ${slug}"
     if cjt::run_codex "$prompt_file" "$raw_file" "tasks-${slug}"; then
-      cjt::wrap_json_extractor "$raw_file" "$json_file"
+      if ! cjt::wrap_json_extractor "$raw_file" "$json_file"; then
+        cjt::die "Failed to parse tasks output into JSON for story ${slug}"
+      fi
+      if ! cjt::tasks_json_has_entries "$json_file"; then
+        cjt::die "Tasks generation produced empty or invalid tasks for story ${slug}"
+      fi
       cjt::state_mark_story_completed "tasks" "$slug"
       cjt::sync_story_snapshot_to_db "$json_file" "$slug"
       if (( inline_refine_enabled )); then
@@ -1364,6 +1388,10 @@ cjt::build_payload() {
 }
 
 cjt::update_database() {
+  if [[ "${CJT_DRY_RUN:-0}" == "1" ]]; then
+    cjt::log "[dry-run] Skipping tasks.db update"
+    return
+  fi
   if [[ "${CJT_INCREMENTAL_DB:-0}" == "1" ]]; then
     cjt::log "tasks.db already synchronized incrementally; skipping bulk rebuild"
     return

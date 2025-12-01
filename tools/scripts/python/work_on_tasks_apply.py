@@ -17,7 +17,10 @@ def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path) -
     cmd = [
         "bash",
         "-lc",
-        f"codex exec --model \"${{CODEX_MODEL:-{os.getenv('CODEX_MODEL','gpt-5.1-codex')}}}\" --prompt '{prompt_path}' --output '{output_path}' --step '{step}'",
+        (
+            f"codex exec --model \"${{CODEX_MODEL:-{os.getenv('CODEX_MODEL','gpt-5.1-codex')}}}\" "
+            f"--output '{output_path}' --step '{step}' < '{prompt_path}'"
+        ),
     ]
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
@@ -116,11 +119,11 @@ def main(argv: List[str]) -> int:
     if args.diff_guard:
         diff_after = fingerprint_diff()
         if diff_before and diff_after and diff_before == diff_after:
-        result["status"] = "no-diff"
-        result["apply_status"] = "no-diff"
-        result["notes"].append("No diff detected after apply.")
-        emit_plain(result)
-        return 0
+            result["status"] = "no-diff"
+            result["apply_status"] = "no-diff"
+            result["notes"].append("No diff detected after apply.")
+            emit_plain(result)
+            return 0
 
     result["status"] = "ok"
     result["apply_status"] = "applied"

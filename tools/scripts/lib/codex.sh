@@ -362,6 +362,9 @@ gc_refresh_work_prompt() {
     die "Python runtime '${python_bin}' not available; cannot refresh prompt."
   fi
   local helper_path
-  helper_path="$(gc_clone_python_tool "refresh_work_prompt.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  helper_path="$(gc_clone_python_tool "refresh_work_prompt.py" "${PROJECT_ROOT:-$PWD}")" || {
+    warn "refresh_work_prompt helper missing; skipping prompt refresh."
+    return 0
+  }
   "$python_bin" "$helper_path" "$prompt_base" "$prompt_path" "$template"
 }

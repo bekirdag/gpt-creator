@@ -703,8 +703,8 @@ preflight() {
 
 install_files() {
   echo "› Installing files to $APP_DIR …"
-  if [[ $FORCE -eq 1 && -d "$APP_DIR" ]]; then
-    echo "› Removing existing install at $APP_DIR (force)"
+  if [[ -d "$APP_DIR" ]]; then
+    echo "› Removing existing install at $APP_DIR to avoid stale files"
     as_root "$INSTALL_PREFIX" rm -rf "$APP_DIR"
   fi
   as_root "$INSTALL_PREFIX" mkdir -p "$APP_DIR"

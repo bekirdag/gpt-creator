@@ -28,15 +28,15 @@ def log_debug(project_root: Path, message: str) -> None:
 
 
 def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, project_root: Path, timeout_seconds: int) -> subprocess.CompletedProcess:
-    # Keep the Codex invocation minimal and non-interactive: feed prompt via stdin,
-    # auto-approve commands on failure, and constrain the sandbox to workspace-write.
+    # Keep the Codex invocation minimal and non-interactive: feed prompt via stdin
+    # and constrain the sandbox to workspace-write.
     cmd = [
         "bash",
         "-lc",
         (
             f"codex exec --model \"${{CODEX_MODEL:-{os.getenv('CODEX_MODEL','gpt-5.1-codex')}}}\" "
             f"-c task_name=\"{call_name}\" "
-            f"-a on-failure --sandbox workspace-write "
+            f"--sandbox workspace-write "
             f"--cd \"{project_root}\" "
             f"< '{prompt_path}' > '{output_path}'"
         ),

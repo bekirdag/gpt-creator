@@ -89,22 +89,11 @@ as_root() {
     echo "✖ Cannot write to ${target} and sudo is unavailable. Re-run with --prefix \"${HOME}/.local\" or a writable prefix." >&2
     exit 1
   fi
-  local sudo_check
-  sudo_check="$(sudo -n true 2>&1 || true)"
-  if [[ -z "$sudo_check" ]]; then
-    sudo "$@"
-    return $?
+  echo "› sudo will prompt for your password to write to ${target}. Press Ctrl+C to abort." >&2
+  if sudo "$@"; then
+    return 0
   fi
-  if grep -qi "no new privileges" <<<"$sudo_check"; then
-    echo "✖ sudo is blocked by the 'no new privileges' policy. Use --prefix \"${HOME}/.local\" or adjust sudo policy." >&2
-    exit 1
-  fi
-  if grep -qi "password is required" <<<"$sudo_check"; then
-    echo "› sudo will prompt for your password to write to ${target}. Press Ctrl+C to abort." >&2
-    sudo "$@"
-    return $?
-  fi
-  echo "✖ Unable to elevate with sudo (reason: ${sudo_check:-unknown}). Use --prefix \"${HOME}/.local\" or provide write access to ${target}." >&2
+  echo "✖ Unable to elevate with sudo. Use --prefix \"${HOME}/.local\" or provide write access to ${target}." >&2
   exit 1
 }
 

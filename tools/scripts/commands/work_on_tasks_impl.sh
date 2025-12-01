@@ -2026,6 +2026,15 @@ print(error)'
   local story_plan_helper=""
   story_plan_helper="$(gc_clone_python_tool "story_scheduler.py" "${PROJECT_ROOT:-$PWD}")" || return 1
 
+  # Fast exit when the backlog has no pending tasks to avoid prompt-prep loops.
+  local initial_pending_tasks
+  initial_pending_tasks="$(gc_count_pending_tasks "$tasks_db" 2>/dev/null || echo 0)"
+  [[ "$initial_pending_tasks" =~ ^[0-9]+$ ]] || initial_pending_tasks=0
+  if (( initial_pending_tasks == 0 )); then
+    info "No pending tasks detected; exiting work-on-tasks."
+    return 0
+  fi
+
   while :; do
     if gc_check_idle_timeout; then :; else break; fi
     local iteration_processed_any=0
@@ -2148,13 +2157,42 @@ print(error)'
     gc_update_work_state "$tasks_db" "$slug" "pending" "$actual_completed" "$total_tasks_int" "$run_stamp"
 
     if (( total_tasks_int > 0 && next_task_int >= total_tasks_int )); then
-      info "  All ${total_tasks_int} task(s) already complete; skipping prompt preparation."
-      gc_update_work_state "$tasks_db" "$slug" "complete" "$total_tasks_int" "$total_tasks_int" "$run_stamp"
-      if (( keep_artifacts == 0 )); then
-        rmdir "${story_run_dir}/prompts" 2>/dev/null || true
-        rmdir "${story_run_dir}/out" 2>/dev/null || true
+      local pending_story_tasks="0"
+      pending_story_tasks="$(
+        python3 - "$tasks_db" "$slug" <<'PY' 2>/dev/null
+import sqlite3, sys
+db, slug = sys.argv[1], sys.argv[2]
+try:
+    conn = sqlite3.connect(db)
+    cur = conn.execute(
+        "SELECT count(*) FROM tasks WHERE story_slug=? AND status NOT IN ('complete','completed','completed-no-changes','ready-to-review','ready-to-review-no-changes')",
+        (slug,),
+    )
+    row = cur.fetchone()
+    print(row[0] if row else 0)
+except Exception:
+    print("0")
+PY
+      )"
+      [[ "$pending_story_tasks" =~ ^[0-9]+$ ]] || pending_story_tasks="0"
+      if (( pending_story_tasks == 0 )); then
+        info "  All ${total_tasks_int} task(s) already complete; skipping prompt preparation."
+        gc_update_work_state "$tasks_db" "$slug" "complete" "$total_tasks_int" "$total_tasks_int" "$run_stamp"
+        if (( keep_artifacts == 0 )); then
+          rmdir "${story_run_dir}/prompts" 2>/dev/null || true
+          rmdir "${story_run_dir}/out" 2>/dev/null || true
+        fi
+        continue
+      else
+        warn "  Story ${slug} appears complete but ${pending_story_tasks} pending task(s) remain; resyncing metadata."
+        gc_sync_story_totals "$tasks_db" || true
+        if (( next_task_int >= total_tasks_int )); then
+          next_task_int=$actual_completed
+        fi
+        if (( next_task_int >= total_tasks_int )); then
+          next_task_int=0
+        fi
       fi
-      continue
     fi
 
     if (( total_tasks_int == 0 )); then

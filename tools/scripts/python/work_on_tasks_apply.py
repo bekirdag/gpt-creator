@@ -13,6 +13,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from llm_client_factory import create_llm_client
+from llm_client import ChatResult
+
 
 def log_debug(project_root: Path, message: str) -> None:
     """Append lightweight debug breadcrumbs for troubleshooting."""
@@ -27,11 +30,16 @@ def log_debug(project_root: Path, message: str) -> None:
         pass
 
 
-def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, project_root: Path, timeout_seconds: int) -> subprocess.CompletedProcess:
+def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, project_root: Path, timeout_seconds: int) -> tuple[subprocess.CompletedProcess, Path]:
     # Keep the Codex invocation minimal and non-interactive: feed prompt via stdin
     # and constrain the sandbox to workspace-write. Wrap with coreutils timeout so
     # hung Codex sessions can't stall work-on-tasks indefinitely.
     timeout_prefix = f"timeout -k 10s {timeout_seconds}s "
+    stderr_log = project_root / ".gpt-creator" / "logs" / "codex-apply" / f"{call_name}.stderr.log"
+    try:
+        stderr_log.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     cmd = [
         "bash",
         "-lc",
@@ -41,12 +49,46 @@ def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, p
             f"-c task_name=\"{call_name}\" "
             f"--sandbox workspace-write "
             f"--cd \"{project_root}\" "
-            f"< '{prompt_path}' > '{output_path}'"
+            f"< '{prompt_path}' > '{output_path}' "
+            f"2> >(tee -a '{stderr_log}' >&2)"
         ),
     ]
     log_debug(project_root, f"[codex] launching (step={step}) cmd={cmd[2]}")
     # Allow a small buffer beyond timeout_prefix to let `timeout` cleanly kill children.
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout_seconds + 30)
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout_seconds + 30)
+    return proc, stderr_log
+
+
+def run_generic_agent(adapter: str, model: str, prompt_path: Path, output_path: Path, project_root: Path) -> ChatResult:
+    """Run a non-Codex adapter via llm_client_factory."""
+    agent_file = os.getenv("GC_ACTIVE_AGENT_FILE", "").strip()
+    config: Dict[str, object] = {}
+    if agent_file:
+        try:
+            data = json.loads(Path(agent_file).read_text(encoding="utf-8"))
+            # Agents registry stores config fields at the top level or under "agent"
+            if isinstance(data, dict):
+                config = data.get("agent") or data  # type: ignore[assignment]
+                if not isinstance(config, dict):
+                    config = {}
+        except Exception as exc:  # pragma: no cover - best effort
+            log_debug(project_root, f"[agent] failed to read agent file {agent_file}: {exc}")
+    # Fallback adapter config from environment if provided
+    adapter_cfg_env = os.getenv("GC_AGENT_CONFIG_JSON", "").strip()
+    if adapter_cfg_env and not config:
+        try:
+            env_cfg = json.loads(adapter_cfg_env)
+            if isinstance(env_cfg, dict):
+                config = env_cfg
+        except Exception:
+            pass
+
+    llm = create_llm_client(adapter, config or {})
+    prompt_text = prompt_path.read_text(encoding="utf-8")
+    result = llm.send_chat([prompt_text], model=model)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(result.content, encoding="utf-8")
+    return result
 
 
 def apply_patch(output_path: Path, project_root: Path, patch_artifact_path: Path) -> subprocess.CompletedProcess:
@@ -104,31 +146,50 @@ def main(argv: List[str]) -> int:
     }
 
     diff_before = fingerprint_diff() if args.diff_guard else ""
+    adapter = (os.getenv("GC_ACTIVE_AGENT_ADAPTER", "codex_cli") or "codex_cli").strip().lower()
+    model = os.getenv("CODEX_MODEL", os.getenv("GC_ACTIVE_AGENT_MODEL", "gpt-5.1-codex"))
+    chat_result: Optional[ChatResult] = None
 
-    timeout_seconds = int(os.getenv("GC_CODEX_EXEC_TIMEOUT_SECONDS", "300") or "300")
-    try:
-        proc = run_codex(args.call_name, args.step, prompt_path, output_path, project_root, timeout_seconds)
-    except subprocess.TimeoutExpired:
-        log_debug(project_root, f"[codex] timeout after {timeout_seconds}s")
-        result["status"] = "codex-timeout"
-        result["apply_status"] = "codex-timeout"
-        result["notes"].append(f"Codex timed out after {timeout_seconds}s")
-        emit_plain(result)
-        return 0
+    if adapter in {"codex_cli", "openai_cli", "openai", ""}:
+        timeout_seconds = int(os.getenv("GC_CODEX_EXEC_TIMEOUT_SECONDS", "300") or "300")
+        try:
+            proc, stderr_log = run_codex(args.call_name, args.step, prompt_path, output_path, project_root, timeout_seconds)
+        except subprocess.TimeoutExpired:
+            log_debug(project_root, f"[codex] timeout after {timeout_seconds}s")
+            result["status"] = "codex-timeout"
+            result["apply_status"] = "codex-timeout"
+            result["notes"].append(f"Codex timed out after {timeout_seconds}s")
+            emit_plain(result)
+            return 0
 
-    log_debug(project_root, f"[codex] completed rc={proc.returncode} stderr_len={len(proc.stderr or '')}")
-    if proc.returncode != 0:
-        result["status"] = "codex-failed"
-        stderr_snippet = (proc.stderr or "").strip()
-        if stderr_snippet:
-            result["notes"].append(f"Codex failed: {stderr_snippet}")
-        emit_plain(result)
-        return 0
+        log_debug(project_root, f"[codex] completed rc={proc.returncode} stderr_len={len(proc.stderr or '')}")
+        if proc.returncode != 0:
+            result["status"] = "codex-failed"
+            stderr_snippet = (proc.stderr or "").strip()
+            if stderr_snippet:
+                result["notes"].append(f"Codex failed: {stderr_snippet}")
+                result["notes"].append(f"Codex stderr log: {stderr_log}")
+            emit_plain(result)
+            return 0
+    else:
+        try:
+            chat_result = run_generic_agent(adapter, model, prompt_path, output_path, project_root)
+        except Exception as exc:
+            log_debug(project_root, f"[agent] adapter '{adapter}' failed: {exc}")
+            result["status"] = "agent-failed"
+            result["apply_status"] = "agent-failed"
+            result["notes"].append(f"Agent adapter '{adapter}' failed: {exc}")
+            emit_plain(result)
+            return 0
 
     # Token accounting from environment if available
     prompt_tokens = int(os.getenv("GC_LAST_CODEX_PROMPT_TOKENS", "0") or 0)
     completion_tokens = int(os.getenv("GC_LAST_CODEX_COMPLETION_TOKENS", "0") or 0)
     total_tokens = int(os.getenv("GC_CODEX_CALL_TOKEN_ACCUM", os.getenv("GC_LAST_CODEX_TOTAL_TOKENS", "0")) or 0)
+    if chat_result is not None:
+        prompt_tokens = getattr(chat_result.tokens, "prompt", prompt_tokens)
+        completion_tokens = getattr(chat_result.tokens, "completion", completion_tokens)
+        total_tokens = prompt_tokens + completion_tokens
     result["tokens"] = {"prompt": prompt_tokens, "completion": completion_tokens, "total": total_tokens}
 
     if not output_path.exists() or output_path.stat().st_size == 0:

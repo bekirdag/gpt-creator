@@ -95,6 +95,21 @@ if (( ${#queue[@]} == 0 )); then
   exit 0
 fi
 
+# Surface how many tasks will run this invocation and log the queue for debugging.
+run_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+queue_count="${#queue[@]}"
+queue_log_dir="${LOG_DIR:-${PROJECT_ROOT_DIR:-$PWD}/.gpt-creator/logs}/work-on-tasks"
+mkdir -p "$queue_log_dir"
+queue_log_path="${queue_log_dir}/task-queue-${run_stamp}.log"
+: >"$queue_log_path"
+for entry in "${queue[@]}"; do
+  printf '%s\n' "$entry" >>"$queue_log_path"
+done
+queue_line="|  TOTAL TASKS TO RUN : ${queue_count}  |"
+queue_border="$(printf '%*s' "${#queue_line}" '' | tr ' ' '-')"
+printf '%s\n%s\n%s\n' "$queue_border" "$queue_line" "$queue_border"
+echo "Task queue written to ${queue_log_path}"
+
 story_override_norm="${story_override,,}"
 task_override_norm="${task_override,,}"
 ran_any=0

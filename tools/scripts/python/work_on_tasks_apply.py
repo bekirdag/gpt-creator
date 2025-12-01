@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 
 from llm_client_factory import create_llm_client
 from llm_client import ChatResult
+from agents_registry import AgentRegistry
 
 
 def resolve_cli_root() -> Path:
@@ -156,7 +157,34 @@ def record_usage(project_root: Path, task_id: str, model: str, stderr_log: Path,
         log_debug(project_root, f"[usage] failed to record codex usage: {exc}")
 
 
-def run_generic_agent(adapter: str, model: str, prompt_path: Path, output_path: Path, project_root: Path) -> ChatResult:
+def merge_registry_config(
+    config: Dict[str, object],
+    registry_cfg: Optional[Dict[str, object]],
+) -> Dict[str, object]:
+    """Overlay agent config with registry metadata (adapterConfig, headers, limits)."""
+    if not registry_cfg:
+        return config
+    merged: Dict[str, object] = dict(registry_cfg)
+    # Preserve explicit agent overrides where present
+    for key, value in config.items():
+        if key == "adapterConfig":
+            if value:
+                merged["adapterConfig"] = value
+            elif registry_cfg.get("adapterConfig") and not merged.get("adapterConfig"):
+                merged["adapterConfig"] = registry_cfg["adapterConfig"]
+        else:
+            merged[key] = value
+    return merged
+
+
+def run_generic_agent(
+    adapter: str,
+    model: str,
+    prompt_path: Path,
+    output_path: Path,
+    project_root: Path,
+    registry_cfg: Optional[Dict[str, object]] = None,
+) -> ChatResult:
     """Run a non-Codex adapter via llm_client_factory."""
     agent_file = os.getenv("GC_ACTIVE_AGENT_FILE", "").strip()
     config: Dict[str, object] = {}
@@ -179,6 +207,9 @@ def run_generic_agent(adapter: str, model: str, prompt_path: Path, output_path: 
                 config = env_cfg
         except Exception:
             pass
+
+    if registry_cfg:
+        config = merge_registry_config(config, registry_cfg)
 
     llm = create_llm_client(adapter, config or {})
     prompt_text = prompt_path.read_text(encoding="utf-8")
@@ -261,13 +292,35 @@ def main(argv: List[str]) -> int:
     }
 
     diff_before = fingerprint_diff() if args.diff_guard else ""
-    adapter = (os.getenv("GC_ACTIVE_AGENT_ADAPTER", "codex_cli") or "codex_cli").strip().lower()
+    agent_flag = os.getenv("GC_AGENT_FLAG", "").strip().lower() not in {"", "0", "false", "no"}
+    active_client = os.getenv("GC_ACTIVE_AGENT_CLIENT", "").strip()
+    active_model_env = os.getenv("GC_ACTIVE_AGENT_MODEL", "").strip()
+    adapter = (os.getenv("GC_ACTIVE_AGENT_ADAPTER", "") or "").strip().lower()
     model = (
         os.getenv("DEFAULT_LLM")
         or os.getenv("CODEX_MODEL")
-        or os.getenv("GC_ACTIVE_AGENT_MODEL")
+        or active_model_env
         or "gpt-5.1-codex-max"
     )
+    registry_cfg: Optional[Dict[str, object]] = None
+    if not adapter and active_client:
+        try:
+            registry_cfg = AgentRegistry.load().validate_pair(active_client, model)
+            adapter = (registry_cfg.get("adapter") or "").strip().lower()
+            # Use registry-resolved model when not explicitly provided
+            registry_model = (registry_cfg.get("model") or "").strip()
+            if registry_model:
+                model = registry_model
+        except Exception as exc:  # pragma: no cover - defensive
+            log_debug(project_root, f"[agent] registry lookup failed: {exc}")
+    if not adapter:
+        if agent_flag:
+            result["status"] = "agent-failed"
+            result["apply_status"] = "agent-failed"
+            result["notes"].append("Agent adapter not resolved; check agent registry or adapter configuration.")
+            emit_plain(result)
+            return 0
+        adapter = "codex_cli"
     chat_result: Optional[ChatResult] = None
 
     if adapter in {"codex_cli", "openai_cli", "openai", ""}:
@@ -291,7 +344,7 @@ def main(argv: List[str]) -> int:
             return 0
     else:
         try:
-            chat_result = run_generic_agent(adapter, model, prompt_path, output_path, project_root)
+            chat_result = run_generic_agent(adapter, model, prompt_path, output_path, project_root, registry_cfg)
         except Exception as exc:
             log_debug(project_root, f"[agent] adapter '{adapter}' failed: {exc}")
             result["status"] = "agent-failed"

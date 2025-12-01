@@ -19,10 +19,19 @@ from .model import (
 
 
 class AgentRepository:
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, read_only: bool = False):
         self.db_path = Path(db_path)
+        self.read_only = read_only
 
     def _connect(self) -> sqlite3.Connection:
+        if self.read_only:
+            conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("PRAGMA foreign_keys = ON")
+            except Exception:
+                pass
+            return conn
         conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")

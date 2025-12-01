@@ -47,18 +47,21 @@ class DocSource:
 
 
 class AgentService:
-    def __init__(self, db_path: Path, registry: Optional[AgentRegistry] = None):
-        self.repo = AgentRepository(db_path)
+    def __init__(self, db_path: Path, registry: Optional[AgentRegistry] = None, read_only: bool = False):
+        self.read_only = read_only or os.getenv("GC_AGENT_READONLY", "").strip().lower() in {"1", "true", "yes"}
+        self.repo = AgentRepository(db_path, read_only=self.read_only)
         self.registry = registry or AgentRegistry.load()
         self._summarizer = AgentSummarizer(self.registry)
         self._catalog_store = LLMCatalogStore(db_path)
         self._warnings: List[str] = []
         try:
-            self._sync_catalog_registry()
+            if not self.read_only:
+                self._sync_catalog_registry()
         except RuntimeError as exc:
             warning = str(exc)
             self._record_warning(warning)
-        self._seed_registry_providers()
+        if not self.read_only:
+            self._seed_registry_providers()
 
     def _load_doc(self, source: DocSource) -> DocBundle:
         return read_doc(source.path, stdin_payload=source.stdin_payload)
@@ -583,21 +586,34 @@ class AgentService:
             pass
 
     def _seed_registry_providers(self) -> None:
+        if os.getenv("GC_AGENT_SKIP_SEED", "").strip().lower() in {"1", "true", "yes"}:
+            return
         try:
             clients = self.registry.list_clients()
         except Exception:
             return
-        for entry in clients:
-            client_name = entry.get("name")
-            default_model = entry.get("defaultModel") or (entry.get("models") or [None])[0]
-            if client_name and default_model:
-                self._ensure_llm_reference(client_name, default_model)
+        try:
+            for entry in clients:
+                client_name = entry.get("name")
+                default_model = entry.get("defaultModel") or (entry.get("models") or [None])[0]
+                if client_name and default_model:
+                    self._ensure_llm_reference(client_name, default_model)
+        except sqlite3.OperationalError as exc:
+            # Allow read-only task DBs to proceed without seeding provider metadata.
+            if "readonly" in str(exc).lower():
+                self._record_warning("Skipping LLM catalog seed (tasks DB is read-only).")
+                return
+            raise
+        except Exception as exc:
+            self._record_warning(f"Skipping LLM catalog seed: {exc}")
 
     def _ensure_llm_reference(self, client: str, model: str) -> Tuple[Optional[str], Optional[str]]:
         cfg = self.registry.get_client_config(client)
         provider_id = cfg.name if cfg else client
         provider_label = cfg.label if cfg else client
         adapter = cfg.adapter if cfg else ""
+        if self.read_only:
+            return provider_id, model
         provider_meta = {
             "id": provider_id,
             "name": provider_label,

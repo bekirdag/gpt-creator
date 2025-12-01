@@ -32,14 +32,13 @@ _cmd_work_on_tasks_impl() {
   local prepare_prompts=1
   local agent_model_override=""
   local agent_selector=""
+  local agent_flag=0
   local wot_avg_tokens_per_sp=""
   local wot_avg_tokens_samples=0
   local wot_avg_tokens_points="0"
   local wot_avg_tokens_total="0"
   local wot_avg_recent_count=0
   local wot_avg_recent_window=0
-
-  unset GC_ACTIVE_AGENT_FILE GC_ACTIVE_AGENT_NAME GC_ACTIVE_AGENT_CLIENT GC_ACTIVE_AGENT_MODEL GC_ACTIVE_AGENT_ADAPTER GC_ACTIVE_AGENT_MAX_CONTEXT GC_ACTIVE_AGENT_MAX_OUTPUT GC_ACTIVE_AGENT_API_BASE GC_ACTIVE_AGENT_API_KEY_ENV GC_ACTIVE_AGENT_API_ORG_ENV
 
   local auto_review_enabled=1
   if [[ -n "${GC_AUTO_REVIEW:-}" ]]; then
@@ -173,12 +172,14 @@ _cmd_work_on_tasks_impl() {
       --agent|--codex-model)
         agent_selector="${2:-}"
         agent_model_override="${agent_selector}"
+        agent_flag=1
         [[ -n "$agent_model_override" ]] || die "--agent requires a Codex model name"
         shift 2
         ;;
       --agent=*|--codex-model=*)
         agent_selector="${1#*=}"
         agent_model_override="$agent_selector"
+        agent_flag=1
         [[ -n "$agent_model_override" ]] || die "--agent requires a Codex model name"
         shift
         ;;
@@ -781,126 +782,11 @@ _cmd_work_on_tasks_impl() {
   local work_plan_tasks_db="${PLAN_DIR}/tasks/tasks.db"
   [[ -f "$work_plan_tasks_db" ]] || die "Tasks database not found at ${work_plan_tasks_db}. Run 'gpt-creator create-tasks' first."
 
-  if [[ -n "$agent_selector" ]]; then
-    local agent_tmp=""
-    agent_tmp="$(mktemp "${GC_DIR}/tmp/agent-select.XXXXXX.json")"
-    local select_output=""
-    if select_output="$(gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$work_plan_tasks_db" select --name "$agent_selector")"; then
-      local parse_output=""
-      parse_output="$("$python_bin" - "$agent_tmp" "$select_output" <<'PY'
-import json, sys
-tmp_path = sys.argv[1] if len(sys.argv) > 1 else ""
-raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
-try:
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise ValueError("expected object")
-except Exception:
-    data = {}
-kind = data.get("kind")
-if kind == "agent":
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh)
-    agent = data.get("agent") or {}
-    print("agent")
-    print(agent.get("client", ""))
-    print(agent.get("model", ""))
-    print(agent.get("name", ""))
-    print(agent.get("client_api_key", ""))
-    print(agent.get("client_api_base", ""))
-    print(agent.get("client_api_org", ""))
-elif kind == "model":
-    print("model")
-    print("")
-    print(data.get("model", ""))
-    print("")
-    print("")
-    print("")
-    print("")
-else:
-    print("unknown")
-    print("")
-    print("")
-    print("")
-    print("")
-    print("")
-PY
-)"
-      IFS=$'\n' read -r resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org <<<"$parse_output"
-      if [[ "$resolved_kind" == "agent" && -n "$resolved_model" ]]; then
-        export GC_ACTIVE_AGENT_FILE="$agent_tmp"
-        export GC_ACTIVE_AGENT_NAME="$resolved_name"
-        export GC_ACTIVE_AGENT_CLIENT="$resolved_client"
-        export GC_ACTIVE_AGENT_MODEL="$resolved_model"
-        agent_model_override="$resolved_model"
-        local registry_info adapter_parse_output agent_adapter="" agent_ctx="" agent_out="" agent_api_base="" agent_api_key_env="" agent_org_env="" agent_api_base_env=""
-        if registry_info="$(gc_agents_registry_cmd validate --client "$resolved_client" --model "$resolved_model" 2>/dev/null)"; then
-          adapter_parse_output="$("$python_bin" - <<'PY' "$registry_info"
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    data = {}
-print(data.get("adapter", ""))
-print(data.get("maxContextTokens") or "")
-print(data.get("maxOutputTokens") or "")
-print(data.get("apiBase") or "")
-print(data.get("apiKeyEnv") or "")
-print(data.get("orgEnv") or "")
-print(data.get("apiBaseEnv") or "")
-PY
-)"
-          IFS=$'\n' read -r agent_adapter agent_ctx agent_out agent_api_base agent_api_key_env agent_org_env agent_api_base_env <<<"$adapter_parse_output"
-          if [[ -n "$agent_adapter" ]]; then
-            export GC_ACTIVE_AGENT_ADAPTER="$agent_adapter"
-          fi
-          if [[ -n "$agent_ctx" ]]; then
-            export GC_ACTIVE_AGENT_MAX_CONTEXT="$agent_ctx"
-          fi
-          if [[ -n "$agent_out" ]]; then
-            export GC_ACTIVE_AGENT_MAX_OUTPUT="$agent_out"
-          fi
-          if [[ -n "$agent_api_base" ]]; then
-            export GC_ACTIVE_AGENT_API_BASE="$agent_api_base"
-          fi
-          if [[ -n "$agent_api_key_env" ]]; then
-            export GC_ACTIVE_AGENT_API_KEY_ENV="$agent_api_key_env"
-          fi
-          if [[ -n "$agent_org_env" ]]; then
-            export GC_ACTIVE_AGENT_API_ORG_ENV="$agent_org_env"
-          fi
-          if [[ -n "$agent_api_base_env" ]]; then
-            export GC_ACTIVE_AGENT_API_BASE_ENV="$agent_api_base_env"
-          fi
-        fi
-        if [[ -n "$resolved_api_base" ]]; then
-          export GC_ACTIVE_AGENT_API_BASE="$resolved_api_base"
-          if [[ -n "$agent_api_base_env" ]]; then
-            export "$agent_api_base_env"="$resolved_api_base"
-          fi
-        fi
-        if [[ -n "$agent_api_key_env" && -n "$resolved_api_key" ]]; then
-          export "$agent_api_key_env"="$resolved_api_key"
-        fi
-        if [[ -n "$agent_org_env" && -n "$resolved_api_org" ]]; then
-          export "$agent_org_env"="$resolved_api_org"
-        fi
-        info "Agent '${resolved_name}' active (client=${resolved_client}, model=${resolved_model}${agent_adapter:+, adapter=${agent_adapter}})."
-        AGENT_TELEMETRY_PAYLOAD="$(jq -n \
-          --arg name "$resolved_name" \
-          --arg client "$resolved_client" \
-          --arg model "$resolved_model" \
-          '{agent: {name: $name, client: $client, model: $model}}')"
-      else
-        rm -f "$agent_tmp"
-        if [[ -n "$resolved_model" ]]; then
-          agent_model_override="$resolved_model"
-        fi
-      fi
-    else
-      rm -f "$agent_tmp"
-      warn "Agent '${agent_selector}' not found; treating value as raw model override."
-    fi
+  if ! gc_resolve_agent "$agent_selector" "$work_plan_tasks_db" "${PROJECT_ROOT:-$PWD}"; then
+    die "Failed to resolve agent '${agent_selector:-default}'"
+  fi
+  if [[ -z "$agent_model_override" && -n "${GC_ACTIVE_AGENT_MODEL:-}" ]]; then
+    agent_model_override="${GC_ACTIVE_AGENT_MODEL}"
   fi
 
   if [[ -z "$override_max_tokens" && -n "${GC_ACTIVE_AGENT_MAX_CONTEXT:-}" && "${GC_ACTIVE_AGENT_MAX_CONTEXT}" =~ ^[0-9]+$ ]]; then
@@ -910,6 +796,12 @@ PY
   if [[ -z "$override_reserved_output" && -n "${GC_ACTIVE_AGENT_MAX_OUTPUT:-}" && "${GC_ACTIVE_AGENT_MAX_OUTPUT}" =~ ^[0-9]+$ ]]; then
     override_reserved_output="${GC_ACTIVE_AGENT_MAX_OUTPUT}"
     info "Applying agent max-output override (${override_reserved_output} tokens)."
+  fi
+
+  if (( agent_flag )); then
+    export GC_AGENT_FLAG=1
+  else
+    unset GC_AGENT_FLAG
   fi
 
   if [[ -z "${GC_ACTIVE_AGENT_ADAPTER:-}" ]]; then

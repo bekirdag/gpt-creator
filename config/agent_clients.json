@@ -35,6 +35,30 @@
         "backoffFactor": 1.5
       }
     },
+    "ollama": {
+      "label": "Ollama",
+      "adapter": "command",
+      "defaultModel": "gpt-oss",
+      "models": [
+        "gpt-oss"
+      ],
+      "adapterConfig": {
+        "command": [
+          "ollama",
+          "run",
+          "{model}"
+        ],
+        "messageJoiner": "\n\n",
+        "promptTemplate": "{system}\n\n{messages}",
+        "timeoutSeconds": 180
+      },
+      "installHint": "Requires Ollama with the gpt-oss model pulled.",
+      "installCommands": {
+        "default": "ollama pull gpt-oss",
+        "macos": "ollama pull gpt-oss",
+        "windows": "ollama pull gpt-oss"
+      }
+    },
     "anthropic": {
       "label": "Anthropic Claude",
       "adapter": "anthropic",

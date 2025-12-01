@@ -785,7 +785,8 @@ def main(argv: List[str]) -> int:
     project_root = Path(args.project).resolve()
     db_path = Path(args.db_path).resolve() if args.db_path else _default_tasks_db(project_root)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    service = AgentService(db_path)
+    read_only = os.getenv("GC_AGENT_READONLY", "").strip().lower() in {"1", "true", "yes"}
+    service = AgentService(db_path, read_only=read_only)
     if args.verbose:
         print(f"[agents] Using tasks database at {db_path}", file=sys.stderr)
 

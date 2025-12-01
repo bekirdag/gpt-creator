@@ -302,6 +302,10 @@ if [[ -f "${GC_SCRIPTS_ROOT}/lib/progress.sh" ]]; then
   # shellcheck source=scripts/lib/progress.sh
   . "${GC_SCRIPTS_ROOT}/lib/progress.sh"
 fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/agent.sh" ]]; then
+  # shellcheck source=scripts/lib/agent.sh
+  . "${GC_SCRIPTS_ROOT}/lib/agent.sh"
+fi
 
 GC_TEMPLATE_DIR="${CLI_ROOT}/assets/templates"
 CLI_SHIM_BIN="${CLI_ROOT}/.gpt-creator/shims/bin"
@@ -4433,6 +4437,10 @@ main() {
     agent-check)
       gc_load_cmd agent-check
       cmd_agent_check "$@"
+      ;;
+    test-agent)
+      gc_load_cmd test-agent
+      cmd_test_agent "$@"
       ;;
     delete-agent)
       gc_load_cmd delete-agent

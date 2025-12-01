@@ -29,11 +29,14 @@ def log_debug(project_root: Path, message: str) -> None:
 
 def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, project_root: Path, timeout_seconds: int) -> subprocess.CompletedProcess:
     # Keep the Codex invocation minimal and non-interactive: feed prompt via stdin
-    # and constrain the sandbox to workspace-write.
+    # and constrain the sandbox to workspace-write. Wrap with coreutils timeout so
+    # hung Codex sessions can't stall work-on-tasks indefinitely.
+    timeout_prefix = f"timeout -k 10s {timeout_seconds}s "
     cmd = [
         "bash",
         "-lc",
         (
+            f"{timeout_prefix}"
             f"codex exec --model \"${{CODEX_MODEL:-{os.getenv('CODEX_MODEL','gpt-5.1-codex')}}}\" "
             f"-c task_name=\"{call_name}\" "
             f"--sandbox workspace-write "
@@ -42,7 +45,8 @@ def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, p
         ),
     ]
     log_debug(project_root, f"[codex] launching (step={step}) cmd={cmd[2]}")
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout_seconds)
+    # Allow a small buffer beyond timeout_prefix to let `timeout` cleanly kill children.
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout_seconds + 30)
 
 
 def apply_patch(output_path: Path, project_root: Path, patch_artifact_path: Path) -> subprocess.CompletedProcess:
@@ -101,7 +105,7 @@ def main(argv: List[str]) -> int:
 
     diff_before = fingerprint_diff() if args.diff_guard else ""
 
-    timeout_seconds = int(os.getenv("GC_CODEX_EXEC_TIMEOUT_SECONDS", "900") or "900")
+    timeout_seconds = int(os.getenv("GC_CODEX_EXEC_TIMEOUT_SECONDS", "300") or "300")
     try:
         proc = run_codex(args.call_name, args.step, prompt_path, output_path, project_root, timeout_seconds)
     except subprocess.TimeoutExpired:

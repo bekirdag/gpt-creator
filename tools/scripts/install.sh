@@ -89,7 +89,6 @@ as_root() {
     echo "✖ Cannot write to ${target} and sudo is unavailable. Re-run with --prefix \"${HOME}/.local\" or a writable prefix." >&2
     exit 1
   fi
-  echo "› sudo will prompt for your password to write to ${target}. Press Ctrl+C to abort." >&2
   if sudo "$@"; then
     return 0
   fi

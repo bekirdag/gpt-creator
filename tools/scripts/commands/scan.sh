@@ -120,10 +120,10 @@ cmd_scan() {
         scan_dirs+=("$PROJECT_ROOT/$candidate")
       fi
     done
-    if [[ ${#scan_dirs[@]} -eq 0 ]]; then
-      scan_dirs=("$PROJECT_ROOT")
-    fi
   fi
+
+  # Always include the project root as a catch-all so top-level docs (e.g., rfp.md) are not missed.
+  scan_dirs+=("$PROJECT_ROOT")
 
   local -a prune_dirs=(
     ".git"
@@ -265,4 +265,3 @@ cmd_scan() {
     warn "Scan manifest export missing (${scan_json}); rerun scan after installing ${python_bin}."
   fi
 }
-

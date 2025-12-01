@@ -2634,7 +2634,7 @@ print(error)'
           task_needs_review=0
           manual_followups=0
           if [[ "$task_result_status" == "retryable" || "$task_result_status" == "apply-failed-migration-context" ]]; then
-            task_result_status="complete"
+            task_result_status="ready-to-review"
           fi
           local auto_review_rel="$auto_review_path"
           if [[ -n "$PROJECT_ROOT" && "$auto_review_rel" == "$PROJECT_ROOT/"* ]]; then
@@ -2662,11 +2662,11 @@ print(error)'
           task_needs_review=0
           manual_followups=0
           keep_output=0
-          task_result_status="completed-no-changes"
+          task_result_status="ready-to-review-no-changes"
           if [[ -z "$apply_status" || "$apply_status" == "pending" || "$apply_status" == "no-changes" ]]; then
             apply_status="completed-no-changes"
           fi
-          task_notes+=("Marked completed-no-changes via GC_COMPLETE_ON_EMPTY; existing artifacts satisfy the task.")
+          task_notes+=("Marked ready-to-review-no-changes via GC_COMPLETE_ON_EMPTY; existing artifacts satisfy the task.")
         fi
       fi
 
@@ -2675,8 +2675,8 @@ print(error)'
         if [[ "$task_result_status" != "blocked" && "$task_result_status" != "permanent-fail" && "$task_result_status" != "dead-letter" ]]; then
           if (( ${GC_WOT_COMPLETE_ON_FOLLOWUP:-0} )); then
             case "$task_result_status" in
-              complete|completed-no-changes)
-                task_notes+=("Follow-up required; status remains complete due to --complete-on-followup.")
+              complete|completed-no-changes|ready-to-review|ready-to-review-no-changes)
+                task_notes+=("Follow-up required; status remains ready-to-review due to --complete-on-followup.")
                 ;;
               apply-failed-migration-context|retryable|in-progress)
                 task_result_status="retryable"
@@ -2851,7 +2851,7 @@ print(error)'
       fi
 
       if [[ "$task_result_status" == "in-progress" ]]; then
-        task_result_status="complete"
+        task_result_status="ready-to-review"
       fi
 
       local note_status_override=""
@@ -2866,10 +2866,10 @@ print(error)'
       if [[ -n "$note_status_override" ]]; then
         case "$note_status_override" in
           completed-no-changes|completed_no_changes)
-            task_result_status="completed-no-changes"
+            task_result_status="ready-to-review-no-changes"
             ;;
           completed|complete|ready-to-review|ready_to_review)
-            task_result_status="complete"
+            task_result_status="ready-to-review"
             ;;
           needs-retry|needs_retry|retry|retryable)
             task_result_status="retryable"
@@ -2947,10 +2947,16 @@ print(error)'
 
       local status_token=""
       case "$task_result_status" in
-        complete|completed|ready-to-review)
+        ready-to-review)
+          status_token="READY TO REVIEW"
+          ;;
+        ready-to-review-no-changes)
+          status_token="READY TO REVIEW NO CHANGES"
+          ;;
+        complete|completed)
           status_token="COMPLETED"
           ;;
-        completed-no-changes|ready-to-review-no-changes)
+        completed-no-changes)
           status_token="COMPLETED NO CHANGES"
           ;;
         retryable)
@@ -3041,9 +3047,9 @@ print(error)'
         fi
       fi
 
-      if [[ "$task_result_status" == "completed-no-changes" && "${GC_LAST_AUTO_COMMIT_STATUS:-}" == "committed" ]]; then
-        info "    Auto-finalize produced a commit; promoting status to complete."
-        task_result_status="complete"
+      if { [[ "$task_result_status" == "completed-no-changes" ]] || [[ "$task_result_status" == "ready-to-review-no-changes" ]]; } && [[ "${GC_LAST_AUTO_COMMIT_STATUS:-}" == "committed" ]]; then
+        info "    Auto-finalize produced a commit; promoting status to ready-to-review."
+        task_result_status="ready-to-review"
         task_changes_applied=1
         if (( task_last_change_operations == 0 )); then
           task_last_change_operations=1
@@ -3062,7 +3068,7 @@ print(error)'
           fi
           _task_notes_refreshed+=("$note_entry")
         done
-        _task_notes_refreshed+=("STATUS: COMPLETED")
+        _task_notes_refreshed+=("STATUS: READY TO REVIEW")
         task_notes=("${_task_notes_refreshed[@]}")
       fi
 
@@ -3142,10 +3148,10 @@ print(error)'
       local task_changes_count="$task_last_change_operations"
       if [[ -z "$task_outcome_reason" ]]; then
         case "$task_result_status" in
-          completed-no-changes)
+          completed-no-changes|ready-to-review-no-changes)
             task_outcome_reason="noop"
             ;;
-          complete)
+          complete|ready-to-review)
             task_outcome_reason="changes-applied"
             ;;
         esac

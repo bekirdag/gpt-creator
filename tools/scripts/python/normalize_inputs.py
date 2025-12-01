@@ -68,6 +68,18 @@ def main(argv: list[str]) -> None:
     data = load_scan(scan_path)
     project_root = Path(data.get("project_root", ".")).resolve()
     artifacts = data.get("artifacts") or []
+    # Promote generic docs to specific kinds based on filename hints so top-level rfp/pdr/sds are copied.
+    for entry in artifacts:
+        kind = entry.get("type")
+        if kind == "doc":
+            path_value = (entry.get("path") or "").lower()
+            name = Path(path_value).name
+            if "rfp" in name or "request-for-proposal" in name.replace("_", "-"):
+                entry["type"] = "rfp"
+            elif "pdr" in name or "product-requirement" in name.replace("_", "-"):
+                entry["type"] = "pdr"
+            elif "sds" in name or "system-design" in name.replace("_", "-"):
+                entry["type"] = "sds"
 
     unique_types = {"pdr", "sds", "rfp", "jira", "ui_pages", "openapi"}
     unique_entries = select_best_entries(artifacts, unique_types)

@@ -93,7 +93,6 @@ if missing:
     )
     sys.exit(3)
 PY
-  then
     return $?
   fi
 

@@ -9,20 +9,40 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
 
-def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path) -> subprocess.CompletedProcess:
+def log_debug(project_root: Path, message: str) -> None:
+    """Append lightweight debug breadcrumbs for troubleshooting."""
+    ts = datetime.utcnow().isoformat() + "Z"
+    log_path = project_root / ".gpt-creator" / "logs" / "work-on-tasks-apply.debug.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{ts} {message}\n")
+    except Exception:
+        # Never block on logging; this is best-effort only.
+        pass
+
+
+def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, project_root: Path, timeout_seconds: int) -> subprocess.CompletedProcess:
+    # Keep the Codex invocation minimal and non-interactive: feed prompt via stdin,
+    # auto-approve commands on failure, and constrain the sandbox to workspace-write.
     cmd = [
         "bash",
         "-lc",
         (
             f"codex exec --model \"${{CODEX_MODEL:-{os.getenv('CODEX_MODEL','gpt-5.1-codex')}}}\" "
-            f"--step '{step}' < '{prompt_path}' > '{output_path}'"
+            f"-c task_name=\"{call_name}\" "
+            f"-a on-failure --sandbox workspace-write "
+            f"--cd \"{project_root}\" "
+            f"< '{prompt_path}' > '{output_path}'"
         ),
     ]
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    log_debug(project_root, f"[codex] launching (step={step}) cmd={cmd[2]}")
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout_seconds)
 
 
 def apply_patch(output_path: Path, project_root: Path, patch_artifact_path: Path) -> subprocess.CompletedProcess:
@@ -80,10 +100,24 @@ def main(argv: List[str]) -> int:
     }
 
     diff_before = fingerprint_diff() if args.diff_guard else ""
-    proc = run_codex(args.call_name, args.step, prompt_path, output_path)
+
+    timeout_seconds = int(os.getenv("GC_CODEX_EXEC_TIMEOUT_SECONDS", "900") or "900")
+    try:
+        proc = run_codex(args.call_name, args.step, prompt_path, output_path, project_root, timeout_seconds)
+    except subprocess.TimeoutExpired:
+        log_debug(project_root, f"[codex] timeout after {timeout_seconds}s")
+        result["status"] = "codex-timeout"
+        result["apply_status"] = "codex-timeout"
+        result["notes"].append(f"Codex timed out after {timeout_seconds}s")
+        emit_plain(result)
+        return 0
+
+    log_debug(project_root, f"[codex] completed rc={proc.returncode} stderr_len={len(proc.stderr or '')}")
     if proc.returncode != 0:
         result["status"] = "codex-failed"
-        result["notes"].append(f"Codex failed: {proc.stderr.strip()}")
+        stderr_snippet = (proc.stderr or "").strip()
+        if stderr_snippet:
+            result["notes"].append(f"Codex failed: {stderr_snippet}")
         emit_plain(result)
         return 0
 
@@ -94,6 +128,7 @@ def main(argv: List[str]) -> int:
     result["tokens"] = {"prompt": prompt_tokens, "completion": completion_tokens, "total": total_tokens}
 
     if not output_path.exists() or output_path.stat().st_size == 0:
+        log_debug(project_root, "[codex] produced empty output file")
         result["status"] = "empty-output"
         result["apply_status"] = "no-output"
         result["notes"].append("Codex produced no output.")
@@ -101,6 +136,7 @@ def main(argv: List[str]) -> int:
         return 0
 
     apply_proc = apply_patch(output_path, project_root, patch_artifact_path)
+    log_debug(project_root, f"[apply] completed rc={apply_proc.returncode}")
     if apply_proc.returncode != 0:
         result["status"] = "apply-failed"
         result["apply_status"] = "apply-failed"
@@ -110,6 +146,7 @@ def main(argv: List[str]) -> int:
 
     apply_output = apply_proc.stdout.strip()
     if apply_output in {"no-output", "empty-output"}:
+        log_debug(project_root, "[apply] no-output/empty-output from auto_apply_patch")
         result["status"] = "empty-apply"
         result["apply_status"] = apply_output
         result["notes"].append("Patch apply returned no actionable changes.")
@@ -119,6 +156,7 @@ def main(argv: List[str]) -> int:
     if args.diff_guard:
         diff_after = fingerprint_diff()
         if diff_before and diff_after and diff_before == diff_after:
+            log_debug(project_root, "[apply] diff guard detected no changes")
             result["status"] = "no-diff"
             result["apply_status"] = "no-diff"
             result["notes"].append("No diff detected after apply.")

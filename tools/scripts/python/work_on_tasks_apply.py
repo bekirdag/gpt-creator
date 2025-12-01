@@ -15,7 +15,6 @@ from typing import Dict, List, Optional
 
 from llm_client_factory import create_llm_client
 from llm_client import ChatResult
-import record_codex_usage_lib as codex_usage  # type: ignore
 
 
 def resolve_cli_root() -> Path:

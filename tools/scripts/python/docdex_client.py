@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import hashlib
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -24,7 +25,11 @@ class DocDexError(RuntimeError):
 
 
 def _log(message: str) -> None:
-    print(f"[docdex_client] {message}")
+    try:
+        print(f"[docdex_client] {message}", file=sys.stderr)
+    except Exception:
+        # Logging must never interfere with callers consuming stdout.
+        pass
 
 
 def _resolve_repo_root(repo_root: Optional[Path] = None) -> Path:

@@ -16,10 +16,34 @@ from llm_catalog import load_catalog
 
 
 def _default_registry_path() -> Path:
-    base = Path(__file__).resolve().parents[2]
-    fallback = base / "config" / "agent_clients.json"
+    """
+    Resolve the agent registry path robustly.
+
+    Order of precedence:
+    1) GC_AGENT_REGISTRY_PATH override (if set)
+    2) config/agent_clients.json under GC_CLI_ROOT (if present)
+    3) First ancestor of this file that contains config/agent_clients.json
+    4) Fallback to repo root guess (three parents up)
+    """
     override = os.environ.get("GC_AGENT_REGISTRY_PATH", "").strip()
-    return Path(override) if override else fallback
+    if override:
+        return Path(override).expanduser()
+
+    candidates = []
+    cli_root = os.environ.get("GC_CLI_ROOT", "").strip()
+    if cli_root:
+        candidates.append(Path(cli_root).expanduser())
+
+    here = Path(__file__).resolve()
+    candidates.extend(here.parents)
+
+    for base in candidates:
+        candidate = base / "config" / "agent_clients.json"
+        if candidate.is_file():
+            return candidate
+
+    # Best-effort fallback: assume repo root is three levels up from this file.
+    return here.parents[3] / "config" / "agent_clients.json"
 
 
 @dataclass

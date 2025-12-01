@@ -225,6 +225,30 @@
         "windows": "ollama pull codellama"
       }
     },
+    "gpt-oss": {
+      "label": "GPT-OSS (Ollama)",
+      "adapter": "command",
+      "defaultModel": "gpt-oss",
+      "models": [
+        "gpt-oss"
+      ],
+      "adapterConfig": {
+        "command": [
+          "ollama",
+          "run",
+          "{model}"
+        ],
+        "messageJoiner": "\n\n",
+        "promptTemplate": "{system}\n\n{messages}",
+        "timeoutSeconds": 180
+      },
+      "installHint": "Requires Ollama with the gpt-oss model pulled.",
+      "installCommands": {
+        "default": "ollama pull gpt-oss",
+        "macos": "ollama pull gpt-oss",
+        "windows": "ollama pull gpt-oss"
+      }
+    },
     "starcoder2": {
       "label": "BigCode StarCoder2 CLI",
       "adapter": "command",

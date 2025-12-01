@@ -787,10 +787,16 @@ _cmd_work_on_tasks_impl() {
     local select_output=""
     if select_output="$(gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$work_plan_tasks_db" select --name "$agent_selector")"; then
       local parse_output=""
-      parse_output="$("$python_bin" - "$agent_tmp" <<'PY' <<<"$select_output"
+      parse_output="$("$python_bin" - "$agent_tmp" "$select_output" <<'PY'
 import json, sys
-data = json.load(sys.stdin)
-tmp_path = sys.argv[1]
+tmp_path = sys.argv[1] if len(sys.argv) > 1 else ""
+raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
+try:
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise ValueError("expected object")
+except Exception:
+    data = {}
 kind = data.get("kind")
 if kind == "agent":
     with open(tmp_path, "w", encoding="utf-8") as fh:

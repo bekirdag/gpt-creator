@@ -170,6 +170,8 @@ cmd_task_convert() {
 CLI_ROOT="$(resolve_cli_root)"
 unset -f resolve_cli_root
 
+export CLI_ROOT
+
 if [[ -d "${CLI_ROOT}/tools/scripts" ]]; then
   GC_SCRIPTS_ROOT="${CLI_ROOT}/tools/scripts"
 else

@@ -17,6 +17,15 @@ from llm_client_factory import create_llm_client
 from llm_client import ChatResult
 
 
+def resolve_cli_root() -> Path:
+    """Best-effort detection of the CLI root for helper scripts."""
+    env_root = os.getenv("CLI_ROOT") or os.getenv("GC_CLI_ROOT")
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+    # tools/scripts/python -> scripts live at parents[3]/scripts
+    return Path(__file__).resolve().parents[3]
+
+
 def log_debug(project_root: Path, message: str) -> None:
     """Append lightweight debug breadcrumbs for troubleshooting."""
     ts = datetime.utcnow().isoformat() + "Z"
@@ -89,10 +98,28 @@ def run_generic_agent(adapter: str, model: str, prompt_path: Path, output_path: 
 
 
 def apply_patch(output_path: Path, project_root: Path, patch_artifact_path: Path) -> subprocess.CompletedProcess:
+    cli_root = resolve_cli_root()
+    helper = None
+    candidates = [
+        cli_root / "scripts" / "auto_apply_patch.sh",
+        cli_root / "tools" / "scripts" / "auto_apply_patch.sh",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            helper = candidate
+            break
+    if helper is None:
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=127,
+            stdout="",
+            stderr="auto_apply_patch.sh not found; apply changes manually.",
+        )
+
     cmd = [
         "bash",
         "-lc",
-        f"BASH={os.getenv('BASH','bash')} GC_APPLY_PATCH_PROJECT_ROOT='{project_root}' '{os.getenv('CLI_ROOT','.')}/scripts/auto_apply_patch.sh' '{output_path}' '{patch_artifact_path}'",
+        f"BASH={os.getenv('BASH','bash')} GC_APPLY_PATCH_PROJECT_ROOT='{project_root}' '{helper}' '{output_path}' '{patch_artifact_path}'",
     ]
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 

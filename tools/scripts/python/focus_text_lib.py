@@ -769,8 +769,19 @@ for change in changes:
                     pass
 
                 applied_via_helper = False
-                helper = project_root / "scripts" / "auto_apply_patch.sh"
-                if helper.exists() and helper.is_file():
+                helper = None
+                helper_roots = []
+                env_root = os.getenv("CLI_ROOT") or os.getenv("GC_CLI_ROOT")
+                if env_root:
+                    helper_roots.append(Path(env_root))
+                helper_roots.append(project_root)
+                for root in helper_roots:
+                    candidate = root / "scripts" / "auto_apply_patch.sh"
+                    if candidate.exists() and candidate.is_file():
+                        helper = candidate
+                        break
+
+                if helper is not None:
                     try:
                         result = subprocess.run(
                             [str(helper), str(manual_patch)],

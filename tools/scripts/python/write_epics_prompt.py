@@ -8,24 +8,23 @@ import sys
 from pathlib import Path
 
 PROMPT_BODY = """## Requirements
-- Create a comprehensive backlog of Jira epics that covers every piece of functionality the product must deliver across web, admin/backoffice, and mobile (React Native/Expo) clients.
-- Use identifiers `WEB-XX` for website-facing epics, `ADM-XX` for admin/backoffice epics, and `MOB-XX` for mobile app epics. Start numbering each prefix at 01.
-- Ensure the epics collectively span navigation, authentication, content, commerce/workflows, reporting, localization, accessibility, error states, offline/resilience, notifications, and any other requirements found in the docs. Maintain parity across surfaces when the docs mandate it.
-- Provide rich acceptance criteria per epic describing what success looks like (include non-functional needs such as performance, security, accessibility, and mobile parity when applicable).
-- Note any cross-epic dependencies.
-- Include a short call-out of the primary user roles touched by the epic.
+- Create a comprehensive backlog of Jira epics that matches the documented scope. Only include surfaces explicitly requested (e.g., CLI/daemon, library, API, web, admin, mobile). Do not add mobile/admin/web/API/db work unless the docs require it.
+- Use identifiers that fit the project (reuse any scheme from the docs; otherwise use `EP-XX`). Start numbering at 01 per scheme.
+- Ensure epics cover the functional themes, non-functional constraints, and integrations mentioned in the docs. Skip infra/DevOps/telemetry unless explicitly documented.
+- Provide concise acceptance criteria per epic describing what success looks like. When a concern (performance, security, accessibility, localization) is not mentioned, omit it rather than guessing.
+- Note any cross-epic dependencies and primary user roles.
 
 ## Output format (JSON only)
 {{
   "epics": [
     {{
-      "epic_id": "WEB-01",
-      "title": "Global shell, navigation, and layout",
+      "epic_id": "EP-01",
+      "title": "Primary objective",
       "summary": "High-level objective for the epic",
       "acceptance_criteria": ["Clear measurable criteria ..."],
       "dependencies": ["ADM-02"],
       "primary_roles": ["Visitor", "Member", "Admin"],
-      "scope": "web"
+      "scope": "api"
     }}
   ]
 }}
@@ -56,7 +55,7 @@ def write_epics_prompt(prompt_path: Path, project_label: str, epic_context: Path
             f"You are a senior delivery lead creating Jira epics for the {project_label} initiative.\n\n"
         )
         handle.write(
-            "Project scope: prioritize the customer-facing and admin/backoffice experiences described in the documentation.\n"
+            "Project scope: use only what is documented; do not invent additional surfaces or technologies.\n"
         )
         handle.write("Ignore DevOps, infrastructure, and tooling work unless explicitly documented.\n")
         handle.write(

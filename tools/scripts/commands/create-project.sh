@@ -69,52 +69,53 @@ cmd_create_project() {
   surfaces="$(gc_resolve_surfaces "$PROJECT_ROOT" "$surfaces_override" "$rfp_path")"
   read -r -a SURFACES_ARR <<<"$surfaces"
   if (( ${#SURFACES_ARR[@]} == 0 )); then
-    warn "No surfaces detected; defaulting to api db (no docker)."
-    SURFACES_ARR=(api db)
+    warn "No implementation surfaces detected from documentation; skipping scaffold generation."
+  else
+    info "Selected surfaces: ${SURFACES_ARR[*]}"
   fi
-  info "Selected surfaces: ${SURFACES_ARR[*]}"
 
   cmd_plan --project "$PROJECT_ROOT"
 
-  local has_docker=0 has_db=0
-  local docker_services_str=""
-  local -a docker_services=()
-  for surface in "${SURFACES_ARR[@]}"; do
-    case "$surface" in
-      docker) has_docker=1 ;;
-      db) has_db=1 ;;
-    esac
-  done
-  docker_services_str="$(gc_docker_services_from_surfaces "${SURFACES_ARR[@]}")"
-  read -r -a docker_services <<<"$docker_services_str"
-  if (( ${#docker_services[@]} > 0 )); then
-    has_docker=1
-  fi
+  if (( ${#SURFACES_ARR[@]} > 0 )); then
+    local has_docker=0 has_db=0
+    local docker_services_str=""
+    local -a docker_services=()
+    for surface in "${SURFACES_ARR[@]}"; do
+      case "$surface" in
+        docker) has_docker=1 ;;
+        db) has_db=1 ;;
+      esac
+    done
+    if (( has_docker )); then
+      docker_services_str="$(gc_docker_services_from_surfaces "${SURFACES_ARR[@]}")"
+      read -r -a docker_services <<<"$docker_services_str"
+    fi
 
-  for surface in "${SURFACES_ARR[@]}"; do
-    case "$surface" in
-      docker) ;;
-      *) cmd_generate "$surface" --project "$PROJECT_ROOT" ;;
-    esac
-  done
+    for surface in "${SURFACES_ARR[@]}"; do
+      case "$surface" in
+        docker) ;;
+        *) cmd_generate "$surface" --project "$PROJECT_ROOT" ;;
+      esac
+    done
 
-  if (( has_docker )) && (( ${#docker_services[@]} > 0 )); then
-    GC_DOCKER_SERVICES="${docker_services[*]}" cmd_generate docker --project "$PROJECT_ROOT"
-  elif (( has_docker )); then
-    info "Skipping docker assets because no docker services were detected (set GC_DOCKER_SERVICES to force generation)."
-  else
-    info "Skipping docker assets because 'docker' was not selected for this project."
-  fi
+    if (( has_docker )) && (( ${#docker_services[@]} > 0 )); then
+      GC_DOCKER_SERVICES="${docker_services[*]}" cmd_generate docker --project "$PROJECT_ROOT"
+    elif (( has_docker )); then
+      info "Skipping docker assets because no docker services were detected (set GC_DOCKER_SERVICES to force generation)."
+    else
+      info "Skipping docker assets because 'docker' was not selected for this project."
+    fi
 
-  if (( has_db && has_docker )); then
-    cmd_db provision --project "$PROJECT_ROOT" || warn "Database provision step reported an error"
-  else
-    info "Skipping DB provision (db or docker not selected)."
-  fi
-  if (( has_docker )); then
-    cmd_run up --project "$PROJECT_ROOT" || warn "Stack start reported an error"
-  else
-    info "Skipping stack startup (docker not selected)."
+    if (( has_db && has_docker )); then
+      cmd_db provision --project "$PROJECT_ROOT" || warn "Database provision step reported an error"
+    else
+      info "Skipping DB provision (db or docker not selected)."
+    fi
+    if (( has_docker )); then
+      cmd_run up --project "$PROJECT_ROOT" || warn "Stack start reported an error"
+    else
+      info "Skipping stack startup (docker not selected)."
+    fi
   fi
   ok "Project bootstrap complete"
 }

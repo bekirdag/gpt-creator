@@ -65,8 +65,6 @@ REQUIRED_LIST_FIELDS = (
     "tags",
     "assignees",
     "document_references",
-    "endpoints",
-    "data_contracts",
     "qa_notes",
 )
 
@@ -445,8 +443,8 @@ with prompt_path.open("w", encoding="utf-8") as fh:
 
     fh.write("## Requirements\n")
     fh.write("- Update only the fields above that need attention; keep correct data unchanged.\n")
-    fh.write("- Cite documentation by identifier (SDS §#, SQL:table, API:/path) rather than pasting prose.\n")
-    fh.write("- Fill in missing technical specifics (APIs, data contracts, QA, analytics, RBAC) using the references.\n")
+    fh.write("- Cite documentation by identifier (SDS §#, SQL:table, API:/path) rather than pasting prose when such artifacts exist.\n")
+    fh.write("- Fill in missing technical specifics only when applicable; leave endpoints/data contracts/RBAC/analytics empty if the story does not require them.\n")
     fh.write("- Keep story points realistic and adjust tags, assignees, and dependencies when necessary.\n")
     fh.write("- Return the complete task as valid JSON with no markdown or commentary outside the object.\n\n")
 

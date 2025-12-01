@@ -2,8 +2,12 @@
 """Heuristic surface detector for create-project.
 
 Reads the staged inputs (or an explicit RFP file) and decides which app surfaces
-to scaffold: api, web, admin, db, docker, mobile (future-proof). Output is a
-space-separated list written to stdout.
+to scaffold based on explicit evidence. Output is a space-separated list written
+to stdout.
+
+Surfaces are only returned when the docs clearly call for them; no implicit
+defaults are added (e.g., docker is only returned when containerization is
+mentioned).
 """
 
 from __future__ import annotations
@@ -44,23 +48,22 @@ def detect_surfaces(text: str) -> list[str]:
         "fastify",
     ]
     web_keywords = [
-        "frontend",
         "web app",
-        "browser",
+        "website",
+        "browser-based",
         "spa",
         "vue",
         "react",
         "angular",
-        "ui",
-        "page",
+        "next.js",
+        "astro",
     ]
     admin_keywords = [
         "admin",
         "backoffice",
-        "dashboard",
-        "console",
-        "cms",
+        "operator console",
         "control panel",
+        "governance ui",
     ]
     mobile_keywords = [
         "mobile app",
@@ -79,6 +82,15 @@ def detect_surfaces(text: str) -> list[str]:
         "entity",
         "orm",
     ]
+    docker_keywords = [
+        "docker",
+        "container",
+        "containerize",
+        "kubernetes",
+        "podman",
+        "compose",
+        "helm",
+    ]
 
     if any(k in text_lower for k in api_keywords):
         surfaces.add("api")
@@ -90,12 +102,15 @@ def detect_surfaces(text: str) -> list[str]:
         surfaces.add("mobile")
     if any(k in text_lower for k in db_keywords):
         surfaces.add("db")
-
-    # Add docker when any surface is requested.
-    if surfaces:
+    if any(k in text_lower for k in docker_keywords):
         surfaces.add("docker")
 
-    return sorted(surfaces, key=lambda x: ["api", "db", "web", "admin", "mobile", "docker"].index(x) if x in ["api", "db", "web", "admin", "mobile", "docker"] else 99)
+    return sorted(
+        surfaces,
+        key=lambda x: ["api", "db", "web", "admin", "mobile", "docker"].index(x)
+        if x in ["api", "db", "web", "admin", "mobile", "docker"]
+        else 99,
+    )
 
 
 def main() -> int:

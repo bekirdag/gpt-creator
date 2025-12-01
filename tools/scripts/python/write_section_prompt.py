@@ -57,10 +57,10 @@ def build_prompt(node, manifest, snippet_text):
         f"1. Begin with the heading `{heading_token} {title} {{#{slug}}}` (you may adjust the wording, but keep the heading level and anchor)."
     )
     lines.append(
-        "2. Summarize the section at the appropriate fidelity: higher levels focus on narrative, scope, and success criteria; deeper levels provide concrete requirements, data flows, policies, and validation steps."
+        "2. Summarize the section at the appropriate fidelity: reflect only what the RFP requests; when a domain is not mentioned, note it as out-of-scope rather than inventing details."
     )
     lines.append(
-        "3. Align content strictly with the RFP while resolving gaps with reasonable assumptions explicitly marked as such."
+        "3. Align content strictly with the RFP; do not add new surfaces (e.g., mobile, admin, APIs, databases) unless the RFP mentions them. When the RFP is silent, state open questions instead of making assumptions."
     )
     lines.append(
         "4. Use ordered lists, bullet points, and sub-subheadings sparingly to improve structure, but do not create headings beyond the assigned level for this pass."

@@ -8,10 +8,7 @@ This file will be populated by Codex based on the staged inputs:
 - samples/**
 
 Next steps (automated in future steps):
-1. Generate an execution plan with acceptance criteria.
-2. Synthesize API scaffolds from OpenAPI (NestJS).
-3. Generate schema & migrations (MySQL 8).
-4. Generate Vue 3 website & admin shells from UI pages and CSS tokens.
-5. Wire Docker Compose for local dev (API, MySQL, Admin, Web, Proxy).
-6. Run acceptance checks, then drive Jira via create-tasks/work-on-tasks.
-
+1. Generate an execution plan grounded in the provided documents (no default stack assumptions).
+2. Identify only the surfaces explicitly requested (e.g., CLI, daemon, library, API, web, admin, mobile).
+3. Outline data/storage, runtime/deployment, and tooling tracks only when the docs call for them.
+4. Capture explicit TODOs for missing inputs or undecided technologies.

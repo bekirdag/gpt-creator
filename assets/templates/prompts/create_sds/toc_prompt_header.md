@@ -1,10 +1,10 @@
-You are Codex, acting as the lead systems architect. Draft a System Design Specification (SDS) that realises the Product Requirements Document (PDR) provided below.
+You are Codex, acting as the lead systems architect. Draft a System Design Specification (SDS) that realises the Product Requirements Document (PDR) provided below, without assuming any particular stack or surface.
 
 Process:
 1. Read the PDR excerpt to understand product goals and constraints.
-2. Identify architecture domains first: platform overview, runtime topology, service/module boundaries, data flows, integration points, and operational concerns.
-3. Decompose each domain into progressively detailed sections and subsections covering diagrams, contracts, databases, APIs, deployment, observability, security, scalability, and runbooks.
-4. Before writing narrative content, output a complete SDS table of contents ordered from strategic architecture down to granular implementation details.
+2. Identify only the architecture domains that the PDR calls for (e.g., CLI/daemon, library, API, UI, data/storage, integrations, deployment/runtime, operability). If a domain is not mentioned, mark it out of scope rather than inventing it.
+3. Decompose each applicable domain into progressively detailed sections and subsections. Include data stores, APIs, deployment, observability, security, and runbooks only when the PDR requires them.
+4. Before writing narrative content, output a complete SDS table of contents ordered from high-level architecture down to implementation and operations details that are in scope.
 
 Respond with strict JSON using this schema:
 {
@@ -30,9 +30,9 @@ Respond with strict JSON using this schema:
 }
 
 Rules:
-- Order sections top-down: architecture overview → component design → data & storage → integration & interface contracts → infrastructure & operations → testing, observability, and risk management.
-- Provide at least five top-level sections spanning architecture, data, interfaces, infrastructure, and quality/operability.
-- Populate subsection arrays whenever deeper guidance is needed; leave empty only when no additional breakdown is required.
+- Order sections top-down: architecture overview → components/interaction model → data & storage (only if present) → interfaces/contracts → runtime/operations → testing/quality/risk.
+- Provide 4–7 top-level sections that reflect the PDR; skip domains that are out of scope.
+- Populate subsection arrays when deeper guidance is needed; leave empty when no additional breakdown is required.
 - Output JSON only.
 
 ## PDR Excerpt

@@ -57,16 +57,16 @@ def build_prompt(node, manifest, snippet_text):
         f"1. Begin with the heading `{heading_token} {title} {{#{slug}}}` (adjust wording if needed, but keep the level and anchor)."
     )
     lines.append(
-        "2. Articulate the architectural intent for this section, then specify components, interactions, and data contracts in increasing detail."
+        "2. Articulate the architectural intent for this section, then specify components, interactions, and data contracts only when the PDR calls for them; if a domain is out of scope, state that briefly."
     )
     lines.append(
-        "3. Map requirements from the PDR into concrete technical decisions: technologies, responsibilities, data models, interfaces, and operational policies."
+        "3. Map requirements from the PDR into concrete technical decisions without introducing new surfaces or technologies; call out open questions instead of inventing details."
     )
     lines.append(
         "4. If diagrams are referenced, describe their structure textually (component, sequence, deployment) so engineers can implement them."
     )
     lines.append(
-        "5. Cover scalability, reliability, security, observability, and DevOps implications relevant to this scope."
+        "5. Cover scalability, reliability, security, observability, and DevOps implications only when relevant to the section; otherwise note 'not requested in PDR'."
     )
     lines.append("6. Call out assumptions explicitly and flag open questions or risks.")
     lines.append("7. Close with bullet lists for 'Open Questions & Risks' and 'Verification Strategy'.")

@@ -29,20 +29,45 @@ gc_resolve_agent() {
 
   [[ -f "$tasks_db" ]] || die "Tasks database not found at ${tasks_db}"
 
+  local tmp_base="${GC_TMP_DIR:-${TMPDIR:-/tmp}}"
+  mkdir -p "$tmp_base" 2>/dev/null || true
   local agent_tmp=""
-  agent_tmp="$(mktemp "${GC_DIR:-${project_root}/.gpt-creator}/tmp/agent-select.XXXXXX.json")"
+  if ! agent_tmp="$(mktemp "${tmp_base%/}/agent-select.XXXXXX.json" 2>/dev/null)"; then
+    agent_tmp="$(mktemp /tmp/agent-select.XXXXXX.json)"
+  fi
   local agent_db_tmp=""
-  agent_db_tmp="$(mktemp "${GC_DIR:-${project_root}/.gpt-creator}/tmp/agent-select-db.XXXXXX.sqlite")"
+  if ! agent_db_tmp="$(mktemp "${tmp_base%/}/agent-select-db.XXXXXX.sqlite" 2>/dev/null)"; then
+    agent_db_tmp="$(mktemp /tmp/agent-select-db.XXXXXX.sqlite)"
+  fi
   cp "$tasks_db" "$agent_db_tmp" 2>/dev/null || true
   chmod u+w "$agent_db_tmp" 2>/dev/null || true
 
   local select_output=""
   # Use a writable copy of tasks.db so the agents CLI can apply migrations or seed
   # catalog metadata (WAL-mode databases throw "attempt to write a readonly database"
-  # when forced into read-only mode).
+  # when forced into read-only mode). If the CLI still fails, fall back to a direct
+  # read-only query against the agents table.
   if ! select_output="$(GC_AGENT_READONLY=0 gc_run_agents_cli "$project_root" "$agent_db_tmp" select --name "$agent_name")"; then
-    rm -f "$agent_tmp" "$agent_db_tmp"
-    die "Agent '${agent_name}' not found in tasks database"
+    select_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$agent_db_tmp" "$agent_name"
+import json, sqlite3, sys
+db_path = sys.argv[1]
+name = (sys.argv[2] or "").strip().lower()
+if not name:
+    sys.exit(2)
+conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row
+row = conn.execute("SELECT * FROM agents WHERE name_normalized = ?", (name,)).fetchone()
+conn.close()
+if not row:
+    sys.exit(1)
+agent = dict(row)
+agent.setdefault("name", agent.get("name_normalized", ""))
+print(json.dumps({"kind": "agent", "agent": agent}))
+PY
+)" || {
+      rm -f "$agent_tmp" "$agent_db_tmp"
+      die "Agent '${agent_name}' not found in tasks database"
+    }
   fi
 
   local parse_output=""

@@ -78,9 +78,9 @@ cmd_list_agents() {
     fi
     return "$status"
   fi
-  if printf '%s\n' "$output" | gc_render_with_renderer column -ts $'\t'; then
+  # The renderer only understands backlog/estimate payloads; disable it here to avoid noisy errors.
+  if printf '%s\n' "$output" | GC_RENDERER_DISABLED=1 gc_render_with_renderer column -ts $'\t'; then
     return 0
   fi
   return 1
 }
-

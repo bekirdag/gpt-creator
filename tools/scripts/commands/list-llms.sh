@@ -110,7 +110,8 @@ cmd_list_llms() {
     fi
     return "$status"
   fi
-  if printf '%s\n' "$output" | gc_render_with_renderer column -ts $'\t'; then
+  # Renderer does not handle generic TSV tables; bypass it to avoid warning noise.
+  if printf '%s\n' "$output" | GC_RENDERER_DISABLED=1 gc_render_with_renderer column -ts $'\t'; then
     return 0
   fi
   return 1

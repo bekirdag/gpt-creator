@@ -1028,81 +1028,7 @@ PY
     done
   fi
 
-  local scripts_root="${GC_SCRIPTS_ROOT:-${CLI_ROOT}/tools/scripts}"
-  if [[ -n "${CLI_ROOT:-}" && ! -d "$scripts_root" ]]; then
-    scripts_root="${CLI_ROOT}/scripts"
-  fi
-  local i18n_guard_script="${scripts_root}/preflight_i18n_guard.sh"
-  if [[ "${WORK_ON_TASKS_SKIP_I18N_GUARD:-0}" =~ ^(1|true|yes)$ ]]; then
-    info "Skipping i18n preflight guard because WORK_ON_TASKS_SKIP_I18N_GUARD=${WORK_ON_TASKS_SKIP_I18N_GUARD}"
-  elif [[ -x "$i18n_guard_script" ]]; then
-    local i18n_guard_output="" i18n_guard_code=0 i18n_guard_outcome=""
-    local i18n_guard_autofix_attempts=0
-    local i18n_guard_autofix_limit="${GC_PREFLIGHT_I18N_AUTO_SYNC_LIMIT:-1}"
-    if ! [[ "$i18n_guard_autofix_limit" =~ ^[0-9]+$ ]]; then
-      i18n_guard_autofix_limit=1
-    fi
-    while true; do
-      if [[ -n "${PROJECT_ROOT:-}" ]]; then
-        set +e
-        i18n_guard_output="$(cd "$PROJECT_ROOT" && "$i18n_guard_script" 2>&1)"
-        i18n_guard_code=$?
-        set -e
-      else
-        set +e
-        i18n_guard_output="$("$i18n_guard_script" 2>&1)"
-        i18n_guard_code=$?
-        set -e
-      fi
-      i18n_guard_outcome="${i18n_guard_output//[$'\r\n']}"
-      if [[ -z "$i18n_guard_outcome" ]]; then
-        if (( i18n_guard_code == 6 )); then
-          i18n_guard_outcome="blocked-dependency(i18n_sync_required)"
-        elif (( i18n_guard_code == 3 )); then
-          i18n_guard_outcome="blocked-merge-conflict"
-        else
-          i18n_guard_outcome="ok"
-        fi
-      fi
-      case "$i18n_guard_outcome" in
-        blocked-merge-conflict)
-          warn "Locale merge conflicts detected; resolve locale .rej files before running work-on-tasks."
-          printf '%s\n' "$i18n_guard_outcome"
-          return 3
-          ;;
-        'blocked-dependency(i18n_sync_required)')
-          if (( i18n_guard_autofix_attempts < i18n_guard_autofix_limit )); then
-            ((i18n_guard_autofix_attempts+=1))
-            if gc_auto_sync_i18n; then
-              continue
-            fi
-          fi
-          warn "Locale files out of sync; run 'pnpm i18n:sync' to regenerate translations."
-          printf '%s\n' "$i18n_guard_outcome"
-          return 6
-          ;;
-        blocked-i18n-guard-error)
-          warn "i18n preflight guard failed; inspect scripts/preflight_i18n_guard.sh output."
-          if [[ -n "$i18n_guard_output" ]]; then
-            printf '%s\n' "$i18n_guard_output" >&2
-          fi
-          printf '%s\n' "$i18n_guard_outcome"
-          return 6
-          ;;
-        ok)
-          break
-          ;;
-        *)
-          if (( i18n_guard_code != 0 )); then
-            warn "i18n preflight guard returned '${i18n_guard_outcome:-?}' (exit ${i18n_guard_code}); treating as guard failure."
-            printf '%s\n' "blocked-i18n-guard-error"
-            return 6
-          fi
-          break
-          ;;
-      esac
-    done
-  fi
+  # i18n preflight guard removed for streamlined WOT; run i18n sync explicitly if needed.
 
 local scripts_root="${GC_SCRIPTS_ROOT:-${CLI_ROOT}/tools/scripts}"
 if [[ -n "${CLI_ROOT:-}" && ! -d "$scripts_root" ]]; then
@@ -1392,18 +1318,6 @@ if [[ -x "$schema_guard_script" ]]; then
       gc_sync_story_totals "$tasks_db"
     fi
   fi
-
-  local migration_epoch_initial=0
-  if migration_epoch_initial="$(gc_fetch_migration_epoch "$tasks_db" 2>/dev/null)"; then
-    :
-  else
-    migration_epoch_initial=0
-  fi
-  local migration_epoch_baseline="$migration_epoch_initial"
-  local migration_transition_triggered=0
-  local migration_epoch_refreshes=0
-  local migration_epoch_refresh_limit=5
-  local migration_transition_hard_stop=0
 
   local start_task_story_slug="" start_task_story_title="" start_task_position="" start_task_id="" start_task_title=""
   if [[ -n "$start_task_ref" ]]; then
@@ -2019,12 +1933,8 @@ print(error)'
   local remaining_tasks=0
   local no_progress_iterations=0
   local memory_cycle_single=0
-  local no_progress_story_limit="${GC_NO_PROGRESS_STORY_LIMIT:-40}"
-  if ! [[ "$no_progress_story_limit" =~ ^[0-9]+$ ]]; then
-    no_progress_story_limit=40
-  fi
-  local story_plan_helper=""
-  story_plan_helper="$(gc_clone_python_tool "story_scheduler.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local task_queue_helper=""
+  task_queue_helper="$(gc_clone_python_tool "list_global_task_queue.py" "${PROJECT_ROOT:-$PWD}")" || return 1
 
   # Fast exit when the backlog has no pending tasks to avoid prompt-prep loops.
   local initial_pending_tasks
@@ -2035,13 +1945,17 @@ print(error)'
     return 0
   fi
 
+  local task_run_root="${run_dir}/tasks"
+  local task_log_root="${run_log_dir}/tasks"
+  mkdir -p "$task_run_root" "$task_log_root"
+  local single_task_fallback="${TASK_FALLBACK:-}"
+  single_task_fallback="${single_task_fallback,,}"
+
   while :; do
     if gc_check_idle_timeout; then :; else break; fi
     local iteration_processed_any=0
     local iteration_processed=0
     local continue_current_run=0
-    local progress_safety_break=0
-    local no_progress_story_count=0
     local pending_tasks=0
 
     local effective_batch_size="$batch_size"
@@ -2053,8 +1967,12 @@ print(error)'
       fi
     fi
 
-    while IFS=$'\t' read -r sequence slug story_id story_title epic_id epic_title total_tasks next_task completed status; do
-      if [[ -z "${sequence}${slug}${story_id}${story_title}${epic_id}${epic_title}" ]]; then
+    while IFS=$'\t' read -r global_order slug task_filter_value position; do
+      if [[ -z "${global_order}${slug}${task_filter_value}${position}" ]]; then
+        continue
+      fi
+
+      if [[ -n "$story_filter" && "${slug,,}" != "${story_filter,,}" ]]; then
         continue
       fi
 
@@ -2063,7 +1981,6 @@ print(error)'
       fi
 
       iteration_processed_any=1
-      local story_progress_before="$iteration_processed"
 
       if (( throughput_checkpoint_interval > 0 )); then
         now_ts="$(date +%s)"
@@ -2080,103 +1997,34 @@ print(error)'
         fi
       fi
 
-    : "${total_tasks:=0}"; : "${next_task:=0}"
-    local total_tasks_int=0
-    if [[ "$total_tasks" =~ ^[0-9]+$ ]]; then
-      total_tasks_int=$((total_tasks))
-    fi
-    local next_task_int=0
-    if [[ "$next_task" =~ ^[0-9]+$ ]]; then
-      next_task_int=$((next_task))
-    fi
-
-    if (( migration_transition_hard_stop )); then
-      break
-    fi
-
-    if (( migration_transition_triggered )); then
-      break
-    fi
-
-    local migration_epoch_current=""
-    if migration_epoch_current="$(gc_fetch_migration_epoch "$tasks_db" 2>/dev/null)"; then
-      if [[ "$migration_epoch_current" != "$migration_epoch_baseline" ]]; then
-        migration_transition_triggered=1
-        (( migration_epoch_refreshes++ ))
-        local prior_epoch="$migration_epoch_baseline"
-        if (( migration_epoch_refreshes > migration_epoch_refresh_limit )); then
-          warn "  Migration epoch changed ${migration_epoch_refreshes} times within a single work-on-tasks run; pausing to avoid an infinite loop."
-          work_failed=1
-          manual_followups=1
-          migration_transition_hard_stop=1
-          break
-        fi
-        if (( binder_clear_on_migration )); then
-          gc_binder_clear_story "$PROJECT_ROOT" "${epic_id:-}" "$slug"
-          info "  Cleared binder cache for story ${slug} due to migration epoch change."
-        fi
-        info "  Migration epoch changed (${prior_epoch} → ${migration_epoch_current}); refreshing backlog before continuing."
-        migration_epoch_baseline="$migration_epoch_current"
-        break
-      fi
-    fi
-
-    printf -v story_prefix "%03d" "${sequence:-0}"
-    [[ -n "$slug" ]] || slug="story-${story_prefix}"
-    local story_run_dir="${run_dir}/story_${story_prefix}_${slug}"
-    local story_log_dir="${run_log_dir}/story_${story_prefix}_${slug}"
-    mkdir -p "${story_run_dir}/prompts" "${story_run_dir}/out" "${story_run_dir}/reports" "$story_log_dir"
-    local report_dir="${story_run_dir}/reports"
-
-    info "Story ${story_prefix} (${story_id:-$slug}) — ${story_title:-Unnamed}"
-    export GC_BUDGET_STORY_ID="${story_id:-$slug}"
-
-    # Remove story-level gating; rely on task-level status filtering instead.
-    total_tasks_int=0
-    gc_update_work_state "$tasks_db" "$slug" "in-progress" "$next_task_int" "$total_tasks_int" "$run_stamp"
-
-    local task_index
-    if [[ "${GC_SKIP_STORY_PROMPT_SYNC:-0}" == "1" ]]; then
-      info "  Skipping prompt preparation (GC_WORK_PREPARE_PROMPTS=0)."
-    else
-      info "  Preparing prompts and context…"
-    fi
-    local story_failed=0
-    local story_task_consumed=0
-    local single_task_fallback="${TASK_FALLBACK:-}"
-    single_task_fallback="${single_task_fallback,,}"
-    for (( task_index = next_task_int; task_index < total_tasks_int; task_index++ )); do
-      if (( single_task_mode )) && [[ -n "$single_task_fallback" ]]; then
-        local current_task_fallback
-        printf -v current_task_fallback "%s:%d" "${slug,,}" $((task_index + 1))
-        if [[ "${current_task_fallback,,}" != "$single_task_fallback" ]]; then
-          continue
-        fi
-      fi
-      gc_clear_active_task
-      if ! gc_check_idle_timeout; then
-        break
-      fi
-      if (( throughput_checkpoint_interval > 0 )); then
-        now_ts="$(date +%s)"
-        if (( throughput_next_checkpoint == 0 || now_ts >= throughput_next_checkpoint )); then
-          local throughput_checkpoint_msg=""
-          if throughput_checkpoint_msg="$(gc_update_throughput_metrics "$tasks_db" "checkpoint")"; then
-            if [[ -n "$throughput_checkpoint_msg" ]]; then
-              info "$throughput_checkpoint_msg"
-            fi
-          else
-            warn "Failed to checkpoint throughput metrics."
-          fi
-          throughput_next_checkpoint=$((now_ts + throughput_checkpoint_interval))
-        fi
-      fi
       if (( effective_batch_size > 0 && iteration_processed >= effective_batch_size )); then
         batch_limit_reached=1
         break
       fi
+
+      local position_int=0
+      if [[ "$position" =~ ^-?[0-9]+$ ]]; then
+        position_int=$((position))
+      fi
+      if (( position_int < 0 )); then
+        position_int=0
+      fi
+
+      local task_index="$position_int"
+      local order_prefix
+      printf -v order_prefix "%05d" "${global_order:-$((iteration_processed + 1))}"
       local task_number
-      printf -v task_number "%03d" $((task_index + 1))
+      printf -v task_number "%03d" $((position_int + 1))
+
+      local slug_safe="${slug:-task}"
+      slug_safe="${slug_safe//[^A-Za-z0-9_.-]/-}"
+      local story_run_dir="${task_run_root}/task_${order_prefix}_${slug_safe}"
+      local story_log_dir="$task_log_root"
+      local report_dir="${story_run_dir}/reports"
+      mkdir -p "${story_run_dir}/prompts" "${story_run_dir}/out" "$report_dir" "$story_log_dir"
+
+      export GC_BUDGET_STORY_ID="${slug:-task}"
+
       local prompt_path="${story_run_dir}/prompts/task_${task_number}.prompt.md"
       local output_path="${story_run_dir}/out/task_${task_number}.out.md"
       local prompt_base_path="${prompt_path}.base"
@@ -2186,8 +2034,8 @@ print(error)'
       local stage_baseline_verify="${GC_BUDGET_STAGE_TOTAL_VERIFY:-0}"
 
       local prompt_meta
-      if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$task_index" "$prompt_path" "$context_tail" "$CODEX_MODEL_CODE" "$PROJECT_ROOT" "$STAGING_DIR")"; then
-        warn "  Failed to build prompt for task index ${task_index}; skipping task."
+      if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$position_int" "$prompt_path" "$context_tail" "$CODEX_MODEL_CODE" "$PROJECT_ROOT" "$STAGING_DIR")"; then
+        warn "  Failed to build prompt for task index ${position_int}; skipping task."
         manual_followups=1
         work_failed=1
         continue
@@ -2212,17 +2060,19 @@ print(error)'
       local task_id_lower="${task_id,,}"
       if (( single_task_mode )); then
         local fallback_key
-        fallback_key="$(printf '%s:%d' "${slug,,}" $((task_index + 1)))"
+        fallback_key="$(printf '%s:%d' "${slug,,}" $((position_int + 1)))"
         local matches_filter=0
         if [[ -n "$task_filter_normalized" ]]; then
           if [[ -n "$task_id_lower" && "$task_id_lower" == "$task_filter_normalized" ]]; then
             matches_filter=1
           elif [[ "$fallback_key" == "$task_filter_normalized" ]]; then
             matches_filter=1
+          elif [[ "${task_filter_value,,}" == "$task_filter_normalized" ]]; then
+            matches_filter=1
           fi
         fi
         if (( matches_filter == 0 )) && [[ -n "$single_task_fallback" ]]; then
-          if [[ "${fallback_key,,}" == "$single_task_fallback" ]]; then
+          if [[ "${fallback_key,,}" == "$single_task_fallback" || "${task_filter_value,,}" == "$single_task_fallback" ]]; then
             matches_filter=1
           fi
         fi
@@ -2232,7 +2082,7 @@ print(error)'
           fi
           continue
         fi
-        story_task_consumed=1
+        single_task_consumed=1
       fi
       local banner_task_id="${task_id:-no-id}"
       local task_start_epoch
@@ -2256,7 +2106,7 @@ print(error)'
         task_locked_migration=1
       fi
       local task_status_reason_current="$task_status_reason"
-      local terminal_locked_regex='^(complete|completed|completed-no-changes|ready-to-review|ready_to_review|ready-for-qa|ready_for_qa|dead-letter|permanent-fail|blocked-budget|blocked-quota|blocked-merge-conflict|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\([^)]+\)|skipped-already-complete)$'
+      local terminal_locked_regex='^(complete|completed|completed-no-changes|dead-letter|permanent-fail|blocked-budget|blocked-quota|blocked-merge-conflict|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\([^)]+\)|skipped-already-complete)$'
       if [[ "$task_status_lower" == blocked-dependency\(* ]]; then
         local blocked_reason="${task_status_reason_current:-${task_status_original}}"
         warn "  Task ${task_number} (${banner_task_id}) blocked by dependency: ${blocked_reason}; skipping for now."
@@ -2291,7 +2141,7 @@ print(error)'
       info "  → ${task_alias_line}"
       info "    ${task_summary_line}"
 
-      local call_name="story-${slug}-task-${task_number}"
+      local call_name="task-${order_prefix}-${slug}"
       local codex_ok=0
       local attempt=0
       local max_attempts=2
@@ -2335,7 +2185,7 @@ print(error)'
       local apply_status="pending"
       local skip_codex_reason="prompt-blocked"
       local task_report_path="${report_dir}/task_${task_number}.log"
-      local task_log_archive_path="${story_log_dir}/task_${task_number}.log"
+      local task_log_archive_path="${story_log_dir}/task_${order_prefix}.log"
       local task_change_sizes=""
       local diff_last_transition=""
       local diff_prev_after_sig=""
@@ -3001,7 +2851,7 @@ print(error)'
       fi
 
       if [[ "$task_result_status" == "in-progress" ]]; then
-        task_result_status="ready-to-review"
+        task_result_status="complete"
       fi
 
       local note_status_override=""
@@ -3016,14 +2866,10 @@ print(error)'
       if [[ -n "$note_status_override" ]]; then
         case "$note_status_override" in
           completed-no-changes|completed_no_changes)
-            if [[ "$task_result_status" == "complete" || "$task_result_status" == "ready-to-review" || "$task_result_status" == "in-progress" || "$task_result_status" == "retryable" ]]; then
-              task_result_status="ready-to-review-no-changes"
-            fi
+            task_result_status="completed-no-changes"
             ;;
           completed|complete|ready-to-review|ready_to_review)
-            if [[ "$task_result_status" == "completed-no-changes" || "$task_result_status" == "ready-to-review-no-changes" || "$task_result_status" == "in-progress" || "$task_result_status" == "retryable" ]]; then
-              task_result_status="ready-to-review"
-            fi
+            task_result_status="complete"
             ;;
           needs-retry|needs_retry|retry|retryable)
             task_result_status="retryable"
@@ -3040,18 +2886,9 @@ print(error)'
         esac
       fi
 
-      case "$task_result_status" in
-        complete|completed)
-          task_result_status="ready-to-review"
-          ;;
-        completed-no-changes)
-          task_result_status="ready-to-review-no-changes"
-          ;;
-      esac
-
       if [[ "$task_terminal_state" == "RUNNING" ]]; then
         case "$task_result_status" in
-          complete|ready-to-review)
+          complete|completed|completed-no-changes|ready-to-review)
             if (( task_changes_applied > 0 )); then
               gc_mark_terminal_state "COMPLETED_WITH_CHANGES"
             else
@@ -3148,7 +2985,7 @@ print(error)'
 
       local attempt_label=$(( attempt > 0 ? attempt : 1 ))
 
-      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" || "$task_result_status" == "ready-to-review" || "$task_result_status" == "ready-to-review-no-changes" ]]; then
+      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed" || "$task_result_status" == "completed-no-changes" || "$task_result_status" == "ready-to-review" || "$task_result_status" == "ready-to-review-no-changes" ]]; then
         local commit_label="${banner_task_id}: ${task_title:-Task ${task_number}}"
         if gc_finalize_task_snapshot "$commit_label" "$task_ref_for_verify" "$attempt_label" "$task_result_status" "complete" "${task_auto_push_records[@]}"; then
           if [[ "${GC_LAST_AUTO_COMMIT_STATUS:-}" == "committed" ]]; then
@@ -3229,27 +3066,7 @@ print(error)'
         task_notes=("${_task_notes_refreshed[@]}")
       fi
 
-      # Normalize successful outcomes to ready-to-review so downstream git + reporting
-      # flows treat all successes the same way.
-      case "$task_result_status" in
-        complete|completed|completed-no-changes|ready-to-review-no-changes)
-          task_result_status="ready-to-review"
-          ;;
-      esac
-
-      local story_status_hint="in-progress"
-      case "$task_result_status" in
-        blocked|blocked-budget|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|retryable|blocked-push|dead-letter|permanent-fail) story_status_hint="blocked" ;;
-        on-hold) story_status_hint="on-hold" ;;
-      esac
-
-      local completed_hint="$task_index"
-      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" || "$task_result_status" == "ready-to-review" || "$task_result_status" == "ready-to-review-no-changes" ]]; then
-        completed_hint=$((task_index + 1))
-      fi
-
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "$task_result_status" "$run_stamp"
-      gc_update_work_state "$tasks_db" "$slug" "$story_status_hint" "$completed_hint" "$total_tasks_int" "$run_stamp"
 
       if (( blocked_stop_run )); then
         task_notes+=("Auto-push issues recorded; continuing to the next task.")
@@ -3466,7 +3283,7 @@ print(error)'
         gc_telemetry_record "agent_usage" "${AGENT_TELEMETRY_PAYLOAD}" || true
       fi
 
-      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed-no-changes" || "$task_result_status" == "ready-to-review" || "$task_result_status" == "ready-to-review-no-changes" ]]; then
+      if [[ "$task_result_status" == "complete" || "$task_result_status" == "completed" || "$task_result_status" == "completed-no-changes" || "$task_result_status" == "ready-to-review" || "$task_result_status" == "ready-to-review-no-changes" ]]; then
         local throughput_task_msg=""
         if throughput_task_msg="$(gc_update_throughput_metrics "$tasks_db" "task-complete" "$slug" "$task_index")"; then
           if [[ -n "$throughput_task_msg" ]]; then
@@ -3533,7 +3350,6 @@ print(error)'
 
       case "$task_result_status" in
         blocked|blocked-budget|blocked-quota|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|permanent-fail|dead-letter)
-          story_failed=1
           break_after_update=1
           continue
           ;;
@@ -3551,25 +3367,10 @@ print(error)'
         break
       fi
 
-    done
-
-    if (( story_task_consumed )); then
-      single_task_consumed=1
-    fi
+    done < <("$python_bin" "$task_queue_helper" "$tasks_db")
 
     if (( batch_limit_reached )); then
       break
-    fi
-
-    if (( story_failed )); then
-      warn "Continuing after issues in story ${slug}; moving to the next story."
-      story_failed=0
-      if (( single_task_mode )); then
-        gc_sync_story_totals "$tasks_db"
-        gc_touch_progress
-        break
-      fi
-      continue
     fi
 
     if (( idle_timeout_triggered )); then
@@ -3577,55 +3378,9 @@ print(error)'
     fi
 
     if (( single_task_mode )); then
-      gc_sync_story_totals "$tasks_db"
-      gc_touch_progress
-      if (( story_task_consumed )); then
+      if (( single_task_consumed )); then
         break
       fi
-      continue
-    fi
-
-    gc_update_work_state "$tasks_db" "$slug" "complete" "$total_tasks_int" "$total_tasks_int" "$run_stamp"
-    gc_touch_progress
-    if (( keep_artifacts == 0 )); then
-      rmdir "${story_run_dir}/prompts" 2>/dev/null || true
-      rmdir "${story_run_dir}/out" 2>/dev/null || true
-    fi
-
-    if (( iteration_processed == story_progress_before )); then
-      (( no_progress_story_count++ ))
-      if (( iteration_processed == 0 && no_progress_story_limit > 0 && no_progress_story_count >= no_progress_story_limit )); then
-        warn "No tasks executed across ${no_progress_story_count} consecutive stories; resynchronising metadata and restarting to avoid a prompt-preparation loop."
-        if ! gc_sync_story_totals "$tasks_db"; then
-          warn "Story/task metadata resync failed; continuing without metadata refresh."
-        fi
-        gc_touch_progress
-        progress_safety_break=1
-        break
-      fi
-    else
-      no_progress_story_count=0
-    fi
-  done < <("$python_bin" "$story_plan_helper" "$tasks_db" "${story_filter}" "$resume_flag")
-
-    if (( progress_safety_break )); then
-      continue
-    fi
-
-    if (( single_task_mode )) && (( single_task_consumed )); then
-      break
-    fi
-
-    if (( migration_transition_hard_stop )); then
-      break
-    fi
-
-    if (( migration_transition_triggered )); then
-      migration_transition_triggered=0
-      if (( iteration_processed_any )); then
-        processed_any_total=1
-      fi
-      continue
     fi
 
     if (( idle_timeout_triggered )); then
@@ -3636,7 +3391,7 @@ print(error)'
       processed_any_total=1
     else
       if (( processed_any_total == 0 )); then
-        info "No stories to process (already complete)."
+        info "No tasks to process (already complete)."
       fi
       break
     fi
@@ -3644,14 +3399,11 @@ print(error)'
     if (( iteration_processed == 0 )); then
       (( no_progress_iterations++ ))
       if (( no_progress_iterations == 1 )); then
-        warn "No tasks were executed in this pass; resynchronising story/task metadata to avoid a prompt loop."
-        if ! gc_sync_story_totals "$tasks_db"; then
-          warn "Story/task metadata resync failed; continuing without metadata refresh."
-        fi
+        warn "No tasks were executed in this pass; refreshing pending queue."
         gc_touch_progress
         continue
       fi
-      warn "No tasks executed after metadata resync; stopping work-on-tasks to avoid an infinite prompt-preparation loop."
+      warn "No tasks executed after rescan; stopping work-on-tasks to avoid an infinite loop."
       work_failed=1
       manual_followups=1
       break
@@ -3700,12 +3452,8 @@ print(error)'
           warn "Manual follow-ups detected; backlog paused with ${remaining_tasks} review task(s)."
         fi
       elif (( work_failed == 0 && manual_followups == 0 && memory_cycle == 0 && batch_limit_reached == 0 && effective_batch_size == 0 && iteration_processed > 0 && remaining_tasks > 0 )); then
-        if [[ -n "$story_filter" ]]; then
-          info "Remaining tasks detected beyond filtered story; rerun with a broader filter to continue."
-        else
-          info "${remaining_tasks} task(s) remain; continuing work-on-tasks automatically."
-          continue_current_run=1
-        fi
+        info "${remaining_tasks} task(s) remain; continuing work-on-tasks automatically."
+        continue_current_run=1
       fi
     fi
 
@@ -3795,12 +3543,6 @@ print(error)'
 
   if (( run_blocked_quota )); then
     warn "Run terminated because a prompt exceeded the configured token budget (status: blocked-quota)."
-  fi
-
-  if (( migration_transition_hard_stop )); then
-    warn "Run paused because the migration epoch changed too many times during a single run; rerun work-on-tasks after investigating pending migrations."
-  elif (( migration_epoch_refreshes > 0 )); then
-    info "Migration epoch refreshed ${migration_epoch_refreshes} time(s) during this run; backlog was reloaded automatically."
   fi
 
   local budget_report_helper

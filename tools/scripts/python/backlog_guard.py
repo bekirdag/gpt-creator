@@ -46,6 +46,12 @@ ACTIVE_STATUSES = {
     "review",
     "needs-review",
     "ready-to-review",
+    "ready-for-review",
+    "ready_for_review",
+    "ready-for-qa",
+    "ready-to-qa",
+    "ready_for_qa",
+    "ready_to_qa",
 }
 
 BLOCKED_STATUSES = {

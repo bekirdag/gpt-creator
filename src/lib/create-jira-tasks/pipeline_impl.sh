@@ -260,10 +260,30 @@ cjt::resolve_core_paths() {
 
 cjt::prepare_inputs() {
   cjt::log "Discovering documentation under $CJT_PROJECT_ROOT"
-  gc_load_cmd scan
-  gc_load_cmd normalize
-  cmd_scan --project "$CJT_PROJECT_ROOT"
-  cmd_normalize --project "$CJT_PROJECT_ROOT"
+  if declare -F gc_load_cmd >/dev/null 2>&1; then
+    gc_load_cmd scan
+    gc_load_cmd normalize
+    if declare -F cmd_scan >/dev/null 2>&1 && declare -F cmd_normalize >/dev/null 2>&1; then
+      cmd_scan --project "$CJT_PROJECT_ROOT"
+      cmd_normalize --project "$CJT_PROJECT_ROOT"
+    else
+      cjt::warn "scan/normalize commands not loaded after gc_load_cmd; falling back to invoking gpt-creator CLI."
+    fi
+  fi
+
+  if ! declare -F cmd_normalize >/dev/null 2>&1; then
+    local gc_bin="${GC_CLI_BIN:-}"
+    if [[ -z "$gc_bin" ]]; then
+      if [[ -x "${CJT_ROOT_DIR}/bin/gpt-creator" ]]; then
+        gc_bin="${CJT_ROOT_DIR}/bin/gpt-creator"
+      elif command -v gpt-creator >/dev/null 2>&1; then
+        gc_bin="gpt-creator"
+      fi
+    fi
+    [[ -n "$gc_bin" ]] || cjt::die "gc_load_cmd unavailable and gpt-creator CLI not found; cannot run scan/normalize."
+    "$gc_bin" scan --project "$CJT_PROJECT_ROOT"
+    "$gc_bin" normalize --project "$CJT_PROJECT_ROOT"
+  fi
   cjt::resolve_core_paths
 
   cjt::log "Compiling context excerpts"

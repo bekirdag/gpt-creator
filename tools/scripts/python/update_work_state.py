@@ -44,7 +44,8 @@ def update_work_state(
                   'ready-to-qa',
                   'ready_to_qa',
                   'ready-for-qa',
-                  'ready_for_qa'
+                  'ready_for_qa',
+                  'skipped-already-complete'
                 )
                 THEN 1
                 ELSE 0

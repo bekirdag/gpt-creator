@@ -11,6 +11,35 @@ while len(args) < 6:
     args.append("")
 db_path, type_arg, item_children, progress_flag, task_details, dag_limit = args[:6]
 
+
+def infer_project_root(db_file: str) -> Path:
+    resolved = Path(db_file).resolve()
+    for parent in resolved.parents:
+        if parent.name == ".gpt-creator":
+            return parent.parent
+    return resolved.parent
+
+
+def require_backlog_tables(connection: sqlite3.Connection, db_file: str) -> None:
+    try:
+        rows = connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    except sqlite3.DatabaseError as exc:
+        raise SystemExit(f"Unable to read schema from {db_file}: {exc}") from exc
+    names = {row[0] for row in rows}
+    missing = [name for name in ("epics", "stories", "tasks") if name not in names]
+    if missing:
+        project_root = infer_project_root(db_file)
+        project_hint = f" --project {project_root}" if project_root else ""
+        tip = textwrap.dedent(
+            f"""
+            Tasks database at {db_file} is missing required tables: {', '.join(missing)}.
+            Rebuild it via 'gpt-creator migrate-tasks{project_hint} --force' or rerun
+            'gpt-creator create-tasks'/'gpt-creator create-jira-tasks'.
+            """
+        ).strip()
+        raise SystemExit(tip)
+
+
 def load_progress_overrides(connection: sqlite3.Connection) -> dict[str, str]:
     try:
         connection.execute("SELECT 1 FROM task_progress LIMIT 1")
@@ -54,19 +83,10 @@ def resolve_status_with_overrides(base_status: str, slug: str, position: int, ta
 
 conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
+PROJECT_ROOT = infer_project_root(db_path)
+require_backlog_tables(conn, db_path)
 PROGRESS_OVERRIDES: dict[str, str] = {}
 PROGRESS_OVERRIDES = load_progress_overrides(conn)
-
-
-def infer_project_root(db_file: str) -> Path:
-    resolved = Path(db_file).resolve()
-    for parent in resolved.parents:
-        if parent.name == ".gpt-creator":
-            return parent.parent
-    return resolved.parent
-
-
-PROJECT_ROOT = infer_project_root(db_path)
 STATUS_OVERRIDE_DIR = PROJECT_ROOT / ".gpt-creator" / "logs" / "status-overrides"
 _RECENT_SUBJECTS = None
 

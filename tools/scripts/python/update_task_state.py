@@ -104,6 +104,7 @@ def update_task_state(
         elif status in {
             "complete",
             "completed",
+            "completed-no-changes",
             "ready-to-review",
             "ready_to_review",
             "ready-to-review-no-changes",
@@ -113,6 +114,7 @@ def update_task_state(
             "ready-to-qa",
             "ready_to_qa",
             "ready_for_qa",
+            "skipped-already-complete",
         }:
             if not started_at:
                 fields.append(("started_at", timestamp))

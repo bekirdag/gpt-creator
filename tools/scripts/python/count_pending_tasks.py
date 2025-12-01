@@ -8,7 +8,14 @@ def count_pending_tasks(db_path: Path) -> int:
     cur = conn.cursor()
     row = cur.execute(
         "SELECT COUNT(*) FROM tasks WHERE LOWER(REPLACE(COALESCE(status, 'pending'), '_','-')) "
-        "NOT IN ('complete','completed','completed-no-changes','ready-to-review','ready-to-review-no-changes','ready-for-review','ready-for-qa','ready-to-qa','ready_to_qa','skipped-already-complete')"
+        "NOT IN ('complete','completed','completed-no-changes','ready-to-review','ready-to-review-no-changes','ready-for-review','ready_for_review','ready-for-qa','ready-to-qa','ready_to_qa','ready_for_qa','skipped-already-complete') "
+        "AND LOWER(REPLACE(COALESCE(status, 'pending'), '_','-')) NOT LIKE 'completed-%' "
+        "AND LOWER(REPLACE(COALESCE(status, 'pending'), '_','-')) NOT LIKE 'done-%' "
+        "AND LOWER(REPLACE(COALESCE(status, 'pending'), '_','-')) NOT LIKE 'skipped-%' "
+        "AND LOWER(REPLACE(COALESCE(status, 'pending'), '_','-')) NOT LIKE 'ready-to-review%' "
+        "AND LOWER(REPLACE(COALESCE(status, 'pending'), '_','-')) NOT LIKE 'ready-for-review%' "
+        "AND LOWER(REPLACE(COALESCE(status, 'pending'), '_','-')) NOT LIKE 'ready-to-qa%' "
+        "AND LOWER(REPLACE(COALESCE(status, 'pending'), '_','-')) NOT LIKE 'ready-for-qa%'"
     ).fetchone()
     pending = row[0] if row else 0
     conn.close()

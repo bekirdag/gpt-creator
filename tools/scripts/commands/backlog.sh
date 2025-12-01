@@ -66,6 +66,36 @@ cmd_backlog() {
   if [[ ! -f "$tasks_db" ]]; then
     die "Tasks database not found at ${tasks_db}. Run 'gpt-creator create-tasks' first."
   fi
+  if ! python3 - "$tasks_db" <<'PY'; then
+import sqlite3, sys
+
+db_path = sys.argv[1]
+required = {"epics", "stories", "tasks"}
+try:
+    conn = sqlite3.connect(db_path)
+except sqlite3.Error as exc:  # pragma: no cover - thin guard
+    sys.stderr.write(f"Unable to open tasks database at {db_path}: {exc}\n")
+    sys.exit(2)
+with conn:
+    try:
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    except sqlite3.Error as exc:  # pragma: no cover - thin guard
+        sys.stderr.write(f"Unable to read schema from {db_path}: {exc}\n")
+        sys.exit(2)
+names = {row[0] for row in rows}
+missing = required - names
+if missing:
+    missing_list = ", ".join(sorted(missing))
+    sys.stderr.write(
+        f"Tasks database at {db_path} is missing required tables ({missing_list}).\n"
+        "Rebuild it via 'gpt-creator migrate-tasks --project <path> --force' or rerun "
+        "'gpt-creator create-tasks'/'gpt-creator create-jira-tasks'.\n"
+    )
+    sys.exit(3)
+PY
+  then
+    return $?
+  fi
 
   local backlog_helper
   backlog_helper="$(gc_clone_python_tool "fetch_stories.py" "${PROJECT_ROOT:-$PWD}")" || die "Failed to prepare backlog helper script"
@@ -93,4 +123,3 @@ cmd_backlog() {
   fi
   return $render_status
 }
-

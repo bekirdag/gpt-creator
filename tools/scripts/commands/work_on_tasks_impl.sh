@@ -2131,80 +2131,8 @@ print(error)'
     info "Story ${story_prefix} (${story_id:-$slug}) — ${story_title:-Unnamed}"
     export GC_BUDGET_STORY_ID="${story_id:-$slug}"
 
-    # Always trust tasks.db for counts; ignore stale story metadata.
-    local stats=""
-    local actual_total=0 actual_completed=0
-    if stats="$(gc_fetch_story_task_counts "$tasks_db" "$slug" 2>/dev/null)"; then
-      IFS=$'\t' read -r actual_total actual_completed <<<"$stats"
-      [[ "$actual_total" =~ ^[0-9]+$ ]] || actual_total=0
-      [[ "$actual_completed" =~ ^[0-9]+$ ]] || actual_completed=0
-    fi
-    total_tasks_int=$actual_total
-    if (( actual_completed > total_tasks_int )); then
-      actual_completed="$total_tasks_int"
-    fi
-    if (( next_task_int < actual_completed )); then
-      next_task_int="$actual_completed"
-    fi
-    if (( total_tasks_int == 0 )); then
-      info "  No tasks found in tasks.db for ${slug}; skipping."
-      if (( keep_artifacts == 0 )); then
-        rmdir "${story_run_dir}/prompts" 2>/dev/null || true
-        rmdir "${story_run_dir}/out" 2>/dev/null || true
-      fi
-      continue
-    fi
-    gc_update_work_state "$tasks_db" "$slug" "pending" "$actual_completed" "$total_tasks_int" "$run_stamp"
-
-    if (( total_tasks_int > 0 && next_task_int >= total_tasks_int )); then
-      local pending_story_tasks="0"
-      pending_story_tasks="$(
-        python3 - "$tasks_db" "$slug" <<'PY' 2>/dev/null
-import sqlite3, sys
-db, slug = sys.argv[1], sys.argv[2]
-try:
-    conn = sqlite3.connect(db)
-    cur = conn.execute(
-        "SELECT count(*) FROM tasks WHERE story_slug=? AND status NOT IN ('complete','completed','completed-no-changes','ready-to-review','ready-to-review-no-changes')",
-        (slug,),
-    )
-    row = cur.fetchone()
-    print(row[0] if row else 0)
-except Exception:
-    print("0")
-PY
-      )"
-      [[ "$pending_story_tasks" =~ ^[0-9]+$ ]] || pending_story_tasks="0"
-      if (( pending_story_tasks == 0 )); then
-        info "  All ${total_tasks_int} task(s) already complete; skipping prompt preparation."
-        gc_update_work_state "$tasks_db" "$slug" "complete" "$total_tasks_int" "$total_tasks_int" "$run_stamp"
-        if (( keep_artifacts == 0 )); then
-          rmdir "${story_run_dir}/prompts" 2>/dev/null || true
-          rmdir "${story_run_dir}/out" 2>/dev/null || true
-        fi
-        continue
-      else
-        warn "  Story ${slug} appears complete but ${pending_story_tasks} pending task(s) remain; resyncing metadata."
-        gc_sync_story_totals "$tasks_db" || true
-        if (( next_task_int >= total_tasks_int )); then
-          next_task_int=$actual_completed
-        fi
-        if (( next_task_int >= total_tasks_int )); then
-          next_task_int=0
-        fi
-      fi
-    fi
-
-    if (( total_tasks_int == 0 )); then
-      info "  No tasks for this story; marking complete."
-      gc_update_work_state "$tasks_db" "$slug" "complete" 0 0 "$run_stamp"
-      if (( keep_artifacts == 0 )); then
-        rmdir "${story_run_dir}/prompts" 2>/dev/null || true
-        rmdir "${story_run_dir}/out" 2>/dev/null || true
-      fi
-      continue
-    fi
-
+    # Remove story-level gating; rely on task-level status filtering instead.
+    total_tasks_int=0
     gc_update_work_state "$tasks_db" "$slug" "in-progress" "$next_task_int" "$total_tasks_int" "$run_stamp"
 
     local task_index

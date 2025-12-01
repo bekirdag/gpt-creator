@@ -30,11 +30,9 @@ def log_debug(project_root: Path, message: str) -> None:
         pass
 
 
-def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, project_root: Path, timeout_seconds: int) -> tuple[subprocess.CompletedProcess, Path]:
+def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, project_root: Path) -> tuple[subprocess.CompletedProcess, Path]:
     # Keep the Codex invocation minimal and non-interactive: feed prompt via stdin
-    # and constrain the sandbox to workspace-write. Wrap with coreutils timeout so
-    # hung Codex sessions can't stall work-on-tasks indefinitely.
-    timeout_prefix = f"timeout -k 10s {timeout_seconds}s "
+    # and constrain the sandbox to workspace-write.
     stderr_log = project_root / ".gpt-creator" / "logs" / "codex-apply" / f"{call_name}.stderr.log"
     try:
         stderr_log.parent.mkdir(parents=True, exist_ok=True)
@@ -44,7 +42,6 @@ def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, p
         "bash",
         "-lc",
         (
-            f"{timeout_prefix}"
             f"codex exec --model \"${{CODEX_MODEL:-{os.getenv('CODEX_MODEL','gpt-5.1-codex')}}}\" "
             f"-c task_name=\"{call_name}\" "
             f"--sandbox workspace-write "
@@ -54,8 +51,8 @@ def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, p
         ),
     ]
     log_debug(project_root, f"[codex] launching (step={step}) cmd={cmd[2]}")
-    # Allow a small buffer beyond timeout_prefix to let `timeout` cleanly kill children.
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout_seconds + 30)
+    # Stream stderr to the user (inherited), while also tee'ing into a logfile.
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True)
     return proc, stderr_log
 
 
@@ -151,24 +148,20 @@ def main(argv: List[str]) -> int:
     chat_result: Optional[ChatResult] = None
 
     if adapter in {"codex_cli", "openai_cli", "openai", ""}:
-        timeout_seconds = int(os.getenv("GC_CODEX_EXEC_TIMEOUT_SECONDS", "300") or "300")
-        try:
-            proc, stderr_log = run_codex(args.call_name, args.step, prompt_path, output_path, project_root, timeout_seconds)
-        except subprocess.TimeoutExpired:
-            log_debug(project_root, f"[codex] timeout after {timeout_seconds}s")
-            result["status"] = "codex-timeout"
-            result["apply_status"] = "codex-timeout"
-            result["notes"].append(f"Codex timed out after {timeout_seconds}s")
-            emit_plain(result)
-            return 0
-
-        log_debug(project_root, f"[codex] completed rc={proc.returncode} stderr_len={len(proc.stderr or '')}")
+        proc, stderr_log = run_codex(args.call_name, args.step, prompt_path, output_path, project_root)
+        log_debug(project_root, f"[codex] completed rc={proc.returncode} (see stderr log at {stderr_log})")
         if proc.returncode != 0:
             result["status"] = "codex-failed"
-            stderr_snippet = (proc.stderr or "").strip()
+            stderr_snippet = ""
+            try:
+                if stderr_log.exists():
+                    text = stderr_log.read_text(encoding="utf-8", errors="ignore")
+                    stderr_snippet = text.splitlines()[-1] if text else ""
+            except Exception:
+                stderr_snippet = ""
             if stderr_snippet:
                 result["notes"].append(f"Codex failed: {stderr_snippet}")
-                result["notes"].append(f"Codex stderr log: {stderr_log}")
+            result["notes"].append(f"Codex stderr log: {stderr_log}")
             emit_plain(result)
             return 0
     else:

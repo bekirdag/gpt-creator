@@ -1790,9 +1790,6 @@ print(error)'
     fi
     local pending_status
     pending_status="$(git -C "$project_root" status --porcelain=v1 --untracked-files=all 2>/dev/null || true)"
-    if [[ -z "$pending_status" ]]; then
-      return 0
-    fi
 
     local original_auto_push="${GC_AUTO_PUSH:-}"
     local original_remote="${GC_AUTO_PUSH_REMOTE:-}"

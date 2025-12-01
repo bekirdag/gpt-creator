@@ -61,13 +61,42 @@ def parse_token_counts(log_path: Path) -> Dict[str, int]:
         "completion": re.compile(r"completion\s+tokens?[:\s]+([0-9][0-9,._ ]*)", re.IGNORECASE),
     }
 
+    pending_key = ""
+
     for line in text.splitlines():
+        stripped = line.strip()
+
+        if pending_key:
+            try:
+                value = parse_number(stripped)
+            except Exception:
+                value = 0
+            if value:
+                counts[pending_key] = value
+            pending_key = ""
+            continue
+
+        matched = False
         for key, pattern in patterns.items():
             match = pattern.search(line)
             if match:
                 value = parse_number(match.group(1))
                 if value:
                     counts[key] = value
+                    matched = True
+        if matched:
+            continue
+
+        # Handle two-line output where the number is on the next line
+        if re.match(r"^tokens?\s+used\b", stripped, re.IGNORECASE):
+            pending_key = "total"
+            continue
+        if re.match(r"^prompt\s+tokens?\b", stripped, re.IGNORECASE):
+            pending_key = "prompt"
+            continue
+        if re.match(r"^completion\s+tokens?\b", stripped, re.IGNORECASE):
+            pending_key = "completion"
+            continue
 
     if "total" not in counts and ("prompt" in counts or "completion" in counts):
         counts["total"] = counts.get("prompt", 0) + counts.get("completion", 0)

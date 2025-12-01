@@ -75,9 +75,37 @@ as_root() {
   shift
   if [[ -w "$target" ]]; then
     "$@"
-  else
-    sudo "$@"
+    return $?
   fi
+  if [[ ! -e "$target" ]]; then
+    local parent
+    parent="$(cd "$(dirname "$target")" >/dev/null 2>&1 && pwd -P)"
+    if [[ -w "$parent" ]]; then
+      "$@"
+      return $?
+    fi
+  fi
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "✖ Cannot write to ${target} and sudo is unavailable. Re-run with --prefix \"${HOME}/.local\" or a writable prefix." >&2
+    exit 1
+  fi
+  local sudo_check
+  sudo_check="$(sudo -n true 2>&1 || true)"
+  if [[ -z "$sudo_check" ]]; then
+    sudo "$@"
+    return $?
+  fi
+  if grep -qi "no new privileges" <<<"$sudo_check"; then
+    echo "✖ sudo is blocked by the 'no new privileges' policy. Use --prefix \"${HOME}/.local\" or adjust sudo policy." >&2
+    exit 1
+  fi
+  if grep -qi "password is required" <<<"$sudo_check"; then
+    echo "› sudo will prompt for your password to write to ${target}. Press Ctrl+C to abort." >&2
+    sudo "$@"
+    return $?
+  fi
+  echo "✖ Unable to elevate with sudo (reason: ${sudo_check:-unknown}). Use --prefix \"${HOME}/.local\" or provide write access to ${target}." >&2
+  exit 1
 }
 
 run_as_user() {
@@ -467,6 +495,16 @@ docdex_supports_mcp() {
 }
 
 ensure_rust() {
+  # Detect cargo even if ~/.cargo/bin is not on PATH.
+  local target_user="${SUDO_USER:-$USER}"
+  local target_home
+  target_home="$(eval "echo ~${target_user}" 2>/dev/null || echo "$HOME")"
+  local cargo_bin="${target_home}/.cargo/bin"
+  if [[ -x "${cargo_bin}/cargo" && ":$PATH:" != *":${cargo_bin}:"* ]]; then
+    PATH="${cargo_bin}:$PATH"
+    export PATH
+  fi
+
   if need_cmd cargo; then
     echo "✔ Rust toolchain $(cargo --version 2>/dev/null || true) detected."
     return 0
@@ -665,10 +703,14 @@ preflight() {
 
 install_files() {
   echo "› Installing files to $APP_DIR …"
+  if [[ $FORCE -eq 1 && -d "$APP_DIR" ]]; then
+    echo "› Removing existing install at $APP_DIR (force)"
+    as_root "$INSTALL_PREFIX" rm -rf "$APP_DIR"
+  fi
   as_root "$INSTALL_PREFIX" mkdir -p "$APP_DIR"
   # Copy only what's needed (bin + templates + scripts + docs); falls back to repo if structure differs.
   local rsync_args=(
-    -a
+    -aL
     --delete
     --omit-dir-times
     --no-perms
@@ -683,8 +725,12 @@ install_files() {
     --include '/config/' --include '/config/***'
     --include '/src/***'
     --include '/scripts/***'
-    --include '/.gpt-creator/'
-    --include '/.gpt-creator/***'
+    --include '/tools/***'
+    --include '/.gpt-creator/shims/***'
+    --include '/.gpt-creator/shims/'
+    --exclude '/.git/***'
+    --exclude '/.gpt-creator/tmp/***'
+    --exclude '/.gpt-creator/tmp'
     --include '/tui/***'
     --include '/docs/***'
     --include '/verify/***'
@@ -693,8 +739,8 @@ install_files() {
   )
 
   if ! as_root "$INSTALL_PREFIX" rsync "${rsync_args[@]}" "$REPO_DIR"/ "$APP_DIR"/; then
-    echo "rsync minimal copy failed; copying full repo…"
-    as_root "$INSTALL_PREFIX" cp -R "$REPO_DIR"/. "$APP_DIR"/
+    echo "✖ Install copy failed (rsync). Free space or try a different --prefix (e.g., ${HOME}/.local) and rerun." >&2
+    exit 1
   fi
 
   # Ensure shim binaries remain executable (fallback tools like rg live here)

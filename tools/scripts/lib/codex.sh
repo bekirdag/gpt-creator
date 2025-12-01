@@ -255,7 +255,31 @@ ensure_node_dependencies() {
     pkg_manager="yarn"
   fi
   info "Ensuring Node dependencies are installed (using ${pkg_manager})..."
-  (cd "$project_root" && "$pkg_manager" install >/dev/null 2>&1)
+  local install_output="" install_status=0
+  set +e
+  install_output="$(
+    cd "$project_root" && "$pkg_manager" install >/dev/null 2>&1
+  )"
+  install_status=$?
+  set -e
+  if (( install_status == 0 )); then
+    return 0
+  fi
+
+  local network_error=0
+  if [[ "$install_output" == *"EAI_AGAIN"* || "$install_output" == *"ENOTFOUND"* || "$install_output" == *"getaddrinfo"* ]]; then
+    network_error=1
+  elif [[ "$install_output" == *"registry.npmjs.org"* || "$install_output" == *"network connection error"* ]]; then
+    network_error=1
+  fi
+
+  if (( network_error )); then
+    warn "Node dependency install skipped (network unavailable: ${pkg_manager} install); continuing without auto install."
+    return 0
+  fi
+
+  warn "Node dependency install failed (exit ${install_status}); inspect output manually. Continuing may fail later."
+  return "$install_status"
 }
 
 gc_wot_normalize_sleep_between() {

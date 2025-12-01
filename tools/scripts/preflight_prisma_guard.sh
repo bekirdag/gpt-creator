@@ -87,6 +87,17 @@ is_missing_prisma_cmd() {
   return 1
 }
 
+is_prisma_network_error() {
+  local output="$1"
+  if [[ "$output" == *"EAI_AGAIN"* || "$output" == *"ENOTFOUND"* || "$output" == *"getaddrinfo"* ]]; then
+    return 0
+  fi
+  if [[ "$output" == *"registry.npmjs.org"* || "$output" == *"network connection error"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
 read_env_var() {
   local key="$1"
   local file="$2"
@@ -229,6 +240,11 @@ for schema_path in "${schema_paths[@]}"; do
       continue
     fi
     if [[ -n "$prisma_output" ]]; then
+      if is_prisma_network_error "$prisma_output"; then
+        printf 'preflight-prisma-guard: network unavailable for prisma CLI (%s); skipping guard.\n' "$(normalize_path "$schema_path")" >&2
+        schema_ok=1
+        break
+      fi
       printf '%s\n' "$prisma_output" >&2
     fi
     error_paths+=("$(normalize_path "$schema_path")")

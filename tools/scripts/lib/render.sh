@@ -227,6 +227,10 @@ gc_renderer_cache_path() {
 }
 
 gc_renderer_path_if_enabled() {
+  if [[ -n "${GC_RENDERER_DISABLED:-}" ]]; then
+    return 1
+  fi
+
   local -a candidates=()
   local -a copy_sources=()
 
@@ -352,7 +356,7 @@ gc_render_task_start_panel() {
   local session_line="${8:-}"
   local step_line="${9:-}"
 
-  local renderer_path=""
+  local renderer_path="" renderer_output=""
   if renderer_path="$(gc_renderer_path_if_enabled)"; then
     local -a start_lines=()
     start_lines+=("|-----------------------|")
@@ -380,8 +384,24 @@ gc_render_task_start_panel() {
     [[ -n "$workdir_line" ]] && start_lines+=("workdir: ${workdir_line}")
     [[ -n "$reasoning_line" ]] && start_lines+=("reasoning effort: ${reasoning_line}")
     [[ -n "$session_line" ]] && start_lines+=("session id: ${session_line}")
-    printf '%s\\n' "${start_lines[@]}" | "$renderer_path"
-    return
+    if renderer_output="$(
+      {
+        local line
+        for line in "${start_lines[@]}"; do
+          printf '%s\n' "$line"
+        done
+      } | "$renderer_path"
+    )"; then
+      if [[ -n "$renderer_output" ]]; then
+        printf '%s' "$renderer_output"
+        return
+      fi
+    else
+      local render_status=$?
+      printf '[warn] Renderer failed via %s (exit=%s); falling back to plain task header.\n' \
+        "$renderer_path" "$render_status" >&2
+      GC_RENDERER_DISABLED=1
+    fi
   fi
 
   printf '\\n%s╭────────────────────────────────────────────────────────────╮%s\\n' "${gc_color_border:-}" "$c_reset"
@@ -446,13 +466,19 @@ gc_render_task_end_panel() {
   local renderer_path=""
   local renderer_output=""
   if renderer_path="$(gc_renderer_path_if_enabled)"; then
-    renderer_output="$("$renderer_path" <<EOF
+    if renderer_output="$("$renderer_path" <<EOF
 { "task_id": "${task_id}", "status": "${status}", "terminal": "${terminal}", "time": "${time_spent}", "story_points": "${story_points_display}", "tokens_used": "${tokens_display}", "tokens_estimate": "${tokens_estimate_display}", "failure": "${failure_class}", "detail": "${detail_line}" }
 EOF
-)" || renderer_output=""
-    if [[ -n "$renderer_output" ]]; then
-      printf '%s\n' "$renderer_output"
-      return
+)"; then
+      if [[ -n "$renderer_output" ]]; then
+        printf '%s\n' "$renderer_output"
+        return
+      fi
+    else
+      local render_status=$?
+      printf '[warn] Renderer failed via %s (exit=%s); falling back to plain task footer.\n' \
+        "$renderer_path" "$render_status" >&2
+      GC_RENDERER_DISABLED=1
     fi
   fi
 

@@ -161,6 +161,15 @@ _cmd_work_on_tasks_impl() {
         fi
         shift
         ;;
+      --skip-prisma-guard|--no-prisma-guard)
+        SKIP_PRISMA_GUARD=1
+        shift
+        ;;
+      --skip-dep-install|--no-dep-install)
+        SKIP_DEP_INSTALL=1
+        shift
+        ;;
+
       --agent|--codex-model)
         agent_selector="${2:-}"
         agent_model_override="${agent_selector}"

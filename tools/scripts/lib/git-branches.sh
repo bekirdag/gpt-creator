@@ -208,7 +208,7 @@ gc_git_finalize_task_branch() {
   fi
 
   local merge_result="skipped"
-  local state_dir base_file base_sha head_sha changed_count="0"
+  local state_dir base_file base_sha head_sha changed_count="0" commit_count="0"
   state_dir="$(gc_git_state_dir 2>/dev/null || printf '%s/.gpt-creator/state' "$root")"
   base_file="${state_dir}/base-sha"
   if [[ -f "$base_file" ]]; then
@@ -218,13 +218,19 @@ gc_git_finalize_task_branch() {
   if [[ -n "$base_sha" && -n "$head_sha" ]]; then
     changed_count="$(_gc_git diff --name-only "$base_sha" "$head_sha" 2>/dev/null | sed '/^$/d' | wc -l | tr -d '[:space:]')"
     [[ -n "$changed_count" ]] || changed_count="0"
+    commit_count="$(_gc_git rev-list --count "$base_sha..$head_sha" 2>/dev/null | tr -d '[:space:]')"
+    [[ -n "$commit_count" ]] || commit_count="0"
   fi
   export GC_LAST_BRANCH_CHANGED="${changed_count}"
-  gc_git_log "[git] files changed since task start: ${changed_count}"
+  gc_git_log "[git] files changed since task start: ${changed_count} (commits since start: ${commit_count})"
 
   local should_merge=0
   if gc_git_status_ok "$status"; then
-    should_merge=1
+    if [[ "${changed_count:-0}" =~ ^[0-9]+$ ]] && (( changed_count > 0 )); then
+      should_merge=1
+    elif [[ "${commit_count:-0}" =~ ^[0-9]+$ ]] && (( commit_count > 0 )); then
+      should_merge=1
+    fi
   fi
   if (( should_merge )) && [[ -n "${GC_GIT_CURRENT_TASK_BRANCH:-}" ]]; then
     gc_git_checkout "$GC_GIT_DEV_BRANCH"
@@ -242,13 +248,13 @@ gc_git_finalize_task_branch() {
       merge_result="failed"
     fi
   else
-    if [[ "${changed_count:-0}" =~ ^[0-9]+$ ]] && (( changed_count == 0 )); then
+    if [[ "${changed_count:-0}" =~ ^[0-9]+$ ]] && (( changed_count == 0 )) && [[ "${commit_count:-0}" =~ ^[0-9]+$ ]] && (( commit_count == 0 )); then
       merge_result="skipped-no-changes"
     fi
   fi
 
-  printf '{"branch":"%s","merge":"%s","base":"%s","head":"%s","changed":%s}\n' \
-    "${GC_GIT_CURRENT_TASK_BRANCH:-}" "$merge_result" "${base_sha:-}" "${head_sha:-}" "${changed_count:-0}" \
+  printf '{"branch":"%s","merge":"%s","base":"%s","head":"%s","changed":%s,"commits":%s}\n' \
+    "${GC_GIT_CURRENT_TASK_BRANCH:-}" "$merge_result" "${base_sha:-}" "${head_sha:-}" "${changed_count:-0}" "${commit_count:-0}" \
     > "${state_dir}/git-last.json" 2>/dev/null || true
   gc_git_checkout "$GC_GIT_DEV_BRANCH"
 }

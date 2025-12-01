@@ -1788,9 +1788,6 @@ print(error)'
     if ! command -v git >/dev/null 2>&1; then
       return 0
     fi
-    local pending_status
-    pending_status="$(git -C "$project_root" status --porcelain=v1 --untracked-files=all 2>/dev/null || true)"
-
     local original_auto_push="${GC_AUTO_PUSH:-}"
     local original_remote="${GC_AUTO_PUSH_REMOTE:-}"
     local original_branch="${GC_AUTO_PUSH_BRANCH:-}"

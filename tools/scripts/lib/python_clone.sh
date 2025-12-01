@@ -56,6 +56,14 @@ gc_clone_python_tool() {
         cp "$sidecar_source" "$sidecar_target" || { __gc_clone_log "Failed to copy ${sidecar} helper"; return 1; }
       fi
     fi
+    local impl_sidecar="${base_name}_lib_impl.py"
+    local impl_sidecar_source="${scripts_root}/python/${impl_sidecar}"
+    local impl_sidecar_target="${target_dir}/${impl_sidecar}"
+    if [[ -f "$impl_sidecar_source" ]]; then
+      if [[ ! -f "$impl_sidecar_target" || "$impl_sidecar_source" -nt "$impl_sidecar_target" ]]; then
+        cp "$impl_sidecar_source" "$impl_sidecar_target" || { __gc_clone_log "Failed to copy ${impl_sidecar} helper"; return 1; }
+      fi
+    fi
   fi
 
   printf '%s\n' "$target_path"

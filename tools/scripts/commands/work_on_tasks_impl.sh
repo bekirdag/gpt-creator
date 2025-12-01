@@ -1313,47 +1313,9 @@ if [[ -x "$schema_guard_script" ]]; then
   local doc_vector_path="${canonical_tasks_dir}/documentation-vector-index.sqlite"
   export GC_DOC_VECTOR_INDEX_PATH="$doc_vector_path"
   export GC_DOCUMENTATION_INDEX_PATH="$doc_vector_path"
-  local doc_mode="${GC_DOCS_MODE:-lazy}"
-  local workspace_stub="${PROJECT_ROOT:-$PWD}/.gpt-creator/docs/catalog.db"
-  local using_stub=0
-  if [[ -n "${GC_DOCUMENTATION_DB_PATH:-}" && "$GC_DOCUMENTATION_DB_PATH" == "$workspace_stub" ]]; then
-    using_stub=1
-  fi
-
-  if [[ "${GC_DOCS_ENABLED:-1}" -eq 1 ]]; then
-    if (( using_stub )); then
-      if gc_refresh_documentation_if_needed "${PROJECT_ROOT:-$PWD}"; then
-        local refreshed_db="${canonical_tasks_dir}/tasks.db"
-        if [[ -f "$refreshed_db" ]]; then
-          export GC_DOCUMENTATION_DB_PATH="$refreshed_db"
-          using_stub=0
-          info "Documentation catalog refreshed; using ${GC_DOCUMENTATION_DB_PATH}."
-        fi
-      fi
-    fi
-
-    if (( using_stub )); then
-      warn "Documentation catalog running in workspace stub mode (${GC_DOCUMENTATION_DB_PATH}); limited doc queries only."
-    fi
-
-    if (( using_stub == 0 )); then
-      if [[ "${doc_mode,,}" == "strict" ]]; then
-        if ! gc_require_documentation_catalog "$PROJECT_ROOT"; then
-          local catalog_root="${PROJECT_ROOT:-$PWD}"
-          die "Failed to prepare documentation catalog. Run 'gpt-creator scan --project \"${catalog_root}\"' and retry."
-        fi
-        gc_bootstrap_docs_registry
-      else
-        if ! gc_require_documentation_catalog "$PROJECT_ROOT"; then
-          warn "Documentation catalog not ready; continuing in lazy mode without strict enforcement."
-        else
-          gc_bootstrap_docs_registry
-        fi
-      fi
-    fi
-  else
-    warn "Documentation catalog disabled (GC_DOCS_MODE=${GC_DOCS_MODE:-off}); skipping documentation checks."
-  fi
+  export GC_DOCS_MODE="${GC_DOCS_MODE:-off}"
+  export GC_DOCS_ENABLED=0
+  info "Documentation indexing/prep disabled for work-on-tasks; skipping catalog/index creation."
 
   if ! gc_tasks_db_has_rows "$tasks_db"; then
     die "Task database missing or empty. Run 'gpt-creator create-tasks' (or create-jira-tasks + migrate-tasks) before work-on-tasks."
@@ -1476,7 +1438,6 @@ ensure_node_dependencies "$PROJECT_ROOT"
 dep_rc=$?
 set -e
 info "preflight: node dependency check completed (status=${dep_rc})"
-gc_refresh_discovery_if_needed
 gc_clear_active_task
 
   if (( prompt_compact )); then

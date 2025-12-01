@@ -1104,30 +1104,32 @@ PY
     done
   fi
 
-  local scripts_root="${GC_SCRIPTS_ROOT:-${CLI_ROOT}/tools/scripts}"
-  if [[ -n "${CLI_ROOT:-}" && ! -d "$scripts_root" ]]; then
-    scripts_root="${CLI_ROOT}/scripts"
-  fi
-  local schema_guard_script="${scripts_root}/preflight_prisma_guard.sh"
-  if [[ -x "$schema_guard_script" ]]; then
-    local schema_guard_output="" schema_guard_code=0 schema_guard_outcome=""
-    if [[ -n "${PROJECT_ROOT:-}" ]]; then
-      set +e
-      schema_guard_output="$(cd "$PROJECT_ROOT" && "$schema_guard_script")"
-      schema_guard_code=$?
-      set -e
+local scripts_root="${GC_SCRIPTS_ROOT:-${CLI_ROOT}/tools/scripts}"
+if [[ -n "${CLI_ROOT:-}" && ! -d "$scripts_root" ]]; then
+  scripts_root="${CLI_ROOT}/scripts"
+fi
+local schema_guard_script="${scripts_root}/preflight_prisma_guard.sh"
+if [[ -x "$schema_guard_script" ]]; then
+  info "preflight: running prisma schema guard (${schema_guard_script})"
+  local schema_guard_output="" schema_guard_code=0 schema_guard_outcome=""
+  if [[ -n "${PROJECT_ROOT:-}" ]]; then
+    set +e
+    schema_guard_output="$(cd "$PROJECT_ROOT" && "$schema_guard_script")"
+    schema_guard_code=$?
+    set -e
     else
       set +e
       schema_guard_output="$("$schema_guard_script")"
-      schema_guard_code=$?
-      set -e
-    fi
-    schema_guard_outcome="${schema_guard_output//[$'\r\n']}"
-    if [[ -z "$schema_guard_outcome" ]]; then
-      if (( schema_guard_code == 4 )); then
-        schema_guard_outcome="blocked-schema-drift"
-      elif (( schema_guard_code == 5 )); then
-        schema_guard_outcome="blocked-schema-guard-error"
+    schema_guard_code=$?
+    set -e
+  fi
+  schema_guard_outcome="${schema_guard_output//[$'\r\n']}"
+  info "preflight: prisma schema guard completed (status=${schema_guard_code}, outcome='${schema_guard_outcome:-<empty>}')"
+  if [[ -z "$schema_guard_outcome" ]]; then
+    if (( schema_guard_code == 4 )); then
+      schema_guard_outcome="blocked-schema-drift"
+    elif (( schema_guard_code == 5 )); then
+      schema_guard_outcome="blocked-schema-guard-error"
       else
         schema_guard_outcome="ok"
       fi
@@ -1463,14 +1465,19 @@ PY
       story_display+=" — ${start_task_story_title}"
     fi
     info "Starting from task ${start_task_position} (${start_task_id:-no-id}) in story ${story_display}."
-    if [[ -n "$start_task_title" ]]; then
-      info "  ${start_task_title}"
-    fi
+  if [[ -n "$start_task_title" ]]; then
+    info "  ${start_task_title}"
   fi
+fi
 
-  ensure_node_dependencies "$PROJECT_ROOT"
-  gc_refresh_discovery_if_needed
-  gc_clear_active_task
+info "preflight: checking node dependencies (PROJECT_ROOT=${PROJECT_ROOT})"
+set +e
+ensure_node_dependencies "$PROJECT_ROOT"
+dep_rc=$?
+set -e
+info "preflight: node dependency check completed (status=${dep_rc})"
+gc_refresh_discovery_if_needed
+gc_clear_active_task
 
   if (( prompt_compact )); then
     export GC_PROMPT_COMPACT=1

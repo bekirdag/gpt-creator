@@ -256,12 +256,27 @@ ensure_node_dependencies() {
   fi
   info "Ensuring Node dependencies are installed (using ${pkg_manager})..."
   local install_output="" install_status=0
+  local log_dir="${LOG_DIR:-${project_root}/.gpt-creator/logs}"
+  mkdir -p "$log_dir" 2>/dev/null || true
+  local log_file="${log_dir}/dep-install.log"
+  local tmp_log
+  tmp_log="$(mktemp "${TMPDIR:-/tmp}/gc-dep-install.XXXXXX")"
+
   set +e
   install_output="$(
-    cd "$project_root" && "$pkg_manager" install >/dev/null 2>&1
+    (cd "$project_root" && "$pkg_manager" install) >"$tmp_log" 2>&1
   )"
   install_status=$?
   set -e
+
+  install_output="$(cat "$tmp_log" 2>/dev/null || true)"
+
+  {
+    printf '\n[%s] project=%s manager=%s status=%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$project_root" "$pkg_manager" "$install_status"
+    cat "$tmp_log"
+  } >>"$log_file" 2>/dev/null || true
+  rm -f "$tmp_log"
+
   if (( install_status == 0 )); then
     return 0
   fi
@@ -274,12 +289,13 @@ ensure_node_dependencies() {
   fi
 
   if (( network_error )); then
-    warn "Node dependency install skipped (network unavailable: ${pkg_manager} install); continuing without auto install."
-    return 0
+    warn "Node dependency install skipped (network unavailable: ${pkg_manager} install); see ${log_file}."
+  else
+    warn "Node dependency install failed (exit ${install_status}); see ${log_file} for details. Continuing."
   fi
 
-  warn "Node dependency install failed (exit ${install_status}); inspect output manually. Continuing may fail later."
-  return "$install_status"
+  # Never block work-on-tasks on install issues; continue.
+  return 0
 }
 
 gc_wot_normalize_sleep_between() {

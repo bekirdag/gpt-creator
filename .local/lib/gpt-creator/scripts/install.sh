@@ -827,6 +827,32 @@ install_link() {
   if ! echo ":$PATH:" | grep -q ":$BIN_DIR:"; then
     echo "⚠ $BIN_DIR is not on PATH. Add: export PATH=\"$BIN_DIR:\$PATH\"" >&2
   fi
+
+  # If a different gpt-creator is first in PATH, write a helper to prefer this install.
+  local current_cmd
+  current_cmd="$(command -v gpt-creator 2>/dev/null || true)"
+  if [[ -n "$current_cmd" && "$current_cmd" != "$LINK_PATH" ]]; then
+    local helper_dir="${HOME}/.gpt-creator"
+    local helper_script="${helper_dir}/use-installed-path.sh"
+    mkdir -p "$helper_dir" 2>/dev/null || true
+    cat >"$helper_script" <<EOF
+# Added by gpt-creator installer to prefer the installed CLI
+export PATH="$BIN_DIR:\$PATH"
+hash -r 2>/dev/null || true
+EOF
+    chmod +x "$helper_script" 2>/dev/null || true
+    if command -v zsh >/dev/null 2>&1 && [[ -f "${HOME}/.zshrc" ]]; then
+      if ! grep -Fq "use-installed-path.sh" "${HOME}/.zshrc"; then
+        printf '\n# gpt-creator: prefer installed CLI\n[ -f "%s" ] && source "%s"\n' "$helper_script" "$helper_script" >> "${HOME}/.zshrc"
+      fi
+    fi
+    if [[ -f "${HOME}/.bashrc" ]]; then
+      if ! grep -Fq "use-installed-path.sh" "${HOME}/.bashrc"; then
+        printf '\n# gpt-creator: prefer installed CLI\n[ -f "%s" ] && source "%s"\n' "$helper_script" "$helper_script" >> "${HOME}/.bashrc"
+      fi
+    fi
+    echo "⚠ Another gpt-creator is earlier in PATH ($current_cmd). A helper was written to ${helper_script}; restart shell to prefer $LINK_PATH."
+  fi
 }
 
 install_completions() {

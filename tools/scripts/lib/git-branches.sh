@@ -130,10 +130,8 @@ gc_git_branching_init() {
   fi
   local current_branch
   current_branch="$(gc_git_current_branch)"
-  if [[ "$current_branch" != "$GC_GIT_DEV_BRANCH" ]] && gc_git_has_changes; then
-    gc_git_log "[git] dirty tree before switching to ${GC_GIT_DEV_BRANCH}; autosnapping"
-    gc_git_autosnap || true
-  fi
+  gc_git_log "[git] pre-switch autosnap if dirty"
+  gc_git_autosnap || true
   gc_git_checkout "$GC_GIT_DEV_BRANCH"
   _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
   local dev_head
@@ -150,17 +148,19 @@ gc_git_begin_task_branch() {
   [[ -n "$id" ]] || id="task"
   candidate="$id"
   slug="${GC_GIT_TASK_PREFIX}${id}"
-  if gc_git_has_changes; then
-    gc_git_log "[git] dirty tree before switching to task branch; autosnapping"
-    gc_git_autosnap || true
-  fi
+  gc_git_log "[git] autosnap before task branch switch (if dirty)"
+  gc_git_autosnap || true
   if gc_git_remote_branch_exists "$candidate" || gc_git_branch_exists "$candidate"; then
     slug="$candidate"
   fi
   export GC_GIT_CURRENT_TASK_BRANCH="$slug"
   if gc_git_branch_exists "$slug"; then
     gc_git_log "[git] reusing existing branch ${slug}"
-    gc_git_checkout "$slug"
+    if ! gc_git_checkout "$slug"; then
+      gc_git_log "[git] checkout ${slug} failed; attempting autosnap + retry"
+      gc_git_autosnap || true
+      gc_git_checkout "$slug" || gc_git_log "[git] checkout ${slug} still failing; leaving working tree as-is"
+    fi
   else
     gc_git_log "[git] creating branch ${slug} from ${GC_GIT_DEV_BRANCH}"
     gc_git_checkout "$GC_GIT_DEV_BRANCH"

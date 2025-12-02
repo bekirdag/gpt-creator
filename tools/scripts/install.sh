@@ -19,6 +19,7 @@ INSTALL_PREFIX="${PREFIX:-/usr/local}"
 unset PREFIX 2>/dev/null || true
 SKIP_PREFLIGHT=0
 FORCE=0
+USER_PREFIX_SET=0
 
 usage() {
   local usage_file="${HELP_DIR}/install_usage.txt"
@@ -42,7 +43,7 @@ usage() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --prefix) INSTALL_PREFIX="${2:-/usr/local}"; shift 2 ;;
+    --prefix) INSTALL_PREFIX="${2:-/usr/local}"; USER_PREFIX_SET=1; shift 2 ;;
     --skip-preflight) SKIP_PREFLIGHT=1; shift ;;
     --force) FORCE=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -64,10 +65,13 @@ case "$OS_NAME" in
     ;;
 esac
 
-APP_DIR="$INSTALL_PREFIX/lib/gpt-creator"
-BIN_DIR="$INSTALL_PREFIX/bin"
-APP_BIN="$APP_DIR/bin/gpt-creator"
-LINK_PATH="$BIN_DIR/gpt-creator"
+set_paths() {
+  APP_DIR="$INSTALL_PREFIX/lib/gpt-creator"
+  BIN_DIR="$INSTALL_PREFIX/bin"
+  APP_BIN="$APP_DIR/bin/gpt-creator"
+  LINK_PATH="$BIN_DIR/gpt-creator"
+}
+set_paths
 
 need_cmd() { command -v "$1" >/dev/null 2>&1; }
 as_root() {
@@ -109,6 +113,43 @@ run_as_user() {
     "$@"
   fi
 }
+
+check_prefix_writable() {
+  local target="$1"
+  if [[ -w "$target" ]]; then
+    return 0
+  fi
+  if [[ ! -e "$target" ]]; then
+    local parent
+    parent="$(cd "$(dirname "$target")" >/dev/null 2>&1 && pwd -P)"
+    [[ -w "$parent" ]] && return 0
+  fi
+  return 1
+}
+
+ensure_prefix_access() {
+  local test_target=""
+  if check_prefix_writable "$INSTALL_PREFIX"; then
+    return 0
+  fi
+  test_target="${INSTALL_PREFIX%/}/.gpt-creator-install-test.$$"
+  if command -v sudo >/dev/null 2>&1; then
+    if sudo sh -c "touch '$test_target' >/dev/null 2>&1 && rm -f '$test_target'" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+  if (( USER_PREFIX_SET == 0 )); then
+    log_warn "No write access to ${INSTALL_PREFIX}; falling back to ${HOME}/.local."
+    INSTALL_PREFIX="${HOME}/.local"
+    set_paths
+    return 0
+  fi
+  echo "✖ Cannot write to ${INSTALL_PREFIX}; rerun with --prefix \"${HOME}/.local\" or a writable prefix." >&2
+  exit 1
+}
+
+ensure_prefix_access
+set_paths
 
 ver_major() { echo "${1#v}" | awk -F. '{print $1}'; }
 

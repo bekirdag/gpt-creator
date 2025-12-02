@@ -96,8 +96,6 @@ except Exception:
     data = {}
 kind = data.get("kind")
 if kind == "agent":
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh)
     agent = data.get("agent") or {}
     print("agent")
     print(agent.get("client", ""))

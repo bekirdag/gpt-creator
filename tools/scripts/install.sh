@@ -147,8 +147,9 @@ ensure_prefix_access() {
       return 0
     fi
   fi
-  echo "✖ Cannot write to ${INSTALL_PREFIX}; rerun with --prefix \"${HOME}/.local\" or another writable prefix." >&2
-  exit 1
+  log_warn "No write access to ${INSTALL_PREFIX}; falling back to ${HOME}/.local."
+  INSTALL_PREFIX="${HOME}/.local"
+  set_paths
 }
 
 ensure_prefix_access

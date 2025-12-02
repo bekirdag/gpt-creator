@@ -81,11 +81,13 @@ PY
     die "Agent '${agent_name}' not found in tasks database"
   fi
 
+  # Persist the raw payload for downstream consumers.
+  printf '%s\n' "$select_output" >"$agent_tmp"
+
   local parse_output=""
-  parse_output="$("${PYTHON_BIN:-python3}" - "$agent_tmp" "$select_output" <<'PY'
+  parse_output="$("${PYTHON_BIN:-python3}" - "$select_output" <<'PY'
 import json, sys
-tmp_path = sys.argv[1] if len(sys.argv) > 1 else ""
-raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
+raw = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
 try:
     data = json.loads(raw)
     if not isinstance(data, dict):
@@ -122,14 +124,17 @@ else:
 PY
 )" || {
     rm -f "$agent_tmp"
+    warn "agent-resolve: parse failure (raw payload='${select_output//[$'\n']/ }')"
     die "Failed to parse agent selection for '${agent_name}'"
   }
 
   local resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org
   IFS=$'\n' read -r resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org <<<"$parse_output"
+  info "agent-resolve: parsed kind=${resolved_kind:-<empty>} client=${resolved_client:-<empty>} model=${resolved_model:-<empty>} name=${resolved_name:-<empty>}"
 
   if [[ "$resolved_kind" != "agent" || -z "$resolved_model" ]]; then
     rm -f "$agent_tmp"
+    warn "agent-resolve: parsed payload invalid (kind='${resolved_kind:-<empty>}' model='${resolved_model:-<empty>}')"
     die "Agent '${agent_name}' not found in tasks database"
   fi
 

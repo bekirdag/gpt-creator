@@ -6,6 +6,8 @@ set -euo pipefail
 : "${GC_GIT_DEV_BRANCH:=dev}"
 : "${GC_GIT_MAIN_BRANCH:=main}"
 : "${GC_GIT_TASK_PREFIX:=}"
+: "${GC_GIT_AUTOMATION_AUTHOR_NAME:=gpt-creator automation}"
+: "${GC_GIT_AUTOMATION_AUTHOR_EMAIL:=automation@gpt-creator}"
 
 gc_git_state_dir() {
   local root
@@ -35,6 +37,16 @@ gc_git_create_from() { _gc_git checkout -q -B "$2" "$1"; }
 gc_git_current_branch() { _gc_git rev-parse --abbrev-ref HEAD 2>/dev/null || echo ""; }
 gc_git_has_changes() { [[ -n "$(_gc_git status --porcelain 2>/dev/null)" ]]; }
 
+gc_git_commit_with_identity() {
+  local message="${1:-}"
+  shift || true
+  GIT_AUTHOR_NAME="${GC_GIT_AUTOMATION_AUTHOR_NAME}" \
+  GIT_AUTHOR_EMAIL="${GC_GIT_AUTOMATION_AUTHOR_EMAIL}" \
+  GIT_COMMITTER_NAME="${GC_GIT_AUTOMATION_AUTHOR_NAME}" \
+  GIT_COMMITTER_EMAIL="${GC_GIT_AUTOMATION_AUTHOR_EMAIL}" \
+    _gc_git commit "$@" -m "$message"
+}
+
 gc_git_log() {
   local msg="$*"
   local root="${GC_GIT_DIR:-${PROJECT_ROOT:-$PWD}}"
@@ -45,22 +57,33 @@ gc_git_log() {
 }
 
 gc_git_autosnap() {
+  # Capture pending edits before any branch switch to avoid checkout failures.
+  local context="${1:-branch switch}"
   gc_git_has_changes || return 0
   local ts head msg
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  msg="chore(gpt-creator): autosnap before branch switch ${ts}"
-  _gc_git add -A >/dev/null 2>&1 || true
+  msg="chore(gpt-creator): autosnap before ${context} ${ts}"
+  if ! _gc_git add -A >/dev/null 2>&1; then
+    gc_git_log "[git] autosnap staging failed; working tree still dirty"
+    return 1
+  fi
   if _gc_git diff --cached --quiet >/dev/null 2>&1; then
     return 0
   fi
-  if _gc_git commit -q -m "$msg"; then
+  if gc_git_commit_with_identity "$msg" -q; then
     head="$(gc_git_current_branch)"
     local sha
     sha="$(_gc_git rev-parse --short HEAD 2>/dev/null || true)"
-    gc_git_log "[git] autosnap commit recorded on ${head:-HEAD} ${sha:+[$sha]}"
-    return 0
+    gc_git_log "[git] autosnap commit recorded on ${head:-HEAD} ${sha:+[$sha]} (${context})"
+  else
+    gc_git_log "[git] autosnap commit failed; leaving tree dirty (${context})"
+    return 1
   fi
-  gc_git_log "[git] autosnap commit failed; leaving tree dirty"
+  if gc_git_has_changes; then
+    gc_git_log "[git] autosnap warning — working tree still dirty after commit (${context})"
+    return 1
+  fi
+  return 0
 }
 
 gc_git_push_set_upstream() {
@@ -100,7 +123,7 @@ gc_git_status_ok() {
   local s
   s="$(printf "%s" "${1:-}" | tr '[:lower:]' '[:upper:]' | tr '-' '_')"
   case "$s" in
-    SUCCESS|COMPLETE|COMPLETED|COMPLETED_OK|READY_TO_REVIEW|READY_TO_REVIEW_NO_CHANGES) return 0 ;;
+    SUCCESS|COMPLETE|COMPLETED|COMPLETED_OK|COMPLETED_NO_CHANGES|READY_TO_REVIEW|READY_TO_REVIEW_NO_CHANGES) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -114,6 +137,8 @@ gc_git_branching_init() {
   else
     gc_git_log "[git] remote fetch failed; continuing with local refs"
   fi
+  gc_git_log "[git] autosnap before dev branch preparation (if dirty)"
+  gc_git_autosnap "dev branch init" || true
   local base_ref="$GC_GIT_MAIN_BRANCH"
   if _gc_git symbolic-ref -q refs/remotes/"$GC_GIT_REMOTE"/HEAD >/dev/null 2>&1; then
     base_ref="$(_gc_git symbolic-ref -q --short refs/remotes/"$GC_GIT_REMOTE"/HEAD | cut -d/ -f2)"
@@ -131,7 +156,7 @@ gc_git_branching_init() {
   local current_branch
   current_branch="$(gc_git_current_branch)"
   gc_git_log "[git] pre-switch autosnap if dirty"
-  gc_git_autosnap || true
+  gc_git_autosnap "dev branch checkout" || true
   gc_git_checkout "$GC_GIT_DEV_BRANCH"
   _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
   local dev_head
@@ -149,20 +174,24 @@ gc_git_begin_task_branch() {
   candidate="$id"
   slug="${GC_GIT_TASK_PREFIX}${id}"
   gc_git_log "[git] autosnap before task branch switch (if dirty)"
-  gc_git_autosnap || true
+  gc_git_autosnap "task branch switch" || true
   if gc_git_remote_branch_exists "$candidate" || gc_git_branch_exists "$candidate"; then
     slug="$candidate"
   fi
   export GC_GIT_CURRENT_TASK_BRANCH="$slug"
   if gc_git_branch_exists "$slug"; then
     gc_git_log "[git] reusing existing branch ${slug}"
+    gc_git_log "[git] autosnap before checkout of ${slug}"
+    gc_git_autosnap "reuse ${slug}" || true
     if ! gc_git_checkout "$slug"; then
       gc_git_log "[git] checkout ${slug} failed; attempting autosnap + retry"
-      gc_git_autosnap || true
+      gc_git_autosnap "retry checkout ${slug}" || true
       gc_git_checkout "$slug" || gc_git_log "[git] checkout ${slug} still failing; leaving working tree as-is"
     fi
   else
     gc_git_log "[git] creating branch ${slug} from ${GC_GIT_DEV_BRANCH}"
+    gc_git_log "[git] autosnap before creating ${slug}"
+    gc_git_autosnap "create ${slug}" || true
     gc_git_checkout "$GC_GIT_DEV_BRANCH"
     gc_git_create_from "$GC_GIT_DEV_BRANCH" "$slug"
     gc_git_log "[git] created branch ${slug} from ${GC_GIT_DEV_BRANCH}"
@@ -197,7 +226,7 @@ gc_git_finalize_task_branch() {
   if gc_git_has_changes; then
     gc_git_log "[git] staging and committing ${task_id} updates"
     _gc_git add -A >/dev/null 2>&1 || true
-    if _gc_git commit -q -m "$message"; then
+    if gc_git_commit_with_identity "$message" -q; then
       gc_git_log "[git] commit: ${message}"
     else
       gc_git_log "[git] commit failed for ${task_id}; leaving tree dirty"
@@ -230,11 +259,7 @@ gc_git_finalize_task_branch() {
 
   local should_merge=0
   if gc_git_status_ok "$status"; then
-    if [[ "${changed_count:-0}" =~ ^[0-9]+$ ]] && (( changed_count > 0 )); then
-      should_merge=1
-    elif [[ "${commit_count:-0}" =~ ^[0-9]+$ ]] && (( commit_count > 0 )); then
-      should_merge=1
-    fi
+    should_merge=1
   fi
   if (( should_merge )) && [[ -n "${GC_GIT_CURRENT_TASK_BRANCH:-}" ]]; then
     gc_git_checkout "$GC_GIT_DEV_BRANCH"

@@ -35,7 +35,7 @@ gc_resolve_agent() {
   if ! agent_tmp="$(mktemp "${tmp_base%/}/agent-select.XXXXXX.json" 2>/dev/null)"; then
     agent_tmp="$(mktemp /tmp/agent-select.XXXXXX.json)"
   fi
-  info "Resolving agent '${agent_name}' from ${tasks_db}"
+  info "Resolving agent '${agent_name}' from ${tasks_db} [agent-resolve:v5]"
 
   local select_output=""
   # Primary: direct SQLite read (immutable/ro) to avoid env/CLI side effects.
@@ -62,11 +62,18 @@ PY
 )" || true
   if [[ -z "$select_output" ]]; then
     warn "agent-resolve: direct SQLite read returned empty payload"
+  else
+    info "agent-resolve: direct SQLite payload: ${select_output//[$'\n']/ }"
   fi
   # Fallback: CLI in read-only mode if direct read fails.
   if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
     warn "agent-resolve: direct SQLite read failed; retrying via agents CLI for '${agent_name}'"
     select_output="$(GC_AGENT_READONLY=1 gc_run_agents_cli "$project_root" "$tasks_db" select --name "$agent_name" 2>/dev/null || true)"
+    if [[ -n "$select_output" ]]; then
+      info "agent-resolve: CLI payload: ${select_output//[$'\n']/ }"
+    else
+      warn "agent-resolve: CLI payload empty"
+    fi
   fi
   if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
     rm -f "$agent_tmp"
@@ -74,55 +81,42 @@ PY
     die "Agent '${agent_name}' not found in tasks database"
   fi
 
+  # Persist the raw payload for downstream consumers.
+  printf '%s\n' "$select_output" >"$agent_tmp"
+
+  local resolved_kind="" resolved_client="" resolved_model="" resolved_name="" resolved_api_key="" resolved_api_base="" resolved_api_org=""
   local parse_output=""
-  parse_output="$("${PYTHON_BIN:-python3}" - "$agent_tmp" "$select_output" <<'PY'
+  parse_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$select_output"
 import json, sys
-tmp_path = sys.argv[1] if len(sys.argv) > 1 else ""
-raw = sys.argv[2] if len(sys.argv) > 2 else sys.stdin.read()
+raw = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
 try:
     data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise ValueError("expected object")
 except Exception:
     data = {}
-kind = data.get("kind")
-if kind == "agent":
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh)
-    agent = data.get("agent") or {}
-    print("agent")
-    print(agent.get("client", ""))
-    print(agent.get("model", ""))
-    print(agent.get("name", ""))
-    print(agent.get("client_api_key", ""))
-    print(agent.get("client_api_base", ""))
-    print(agent.get("client_api_org", ""))
-elif kind == "model":
-    print("model")
-    print("")
-    print(data.get("model", ""))
-    print("")
-    print("")
-    print("")
-    print("")
-else:
-    print("unknown")
-    print("")
-    print("")
-    print("")
-    print("")
-    print("")
+kind = data.get("kind") or ""
+agent = data.get("agent") or {}
+client = agent.get("client") or ""
+model = agent.get("model") or ""
+name = agent.get("name") or agent.get("name_normalized") or ""
+api_key = agent.get("client_api_key") or agent.get("clientApiKey") or ""
+api_base = agent.get("client_api_base") or agent.get("clientApiBase") or ""
+api_org = agent.get("client_api_org") or agent.get("clientApiOrg") or ""
+print(kind)
+print(client)
+print(model)
+print(name)
+print(api_key)
+print(api_base)
+print(api_org)
 PY
-)" || {
-    rm -f "$agent_tmp"
-    die "Failed to parse agent selection for '${agent_name}'"
-  }
+)" || parse_output=""
 
-  local resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org
   IFS=$'\n' read -r resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org <<<"$parse_output"
+  info "agent-resolve: parsed kind=${resolved_kind:-<empty>} client=${resolved_client:-<empty>} model=${resolved_model:-<empty>} name=${resolved_name:-<empty>}"
 
   if [[ "$resolved_kind" != "agent" || -z "$resolved_model" ]]; then
     rm -f "$agent_tmp"
+    warn "agent-resolve: parsed payload invalid (kind='${resolved_kind:-<empty>}' model='${resolved_model:-<empty>}')"
     die "Agent '${agent_name}' not found in tasks database"
   fi
 

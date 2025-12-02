@@ -35,7 +35,7 @@ gc_resolve_agent() {
   if ! agent_tmp="$(mktemp "${tmp_base%/}/agent-select.XXXXXX.json" 2>/dev/null)"; then
     agent_tmp="$(mktemp /tmp/agent-select.XXXXXX.json)"
   fi
-  info "Resolving agent '${agent_name}' from ${tasks_db}"
+  info "Resolving agent '${agent_name}' from ${tasks_db} [agent-resolve:v5]"
 
   local select_output=""
   # Primary: direct SQLite read (immutable/ro) to avoid env/CLI side effects.
@@ -84,50 +84,33 @@ PY
   # Persist the raw payload for downstream consumers.
   printf '%s\n' "$select_output" >"$agent_tmp"
 
+  local resolved_kind="" resolved_client="" resolved_model="" resolved_name="" resolved_api_key="" resolved_api_base="" resolved_api_org=""
   local parse_output=""
-  parse_output="$("${PYTHON_BIN:-python3}" - <<'PY' <<'EOF'
+  parse_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$select_output"
 import json, sys
-raw = sys.stdin.read()
+raw = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
 try:
     data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise ValueError("expected object")
 except Exception:
     data = {}
-kind = data.get("kind")
-if kind == "agent":
-    agent = data.get("agent") or {}
-    print("agent")
-    print(agent.get("client", ""))
-    print(agent.get("model", ""))
-    print(agent.get("name", ""))
-    print(agent.get("client_api_key", ""))
-    print(agent.get("client_api_base", ""))
-    print(agent.get("client_api_org", ""))
-elif kind == "model":
-    print("model")
-    print("")
-    print(data.get("model", ""))
-    print("")
-    print("")
-    print("")
-    print("")
-else:
-    print("unknown")
-    print("")
-    print("")
-    print("")
-    print("")
-    print("")
+kind = data.get("kind") or ""
+agent = data.get("agent") or {}
+client = agent.get("client") or ""
+model = agent.get("model") or ""
+name = agent.get("name") or agent.get("name_normalized") or ""
+api_key = agent.get("client_api_key") or agent.get("clientApiKey") or ""
+api_base = agent.get("client_api_base") or agent.get("clientApiBase") or ""
+api_org = agent.get("client_api_org") or agent.get("clientApiOrg") or ""
+print(kind)
+print(client)
+print(model)
+print(name)
+print(api_key)
+print(api_base)
+print(api_org)
 PY
-EOF
-)" || {
-    rm -f "$agent_tmp"
-    warn "agent-resolve: parse failure (raw payload='${select_output//[$'\n']/ }')"
-    die "Failed to parse agent selection for '${agent_name}'"
-  }
+)" || parse_output=""
 
-  local resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org
   IFS=$'\n' read -r resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org <<<"$parse_output"
   info "agent-resolve: parsed kind=${resolved_kind:-<empty>} client=${resolved_client:-<empty>} model=${resolved_model:-<empty>} name=${resolved_name:-<empty>}"
 

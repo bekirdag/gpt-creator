@@ -99,13 +99,19 @@ DOCS_ENABLED=1
 if [ "$GC_DOCS_MODE" = "off" ]; then
   DOCS_ENABLED=0
 elif [ ! -f "$CAND" ] || ! is_sqlite_catalog "$CAND"; then
-  if [ "$GC_DOCS_MODE" = "strict" ]; then
-    printf >&2 "gpt-creator: documentation catalog invalid or missing at '%s' (strict mode)\n" "$CAND"
-    exit 65
-  fi
-  if ! bootstrap_min_catalog "$CAND"; then
-    DOCS_ENABLED=0
-  fi
+if [ "$GC_DOCS_MODE" = "strict" ]; then
+  printf >&2 "gpt-creator: documentation catalog invalid or missing at '%s' (strict mode)\n" "$CAND"
+  exit 65
+fi
+# Graceful bootstrap: skip docs entirely when write access is missing.
+set +e
+bootstrap_min_catalog "$CAND"
+BOOTSTRAP_RC=$?
+set -e
+if [ "$BOOTSTRAP_RC" -ne 0 ]; then
+  DOCS_ENABLED=0
+  printf >&2 "gpt-creator: warning: documentation catalog bootstrap failed (rc=%s); disabling docs\n" "$BOOTSTRAP_RC"
+fi
 fi
 
 export GC_DOCUMENTATION_DB_PATH="$CAND"

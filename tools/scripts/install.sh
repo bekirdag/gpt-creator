@@ -70,6 +70,7 @@ set_paths() {
   BIN_DIR="$INSTALL_PREFIX/bin"
   APP_BIN="$APP_DIR/bin/gpt-creator"
   LINK_PATH="$BIN_DIR/gpt-creator"
+  CANONICAL_BIN="/usr/local/bin/gpt-creator"
 }
 set_paths
 log_info() { echo "› $1"; }
@@ -165,6 +166,17 @@ apt_get_install() {
     return 0
   fi
   return 1
+}
+
+cleanup_conflicting_bins() {
+  # Remove stale local installs that can shadow the canonical binary on PATH.
+  if [[ "$INSTALL_PREFIX" == "/usr/local" ]]; then
+    local stale="$HOME/apps/gpt-creator/.local/bin/gpt-creator"
+    if [[ -x "$stale" && "$stale" != "$LINK_PATH" ]]; then
+      log_info "Removing stale gpt-creator at ${stale} (preferring ${LINK_PATH})."
+      rm -f "$stale" || log_warn "Failed to remove ${stale}; please delete it manually."
+    fi
+  fi
 }
 
 list_conflicting_node_packages() {
@@ -883,6 +895,7 @@ main() {
 install_files
 ensure_runtime_permissions
 install_link
+cleanup_conflicting_bins
 install_completions
   echo "✔ Installed. Try:"
   echo "    gpt-creator create-project /path/to/project"

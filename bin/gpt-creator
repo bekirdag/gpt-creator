@@ -5,6 +5,18 @@
 
 set -Eeuo pipefail
 
+GC_CANONICAL_PREFIX="${GC_CANONICAL_PREFIX:-/usr/local}"
+GC_CANONICAL_BIN="${GC_CANONICAL_PREFIX}/bin/gpt-creator"
+# If an older gpt-creator instance is invoked from another prefix, re-exec the canonical binary.
+if [[ -x "$GC_CANONICAL_BIN" ]]; then
+  _gc_self_resolved="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+  _gc_canonical_resolved="$(readlink -f "$GC_CANONICAL_BIN" 2>/dev/null || printf '%s' "$GC_CANONICAL_BIN")"
+  if [[ "$_gc_self_resolved" != "$_gc_canonical_resolved" ]]; then
+    exec "$_gc_canonical_resolved" "$@"
+  fi
+  unset _gc_self_resolved _gc_canonical_resolved
+fi
+
 mkdir -p "${PWD}/.gpt-creator/shims" 2>/dev/null || true
 export BASH_ENV="${BASH_ENV:-$PWD/.gpt-creator/shims/bash_env.sh}"
 

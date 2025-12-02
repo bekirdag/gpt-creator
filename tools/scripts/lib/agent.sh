@@ -39,16 +39,36 @@ gc_resolve_agent() {
   if ! agent_db_tmp="$(mktemp "${tmp_base%/}/agent-select-db.XXXXXX.sqlite" 2>/dev/null)"; then
     agent_db_tmp="$(mktemp /tmp/agent-select-db.XXXXXX.sqlite)"
   fi
-  cp "$tasks_db" "$agent_db_tmp" 2>/dev/null || true
+  # Prefer a consistent snapshot (handles WAL) so agents created recently are visible.
+  if command -v sqlite3 >/dev/null 2>&1; then
+    if ! sqlite3 "$tasks_db" ".backup '${agent_db_tmp}'" >/dev/null 2>&1; then
+      cp "$tasks_db" "$agent_db_tmp" 2>/dev/null || true
+    fi
+  else
+    cp "$tasks_db" "$agent_db_tmp" 2>/dev/null || true
+  fi
+  # Copy WAL/SHM when present (best-effort) in case backup falls back to a plain copy.
+  if [[ -f "${tasks_db}-wal" ]]; then
+    cp "${tasks_db}-wal" "${agent_db_tmp}-wal" 2>/dev/null || true
+  fi
+  if [[ -f "${tasks_db}-shm" ]]; then
+    cp "${tasks_db}-shm" "${agent_db_tmp}-shm" 2>/dev/null || true
+  fi
   chmod u+w "$agent_db_tmp" 2>/dev/null || true
 
-  local select_output=""
+  local select_output="" primary_ok=1
   # Use a writable copy of tasks.db so the agents CLI can apply migrations or seed
   # catalog metadata (WAL-mode databases throw "attempt to write a readonly database"
-  # when forced into read-only mode). If the CLI still fails, fall back to a direct
-  # read-only query against the agents table.
+  # when forced into read-only mode). If the CLI returns a non-agent payload or fails,
+  # fall back to read-only lookups directly against the agents table.
   if ! select_output="$(GC_AGENT_READONLY=0 gc_run_agents_cli "$project_root" "$agent_db_tmp" select --name "$agent_name")"; then
-    select_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$agent_db_tmp" "$agent_name"
+    primary_ok=0
+  fi
+  if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
+    select_output="$(GC_AGENT_READONLY=1 gc_run_agents_cli "$project_root" "$tasks_db" select --name "$agent_name" 2>/dev/null || true)"
+  fi
+  if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
+    select_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$tasks_db" "$agent_name"
 import json, sqlite3, sys
 db_path = sys.argv[1]
 name = (sys.argv[2] or "").strip().lower()
@@ -173,6 +193,73 @@ PY
     [[ -n "$agent_api_key_env" ]] && export GC_ACTIVE_AGENT_API_KEY_ENV="$agent_api_key_env"
     [[ -n "$agent_org_env" ]] && export GC_ACTIVE_AGENT_API_ORG_ENV="$agent_org_env"
     [[ -n "$agent_api_base_env" ]] && export GC_ACTIVE_AGENT_API_BASE_ENV="$agent_api_base_env"
+  fi
+
+  # Enrich the agent file with registry defaults (adapter/config/limits), mirroring test-agent.
+  if [[ -n "$agent_tmp" && -f "$agent_tmp" ]]; then
+    "${PYTHON_BIN:-python3}" - "$agent_tmp" "$registry_info" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+registry_raw = sys.argv[2] if len(sys.argv) > 2 else ""
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+if not isinstance(data, dict):
+    sys.exit(0)
+agent = data.get("agent")
+if not isinstance(agent, dict):
+    agent = {}
+    data["agent"] = agent
+registry = {}
+if registry_raw:
+    try:
+        registry = json.loads(registry_raw)
+    except Exception:
+        registry = {}
+
+def first_non_empty(*values):
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            if value.strip():
+                return value
+        else:
+            return value
+    return None
+
+adapter = first_non_empty(agent.get("adapter"), registry.get("adapter"))
+if adapter:
+    agent["adapter"] = adapter
+
+adapter_cfg = agent.get("adapterConfig")
+reg_cfg = registry.get("adapterConfig") if isinstance(registry, dict) else None
+if not adapter_cfg and reg_cfg:
+    agent["adapterConfig"] = reg_cfg
+
+for key, reg_key in (("maxContextTokens", "maxContextTokens"), ("maxOutputTokens", "maxOutputTokens")):
+    if agent.get(key) is None and isinstance(registry, dict) and registry.get(reg_key) is not None:
+        agent[key] = registry[reg_key]
+
+if isinstance(registry, dict):
+    if not agent.get("client_api_base") and registry.get("apiBase"):
+        agent["client_api_base"] = registry.get("apiBase")
+    if not agent.get("client_api_key_env") and registry.get("apiKeyEnv"):
+        agent["client_api_key_env"] = registry.get("apiKeyEnv")
+    if not agent.get("client_api_org_env") and registry.get("orgEnv"):
+        agent["client_api_org_env"] = registry.get("orgEnv")
+    if not agent.get("client_api_base_env") and registry.get("apiBaseEnv"):
+        agent["client_api_base_env"] = registry.get("apiBaseEnv")
+
+try:
+    path.write_text(json.dumps(data), encoding="utf-8")
+except Exception:
+    pass
+PY
   fi
 
   # Apply any inline values from the agent record.

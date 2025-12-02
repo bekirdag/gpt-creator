@@ -303,12 +303,13 @@ def main(argv: List[str]) -> int:
         or "gpt-5.1-codex-max"
     )
     registry_cfg: Optional[Dict[str, object]] = None
-    if not adapter and active_client:
+    if active_client:
         try:
             registry_cfg = AgentRegistry.load().validate_pair(active_client, model)
-            adapter = (registry_cfg.get("adapter") or "").strip().lower()
-            # Use registry-resolved model when not explicitly provided
+            registry_adapter = (registry_cfg.get("adapter") or "").strip().lower()
             registry_model = (registry_cfg.get("model") or "").strip()
+            if not adapter:
+                adapter = registry_adapter
             if registry_model:
                 model = registry_model
         except Exception as exc:  # pragma: no cover - defensive

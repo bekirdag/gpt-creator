@@ -8,7 +8,7 @@ set -euo pipefail
 : "${GC_GIT_TASK_PREFIX:=}"
 : "${GC_GIT_AUTOMATION_AUTHOR_NAME:=gpt-creator automation}"
 : "${GC_GIT_AUTOMATION_AUTHOR_EMAIL:=automation@gpt-creator}"
-: "${GC_GIT_BRANCHING_LOG_VERSION:=v20251202-1}"
+: "${GC_GIT_BRANCHING_LOG_VERSION:=v20251202-2}"
 
 gc_git_state_dir() {
   local root
@@ -38,6 +38,10 @@ gc_git_create_from() { _gc_git checkout -q -B "$2" "$1"; }
 gc_git_current_branch() { _gc_git rev-parse --abbrev-ref HEAD 2>/dev/null || echo ""; }
 gc_git_has_changes() { [[ -n "$(_gc_git status --porcelain 2>/dev/null)" ]]; }
 
+gc_git_dirty_preview() {
+  _gc_git status --porcelain=v1 2>/dev/null | head -n 20 | tr $'\n' ';' | sed 's/;*$//'
+}
+
 gc_git_commit_with_identity() {
   local message="${1:-}"
   shift || true
@@ -62,7 +66,7 @@ gc_git_autosnap() {
   local context="${1:-branch switch}"
   gc_git_has_changes || { gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap skip — tree already clean (${context})"; return 0; }
   local dirty_preview
-  dirty_preview="$(_gc_git status --porcelain 2>/dev/null | head -n 20 | tr $'\n' ';' | sed 's/;*$//')"
+  dirty_preview="$(gc_git_dirty_preview)"
   gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap start (${context}); dirty preview: ${dirty_preview:-<unknown>}"
   local ts head msg
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -79,6 +83,7 @@ gc_git_autosnap() {
     local sha
     sha="$(_gc_git rev-parse --short HEAD 2>/dev/null || true)"
     gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap commit recorded on ${head:-HEAD} ${sha:+[$sha]} (${context})"
+    gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap post-commit dirty preview (${context}): $(gc_git_dirty_preview)"
   else
     gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap commit failed; leaving tree dirty (${context})"
     return 1
@@ -184,9 +189,10 @@ gc_git_begin_task_branch() {
     slug="$candidate"
   fi
   export GC_GIT_CURRENT_TASK_BRANCH="$slug"
+  gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] task branch intent=${slug} current=$(gc_git_current_branch) root=${root}"
   if gc_git_branch_exists "$slug"; then
     local dirty_before_checkout
-    dirty_before_checkout="$(_gc_git status --porcelain 2>/dev/null | head -n 20 | tr $'\n' ';' | sed 's/;*$//')"
+    dirty_before_checkout="$(gc_git_dirty_preview)"
     gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] reusing existing branch ${slug}; dirty preview before checkout: ${dirty_before_checkout:-<unknown>}"
     gc_git_log "[git] autosnap before checkout of ${slug}"
     gc_git_autosnap "reuse ${slug}" || true
@@ -194,13 +200,15 @@ gc_git_begin_task_branch() {
       gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${slug} ok after autosnap"
     else
       local dirty_on_failure
-      dirty_on_failure="$(_gc_git status --porcelain 2>/dev/null | head -n 20 | tr $'\n' ';' | sed 's/;*$//')"
+      dirty_on_failure="$(gc_git_dirty_preview)"
       gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${slug} failed; dirty preview: ${dirty_on_failure:-<unknown>}; attempting autosnap + retry"
       gc_git_autosnap "retry checkout ${slug}" || true
       if ! gc_git_checkout "$slug"; then
         local dirty_retry_failure
-        dirty_retry_failure="$(_gc_git status --porcelain 2>/dev/null | head -n 20 | tr $'\n' ';' | sed 's/;*$//')"
+        dirty_retry_failure="$(gc_git_dirty_preview)"
         gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${slug} still failing after autosnap; dirty preview: ${dirty_retry_failure:-<unknown>}; leaving working tree as-is"
+      else
+        gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${slug} succeeded after retry autosnap; dirty preview: $(gc_git_dirty_preview)"
       fi
     fi
   else

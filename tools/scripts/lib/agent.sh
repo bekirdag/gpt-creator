@@ -62,11 +62,18 @@ PY
 )" || true
   if [[ -z "$select_output" ]]; then
     warn "agent-resolve: direct SQLite read returned empty payload"
+  else
+    info "agent-resolve: direct SQLite payload: ${select_output//[$'\n']/ }"
   fi
   # Fallback: CLI in read-only mode if direct read fails.
   if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
     warn "agent-resolve: direct SQLite read failed; retrying via agents CLI for '${agent_name}'"
     select_output="$(GC_AGENT_READONLY=1 gc_run_agents_cli "$project_root" "$tasks_db" select --name "$agent_name" 2>/dev/null || true)"
+    if [[ -n "$select_output" ]]; then
+      info "agent-resolve: CLI payload: ${select_output//[$'\n']/ }"
+    else
+      warn "agent-resolve: CLI payload empty"
+    fi
   fi
   if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
     rm -f "$agent_tmp"

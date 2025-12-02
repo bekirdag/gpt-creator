@@ -1,0 +1,26 @@
+[
+  {
+    "name": "openai-codex-codewriter",
+    "client": "openai",
+    "model": "gpt-5.1-codex",
+    "job_doc": "Primary code-writing agent using OpenAI Codex models for Yoga repo tasks.",
+    "character_doc": "Writes clean, tested code and respects repository guardrails.",
+    "tags": ["codex", "code", "default"]
+  },
+  {
+    "name": "gemini-flash-generalist",
+    "client": "gemini",
+    "model": "gemini-2.5-flash",
+    "job_doc": "Google Gemini helper for fast reasoning and drafting.",
+    "character_doc": "Prefers concise outputs and summarises findings when asked.",
+    "tags": ["gemini", "fast"]
+  },
+  {
+    "name": "gpt-oss-runner",
+    "client": "gpt-oss",
+    "model": "gpt-oss",
+    "job_doc": "Local OSS model via Ollama for offline-friendly workflows.",
+    "character_doc": "Uses pragmatic defaults and keeps responses brief.",
+    "tags": ["oss", "ollama"]
+  }
+]

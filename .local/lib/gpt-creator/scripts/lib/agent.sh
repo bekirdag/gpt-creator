@@ -35,7 +35,23 @@ gc_resolve_agent() {
   if ! agent_tmp="$(mktemp "${tmp_base%/}/agent-select.XXXXXX.json" 2>/dev/null)"; then
     agent_tmp="$(mktemp /tmp/agent-select.XXXXXX.json)"
   fi
-  info "Resolving agent '${agent_name}' from ${tasks_db} [agent-resolve:v5]"
+  info "Resolving agent '${agent_name}' from ${tasks_db} [agent-resolve:v10]"
+
+  # Ensure Python helpers (agents_registry, etc.) are discoverable.
+  if [[ -n "${CLI_ROOT:-${GC_CLI_ROOT:-}}" ]]; then
+    local _py_paths=("${CLI_ROOT:-${GC_CLI_ROOT}}/scripts/python" "${CLI_ROOT:-${GC_CLI_ROOT}}/tools/scripts/python")
+    local _py_path
+    for _py_path in "${_py_paths[@]}"; do
+      if [[ -d "$_py_path" ]]; then
+        if [[ -z "${PYTHONPATH:-}" ]]; then
+          PYTHONPATH="$_py_path"
+        else
+          PYTHONPATH="$_py_path:${PYTHONPATH}"
+        fi
+      fi
+    done
+    export PYTHONPATH
+  fi
 
   local select_output=""
   # Primary: direct SQLite read (immutable/ro) to avoid env/CLI side effects.
@@ -84,40 +100,68 @@ PY
   # Persist the raw payload for downstream consumers.
   printf '%s\n' "$select_output" >"$agent_tmp"
 
-  local resolved_kind="" resolved_client="" resolved_model="" resolved_name="" resolved_api_key="" resolved_api_base="" resolved_api_org=""
-  local parse_output=""
-  parse_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$select_output"
+  # Resolve fields via sqlite3 (avoid JSON parsing issues).
+  local resolved_client="" resolved_model="" resolved_name="" resolved_api_key="" resolved_api_base="" resolved_api_org=""
+  if command -v sqlite3 >/dev/null 2>&1; then
+    local sql_output
+    sql_output="$(sqlite3 "$tasks_db" "SELECT client, model, name_normalized, client_api_key, client_api_base, client_api_org FROM agents WHERE name_normalized = '$(printf "%s" "$agent_name" | tr "A-Z" "a-z")' LIMIT 1;" 2>/dev/null || true)"
+    if [[ -n "$sql_output" ]]; then
+      IFS='|' read -r resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org <<<"$sql_output"
+    fi
+  fi
+  # No further parsing; rely solely on sqlite row.
+
+  info "agent-resolve: parsed client=${resolved_client:-<empty>} model=${resolved_model:-<empty>} name=${resolved_name:-<empty>}"
+
+  if [[ -z "$resolved_model" || -z "$resolved_client" || -z "$resolved_name" ]]; then
+    rm -f "$agent_tmp"
+    warn "agent-resolve: parsed payload invalid (client='${resolved_client:-<empty>}' model='${resolved_model:-<empty>}' name='${resolved_name:-<empty>}')"
+    die "Agent '${agent_name}' not found in tasks database"
+  fi
+
+  # Fill adapter metadata from registry.
+  local registry_info adapter_parse_output agent_adapter="" agent_ctx="" agent_out="" agent_api_base="" agent_api_key_env="" agent_org_env="" agent_api_base_env=""
+  if registry_info="$(gc_agents_registry_cmd validate --client "$resolved_client" --model "$resolved_model" 2>/dev/null)"; then
+    :
+  else
+    registry_info="$("${PYTHON_BIN:-python3}" - <<'PY' "$resolved_client" "$resolved_model"
 import json, sys
-raw = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
+from agents_registry import AgentRegistry
+client = sys.argv[1]
+model = sys.argv[2]
 try:
-    data = json.loads(raw)
+    data = AgentRegistry.load().validate_pair(client, model)
+    print(json.dumps(data))
+except Exception:
+    print("")
+PY
+)"
+  fi
+  if [[ -n "$registry_info" ]]; then
+    adapter_parse_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$registry_info"
+import json, sys
+try:
+    data = json.load(sys.stdin)
 except Exception:
     data = {}
-kind = data.get("kind") or ""
-agent = data.get("agent") or {}
-client = agent.get("client") or ""
-model = agent.get("model") or ""
-name = agent.get("name") or agent.get("name_normalized") or ""
-api_key = agent.get("client_api_key") or agent.get("clientApiKey") or ""
-api_base = agent.get("client_api_base") or agent.get("clientApiBase") or ""
-api_org = agent.get("client_api_org") or agent.get("clientApiOrg") or ""
-print(kind)
-print(client)
-print(model)
-print(name)
-print(api_key)
-print(api_base)
-print(api_org)
+print(data.get("adapter", ""))
+print(data.get("maxContextTokens") or "")
+print(data.get("maxOutputTokens") or "")
+print(data.get("apiBase") or "")
+print(data.get("apiKeyEnv") or "")
+print(data.get("orgEnv") or "")
+print(data.get("apiBaseEnv") or "")
 PY
-)" || parse_output=""
-
-  IFS=$'\n' read -r resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org <<<"$parse_output"
-  info "agent-resolve: parsed kind=${resolved_kind:-<empty>} client=${resolved_client:-<empty>} model=${resolved_model:-<empty>} name=${resolved_name:-<empty>}"
-
-  if [[ "$resolved_kind" != "agent" || -z "$resolved_model" ]]; then
-    rm -f "$agent_tmp"
-    warn "agent-resolve: parsed payload invalid (kind='${resolved_kind:-<empty>}' model='${resolved_model:-<empty>}')"
-    die "Agent '${agent_name}' not found in tasks database"
+)"
+    IFS=$'\n' read -r agent_adapter agent_ctx agent_out agent_api_base agent_api_key_env agent_org_env agent_api_base_env <<<"$adapter_parse_output"
+    [[ -n "$agent_adapter" ]] && export GC_ACTIVE_AGENT_ADAPTER="$agent_adapter"
+    [[ -n "$agent_ctx" ]] && export GC_ACTIVE_AGENT_MAX_CONTEXT="$agent_ctx"
+    [[ -n "$agent_out" ]] && export GC_ACTIVE_AGENT_MAX_OUTPUT="$agent_out"
+    [[ -n "$agent_api_base" ]] && export GC_ACTIVE_AGENT_API_BASE="$agent_api_base"
+    [[ -n "$agent_api_key_env" ]] && export GC_ACTIVE_AGENT_API_KEY_ENV="$agent_api_key_env"
+    [[ -n "$agent_org_env" ]] && export GC_ACTIVE_AGENT_API_ORG_ENV="$agent_org_env"
+    [[ -n "$agent_api_base_env" ]] && export GC_ACTIVE_AGENT_API_BASE_ENV="$agent_api_base_env"
+    info "agent-resolve: registry adapter=${agent_adapter:-<unset>}"
   fi
 
   export GC_ACTIVE_AGENT_FILE="$agent_tmp"

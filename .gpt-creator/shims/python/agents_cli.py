@@ -8,7 +8,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _prepend_sys_path(path: Path) -> None:
@@ -33,6 +33,8 @@ else:
 from agents import AgentFilter, AgentService, DocSource, LLMFilter
 from agents.repository import AgentRepository  # type: ignore  # noqa: E402
 from agents.model import Agent
+from agents_validate import parse_tags, summarize_text
+from llm_client_factory import create_llm_client
 
 
 def _default_tasks_db(project_root: Path) -> Path:
@@ -142,6 +144,79 @@ def _load_guardrails(args: argparse.Namespace) -> Optional[str]:
                 parts.append(child.read_text(encoding="utf-8").strip())
     joined = "\n\n".join(part for part in parts if part)
     return joined or None
+
+
+def _apply_env_overrides(env_overrides: Dict[str, str]) -> Dict[str, Optional[str]]:
+    previous: Dict[str, Optional[str]] = {}
+    for key, value in env_overrides.items():
+        if not key:
+            continue
+        previous[key] = os.environ.get(key)
+        os.environ[key] = value
+    return previous
+
+
+def _restore_env(previous: Dict[str, Optional[str]]) -> None:
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+def _resolve_pair(service: AgentService, client: str, model: str = "") -> Dict[str, Any]:
+    if not service.registry:
+        raise ValueError("Agent registry unavailable")
+    try:
+        return service.registry.validate_pair(client, model)
+    except ValueError:
+        # Retry with default model for the client when a specific model is invalid or missing.
+        return service.registry.validate_pair(client, "")
+
+
+def _build_command_preview(pair: Dict[str, Any], prompt_text: Optional[str] = None) -> Dict[str, Any]:
+    adapter = pair.get("adapter") or "codex_cli"
+    cfg = pair.get("adapterConfig") or {}
+    model = pair.get("model") or ""
+    command: List[str] = []
+    if adapter == "command":
+        template = cfg.get("command") or []
+        if isinstance(template, str):
+            template = template.split()
+        command = [str(part).format(model=model) for part in template]
+        if not command and cfg.get("binary"):
+            command = [cfg.get("binary")]
+            if model:
+                command.append(model)
+    elif adapter in {"codex_cli", "openai_cli", "openai"}:
+        command = ["codex", "run", "--model", model]
+    else:
+        command = [adapter]
+        if model:
+            command.append(model)
+    env: Dict[str, str] = {}
+    for key in ("apiKeyEnv", "apiBaseEnv", "orgEnv"):
+        env_name = pair.get(key)
+        if env_name:
+            value = os.getenv(env_name, "")
+            if value:
+                env[env_name] = value
+    return {
+        "adapter": adapter,
+        "command": command,
+        "env": env,
+        "model": model,
+        "client": pair.get("client"),
+        "prompt": prompt_text,
+    }
+
+
+def _parse_model_hint(raw: str) -> Tuple[Optional[str], Optional[str]]:
+    for sep in (":", "/"):
+        if sep in raw:
+            parts = raw.split(sep, 1)
+            return parts[0].strip(), parts[1].strip()
+    return None, None
 
 
 def _flush_warnings(service: AgentService) -> None:
@@ -325,6 +400,58 @@ def handle_install_llm(service: AgentService, args: argparse.Namespace) -> int:
     return 0 if result.get("status") == "installed" else 1
 
 
+def handle_agent_check(service: AgentService, args: argparse.Namespace) -> int:
+    agent = service.get_agent(args.name)
+    if not agent:
+        return _exit(f"Agent '{args.name}' not found", 3)
+    client = args.client or agent.client
+    model = args.model or agent.model
+    try:
+        pair = _resolve_pair(service, client, model)
+    except ValueError as exc:
+        return _exit(str(exc), 2)
+    adapter = pair.get("adapter") or "codex_cli"
+    env_overrides: Dict[str, str] = {}
+    api_key_env = pair.get("apiKeyEnv")
+    if api_key_env:
+        key_value = agent.client_api_key or os.getenv(api_key_env, "")
+        if key_value:
+            env_overrides[api_key_env] = key_value
+    previous_env = _apply_env_overrides(env_overrides)
+    try:
+        llm = create_llm_client(adapter, pair)
+        prompt_bundle = service.compose_prompt(agent)
+        system_prompt = prompt_bundle.header
+        if prompt_bundle.guardrails:
+            guardrail_text = "\n".join(prompt_bundle.guardrails)
+            system_prompt = f"{system_prompt}\n\n## Guardrails\n{guardrail_text}"
+        result = llm.send_chat(
+            messages=[args.prompt],
+            model=pair["model"],
+            system=system_prompt,
+        )
+    except Exception as exc:
+        return _exit(f"Agent check failed: {exc}", 1)
+    finally:
+        _restore_env(previous_env)
+    payload = {
+        "agent": agent.name,
+        "client": pair["client"],
+        "model": pair["model"],
+        "prompt": args.prompt,
+        "response": (result.content or "").strip(),
+        "tokens": {
+            "prompt": result.tokens.prompt,
+            "completion": result.tokens.completion,
+        },
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"Agent '{agent.name}' ({pair['client']}/{pair['model']}) response:\n{payload['response']}")
+    return 0
+
+
 def handle_llm_check(service: AgentService, args: argparse.Namespace) -> int:
     results = service.check_llm_adapters(
         provider_id=args.provider,
@@ -435,7 +562,14 @@ def handle_delete(service: AgentService, args: argparse.Namespace) -> int:
 
 def handle_select(service: AgentService, args: argparse.Namespace) -> int:
     agent, model_override = service.resolve_agent_or_model(args.name)
+    resolved_pair: Optional[Dict[str, Any]] = None
+    command_preview: Optional[Dict[str, Any]] = None
     if agent:
+        try:
+            resolved_pair = _resolve_pair(service, agent.client, agent.model)
+            command_preview = _build_command_preview(resolved_pair)
+        except Exception:
+            resolved_pair = None
         payload = _agent_to_dict(agent, include_docs=args.full, include_keys=True)
         prompt_bundle = service.compose_prompt(agent)
         print(
@@ -449,12 +583,21 @@ def handle_select(service: AgentService, args: argparse.Namespace) -> int:
                         "model": prompt_bundle.model,
                         "guardrails": prompt_bundle.guardrails,
                     },
+                    "resolved": resolved_pair,
+                    "command": command_preview,
                 }
             )
         )
         return 0
     fallback_model = model_override or args.name
-    print(json.dumps({"kind": "model", "model": fallback_model}))
+    client_hint, model_hint = _parse_model_hint(fallback_model)
+    if client_hint:
+        try:
+            resolved_pair = _resolve_pair(service, client_hint, model_hint or "")
+            command_preview = _build_command_preview(resolved_pair)
+        except Exception:
+            resolved_pair = None
+    print(json.dumps({"kind": "model", "model": fallback_model, "resolved": resolved_pair, "command": command_preview}))
     return 0
 
 
@@ -561,6 +704,63 @@ def handle_import(service: AgentService, args: argparse.Namespace) -> int:
     return 0
 
 
+def handle_test_agent(service: AgentService, args: argparse.Namespace) -> int:
+    agent, model_override = service.resolve_agent_or_model(args.name)
+    prompt_text = args.prompt or "ping"
+    system_prompt = args.system or ""
+    resolved_pair: Optional[Dict[str, Any]] = None
+    if agent:
+        try:
+            resolved_pair = _resolve_pair(service, agent.client, agent.model)
+        except Exception as exc:
+            return _exit(str(exc), 2)
+        if not system_prompt:
+            system_prompt = service.compose_prompt(agent).header
+    else:
+        fallback = model_override or args.name
+        client_hint, model_hint = _parse_model_hint(fallback)
+        if not client_hint:
+            return _exit("Provide an agent name or client:model pair", 2)
+        try:
+            resolved_pair = _resolve_pair(service, client_hint, model_hint or "")
+        except Exception as exc:
+            return _exit(str(exc), 2)
+    command_preview = _build_command_preview(resolved_pair, prompt_text)
+    payload: Dict[str, Any] = {
+        "agent": agent.name if agent else None,
+        "resolved": resolved_pair,
+        "command": command_preview,
+        "prompt": prompt_text,
+    }
+    if args.execute:
+        try:
+            llm = create_llm_client(resolved_pair.get("adapter"), resolved_pair)
+            result = llm.send_chat(
+                messages=[prompt_text],
+                model=resolved_pair.get("model") or "",
+                system=system_prompt,
+            )
+            payload["result"] = {
+                "content": result.content,
+                "tokens": {
+                    "prompt": result.tokens.prompt,
+                    "completion": result.tokens.completion,
+                },
+            }
+        except Exception as exc:
+            return _exit(f"test-agent failed: {exc}", 1)
+    if args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        resolved = payload.get("resolved") or {}
+        print(f"Resolved: {resolved.get('client')}/{resolved.get('model')} (adapter={resolved.get('adapter')})")
+        if command_preview:
+            print(f"Command: {' '.join(command_preview['command'])}")
+        if payload.get("result"):
+            print(f"Result: {payload['result']['content']}")
+    return 0
+
+
 def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Manage gpt-creator agents.")
     parser.add_argument("--project", default=os.getcwd(), help="Project root.")
@@ -618,6 +818,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     edit_parser.add_argument("--guardrails-file", dest="guardrails_files", action="append", help="Path to a guardrail file (repeatable).")
     edit_parser.add_argument("--guardrails-dir", dest="guardrails_dirs", action="append", help="Load guardrail files from a directory (repeatable).")
     edit_parser.set_defaults(guardrails_files=[], guardrails_dirs=[])
+    edit_parser.add_argument("--allow-missing-key", action="store_true", help="Update the agent even when the client API key is not set (warns instead of failing).")
     edit_parser.add_argument("--json", action="store_true")
 
     delete_parser = sub.add_parser("delete", help="Delete an agent.")
@@ -697,6 +898,20 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     llm_sync_parser.add_argument("--ci", action="store_true", help="Imply --require-adapters --require-keys --json for CI usage.")
     llm_sync_parser.add_argument("--json", action="store_true")
 
+    agent_check_parser = sub.add_parser("agent-check", help="Send a quick health-check prompt to an agent.")
+    agent_check_parser.add_argument("--name", required=True, help="Agent name.")
+    agent_check_parser.add_argument("--prompt", required=True, help="Prompt/question to send.")
+    agent_check_parser.add_argument("--client", help="Override the agent client/provider.")
+    agent_check_parser.add_argument("--model", help="Override the agent model id.")
+    agent_check_parser.add_argument("--json", action="store_true")
+
+    test_agent_parser = sub.add_parser("test-agent", help="Resolve an agent or model and preview the adapter command.")
+    test_agent_parser.add_argument("--name", required=True, help="Agent name or client:model pair.")
+    test_agent_parser.add_argument("--prompt", help="Prompt to send (default: ping).")
+    test_agent_parser.add_argument("--system", help="Optional system prompt override.")
+    test_agent_parser.add_argument("--execute", action="store_true", help="Execute the adapter command instead of previewing.")
+    test_agent_parser.add_argument("--json", action="store_true")
+
     return parser.parse_args(argv)
 
 
@@ -705,37 +920,48 @@ def main(argv: List[str]) -> int:
     project_root = Path(args.project).resolve()
     db_path = Path(args.db_path).resolve() if args.db_path else _default_tasks_db(project_root)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    service = AgentService(db_path)
+    read_only = os.getenv("GC_AGENT_READONLY", "").strip().lower() in {"1", "true", "yes"}
+    service = AgentService(db_path, read_only=read_only)
     if args.verbose:
         print(f"[agents] Using tasks database at {db_path}", file=sys.stderr)
 
     command = args.command
-    result = 1
-    if command == "create":
-        result = handle_create(service, args)
-    elif command == "list":
-        result = handle_list(service, args)
-    elif command == "show":
-        result = handle_show(service, args)
-    elif command == "edit":
-        result = handle_edit(service, args)
-    elif command == "delete":
-        result = handle_delete(service, args)
-    elif command == "select":
-        result = handle_select(service, args)
-    elif command == "export":
-        result = handle_export(service, args)
-    elif command == "import":
-        result = handle_import(service, args)
-    elif command == "llms":
-        result = handle_llms(service, args)
-    elif command == "llms-check":
-        result = handle_llm_check(service, args)
-    elif command == "install-llm":
-        result = handle_install_llm(service, args)
-    elif command == "llms-sync":
-        result = handle_llm_sync(service, args)
-    _flush_warnings(service)
+    try:
+        if command == "create":
+            result = handle_create(service, args)
+        elif command == "list":
+            result = handle_list(service, args)
+        elif command == "show":
+            result = handle_show(service, args)
+        elif command == "edit":
+            result = handle_edit(service, args)
+        elif command == "delete":
+            result = handle_delete(service, args)
+        elif command == "select":
+            result = handle_select(service, args)
+        elif command == "export":
+            result = handle_export(service, args)
+        elif command == "import":
+            result = handle_import(service, args)
+        elif command == "llms":
+            result = handle_llms(service, args)
+        elif command == "llms-check":
+            result = handle_llm_check(service, args)
+        elif command == "install-llm":
+            result = handle_install_llm(service, args)
+        elif command == "llms-sync":
+            result = handle_llm_sync(service, args)
+        elif command == "agent-check":
+            result = handle_agent_check(service, args)
+        elif command == "test-agent":
+            result = handle_test_agent(service, args)
+        else:
+            result = 1
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        _flush_warnings(service)
     return result
 
 

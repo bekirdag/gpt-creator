@@ -133,26 +133,9 @@ check_prefix_writable() {
   return 1
 }
 
-ensure_prefix_access() {
-  local test_target=""
-  test_target="${INSTALL_PREFIX%/}/.gpt-creator-install-test.$$"
-  # Try direct write
-  if touch "$test_target" >/dev/null 2>&1; then
-    rm -f "$test_target" >/dev/null 2>&1 || true
-    return 0
-  fi
-  # Try sudo write to requested prefix
-  if command -v sudo >/dev/null 2>&1; then
-    if sudo sh -c "touch '$test_target' >/dev/null 2>&1 && rm -f '$test_target'" >/dev/null 2>&1; then
-      return 0
-    fi
-  fi
-  log_warn "No write access to ${INSTALL_PREFIX}; falling back to ${HOME}/.local."
-  INSTALL_PREFIX="${HOME}/.local"
-  set_paths
-}
+ensure_prefix_access() { return 0; }
 
-ensure_prefix_access
+ensure_prefix_access || true
 set_paths
 
 ver_major() { echo "${1#v}" | awk -F. '{print $1}'; }

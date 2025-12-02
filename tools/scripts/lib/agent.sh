@@ -85,9 +85,9 @@ PY
   printf '%s\n' "$select_output" >"$agent_tmp"
 
   local parse_output=""
-  parse_output="$("${PYTHON_BIN:-python3}" - "$select_output" <<'PY'
+  parse_output="$("${PYTHON_BIN:-python3}" - <<'PY' <<'EOF'
 import json, sys
-raw = sys.argv[1] if len(sys.argv) > 1 else sys.stdin.read()
+raw = sys.stdin.read()
 try:
     data = json.loads(raw)
     if not isinstance(data, dict):
@@ -120,6 +120,7 @@ else:
     print("")
     print("")
 PY
+EOF
 )" || {
     rm -f "$agent_tmp"
     warn "agent-resolve: parse failure (raw payload='${select_output//[$'\n']/ }')"

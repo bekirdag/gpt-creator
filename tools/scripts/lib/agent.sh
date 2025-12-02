@@ -12,7 +12,7 @@ gc_resolve_agent() {
   local project_root="${3:-${PROJECT_ROOT:-$PWD}}"
 
   # Defaults when no agent is provided.
-  local default_model="${DEFAULT_LLM:-${CODEX_MODEL:-gpt-5.1-codex-max}}"
+  local default_model="${DEFAULT_LLM:-${CODEX_MODEL:-gpt-4.1}}"
   local default_client="openai"
   local default_adapter="codex_cli"
 
@@ -120,58 +120,7 @@ PY
   fi
 
   # Fill adapter metadata from registry.
-  local registry_info adapter_parse_output agent_adapter="" agent_ctx="" agent_out="" agent_api_base="" agent_api_key_env="" agent_org_env="" agent_api_base_env=""
-  if registry_info="$(gc_agents_registry_cmd validate --client "$resolved_client" --model "$resolved_model" 2>/dev/null)"; then
-    :
-  else
-    registry_info="$("${PYTHON_BIN:-python3}" - <<'PY' "$resolved_client" "$resolved_model"
-import json, sys
-from agents_registry import AgentRegistry
-client = sys.argv[1]
-model = sys.argv[2]
-try:
-    data = AgentRegistry.load().validate_pair(client, model)
-    print(json.dumps(data))
-except Exception:
-    print("")
-PY
-)"
-  fi
-  if [[ -n "$registry_info" ]]; then
-    adapter_parse_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$registry_info"
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    data = {}
-print(data.get("adapter", ""))
-print(data.get("maxContextTokens") or "")
-print(data.get("maxOutputTokens") or "")
-print(data.get("apiBase") or "")
-print(data.get("apiKeyEnv") or "")
-print(data.get("orgEnv") or "")
-print(data.get("apiBaseEnv") or "")
-PY
-)"
-    IFS=$'\n' read -r agent_adapter agent_ctx agent_out agent_api_base agent_api_key_env agent_org_env agent_api_base_env <<<"$adapter_parse_output"
-    [[ -n "$agent_adapter" ]] && export GC_ACTIVE_AGENT_ADAPTER="$agent_adapter"
-    [[ -n "$agent_ctx" ]] && export GC_ACTIVE_AGENT_MAX_CONTEXT="$agent_ctx"
-    [[ -n "$agent_out" ]] && export GC_ACTIVE_AGENT_MAX_OUTPUT="$agent_out"
-    [[ -n "$agent_api_base" ]] && export GC_ACTIVE_AGENT_API_BASE="$agent_api_base"
-    [[ -n "$agent_api_key_env" ]] && export GC_ACTIVE_AGENT_API_KEY_ENV="$agent_api_key_env"
-    [[ -n "$agent_org_env" ]] && export GC_ACTIVE_AGENT_API_ORG_ENV="$agent_org_env"
-    [[ -n "$agent_api_base_env" ]] && export GC_ACTIVE_AGENT_API_BASE_ENV="$agent_api_base_env"
-    info "agent-resolve: registry adapter=${agent_adapter:-<unset>}"
-  fi
-
-  export GC_ACTIVE_AGENT_FILE="$agent_tmp"
-  export GC_ACTIVE_AGENT_NAME="$resolved_name"
-  export GC_ACTIVE_AGENT_CLIENT="$resolved_client"
-  export GC_ACTIVE_AGENT_MODEL="$resolved_model"
-  export GC_AGENT_FLAG=1
-
-  # Fill adapter metadata from registry.
-  local registry_info adapter_parse_output agent_adapter="" agent_ctx="" agent_out="" agent_api_base="" agent_api_key_env="" agent_org_env="" agent_api_base_env=""
+  local registry_info adapter_parse_output agent_adapter="" agent_ctx="" agent_out="" agent_api_base="" agent_api_key_env="" agent_org_env="" agent_api_base_env="" agent_registry_model=""
   # Primary: shell helper (may be unavailable in some contexts)
   if registry_info="$(gc_agents_registry_cmd validate --client "$resolved_client" --model "$resolved_model" 2>/dev/null)"; then
     :
@@ -204,9 +153,13 @@ print(data.get("apiBase") or "")
 print(data.get("apiKeyEnv") or "")
 print(data.get("orgEnv") or "")
 print(data.get("apiBaseEnv") or "")
+print(data.get("model") or "")
 PY
 )"
-    IFS=$'\n' read -r agent_adapter agent_ctx agent_out agent_api_base agent_api_key_env agent_org_env agent_api_base_env <<<"$adapter_parse_output"
+    IFS=$'\n' read -r agent_adapter agent_ctx agent_out agent_api_base agent_api_key_env agent_org_env agent_api_base_env agent_registry_model <<<"$adapter_parse_output"
+    if [[ -n "$agent_registry_model" ]]; then
+      resolved_model="$agent_registry_model"
+    fi
     [[ -n "$agent_adapter" ]] && export GC_ACTIVE_AGENT_ADAPTER="$agent_adapter"
     [[ -n "$agent_ctx" ]] && export GC_ACTIVE_AGENT_MAX_CONTEXT="$agent_ctx"
     [[ -n "$agent_out" ]] && export GC_ACTIVE_AGENT_MAX_OUTPUT="$agent_out"
@@ -215,6 +168,12 @@ PY
     [[ -n "$agent_org_env" ]] && export GC_ACTIVE_AGENT_API_ORG_ENV="$agent_org_env"
     [[ -n "$agent_api_base_env" ]] && export GC_ACTIVE_AGENT_API_BASE_ENV="$agent_api_base_env"
   fi
+
+  export GC_ACTIVE_AGENT_FILE="$agent_tmp"
+  export GC_ACTIVE_AGENT_NAME="$resolved_name"
+  export GC_ACTIVE_AGENT_CLIENT="$resolved_client"
+  export GC_ACTIVE_AGENT_MODEL="$resolved_model"
+  export GC_AGENT_FLAG=1
 
   # Enrich the agent file with registry defaults (adapter/config/limits), mirroring test-agent.
   if [[ -n "$agent_tmp" && -f "$agent_tmp" ]]; then

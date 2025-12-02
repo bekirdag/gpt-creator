@@ -62,6 +62,30 @@ gc_codex_profile_for_step() {
   printf -v "$reasoning_ref" '%s' "$reasoning_value"
 }
 
+gc_codex_normalize_reasoning() {
+  local value="${1:-}"
+  local default_value="${2:-medium}"
+  case "${value,,}" in
+    low|medium|high) printf '%s' "${value,,}";;
+    *) printf '%s' "${default_value,,}";;
+  esac
+}
+
+gc_codex_normalize_model() {
+  local value="${1:-}"
+  local fallback="${2:-gpt-4.1}"
+  if [[ -z "$value" ]]; then
+    printf '%s' "$fallback"
+    return 0
+  fi
+  if [[ "$value" =~ ^(gpt-|o3|o1|o-)|^claude|^gemini ]]; then
+    printf '%s' "$value"
+    return 0
+  fi
+  warn "Codex model '${value}' not recognized; falling back to ${fallback}"
+  printf '%s' "$fallback"
+}
+
 codex_call() {
   local task="${1:?task}"; shift || true
   local prompt_dir="${GC_DIR}/prompts"
@@ -115,6 +139,8 @@ codex_call() {
   local codex_model_for_step=""
   local codex_reasoning_for_step=""
   gc_codex_profile_for_step "$call_step" codex_model_for_step codex_reasoning_for_step
+  codex_model_for_step="$(gc_codex_normalize_model "$codex_model_for_step" "${CODEX_MODEL:-gpt-4.1}")"
+  codex_reasoning_for_step="$(gc_codex_normalize_reasoning "$codex_reasoning_for_step" "${CODEX_REASONING_EFFORT:-medium}")"
 
   if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" && "${GC_CODEX_USAGE_LIMIT_CONFIRMED:-0}" == "1" ]]; then
     warn "Codex usage limit previously reached; skipping ${task}."
@@ -139,9 +165,9 @@ codex_call() {
         args+=(--cd "$PROJECT_ROOT")
       fi
       if [[ -n "$step_reasoning" ]]; then
-        args+=(-c "model_reasoning_effort=\"${step_reasoning}\"")
+        args+=(-c "model_reasoning_effort=\"$(gc_codex_normalize_reasoning "$step_reasoning" "${CODEX_REASONING_EFFORT:-medium}")\"")
       elif [[ -n "${CODEX_REASONING_EFFORT:-}" ]]; then
-        args+=(-c "model_reasoning_effort=\"${CODEX_REASONING_EFFORT}\"")
+        args+=(-c "model_reasoning_effort=\"$(gc_codex_normalize_reasoning "${CODEX_REASONING_EFFORT}" medium)\"")
       else
         args+=(-c "model_reasoning_effort=\"low\"")
       fi

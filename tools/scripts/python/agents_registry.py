@@ -72,6 +72,9 @@ class ClientConfig:
         for candidate in self.models:
             if candidate.lower() == model.lower():
                 return self.name, candidate
+        # Gracefully downgrade legacy codex model names to the default chat model.
+        if self.name.lower() == "openai" and "codex" in model.lower():
+            return self.name, self.default_model
         raise ValueError(f"Model '{model}' not valid for client '{self.name}'")
 
 

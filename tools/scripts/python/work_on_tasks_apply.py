@@ -113,11 +113,12 @@ def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, p
         stderr_log.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
+    default_model = os.getenv("CODEX_MODEL", "gpt-4.1")
     cmd = [
         "bash",
         "-lc",
         (
-            f"codex exec --model \"${{CODEX_MODEL:-{os.getenv('CODEX_MODEL','gpt-5.1-codex')}}}\" "
+            f"codex exec --model \"${{CODEX_MODEL:-{default_model}}}\" "
             f"-c task_name=\"{call_name}\" "
             f"--sandbox workspace-write "
             f"--cd \"{project_root}\" "
@@ -300,7 +301,7 @@ def main(argv: List[str]) -> int:
         os.getenv("DEFAULT_LLM")
         or os.getenv("CODEX_MODEL")
         or active_model_env
-        or "gpt-5.1-codex-max"
+        or "gpt-4.1"
     )
     registry_cfg: Optional[Dict[str, object]] = None
     if active_client:

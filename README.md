@@ -611,7 +611,7 @@ gpt-creator iterate --project /path/to/project --jira docs/jira.md
 | `GC_DB_NAME`, `GC_DB_USER`, `GC_DB_PASSWORD` | Injected into rendered DB templates. | `app`, `app`, `app_pass` |
 | `GC_SKIP_PROGRESS_MIGRATION` | Set to `1` to opt out of the automatic sweep that relocates legacy Codex artifacts into `.gpt-creator/`. | `0` |
 | `GC_AUTO_REVIEW` | Leave unset (default) or set to `1`/`true`/`on` to let `work-on-tasks` synthesize review artifacts automatically and clear review-required flags; set to `0`/`false` to disable. | `1` |
-| `CODEX_BIN`, `CODEX_MODEL` | Override Codex executable/model. | `codex`, `gpt-5.1-codex` (high) |
+| `CODEX_BIN`, `CODEX_MODEL` | Override Codex executable/model. | `codex`, `gpt-4.1` (high) |
 | `CODEX_MODEL_CODE`, `CODEX_MODEL_NON_CODE` | Stage-specific Codex models (code-writing vs. planning/doc tasks). | `CODEX_MODEL`, `CODEX_MODEL` |
 | `CODEX_REASONING_EFFORT_CODE`, `CODEX_REASONING_EFFORT_NON_CODE` | Reasoning effort per stage (both default to `medium`). | `medium`, `medium` |
 | `DOCKER_BIN`, `MYSQL_BIN`, `EDITOR_CMD` | Command overrides used within scripts. | `docker`, `mysql`, `code` |

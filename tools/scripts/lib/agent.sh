@@ -35,46 +35,21 @@ gc_resolve_agent() {
   if ! agent_tmp="$(mktemp "${tmp_base%/}/agent-select.XXXXXX.json" 2>/dev/null)"; then
     agent_tmp="$(mktemp /tmp/agent-select.XXXXXX.json)"
   fi
-  local agent_db_tmp=""
-  if ! agent_db_tmp="$(mktemp "${tmp_base%/}/agent-select-db.XXXXXX.sqlite" 2>/dev/null)"; then
-    agent_db_tmp="$(mktemp /tmp/agent-select-db.XXXXXX.sqlite)"
-  fi
-  # Prefer a consistent snapshot (handles WAL) so agents created recently are visible.
-  if command -v sqlite3 >/dev/null 2>&1; then
-    if ! sqlite3 "$tasks_db" ".backup '${agent_db_tmp}'" >/dev/null 2>&1; then
-      cp "$tasks_db" "$agent_db_tmp" 2>/dev/null || true
-    fi
-  else
-    cp "$tasks_db" "$agent_db_tmp" 2>/dev/null || true
-  fi
-  # Copy WAL/SHM when present (best-effort) in case backup falls back to a plain copy.
-  if [[ -f "${tasks_db}-wal" ]]; then
-    cp "${tasks_db}-wal" "${agent_db_tmp}-wal" 2>/dev/null || true
-  fi
-  if [[ -f "${tasks_db}-shm" ]]; then
-    cp "${tasks_db}-shm" "${agent_db_tmp}-shm" 2>/dev/null || true
-  fi
-  chmod u+w "$agent_db_tmp" 2>/dev/null || true
+  info "Resolving agent '${agent_name}' from ${tasks_db}"
 
-  local select_output="" primary_ok=1
-  # Use a writable copy of tasks.db so the agents CLI can apply migrations or seed
-  # catalog metadata (WAL-mode databases throw "attempt to write a readonly database"
-  # when forced into read-only mode). If the CLI returns a non-agent payload or fails,
-  # fall back to read-only lookups directly against the agents table.
-  if ! select_output="$(GC_AGENT_READONLY=0 gc_run_agents_cli "$project_root" "$agent_db_tmp" select --name "$agent_name")"; then
-    primary_ok=0
-  fi
-  if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
-    select_output="$(GC_AGENT_READONLY=1 gc_run_agents_cli "$project_root" "$tasks_db" select --name "$agent_name" 2>/dev/null || true)"
-  fi
-  if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
-    select_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$tasks_db" "$agent_name"
+  local select_output=""
+  # Resolve directly from the live tasks.db (immutable/read-only) before any other work.
+  select_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$tasks_db" "$agent_name"
 import json, sqlite3, sys
 db_path = sys.argv[1]
 name = (sys.argv[2] or "").strip().lower()
 if not name:
     sys.exit(2)
-conn = sqlite3.connect(db_path)
+uri = f"file:{db_path}?mode=ro&immutable=1"
+try:
+    conn = sqlite3.connect(uri, uri=True)
+except Exception:
+    conn = sqlite3.connect(db_path)
 conn.row_factory = sqlite3.Row
 row = conn.execute("SELECT * FROM agents WHERE name_normalized = ?", (name,)).fetchone()
 conn.close()
@@ -84,10 +59,13 @@ agent = dict(row)
 agent.setdefault("name", agent.get("name_normalized", ""))
 print(json.dumps({"kind": "agent", "agent": agent}))
 PY
-)" || {
-      rm -f "$agent_tmp" "$agent_db_tmp"
-      die "Agent '${agent_name}' not found in tasks database"
-    }
+)" || true
+  if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
+    select_output="$(GC_AGENT_READONLY=1 gc_run_agents_cli "$project_root" "$tasks_db" select --name "$agent_name" 2>/dev/null || true)"
+  fi
+  if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
+    rm -f "$agent_tmp"
+    die "Agent '${agent_name}' not found in tasks database"
   fi
 
   local parse_output=""
@@ -130,13 +108,12 @@ else:
     print("")
 PY
 )" || {
-    rm -f "$agent_tmp" "$agent_db_tmp"
+    rm -f "$agent_tmp"
     die "Failed to parse agent selection for '${agent_name}'"
   }
 
   local resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org
   IFS=$'\n' read -r resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org <<<"$parse_output"
-  rm -f "$agent_db_tmp"
 
   if [[ "$resolved_kind" != "agent" || -z "$resolved_model" ]]; then
     rm -f "$agent_tmp"

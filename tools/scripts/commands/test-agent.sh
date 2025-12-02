@@ -89,6 +89,7 @@ try:
         sys.path.insert(0, str(Path(root) / "scripts" / "python"))
     from agents_registry import AgentRegistry  # type: ignore
     reg = AgentRegistry.load().validate_pair(client, model)
+    model = (reg.get("model") or model or "").strip()
     adapter = adapter or (reg.get("adapter") or "").strip()
     adapter_cfg = adapter_cfg or (reg.get("adapterConfig") or {})
     max_ctx = max_ctx or reg.get("maxContextTokens")
@@ -158,7 +159,12 @@ try:
         "maxOutputTokens": data.get("maxOutputTokens"),
     }
     client = create_llm_client(adapter, config)
-    result = client.send_chat(["ping"], model=model)
+    # Normalize reasoning effort for codex_cli tests to avoid unsupported values.
+    env = os.environ.copy()
+    if adapter in {"codex_cli", "openai", "openai_cli"}:
+        env.setdefault("CODEX_REASONING_EFFORT", "medium")
+        env.setdefault("CODEX_REASONING_EFFORT_CODE", "medium")
+    result = client.send_chat(["ping"], model=model, env=env)
     print(result.content)
 except Exception as exc:
     print(str(exc))

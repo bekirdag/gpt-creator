@@ -56,26 +56,39 @@ class CodexCLIClient(LLMClient):
         super().__init__(max_context_tokens=max_context_tokens, max_output_tokens=max_output_tokens)
         self.binary = binary
 
+    @staticmethod
+    def _normalize_reasoning(value: str) -> str:
+        val = (value or "").strip().lower()
+        if val in {"low", "medium", "high"}:
+            return val
+        return "medium"
+
     def send_chat(self, messages: Sequence[str], model: str, **kwargs) -> ChatResult:
         system = (kwargs.get("system") or "").strip()
         workdir = kwargs.get("workdir") or None
         sandbox = kwargs.get("sandbox") or "workspace-write"
+        extra_env = kwargs.get("env") or {}
         prompt_parts: List[str] = []
         if system:
             prompt_parts.append(system)
         prompt_parts.extend(str(msg) for msg in messages)
         prompt = "\n\n".join(prompt_parts)
-        cmd: List[str] = [self.binary, "exec", "--model", model]
+        reasoning_env = os.getenv("CODEX_REASONING_EFFORT") or os.getenv("CODEX_REASONING_EFFORT_CODE") or "medium"
+        reasoning = self._normalize_reasoning(reasoning_env)
+        cmd: List[str] = [self.binary, "exec", "--model", model, "-c", f"model_reasoning_effort=\"{reasoning}\""]
         if sandbox:
             cmd.extend(["--sandbox", sandbox])
         if workdir:
             cmd.extend(["--cd", str(workdir)])
         cmd.append("--full-auto")
+        env = os.environ.copy()
+        env.update({k: v for k, v in extra_env.items() if v is not None})
         proc = subprocess.run(
             cmd,
             input=prompt.encode("utf-8"),
             capture_output=True,
             check=False,
+            env=env,
         )
         if proc.returncode != 0:
             stderr_text = proc.stderr.decode("utf-8", "ignore")

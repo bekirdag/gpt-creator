@@ -60,7 +60,7 @@ gc_git_log() {
 gc_git_autosnap() {
   # Capture pending edits before any branch switch to avoid checkout failures.
   local context="${1:-branch switch}"
-  gc_git_has_changes || return 0
+  gc_git_has_changes || { gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap skip — tree already clean (${context})"; return 0; }
   local dirty_preview
   dirty_preview="$(_gc_git status --porcelain 2>/dev/null | head -n 20 | tr $'\n' ';' | sed 's/;*$//')"
   gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap start (${context}); dirty preview: ${dirty_preview:-<unknown>}"
@@ -135,6 +135,7 @@ gc_git_status_ok() {
 gc_git_branching_init() {
   [ "$GC_GIT_BRANCHING" = "1" ] || return 0
   local root; root="$(gc_git_repo_root)"; [ -n "$root" ] || { gc_git_log "[git] not a git repo; branching disabled"; return 0; }
+  gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] git-branches helper loaded (branching=${GC_GIT_BRANCHING})"
   gc_git_log "[git] syncing remote refs from ${GC_GIT_REMOTE} before dev branch init"
   if _gc_git fetch -q "$GC_GIT_REMOTE" --prune >/dev/null 2>&1; then
     gc_git_log "[git] remote refs fetched from ${GC_GIT_REMOTE}"
@@ -165,7 +166,7 @@ gc_git_branching_init() {
   _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
   local dev_head
   dev_head="$(_gc_git rev-parse --short HEAD 2>/dev/null || echo "")"
-  gc_git_log "[git] ready on ${GC_GIT_DEV_BRANCH} ${dev_head:+[$dev_head]}"
+  gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] ready on ${GC_GIT_DEV_BRANCH} ${dev_head:+[$dev_head]}"
 }
 
 gc_git_begin_task_branch() {
@@ -189,7 +190,9 @@ gc_git_begin_task_branch() {
     gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] reusing existing branch ${slug}; dirty preview before checkout: ${dirty_before_checkout:-<unknown>}"
     gc_git_log "[git] autosnap before checkout of ${slug}"
     gc_git_autosnap "reuse ${slug}" || true
-    if ! gc_git_checkout "$slug"; then
+    if gc_git_checkout "$slug"; then
+      gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${slug} ok after autosnap"
+    else
       local dirty_on_failure
       dirty_on_failure="$(_gc_git status --porcelain 2>/dev/null | head -n 20 | tr $'\n' ';' | sed 's/;*$//')"
       gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${slug} failed; dirty preview: ${dirty_on_failure:-<unknown>}; attempting autosnap + retry"

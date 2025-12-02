@@ -38,15 +38,8 @@ gc_resolve_agent() {
   info "Resolving agent '${agent_name}' from ${tasks_db}"
 
   local select_output=""
-  # Resolve via agents CLI in read-only mode first (matches test-agent behaviour).
-  select_output="$(GC_AGENT_READONLY=1 gc_run_agents_cli "$project_root" "$tasks_db" select --name "$agent_name" 2>/dev/null || true)"
-  if [[ -z "$select_output" ]]; then
-    warn "agent-resolve: CLI select returned empty payload"
-  fi
-  # Fallback: direct SQLite read (immutable/ro) if the CLI path fails to yield an agent.
-  if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
-    warn "agent-resolve: falling back to direct SQLite read for '${agent_name}'"
-    select_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$tasks_db" "$agent_name"
+  # Primary: direct SQLite read (immutable/ro) to avoid env/CLI side effects.
+  select_output="$("${PYTHON_BIN:-python3}" - <<'PY' "$tasks_db" "$agent_name"
 import json, sqlite3, sys
 db_path = sys.argv[1]
 name = (sys.argv[2] or "").strip().lower()
@@ -67,10 +60,17 @@ agent.setdefault("name", agent.get("name_normalized", ""))
 print(json.dumps({"kind": "agent", "agent": agent}))
 PY
 )" || true
+  if [[ -z "$select_output" ]]; then
+    warn "agent-resolve: direct SQLite read returned empty payload"
+  fi
+  # Fallback: CLI in read-only mode if direct read fails.
+  if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
+    warn "agent-resolve: direct SQLite read failed; retrying via agents CLI for '${agent_name}'"
+    select_output="$(GC_AGENT_READONLY=1 gc_run_agents_cli "$project_root" "$tasks_db" select --name "$agent_name" 2>/dev/null || true)"
   fi
   if [[ -z "$select_output" || "$select_output" == *'"kind": "model"'* || "$select_output" != *'"kind":'* ]]; then
     rm -f "$agent_tmp"
-    warn "agent-resolve: no agent payload after CLI + SQLite fallback (payload='${select_output//[$'\n']/ }')"
+    warn "agent-resolve: no agent payload after SQLite + CLI attempts (payload='${select_output//[$'\n']/ }')"
     die "Agent '${agent_name}' not found in tasks database"
   fi
 

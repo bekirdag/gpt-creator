@@ -134,7 +134,7 @@ check_prefix_writable() {
 }
 
 ensure_prefix_access() {
-  local test_target="" fallback
+  local test_target=""
   test_target="${INSTALL_PREFIX%/}/.gpt-creator-install-test.$$"
   # Try direct write
   if touch "$test_target" >/dev/null 2>&1; then
@@ -147,17 +147,7 @@ ensure_prefix_access() {
       return 0
     fi
   fi
-  for fallback in "${HOME}/.local" "${REPO_DIR}/.local"; do
-    test_target="${fallback%/}/.gpt-creator-install-test.$$"
-    if mkdir -p "$fallback" >/dev/null 2>&1 && touch "$test_target" >/dev/null 2>&1; then
-      rm -f "$test_target" >/dev/null 2>&1 || true
-      log_warn "No write access to ${INSTALL_PREFIX}; falling back to ${fallback}."
-      INSTALL_PREFIX="$fallback"
-      set_paths
-      return 0
-    fi
-  done
-  echo "✖ Cannot write to ${INSTALL_PREFIX}; rerun with --prefix \"${REPO_DIR}/.local\" or another writable prefix." >&2
+  echo "✖ Cannot write to ${INSTALL_PREFIX}; rerun with --prefix \"${HOME}/.local\" or another writable prefix." >&2
   exit 1
 }
 

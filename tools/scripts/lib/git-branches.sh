@@ -8,6 +8,7 @@ set -euo pipefail
 : "${GC_GIT_TASK_PREFIX:=}"
 : "${GC_GIT_AUTOMATION_AUTHOR_NAME:=gpt-creator automation}"
 : "${GC_GIT_AUTOMATION_AUTHOR_EMAIL:=automation@gpt-creator}"
+: "${GC_GIT_BRANCHING_LOG_VERSION:=v20251202-1}"
 
 gc_git_state_dir() {
   local root
@@ -60,6 +61,9 @@ gc_git_autosnap() {
   # Capture pending edits before any branch switch to avoid checkout failures.
   local context="${1:-branch switch}"
   gc_git_has_changes || return 0
+  local dirty_preview
+  dirty_preview="$(_gc_git status --porcelain 2>/dev/null | head -n 20 | tr $'\n' ';' | sed 's/;*$//')"
+  gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap start (${context}); dirty preview: ${dirty_preview:-<unknown>}"
   local ts head msg
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   msg="chore(gpt-creator): autosnap before ${context} ${ts}"
@@ -74,13 +78,13 @@ gc_git_autosnap() {
     head="$(gc_git_current_branch)"
     local sha
     sha="$(_gc_git rev-parse --short HEAD 2>/dev/null || true)"
-    gc_git_log "[git] autosnap commit recorded on ${head:-HEAD} ${sha:+[$sha]} (${context})"
+    gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap commit recorded on ${head:-HEAD} ${sha:+[$sha]} (${context})"
   else
-    gc_git_log "[git] autosnap commit failed; leaving tree dirty (${context})"
+    gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap commit failed; leaving tree dirty (${context})"
     return 1
   fi
   if gc_git_has_changes; then
-    gc_git_log "[git] autosnap warning — working tree still dirty after commit (${context})"
+    gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap warning — working tree still dirty after commit (${context})"
     return 1
   fi
   return 0
@@ -137,7 +141,7 @@ gc_git_branching_init() {
   else
     gc_git_log "[git] remote fetch failed; continuing with local refs"
   fi
-  gc_git_log "[git] autosnap before dev branch preparation (if dirty)"
+  gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] autosnap before dev branch preparation (if dirty)"
   gc_git_autosnap "dev branch init" || true
   local base_ref="$GC_GIT_MAIN_BRANCH"
   if _gc_git symbolic-ref -q refs/remotes/"$GC_GIT_REMOTE"/HEAD >/dev/null 2>&1; then
@@ -180,13 +184,21 @@ gc_git_begin_task_branch() {
   fi
   export GC_GIT_CURRENT_TASK_BRANCH="$slug"
   if gc_git_branch_exists "$slug"; then
-    gc_git_log "[git] reusing existing branch ${slug}"
+    local dirty_before_checkout
+    dirty_before_checkout="$(_gc_git status --porcelain 2>/dev/null | head -n 20 | tr $'\n' ';' | sed 's/;*$//')"
+    gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] reusing existing branch ${slug}; dirty preview before checkout: ${dirty_before_checkout:-<unknown>}"
     gc_git_log "[git] autosnap before checkout of ${slug}"
     gc_git_autosnap "reuse ${slug}" || true
     if ! gc_git_checkout "$slug"; then
-      gc_git_log "[git] checkout ${slug} failed; attempting autosnap + retry"
+      local dirty_on_failure
+      dirty_on_failure="$(_gc_git status --porcelain 2>/dev/null | head -n 20 | tr $'\n' ';' | sed 's/;*$//')"
+      gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${slug} failed; dirty preview: ${dirty_on_failure:-<unknown>}; attempting autosnap + retry"
       gc_git_autosnap "retry checkout ${slug}" || true
-      gc_git_checkout "$slug" || gc_git_log "[git] checkout ${slug} still failing; leaving working tree as-is"
+      if ! gc_git_checkout "$slug"; then
+        local dirty_retry_failure
+        dirty_retry_failure="$(_gc_git status --porcelain 2>/dev/null | head -n 20 | tr $'\n' ';' | sed 's/;*$//')"
+        gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${slug} still failing after autosnap; dirty preview: ${dirty_retry_failure:-<unknown>}; leaving working tree as-is"
+      fi
     fi
   else
     gc_git_log "[git] creating branch ${slug} from ${GC_GIT_DEV_BRANCH}"

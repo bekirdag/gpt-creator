@@ -294,9 +294,29 @@ def main(argv: List[str]) -> int:
 
     diff_before = fingerprint_diff() if args.diff_guard else ""
     agent_flag = os.getenv("GC_AGENT_FLAG", "").strip().lower() not in {"", "0", "false", "no"}
-    active_client = os.getenv("GC_ACTIVE_AGENT_CLIENT", "").strip()
+    active_client = os.getenv("GC_ACTIVE_AGENT_CLIENT", "").strip().lower()
     active_model_env = os.getenv("GC_ACTIVE_AGENT_MODEL", "").strip()
     adapter = (os.getenv("GC_ACTIVE_AGENT_ADAPTER", "") or "").strip().lower()
+    agent_file_path = (os.getenv("GC_ACTIVE_AGENT_FILE", "") or "").strip()
+    agent_file_model = ""
+    agent_file_adapter = ""
+    agent_file_client = ""
+    if agent_file_path:
+        try:
+            data = json.loads(Path(agent_file_path).read_text(encoding="utf-8"))
+            agent_data = data.get("agent") or data
+            if isinstance(agent_data, dict):
+                agent_file_model = (agent_data.get("model") or "").strip()
+                agent_file_adapter = (agent_data.get("adapter") or "").strip().lower()
+                agent_file_client = (agent_data.get("client") or "").strip().lower()
+        except Exception:
+            pass
+    if not adapter and agent_file_adapter:
+        adapter = agent_file_adapter
+    if not active_model_env and agent_file_model:
+        active_model_env = agent_file_model
+    if not active_client and agent_file_client:
+        active_client = agent_file_client
     model = (
         os.getenv("DEFAULT_LLM")
         or os.getenv("CODEX_MODEL")
@@ -317,12 +337,14 @@ def main(argv: List[str]) -> int:
             log_debug(project_root, f"[agent] registry lookup failed: {exc}")
     if not adapter:
         if agent_flag:
-            result["status"] = "agent-failed"
-            result["apply_status"] = "agent-failed"
-            result["notes"].append("Agent adapter not resolved; check agent registry or adapter configuration.")
-            emit_plain(result)
-            return 0
-        adapter = "codex_cli"
+            if active_client in {"gpt-oss", "ollama"}:
+                adapter = "command"
+            elif active_client == "openai":
+                adapter = "codex_cli"
+            else:
+                adapter = "codex_cli"
+        else:
+            adapter = "codex_cli"
     chat_result: Optional[ChatResult] = None
 
     if adapter in {"codex_cli", "openai_cli", "openai", ""}:

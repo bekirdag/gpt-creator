@@ -174,6 +174,14 @@ PY
   export GC_ACTIVE_AGENT_CLIENT="$resolved_client"
   export GC_ACTIVE_AGENT_MODEL="$resolved_model"
   export GC_AGENT_FLAG=1
+  if [[ -z "${GC_ACTIVE_AGENT_ADAPTER:-}" ]]; then
+    case "${resolved_client,,}" in
+      gpt-oss|ollama) GC_ACTIVE_AGENT_ADAPTER="command" ;;
+      openai) GC_ACTIVE_AGENT_ADAPTER="codex_cli" ;;
+      *) GC_ACTIVE_AGENT_ADAPTER="codex_cli" ;;
+    esac
+    export GC_ACTIVE_AGENT_ADAPTER
+  fi
 
   # Enrich the agent file with registry defaults (adapter/config/limits), mirroring test-agent.
   if [[ -n "$agent_tmp" && -f "$agent_tmp" ]]; then

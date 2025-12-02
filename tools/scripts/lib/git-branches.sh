@@ -150,6 +150,10 @@ gc_git_begin_task_branch() {
   [[ -n "$id" ]] || id="task"
   candidate="$id"
   slug="${GC_GIT_TASK_PREFIX}${id}"
+  if gc_git_has_changes; then
+    gc_git_log "[git] dirty tree before switching to task branch; autosnapping"
+    gc_git_autosnap || true
+  fi
   if gc_git_remote_branch_exists "$candidate" || gc_git_branch_exists "$candidate"; then
     slug="$candidate"
   fi

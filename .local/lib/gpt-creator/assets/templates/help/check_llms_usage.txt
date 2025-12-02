@@ -1,0 +1,16 @@
+Usage: gpt-creator check-llms [options]
+
+Detect whether local adapter binaries are installed and update the LLM catalog.
+
+Options:
+  --project DIR      Project root (defaults to current directory)
+  --provider ID      Check a specific provider id (e.g., openai)
+  --adapter NAME     Filter by adapter name (codex_cli, command, etc.)
+  --json             Emit JSON results instead of a table
+  --dry-run          Compute statuses without updating the database
+  --install-missing  Attempt to run stored install commands for missing adapters
+  --health-check     Run a lightweight '--version' check for installed adapters
+  -h, --help         Show this help text
+
+Example:
+  gpt-creator check-llms --provider openai

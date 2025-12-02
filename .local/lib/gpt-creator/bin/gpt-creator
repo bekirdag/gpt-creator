@@ -1,0 +1,4661 @@
+#!/usr/bin/env bash
+# gpt-creator — scaffolding & orchestration CLI
+# Aligns with Product Definition & Requirements (PDR v0.2)
+# Usage: gpt-creator <command> [args]
+
+set -Eeuo pipefail
+
+mkdir -p "${PWD}/.gpt-creator/shims" 2>/dev/null || true
+export BASH_ENV="${BASH_ENV:-$PWD/.gpt-creator/shims/bash_env.sh}"
+
+if (( BASH_VERSINFO[0] < 4 )); then
+  if [[ -z "${GC_BASH_BOOTSTRAP:-}" ]]; then
+    bash_candidates=()
+    if [[ -n "${GC_PREFERRED_BASH:-}" ]]; then
+      bash_candidates+=("${GC_PREFERRED_BASH}")
+    fi
+    if [[ -n "${GC_BASH:-}" ]]; then
+      bash_candidates+=("${GC_BASH}")
+    fi
+    if command -v brew >/dev/null 2>&1; then
+      brew_bash="$(brew --prefix 2>/dev/null)/bin/bash"
+      if [[ -x "${brew_bash:-}" ]]; then
+        bash_candidates+=("$brew_bash")
+      fi
+    fi
+    bash_candidates+=("/opt/homebrew/bin/bash" "/usr/local/bin/bash")
+    for candidate in "${bash_candidates[@]}"; do
+      [[ -n "$candidate" ]] || continue
+      if [[ "$candidate" != "$BASH" && -x "$candidate" ]]; then
+        if "$candidate" -c '[[ ${BASH_VERSINFO[0]} -ge 4 ]]' >/dev/null 2>&1; then
+          export GC_BASH_BOOTSTRAP=1
+          PATH="$(dirname "$candidate"):$PATH"
+          export PATH
+          exec "$candidate" "$0" "$@"
+        fi
+      fi
+    done
+  fi
+  printf 'gpt-creator requires Bash 4 or newer. Install via `brew install bash` and re-run, or set GC_PREFERRED_BASH to a modern shell.\n' >&2
+  exit 1
+fi
+
+if [[ -t 1 && $# -eq 0 && -z "${GC_SKIP_TUI_AUTO:-}" ]]; then
+  export GC_SKIP_TUI_AUTO=1
+  exec "$0" tui
+fi
+
+# Crash logging globals
+GC_CRASH_LOGGED=0
+GC_LAST_ERROR_CMD=""
+GC_LAST_ERROR_STATUS=0
+GC_FAIL_LOG_DIR=""
+GC_INVOCATION=""
+
+GC_LAST_CRASH_LOG=""
+GC_MAIN_PID="$$"
+if [[ -z "${GC_PARENT_PID:-}" ]]; then
+  GC_PARENT_PID="$GC_MAIN_PID"
+fi
+export GC_PARENT_PID
+GC_LAST_ERROR_CLASS="NONE"
+GC_LAST_ERROR_REASON=""
+GC_RETRY_ATTEMPTS=0
+GC_LAST_TIMEOUT_SECONDS=0
+
+if [[ -n "${GC_REPORTS_ON:-}" && "${GC_REPORTS_ON}" != "0" ]]; then
+  GC_REPORTS_ON=1
+else
+  GC_REPORTS_ON=0
+fi
+GC_REPORTS_IDLE_TIMEOUT="${GC_REPORTS_IDLE_TIMEOUT:-1800}"
+GC_REPORTS_CHECK_INTERVAL="${GC_REPORTS_CHECK_INTERVAL:-60}"
+export GC_REPORTS_IDLE_TIMEOUT GC_REPORTS_CHECK_INTERVAL
+GC_REPORTS_INITIALIZED=0
+GC_REPORTS_STORE_DIR=""
+GC_REPORTS_ACTIVITY_FILE=""
+GC_REPORTS_IDLE_SENTINEL=""
+GC_REPORTS_WATCHDOG_PID=""
+# shellcheck disable=SC2034
+GC_FILTERED_ARGS=()
+# shellcheck disable=SC2034
+GC_LAST_AUTO_COMMIT_HASH=""
+# shellcheck disable=SC2034
+GC_LAST_AUTO_COMMIT_STATUS=""
+
+
+# Ensure docker compose commands have adequate timeouts unless caller overrides
+if [[ -n "${GC_DOCKER_COMPOSE_TIMEOUT:-}" ]]; then
+  COMPOSE_HTTP_TIMEOUT="$GC_DOCKER_COMPOSE_TIMEOUT"
+  DOCKER_CLIENT_TIMEOUT="$GC_DOCKER_COMPOSE_TIMEOUT"
+fi
+: "${COMPOSE_HTTP_TIMEOUT:=600}"
+: "${DOCKER_CLIENT_TIMEOUT:=$COMPOSE_HTTP_TIMEOUT}"
+export COMPOSE_HTTP_TIMEOUT DOCKER_CLIENT_TIMEOUT
+
+: "${GC_DOCKER_HEALTH_TIMEOUT:=10}"
+: "${GC_DOCKER_HEALTH_INTERVAL:=1}"
+: "${GC_PNPM_VERSION:=10.17.1}"
+# shellcheck disable=SC2034
+GC_CODEX_EXEC_TIMEOUT_INITIAL="${GC_CODEX_EXEC_TIMEOUT-}"
+: "${GC_CODEX_EXEC_TIMEOUT:=0}"
+: "${GC_CODEX_EXEC_MAX_DURATION:=3600}"
+: "${GC_CODEX_MAX_TURNS:=180}"
+: "${GC_CODEX_MAX_TOKENS_PER_TASK:=0}"
+export GC_CODEX_EXEC_MAX_DURATION
+export GC_CODEX_MAX_TURNS
+
+GC_LLM_OUTPUT_LIMIT_PLAN_DEFAULT=450
+GC_LLM_OUTPUT_LIMIT_STATUS_DEFAULT=350
+GC_LLM_OUTPUT_LIMIT_PATCH_DEFAULT=7000
+GC_LLM_OUTPUT_LIMIT_HARD_CAP_DEFAULT=12000
+
+GC_LLM_OUTPUT_LIMIT_PLAN="${GC_LLM_OUTPUT_LIMIT_PLAN_DEFAULT}"
+GC_LLM_OUTPUT_LIMIT_STATUS="${GC_LLM_OUTPUT_LIMIT_STATUS_DEFAULT}"
+GC_LLM_OUTPUT_LIMIT_PATCH="${GC_LLM_OUTPUT_LIMIT_PATCH_DEFAULT}"
+GC_LLM_OUTPUT_LIMIT_HARD_CAP="${GC_LLM_OUTPUT_LIMIT_HARD_CAP_DEFAULT}"
+
+GC_LAST_CODEX_OUTPUT_STEP=""
+GC_LAST_CODEX_OUTPUT_LIMIT=0
+
+gc_budget_collect_tool_actions_json() {
+  local helper_path
+  helper_path="$(gc_clone_python_tool "gc_budget_collect_tool_actions_json.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "${GC_BUDGET_TOOL_ACTIONS_JSON:-}"
+}
+
+gc_env_truthy() {
+  local value="${1:-}"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  value="${value,,}"
+  case "$value" in
+    1|true|yes|on) return 0 ;;
+  esac
+  return 1
+}
+
+gc_dry_run_enabled() {
+  gc_env_truthy "${GC_DRY_RUN:-0}"
+}
+
+gc_dry_run_notice() {
+  if gc_dry_run_enabled; then
+    warn "Dry-run mode enabled; commands will avoid side effects when supported."
+    return 0
+  fi
+  return 1
+}
+
+resolve_cli_root() {
+  local source="${BASH_SOURCE[0]}"
+  while [[ -L "$source" ]]; do
+    local dir
+    dir="$(cd "$(dirname "$source")" && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" != /* ]] && source="$dir/$source"
+  done
+  local abs_dir
+  abs_dir="$(cd "$(dirname "$source")" && pwd)"
+  GC_SELF_PATH="${abs_dir}/$(basename "$source")"
+  cd "${abs_dir}/.." && pwd
+}
+
+cmd_task_convert() {
+  warn "'task-convert' is deprecated; use 'create-tasks' instead. Running create-tasks now."
+  gc_load_cmd create-tasks
+  cmd_create_tasks "$@"
+}
+
+CLI_ROOT="$(resolve_cli_root)"
+unset -f resolve_cli_root
+
+export CLI_ROOT
+
+if [[ -d "${CLI_ROOT}/tools/scripts" ]]; then
+  GC_SCRIPTS_ROOT="${CLI_ROOT}/tools/scripts"
+else
+  GC_SCRIPTS_ROOT="${CLI_ROOT}/scripts"
+fi
+export GC_SCRIPTS_ROOT
+
+GC_CMD_DIR="${GC_SCRIPTS_ROOT}/commands"
+gc_load_cmd() {
+  local name="${1:-}"
+  local path="${GC_CMD_DIR}/${name}.sh"
+  if ! declare -F "cmd_${name//-/_}" >/dev/null && [[ -f "$path" ]]; then
+    # shellcheck source=/dev/null
+    . "$path"
+  fi
+}
+
+gc_usage_commands() {
+  local -a cmds=()
+  local -a skip=("work_on_tasks_impl")
+  if [[ -d "$GC_CMD_DIR" ]]; then
+    local f
+    for f in "$GC_CMD_DIR"/*.sh; do
+      [[ -f "$f" ]] || continue
+      local name
+      name="$(basename "$f" .sh)"
+      case " ${skip[*]} " in
+        *" ${name} "*) continue ;;
+      esac
+      cmds+=("$name")
+    done
+  fi
+  # Include commands handled outside scripts/commands or via direct scripts.
+  cmds+=(
+    create-sds
+    create-pdr
+    create-jira-tasks
+    create-db-dump
+    sweep-artifacts
+    tidy-progress
+    task-convert
+    docdex
+    binder
+    help
+    version
+  )
+  printf '%s\n' "${cmds[@]}" | awk 'NF' | sort -u
+}
+
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/git-branches.sh" ]]; then
+  # shellcheck disable=SC1090
+  . "${GC_SCRIPTS_ROOT}/lib/git-branches.sh"
+fi
+# Shared python helper cloning utilities
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/python_clone.sh" ]]; then
+  # shellcheck source=tools/scripts/lib/python_clone.sh
+  . "${GC_SCRIPTS_ROOT}/lib/python_clone.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/render_task_footer.sh" ]]; then
+  # shellcheck disable=SC1090
+  . "${GC_SCRIPTS_ROOT}/render_task_footer.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/fs.sh" ]]; then
+  # shellcheck source=scripts/lib/fs.sh
+  . "${GC_SCRIPTS_ROOT}/lib/fs.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/budget.sh" ]]; then
+  # shellcheck source=scripts/lib/budget.sh
+  . "${GC_SCRIPTS_ROOT}/lib/budget.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/util.sh" ]]; then
+  # shellcheck source=scripts/lib/util.sh
+  . "${GC_SCRIPTS_ROOT}/lib/util.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/env.sh" ]]; then
+  # shellcheck source=scripts/lib/env.sh
+  . "${GC_SCRIPTS_ROOT}/lib/env.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/retry.sh" ]]; then
+  # shellcheck source=scripts/lib/retry.sh
+  . "${GC_SCRIPTS_ROOT}/lib/retry.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/error.sh" ]]; then
+  # shellcheck source=scripts/lib/error.sh
+  . "${GC_SCRIPTS_ROOT}/lib/error.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/docs.sh" ]]; then
+  # shellcheck source=scripts/lib/docs.sh
+  . "${GC_SCRIPTS_ROOT}/lib/docs.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/http.sh" ]]; then
+  # shellcheck source=scripts/lib/http.sh
+  . "${GC_SCRIPTS_ROOT}/lib/http.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/render.sh" ]]; then
+  # shellcheck source=scripts/lib/render.sh
+  . "${GC_SCRIPTS_ROOT}/lib/render.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/surfaces.sh" ]]; then
+  # shellcheck source=scripts/lib/surfaces.sh
+  . "${GC_SCRIPTS_ROOT}/lib/surfaces.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/templates.sh" ]]; then
+  # shellcheck source=scripts/lib/templates.sh
+  . "${GC_SCRIPTS_ROOT}/lib/templates.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/help.sh" ]]; then
+  # shellcheck source=scripts/lib/help.sh
+  . "${GC_SCRIPTS_ROOT}/lib/help.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/codex.sh" ]]; then
+  # shellcheck source=scripts/lib/codex.sh
+  . "${GC_SCRIPTS_ROOT}/lib/codex.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/binder.sh" ]]; then
+  # shellcheck source=scripts/lib/binder.sh
+  . "${GC_SCRIPTS_ROOT}/lib/binder.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/finalize.sh" ]]; then
+  # shellcheck source=scripts/lib/finalize.sh
+  . "${GC_SCRIPTS_ROOT}/lib/finalize.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/docdex.sh" ]]; then
+  # shellcheck source=scripts/lib/docdex.sh
+  . "${GC_SCRIPTS_ROOT}/lib/docdex.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/progress.sh" ]]; then
+  # shellcheck source=scripts/lib/progress.sh
+  . "${GC_SCRIPTS_ROOT}/lib/progress.sh"
+fi
+if [[ -f "${GC_SCRIPTS_ROOT}/lib/agent.sh" ]]; then
+  # shellcheck source=scripts/lib/agent.sh
+  . "${GC_SCRIPTS_ROOT}/lib/agent.sh"
+fi
+
+GC_TEMPLATE_DIR="${CLI_ROOT}/assets/templates"
+CLI_SHIM_BIN="${CLI_ROOT}/.gpt-creator/shims/bin"
+mkdir -p "${CLI_SHIM_BIN}" 2>/dev/null || true
+export PATH="${CLI_SHIM_BIN}:${CLI_ROOT}/bin:${PATH}"
+GC_LAST_RENDER_TASK_FOOTER=""
+
+# Default to npm-provided docdex CLI on PATH.
+: "${GC_DOCDEX_BIN:=docdexd}"
+export GC_DOCDEX_BIN
+
+gc_template_path() {
+  local name="${1:?template name required}"
+  printf '%s/%s' "$GC_TEMPLATE_DIR" "$name"
+}
+
+gc_render_template_fallback() {
+  local name="${1:?template name required}"
+  case "$name" in
+    prompts/work_on_tasks_diff_reminder.md)
+      printf '%s\n' \
+        "## Diff reminder" \
+        "- Provide explicit unified diffs for the required edits." \
+        "- If no changes are necessary, clearly explain why the existing implementation already satisfies the task."
+      return 0
+      ;;
+    prompts/work_on_tasks_json_reminder.md)
+      printf '%s\n' \
+        "## Reminder" \
+        "- Output a single JSON object exactly as described above; do not include any explanatory text outside the JSON." \
+        "- If no changes are required, return the JSON with an empty \`changes\` array and clear notes explaining why." \
+        "- Diff entries must remain valid unified diffs."
+      return 0
+      ;;
+    prompts/work_on_tasks_contract_guard.md)
+      printf '%s\n' \
+        "## Critical constraint" \
+        "- Provide at least one concrete repository change (diff or file write) or explicitly document a blocker with evidence that proves no change is required." \
+        "- Do not repeat the previous plan without actionable modifications."
+      return 0
+      ;;
+    checkpoints/empty_apply_checkpoint.md.tmpl)
+      local checkpoint_title="${GC_CHECKPOINT_TITLE:-story/task}"
+      local checkpoint_timestamp="${GC_CHECKPOINT_TIMESTAMP:-$(date -u +%FT%TZ)}"
+      printf '# Checkpoint — %s\n\n' "$checkpoint_title"
+      printf 'Generated automatically because the agent response contained no actionable '\''changes'\''.\n\n'
+      printf -- '- Timestamp: %s\n' "$checkpoint_timestamp"
+      printf -- '- Runner: gc-empty-apply-fallback\n\n'
+      printf '## What was attempted\n'
+      printf -- '- Review the raw agent output under .gpt-creator/staging/plan/work/runs for detailed context.\n'
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+gc_render_template() {
+  local name="${1:?template name required}"
+  local template_path
+  template_path="$(gc_template_path "$name")"
+  if [[ ! -f "$template_path" ]]; then
+    if gc_render_template_fallback "$name"; then
+      return 0
+    fi
+    die "Template not found: ${template_path}"
+  fi
+  local python_bin="${PYTHON_BIN:-python3}"
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    die "Python runtime '$python_bin' not available for template rendering"
+  fi
+  "$python_bin" -c 'import os, sys
+from string import Template
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    data = fh.read()
+tmpl = Template(data)
+sys.stdout.write(tmpl.safe_substitute(os.environ))' "$template_path"
+}
+
+gc_configure_tmpdir() {
+  local base="${1:-${PROJECT_ROOT:-$PWD}}"
+  local dir="${base}/.gpt-creator/tmp"
+  if mkdir -p "$dir" 2>/dev/null; then
+    GC_TMP_DIR="$dir"
+    TMPDIR="$dir"
+    export GC_TMP_DIR TMPDIR
+    mkdir -p "${base}/tmp" 2>/dev/null || true
+  else
+    if [[ -n "${GC_TMP_DIR:-}" ]]; then
+      :
+    elif [[ -n "${TMPDIR:-}" && -d "${TMPDIR}" ]]; then
+      GC_TMP_DIR="$TMPDIR"
+      export GC_TMP_DIR
+    fi
+  fi
+}
+
+gc_configure_tmpdir
+
+if [[ -z "${GC_COMMAND_FAILURE_CACHE:-}" ]]; then
+  if [[ -n "${GC_TMP_DIR:-}" ]]; then
+    GC_COMMAND_FAILURE_CACHE="${GC_TMP_DIR}/command-failures.json"
+  else
+    GC_COMMAND_FAILURE_CACHE="${TMPDIR:-/tmp}/command-failures.json"
+  fi
+fi
+export GC_COMMAND_FAILURE_CACHE
+GC_COMMAND_FAILURE_WARN_DIGESTS=""
+
+if [[ -z "${GC_COMMAND_STREAM_CACHE:-}" ]]; then
+  if [[ -n "${GC_TMP_DIR:-}" ]]; then
+    GC_COMMAND_STREAM_CACHE="${GC_TMP_DIR}/command-stream.json"
+  else
+    GC_COMMAND_STREAM_CACHE="${TMPDIR:-/tmp}/command-stream.json"
+  fi
+fi
+export GC_COMMAND_STREAM_CACHE
+GC_COMMAND_STREAM_WARN_DIGESTS=""
+
+if [[ -z "${GC_COMMAND_FILE_CACHE:-}" ]]; then
+  if [[ -n "${GC_TMP_DIR:-}" ]]; then
+    GC_COMMAND_FILE_CACHE="${GC_TMP_DIR}/command-file-cache.json"
+  else
+    GC_COMMAND_FILE_CACHE="${TMPDIR:-/tmp}/command-file-cache.json"
+  fi
+fi
+export GC_COMMAND_FILE_CACHE
+GC_COMMAND_FILE_WARN_DIGESTS=""
+
+if [[ -z "${GC_COMMAND_SCAN_CACHE:-}" ]]; then
+  if [[ -n "${GC_TMP_DIR:-}" ]]; then
+    GC_COMMAND_SCAN_CACHE="${GC_TMP_DIR}/command-scan.json"
+  else
+    GC_COMMAND_SCAN_CACHE="${TMPDIR:-/tmp}/command-scan.json"
+  fi
+fi
+export GC_COMMAND_SCAN_CACHE
+GC_COMMAND_SCAN_WARN_DIGESTS=""
+GC_COMMAND_GUARD_WARN_DIGESTS=""
+GC_CODEX_USAGE_LIMIT_CONFIRMED=0
+
+if [[ -n "${GC_SCAN_DEDUP_EPOCH:-}" && "${GC_SCAN_DEDUP_EPOCH}" =~ ^[0-9]+$ ]]; then
+  :
+else
+  GC_SCAN_DEDUP_EPOCH=0
+fi
+export GC_SCAN_DEDUP_EPOCH
+
+gc_note_mutation() {
+  if ! [[ "${GC_SCAN_DEDUP_EPOCH:-}" =~ ^[0-9]+$ ]]; then
+    GC_SCAN_DEDUP_EPOCH=0
+  fi
+  GC_SCAN_DEDUP_EPOCH=$((GC_SCAN_DEDUP_EPOCH + 1))
+  export GC_SCAN_DEDUP_EPOCH
+}
+
+gc_assert() {
+  local kind="${1:-}"
+  local name="${2:-}"
+  if [[ -z "$kind" || -z "$name" ]]; then
+    warn "gc_assert usage: gc_assert <table|index> <name>"
+    return 2
+  fi
+  local script="${GC_SCRIPTS_ROOT}/schema_evidence.js"
+  local index_path="${GC_SCHEMA_EVIDENCE_PATH:-${GC_WORKSPACE_DIR:-$PWD}/.gpt-creator/index/schema-evidence.json}"
+  if ! command -v node >/dev/null 2>&1; then
+    warn "Node.js required for schema assertions"
+    return 1
+  fi
+  node "$script" query "$kind" "$name" --out "$index_path"
+}
+
+gc_random_string() {
+  local helper_path
+  helper_path="$(gc_clone_python_tool "random_string.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path"
+}
+
+gc_usage_limit_is_provider_signal() {
+  local message="${1:-}"
+  local lower="${message,,}"
+  if [[ "$lower" == *"429"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"insufficient_quota"* || "$lower" == *"insufficient quota"* ]]; then
+    return 0
+  fi
+  if [[ "$lower" == *"rate_limit_exceeded"* || "$lower" == *"rate limit exceeded"* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+
+gc_create_env_if_missing() {
+  local env_file
+  env_file="$(gc_env_file)"
+  if [[ -f "$env_file" ]]; then
+    return
+  fi
+  local slug
+  slug="$(basename "${PROJECT_ROOT:-$PWD}")"
+  slug=$(printf '%s' "$slug" | tr -c '[:alnum:]' '_')
+  slug=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')
+  slug=$(printf '%.12s' "$slug")
+  [[ -n "$slug" ]] || slug="app"
+  local db_name="${slug}_db"
+  local db_user="gc_${slug}_user"
+  local db_password
+  db_password="$(gc_random_string)"
+  local db_root_password
+  db_root_password="$(gc_random_string)"
+  (
+    set -a
+    export GC_ENV_DB_NAME="$db_name"
+    export GC_ENV_DB_USER="$db_user"
+    export GC_ENV_DB_PASSWORD="$db_password"
+    export GC_ENV_DB_ROOT_PASSWORD="$db_root_password"
+    set +a
+    gc_render_template "env/default_env_file.tmpl"
+  ) >"$env_file"
+  chmod 600 "$env_file" || true
+}
+
+VERSION="0.2.0"
+APP_NAME="gpt-creator"
+export APP_NAME VERSION
+
+# Defaults (override via env)
+CODEX_BIN="${CODEX_BIN:-codex}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.1-codex-max}"
+CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-gpt-5.1-codex-max}"
+
+# Stage-aware model selection (defaults fall back to CODEX_MODEL for compatibility)
+CODEX_MODEL_LOW="${CODEX_MODEL_LOW:-${CODEX_MODEL}}"
+CODEX_MODEL_NON_CODE="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW}}"
+CODEX_MODEL_CODE="${CODEX_MODEL_CODE:-${CODEX_MODEL}}"
+
+# Reasoning effort defaults (non-code work drops to low effort unless overridden)
+CODEX_REASONING_EFFORT="${CODEX_REASONING_EFFORT:-medium}"
+CODEX_REASONING_EFFORT_NON_CODE="${CODEX_REASONING_EFFORT_NON_CODE:-medium}"
+CODEX_REASONING_EFFORT_CODE="${CODEX_REASONING_EFFORT_CODE:-medium}"
+
+export CODEX_MODEL CODEX_MODEL_LOW CODEX_MODEL_NON_CODE CODEX_MODEL_CODE
+export CODEX_FALLBACK_MODEL CODEX_REASONING_EFFORT CODEX_REASONING_EFFORT_NON_CODE CODEX_REASONING_EFFORT_CODE
+EDITOR_CMD="${EDITOR_CMD:-code}"
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+MYSQL_BIN="${MYSQL_BIN:-mysql}"
+
+# Colors (TTY-only)
+if [[ -t 1 ]]; then
+  c_reset=$'\033[0m'
+  c_red=$'\033[31m'; c_yellow=$'\033[33m'; c_cyan=$'\033[36m'; c_green=$'\033[32m'
+  gc_color_border=$'\033[1;38;5;214m'
+  gc_color_title=$'\033[1;38;5;39m'
+  gc_color_label=$'\033[1;38;5;111m'
+  gc_color_muted=$'\033[38;5;245m'
+  gc_color_bar_fill=$'\033[1;38;5;39m'
+  gc_color_bar_empty=$'\033[38;5;240m'
+else
+  c_reset=; c_red=; c_yellow=; c_cyan=; c_green=
+  gc_color_border=; gc_color_title=; gc_color_label=; gc_color_muted=; gc_color_bar_fill=; gc_color_bar_empty=
+fi
+
+ts() { date +"%Y-%m-%dT%H:%M:%S"; }
+die() { echo "${c_red}✖${c_reset} $*" >&2; exit 1; }
+
+# Agent CLI standardized exit codes
+GC_AGENT_EXIT_OK=0
+GC_AGENT_EXIT_VALIDATION=2
+GC_AGENT_EXIT_NOT_FOUND=3
+GC_AGENT_EXIT_DB=4
+GC_AGENT_EXIT_IO=5
+
+gc_agents_fail() {
+  local code="${1:?exit code required}"
+  shift || true
+  if [[ $# -gt 0 ]]; then
+    printf 'agent error: %s\n' "$*" >&2
+  fi
+  return "$code"
+}
+info(){ echo "${c_cyan}➜${c_reset} $*"; }
+ok()  { echo "${c_green}✔${c_reset} $*"; }
+warn(){ echo "${c_yellow}!${c_reset} $*"; }
+
+gc_format_duration_compact() {
+  local total="${1:-0}"
+  if [[ ! "$total" =~ ^[0-9]+$ ]]; then
+    total=0
+  fi
+  local hours=$(( total / 3600 ))
+  local minutes=$(( (total % 3600) / 60 ))
+  local seconds=$(( total % 60 ))
+  local parts=()
+  if (( hours > 0 )); then
+    parts+=("${hours}H")
+  fi
+  if (( minutes > 0 || hours > 0 )); then
+    parts+=("${minutes}M")
+  fi
+  parts+=("${seconds}S")
+  printf '%s' "${parts[*]}"
+}
+
+gc_format_tokens_compact() {
+  local raw="${1:-0}"
+  if [[ ! "$raw" =~ ^[0-9]+$ ]]; then
+    raw=0
+  fi
+  printf '%s' "$(printf '%d' "$raw" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"
+}
+
+gc_log_tokens_used() {
+  local total="${1:-0}"
+  local prompt="${2:-0}"
+  local completion="${3:-0}"
+  if [[ ! "$total" =~ ^[0-9]+$ ]] || (( total <= 0 )); then
+    return
+  fi
+  printf 'tokens used\n%s\n' "$(gc_format_tokens_compact "$total")"
+  if [[ "$prompt" =~ ^[0-9]+$ ]] && (( prompt > 0 )); then
+    printf 'prompt tokens\n%s\n' "$(gc_format_tokens_compact "$prompt")"
+  fi
+  if [[ "$completion" =~ ^[0-9]+$ ]] && (( completion > 0 )); then
+    printf 'completion tokens\n%s\n' "$(gc_format_tokens_compact "$completion")"
+  fi
+}
+
+gc_render_task_banner() {
+  local header_position="top"
+  case "$1" in
+    --header-bottom)
+      header_position="bottom"
+      shift
+      ;;
+    --header-top)
+      shift
+      ;;
+  esac
+
+  local header="${1:?header text required}"
+  shift
+  local -a lines=("$@")
+
+  if [[ "$header" == "START OF A NEW TASK" ]] || [[ "$header" == "END OF THE TASK WORK" ]]; then
+    local content_width="${#header}"
+    local line
+    for line in "${lines[@]}"; do
+      if (( ${#line} > content_width )); then
+        content_width=${#line}
+      fi
+    done
+    local inner_width=$(( content_width + 6 ))
+    local shading
+    printf -v shading '%*s' "$inner_width" ''
+    shading="${shading// /═}"
+    local top_border="╔${shading}╗"
+    local mid_border="╠${shading}╣"
+    local bottom_border="╚${shading}╝"
+    local shade_line="$shading"
+    local header_line
+    printf -v header_line "║  %-${content_width}s  ║" "$header"
+    if [[ "$header" == "START OF A NEW TASK" ]]; then
+      info "$top_border"
+      info "$header_line"
+      info "$mid_border"
+      for line in "${lines[@]}"; do
+        printf -v line "║  %-${content_width}s  ║" "$line"
+        info "$line"
+      done
+      info "$bottom_border"
+    else
+      info "$top_border"
+      for line in "${lines[@]}"; do
+        printf -v line "║  %-${content_width}s  ║" "$line"
+        info "$line"
+      done
+      info "$bottom_border"
+      info "$shade_line"
+      info "$header_line"
+      info "$shade_line"
+    fi
+    return
+  fi
+
+  local min_width=23
+  local banner_margin=4
+  local header_padding_extra=8
+  local inner_width="$min_width"
+
+  local line
+  for line in "${lines[@]}"; do
+    local length=${#line}
+    local candidate=$(( length + banner_margin ))
+    if (( candidate > inner_width )); then
+      inner_width=$candidate
+    fi
+  done
+
+  local header_width=$(( inner_width + header_padding_extra ))
+  if (( header_width < ${#header} + 2 )); then
+    header_width=$(( ${#header} + 2 ))
+  fi
+
+  local shade_line
+  printf -v shade_line '%*s' "$header_width" ''
+  shade_line="${shade_line// /░}"
+
+  local header_pad_left=$(( (header_width - ${#header}) / 2 ))
+  local header_pad_right=$(( header_width - header_pad_left - ${#header} ))
+  (( header_pad_left < 0 )) && header_pad_left=0
+  (( header_pad_right < 0 )) && header_pad_right=0
+  local header_line_left header_line_right
+  printf -v header_line_left '%*s' "$header_pad_left" ''
+  printf -v header_line_right '%*s' "$header_pad_right" ''
+  local header_line="${header_line_left// /░}${header}${header_line_right// /░}"
+
+  local border_inner
+  printf -v border_inner '%*s' "$inner_width" ''
+  local border_line="|${border_inner// /-}|"
+
+  if [[ "$header_position" == "top" ]]; then
+    info "$shade_line"
+    info "$header_line"
+    info "$shade_line"
+  fi
+
+  info "$border_line"
+  for line in "${lines[@]}"; do
+    local line_length=${#line}
+    local pad_total=$(( inner_width - line_length ))
+    (( pad_total < 0 )) && pad_total=0
+    local pad_left=$(( pad_total / 2 ))
+    local pad_right=$(( pad_total - pad_left ))
+    local padded_line
+    printf -v padded_line '|%*s%s%*s|' "$pad_left" '' "$line" "$pad_right" ''
+    info "$padded_line"
+    info "$border_line"
+  done
+
+  if [[ "$header_position" == "bottom" ]]; then
+    printf '\n'
+    info "$shade_line"
+    info "$header_line"
+    info "$shade_line"
+  fi
+}
+
+gc_numclean() {
+  local raw="${1:-}"
+  raw="${raw//,/}"
+  raw="${raw// /}"
+  printf '%s' "$raw"
+}
+
+gc_story_points_percent() {
+  local value="${1:-0}"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    value=0
+  fi
+  if (( value < 0 )); then
+    value=0
+  elif (( value > 13 )); then
+    value=13
+  fi
+  awk -v s="$value" 'BEGIN{printf "%.1f",(s/13)*100}'
+}
+
+gc_render_bar() {
+  local pct="${1:-0}"
+  local width="${2:-20}"
+  if [[ ! "$pct" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+    pct=0
+  fi
+  if [[ ! "$width" =~ ^[0-9]+$ ]] || (( width <= 0 )); then
+    width=20
+  fi
+  local filled
+  filled="$(awk -v p="$pct" -v w="$width" 'BEGIN{if(p<0)p=0;if(p>100)p=100;printf "%d", int((p/100)*w + 0.5)}')"
+  [[ "$filled" =~ ^[0-9]+$ ]] || filled=0
+  local i=0
+  while (( i < width )); do
+    if (( i < filled )); then
+      printf '%s█%s' "${gc_color_bar_fill:-}" "${gc_color_bar_fill:+$c_reset}"
+    else
+      printf '%s░%s' "${gc_color_bar_empty:-}" "${gc_color_bar_empty:+$c_reset}"
+    fi
+    (( i++ ))
+  done
+}
+
+gc_render_task_badge() {
+  local label="${1:-N/A}"
+  local color="${2:-39}"
+  local border_color="${gc_color_border:-$'\033[38;5;240m'}"
+  local accent
+  printf -v accent '\033[1;38;5;%sm' "$color"
+  printf '%s%s %s %s%s' "$border_color" "$accent" "$label" "$border_color" "$c_reset"
+}
+
+gc_renderer_cache_path() {
+  local base="${GC_DIR:-}"
+  if [[ -z "$base" && -n "${PROJECT_ROOT:-}" ]]; then
+    base="${PROJECT_ROOT}/.gpt-creator"
+  elif [[ -z "$base" ]]; then
+    base="${PWD}/.gpt-creator"
+  fi
+  printf '%s\n' "${base%/}/renderers/render_gpt_creator.sh"
+}
+
+gc_renderer_path_if_enabled() {
+  if [[ -n "${GC_RENDERER_DISABLED:-}" ]]; then
+    return 1
+  fi
+
+  local -a candidates=()
+  local -a copy_sources=()
+
+  if [[ -n "${GC_RENDER_GPT_CREATOR:-}" ]]; then
+    candidates+=("${GC_RENDER_GPT_CREATOR}")
+  fi
+
+  local cache_path
+  cache_path="$(gc_renderer_cache_path)"
+  if [[ -n "$cache_path" ]]; then
+    candidates+=("$cache_path")
+  fi
+
+  if [[ -n "${CLI_ROOT:-}" ]]; then
+    copy_sources+=("${CLI_ROOT}/render_gpt_creator.sh")
+    copy_sources+=("${CLI_ROOT}/bin/render_gpt_creator.sh")
+    copy_sources+=("${GC_SCRIPTS_ROOT}/render_task_footer.sh")
+    candidates+=("${copy_sources[@]}")
+  fi
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  if [[ -n "$cache_path" ]]; then
+    local source
+    for source in "${copy_sources[@]}"; do
+      if [[ -n "$source" && -r "$source" ]]; then
+        local cache_dir
+        cache_dir="$(dirname "$cache_path")"
+        mkdir -p "$cache_dir" 2>/dev/null || true
+        if cp "$source" "$cache_path"; then
+          chmod +x "$cache_path" 2>/dev/null || true
+          printf '%s\n' "$cache_path"
+          return 0
+        fi
+      fi
+    done
+  fi
+
+  return 1
+}
+
+gc_renderer_available() {
+  gc_renderer_path_if_enabled >/dev/null
+}
+
+gc_render_with_renderer() {
+  local renderer_path=""
+  if ! renderer_path="$(gc_renderer_path_if_enabled)"; then
+    "$@"
+    return $?
+  fi
+
+  local render_strict="${GC_RENDER_GPT_CREATOR_STRICT:-0}"
+
+  local tmpfile
+  tmpfile="$(mktemp "${TMPDIR:-/tmp}/gc-render.XXXXXX")" || {
+    "$@"
+    return $?
+  }
+
+  if ! "$@" >"$tmpfile"; then
+    local status=$?
+    cat "$tmpfile"
+    rm -f "$tmpfile"
+    return $status
+  fi
+
+  if "$renderer_path" <"$tmpfile"; then
+    rm -f "$tmpfile"
+    return 0
+  else
+    local render_status=$?
+    if [[ "$render_strict" == "1" ]]; then
+      printf '%s!%s Renderer failed via %s (exit=%s). Raw output suppressed; fix the renderer or run it manually for debugging.\n' \
+        "$c_yellow" "$c_reset" "$renderer_path" "$render_status" >&2
+      rm -f "$tmpfile"
+      return 0
+    fi
+
+    cat "$tmpfile"
+    rm -f "$tmpfile"
+    return 0
+  fi
+}
+
+gc_status_color_seq() {
+  local status="${1:-}"
+  status="${status,,}"
+  case "$status" in
+    completed|complete|success|ok|passed)
+      printf '%s' "$c_green"
+      ;;
+    blocked*|failed|dead-letter|permanent-fail|error|aborted|interrupted)
+      printf '%s' "$c_red"
+      ;;
+    in-progress|running|pending)
+      printf '%s' "$c_cyan"
+      ;;
+    *)
+      printf '%s' "$c_yellow"
+      ;;
+  esac
+}
+
+gc_render_task_start_panel() {
+  local task_id="${1:-N/A}"
+  local alias_line="${2:-}"
+  local summary_line="${3:-}"
+  local model_line="${4:-}"
+  local provider_line="${5:-}"
+  local workdir_line="${6:-}"
+  local reasoning_line="${7:-}"
+  local session_line="${8:-}"
+  local step_line="${9:-}"
+
+  local renderer_path="" renderer_output=""
+  if renderer_path="$(gc_renderer_path_if_enabled)"; then
+    local -a start_lines=()
+    start_lines+=("|-----------------------|")
+    start_lines+=("|     START TASK ID     |")
+    start_lines+=("|-----------------------|")
+    if [[ -n "$task_id" ]]; then
+      start_lines+=("|    ${task_id}    |")
+    else
+      start_lines+=("|        N/A         |")
+    fi
+    start_lines+=("|-----------------------|")
+    local alias_display="$alias_line"
+    if [[ -z "$alias_display" ]]; then
+      alias_display="Working on task ${task_id:-N/A}"
+    fi
+    start_lines+=("→ ${alias_display}")
+    if [[ -n "$summary_line" ]]; then
+      start_lines+=("  ${summary_line}")
+    fi
+    local step_token="${step_line:-patch}"
+    local reasoning_token="${reasoning_line:-auto}"
+    start_lines+=("meta (step=${step_token}) (model=${model_line:-N/A}) (reasoning=${reasoning_token})")
+    [[ -n "$model_line" ]] && start_lines+=("model: ${model_line}")
+    [[ -n "$provider_line" ]] && start_lines+=("provider: ${provider_line}")
+    [[ -n "$workdir_line" ]] && start_lines+=("workdir: ${workdir_line}")
+    [[ -n "$reasoning_line" ]] && start_lines+=("reasoning effort: ${reasoning_line}")
+    [[ -n "$session_line" ]] && start_lines+=("session id: ${session_line}")
+    if renderer_output="$(
+      {
+        local line
+        for line in "${start_lines[@]}"; do
+          printf '%s\n' "$line"
+        done
+      } | "$renderer_path"
+    )"; then
+      if [[ -n "$renderer_output" ]]; then
+        printf '%s' "$renderer_output"
+        return
+      fi
+    else
+      local render_status=$?
+      printf '%s[warn]%s Renderer failed via %s (exit=%s); falling back to plain task header.\n' \
+        "${c_yellow:-}" "${c_reset:-}" "$renderer_path" "$render_status" >&2
+      GC_RENDERER_DISABLED=1
+    fi
+  fi
+
+  printf '\n%s╭────────────────────────────────────────────────────────────╮%s\n' "${gc_color_border:-}" "$c_reset"
+  printf '│  %sSTART OF TASK%s                                           │\n' "${gc_color_title:-}" "$c_reset"
+  printf '%s╰────────────────────────────────────────────────────────────╯%s\n' "${gc_color_border:-}" "$c_reset"
+
+  printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Start Task ID:" "$c_reset" "$task_id"
+  [[ -n "$alias_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Alias:" "$c_reset" "$alias_line"
+  [[ -n "$summary_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Summary:" "$c_reset" "$summary_line"
+  [[ -n "$model_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Model:" "$c_reset" "$model_line"
+  [[ -n "$provider_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Provider:" "$c_reset" "$provider_line"
+  [[ -n "$workdir_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Workdir:" "$c_reset" "$workdir_line"
+  [[ -n "$reasoning_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Reasoning:" "$c_reset" "$reasoning_line"
+  [[ -n "$session_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Session:" "$c_reset" "$session_line"
+  [[ -n "$step_line" ]] && printf '%s%-16s%s %s\n' "${gc_color_label:-}" "Step:" "$c_reset" "$step_line"
+
+  printf '\n%s░░░░░ START OF A NEW TASK ░░░░░%s\n\n' "${gc_color_muted:-}" "$c_reset"
+}
+
+gc_render_task_end_panel() {
+  local task_id="${1:-N/A}"
+  local status="${2:-unknown}"
+  local terminal="${3:-N/A}"
+  local time_spent="${4:-0S}"
+  local story_points_display="${5:-—}"
+  local story_points_raw="${6:-0}"
+  local tokens_used="${7:-0}"
+  local tokens_estimate="${8:-0}"
+  local tokens_display="${9:-}"
+  local tokens_estimate_display="${10:-}"
+  local failure_class="${11:-}"
+  local detail_line="${12:-}"
+
+  if [[ -z "$tokens_display" ]]; then
+    tokens_display="$(gc_format_tokens_compact "$tokens_used")"
+  fi
+  if [[ -z "$tokens_estimate_display" ]]; then
+    tokens_estimate_display="$(gc_format_tokens_compact "$tokens_estimate")"
+  fi
+
+  local tokens_numeric="$tokens_used"
+  local est_numeric="$tokens_estimate"
+  if [[ ! "$tokens_numeric" =~ ^[0-9]+$ ]]; then
+    tokens_numeric="$(gc_numclean "$tokens_display")"
+  fi
+  if [[ ! "$est_numeric" =~ ^[0-9]+$ ]]; then
+    est_numeric="$(gc_numclean "$tokens_estimate_display")"
+  fi
+  [[ "$tokens_numeric" =~ ^[0-9]+$ ]] || tokens_numeric=0
+  [[ "$est_numeric" =~ ^[0-9]+$ ]] || est_numeric=0
+
+  local ratio_pct="0.0"
+  local ratio_multiplier="0.00"
+  if (( est_numeric > 0 )); then
+    ratio_pct="$(awk -v a="$tokens_numeric" -v b="$est_numeric" 'BEGIN{printf "%.1f", (a/b)*100}')"
+    ratio_multiplier="$(awk -v a="$tokens_numeric" -v b="$est_numeric" 'BEGIN{if(b>0){printf "%.2f", a/b}else{printf "0.00"} }')"
+  fi
+
+  local sp_pct
+  sp_pct="$(gc_story_points_percent "$story_points_raw")"
+
+  local renderer_path="" renderer_output=""
+  if renderer_path="$(gc_renderer_path_if_enabled)"; then
+    local -a end_lines=()
+    end_lines+=("|-----------------------|")
+    end_lines+=("|       END TASK ID     |")
+    end_lines+=("|-----------------------|")
+    if [[ -n "$task_id" ]]; then
+      end_lines+=("|    ${task_id}    |")
+    else
+      end_lines+=("|        N/A         |")
+    fi
+    end_lines+=("|-----------------------|")
+    end_lines+=("Status: ${status}")
+    end_lines+=("Terminal: ${terminal}")
+    end_lines+=("Time spent: ${time_spent}")
+    end_lines+=("Story points: ${story_points_display}")
+    end_lines+=("TOKENS USED: ${tokens_display}")
+    end_lines+=("EST. TOKENS (PROMPT): ${tokens_estimate_display}")
+    if [[ -n "$failure_class" && "$failure_class" != "NONE" ]]; then
+      end_lines+=("Failure: ${failure_class}")
+    fi
+    if [[ -n "$detail_line" ]]; then
+      end_lines+=("Detail: ${detail_line}")
+    fi
+    local notes_added=0
+    if [[ -n "$detail_line" || ( -n "$failure_class" && "$failure_class" != "NONE" ) ]]; then
+      end_lines+=("Notes")
+      if [[ -n "$detail_line" ]]; then
+        end_lines+=("- ${detail_line}")
+      fi
+      if [[ -n "$failure_class" && "$failure_class" != "NONE" ]]; then
+        end_lines+=("- Failure class: ${failure_class}")
+      fi
+      notes_added=1
+    fi
+    if (( notes_added )); then
+      end_lines+=("")
+    fi
+    if renderer_output="$(
+      {
+        local line
+        for line in "${end_lines[@]}"; do
+          printf '%s\n' "$line"
+        done
+      } | "$renderer_path"
+    )"; then
+      if [[ -n "$renderer_output" ]]; then
+        printf '%s' "$renderer_output"
+        if declare -F render_task_end >/dev/null 2>&1; then
+          render_task_end "$task_id" "$status" || true
+          GC_LAST_RENDER_TASK_FOOTER="$task_id"
+        fi
+        return
+      fi
+    else
+      local render_status=$?
+      printf '%s[warn]%s Renderer failed via %s (exit=%s); falling back to plain task footer.\n' \
+        "${c_yellow:-}" "${c_reset:-}" "$renderer_path" "$render_status" >&2
+      GC_RENDERER_DISABLED=1
+    fi
+  fi
+
+  printf '\n%s╭────────────────────────────────────────────────────────────╮%s\n' "${gc_color_border:-}" "$c_reset"
+  printf '│  %sEND OF TASK%s                                             │\n' "${gc_color_title:-}" "$c_reset"
+  printf '%s╰────────────────────────────────────────────────────────────╯%s\n\n' "${gc_color_border:-}" "$c_reset"
+
+  printf '  '
+  gc_render_task_badge "TASK ${task_id:-N/A}" 45
+  printf '  '
+  if [[ -n "$status" ]]; then
+    local status_col
+    if [[ "$status" =~ ^(COMPLETE|COMPLETED|SUCCESS)$ ]]; then
+      status_col=46
+    elif [[ "$status" =~ ^(RETRYABLE|NEEDS-RETRY|FAILED)$ ]]; then
+      status_col=208
+    else
+      status_col=111
+    fi
+    gc_render_task_badge "STATUS ${status}" "$status_col"
+    printf '  '
+  fi
+  if [[ -n "$terminal" ]]; then
+    gc_render_task_badge "TERMINAL ${terminal}" 111
+    printf '  '
+  fi
+  if [[ -n "$story_points_display" ]]; then
+    gc_render_task_badge "SP ${story_points_display}" 39
+    printf '  '
+  fi
+  gc_render_task_badge "TIME ${time_spent}" 221
+  printf '\n\n'
+
+  if [[ -n "$story_points_display" ]]; then
+    printf '  %s📈 Story points:%s %s\n' "${gc_color_label:-}" "$c_reset" "$story_points_display"
+    printf '    '
+    gc_render_bar "$sp_pct" 22
+    printf ' %s%4.1f%%%s (SP)\n' "${gc_color_muted:-}" "$sp_pct" "$c_reset"
+  fi
+
+  printf '  %s🪙 Tokens used:%s  %s\n' "${gc_color_label:-}" "$c_reset" "$tokens_display"
+  printf '    '
+  gc_render_bar "$ratio_pct" 30
+  printf ' %s%5.1f%%%s used vs prompt est (x%s)\n' "${gc_color_muted:-}" "$ratio_pct" "$c_reset" "$ratio_multiplier"
+  printf '  %s📊 Est. tokens:%s %s\n' "${gc_color_label:-}" "$c_reset" "$tokens_estimate_display"
+
+  if [[ -n "$failure_class" && "$failure_class" != "NONE" ]]; then
+    printf '\n  %s⚠ Failure:%s %s\n' "${c_yellow:-}" "$c_reset" "$failure_class"
+  fi
+  if [[ -n "$detail_line" ]]; then
+    printf '  %s📝 Detail:%s %s\n' "${gc_color_label:-}" "$c_reset" "$detail_line"
+  fi
+
+  printf '\n%s░░░░░ END OF THE TASK WORK ░░░░░%s\n\n' "${gc_color_muted:-}" "$c_reset"
+
+  if declare -F render_task_end >/dev/null 2>&1; then
+    render_task_end "$task_id" "$status" || true
+    GC_LAST_RENDER_TASK_FOOTER="$task_id"
+  fi
+}
+
+to_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+slugify_name() {
+  local s="${1:-}"
+  s="$(to_lower "$s")"
+  s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+  s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+  printf '%s\n' "${s:-gptcreator}"
+}
+
+# Context directories inside project
+ensure_ctx() {
+  local root="${1:-}" TMP_DIR=""
+  # Default to the current working directory when --project is not provided.
+  if [[ -z "${root}" ]]; then
+    root="$PWD"
+  fi
+  PROJECT_ROOT="$(abs_path "$root")"
+  GC_DIR="${PROJECT_ROOT}/.gpt-creator"
+  STAGING_DIR="${GC_DIR}/staging"
+  INPUT_DIR="${STAGING_DIR}/inputs"
+  PLAN_DIR="${STAGING_DIR}/plan"
+  LOG_DIR="${GC_DIR}/logs"
+  ART_DIR="${GC_DIR}/artifacts"
+  TMP_DIR="${GC_DIR}/tmp"
+  mkdir -p "$GC_DIR" "$STAGING_DIR" "$INPUT_DIR" "$PLAN_DIR" "$LOG_DIR" "$ART_DIR" "$TMP_DIR"
+  export INPUT_DIR
+  GC_GIT_DIR="$PROJECT_ROOT"
+  export GC_GIT_DIR
+  gc_migrate_progress_artifacts "$PROJECT_ROOT"
+  gc_configure_tmpdir "$PROJECT_ROOT"
+  gc_create_env_if_missing
+  gc_load_env
+  local base_name
+  base_name="$(basename "$PROJECT_ROOT")"
+  PROJECT_SLUG="$(slugify_name "${GC_DOCKER_PROJECT_NAME:-$base_name}")"
+  GC_DOCKER_PROJECT_NAME="${GC_DOCKER_PROJECT_NAME:-$PROJECT_SLUG}"
+  COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$GC_DOCKER_PROJECT_NAME}"
+  GC_FAIL_LOG_DIR="$LOG_DIR"
+  export GC_DOCKER_PROJECT_NAME COMPOSE_PROJECT_NAME PROJECT_SLUG
+
+  if gc_reports_enabled; then
+    gc_reports_initialize
+    gc_reports_touch_activity "$(date +%s)"
+  fi
+
+  gc_run_install_guard
+}
+
+gc_project_templates_root() {
+  local root="${CLI_ROOT}/project_templates"
+  mkdir -p "$root"
+  printf '%s\n' "$root"
+}
+
+gc_find_primary_rfp() {
+  local search_root="${1:-.}"
+  find "$search_root" -maxdepth 3 -type f \
+    \( -iname 'rfp.md' -o -iname '*rfp*.md' -o -iname '*request*for*proposal*.md' \) \
+    | sort | head -n 1
+}
+
+gc_bootstrap_state_dir() {
+  printf '%s\n' "${PLAN_DIR}/bootstrap"
+}
+
+gc_install_guard_version() {
+  printf 'plan-file-v1'
+}
+
+gc_install_guard_sentinel() {
+  local guard_dir="${GC_DIR}/install-guard"
+  mkdir -p "$guard_dir"
+  printf '%s/%s.ok' "$guard_dir" "$(gc_install_guard_version)"
+}
+
+gc_install_guard_forbidden_paths() {
+  printf '%s\n' "PLAN" "Plan" "plan" "PLAN.md" "Plan.md" "plan.md"
+}
+
+gc_install_guard_list_forbidden() {
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    local path="${PROJECT_ROOT}/${candidate}"
+    if [[ -e "$path" ]]; then
+      printf '%s\n' "$path"
+    fi
+  done < <(gc_install_guard_forbidden_paths)
+}
+
+gc_install_guard_has_forbidden() {
+  local found=0
+  while IFS= read -r _path; do
+    found=1
+    break
+  done < <(gc_install_guard_list_forbidden)
+  (( found )) && return 0
+  return 1
+}
+
+gc_run_install_guard() {
+  local sentinel
+  sentinel="$(gc_install_guard_sentinel)"
+  if [[ -f "$sentinel" ]] && ! gc_install_guard_has_forbidden; then
+    return 0
+  fi
+
+  local -a blocked=()
+  if ! mapfile -t blocked < <(gc_install_guard_list_forbidden); then
+    blocked=()
+  fi
+
+  if (( ${#blocked[@]} )); then
+    {
+      echo "[install-guard] Blocked by PLAN artifact(s):"
+      printf '  - %s\n' "${blocked[@]}"
+      cat <<'EOF'
+Resolve by removing or archiving the listed files (e.g., run scripts/install_guard_cleanup.sh --project <path>).
+This guard prevents automation loops that rewrite PLAN.md. Once resolved, rerun your command.
+EOF
+    } >&2
+    exit 1
+  fi
+
+  umask 077
+  local guard_dir tmp
+  guard_dir="$(dirname "$sentinel")"
+  mkdir -p "$guard_dir"
+  tmp="$(mktemp "${guard_dir}/.sentinel.XXXXXX")"
+  printf 'install-guard %s ok at %s\n' "$(gc_install_guard_version)" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >"$tmp"
+  mv -f "$tmp" "$sentinel"
+}
+
+gc_bootstrap_state_file() {
+  printf '%s\n' "$(gc_bootstrap_state_dir)/state.json"
+}
+
+gc_capture_error_context() {
+  local status="${1:-0}"
+  local command="${2:-}"
+  (( status == 0 )) && return
+  GC_LAST_ERROR_STATUS="$status"
+  GC_LAST_ERROR_CMD="$command"
+  gc_classify_error "$status" "$command"
+}
+
+gc_logs_dir() {
+  local dir="${GC_FAIL_LOG_DIR:-}"
+  if [[ -z "$dir" ]]; then
+    if [[ -n "${PROJECT_ROOT:-}" ]]; then
+      dir="${PROJECT_ROOT}/.gpt-creator/logs"
+    else
+      dir="${PWD}/.gpt-creator/logs"
+    fi
+  fi
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    return 1
+  fi
+  printf '%s\n' "$dir"
+}
+
+gc_reports_enabled() {
+  (( GC_REPORTS_ON != 0 ))
+}
+
+gc_reports_current_user() {
+  if [[ -n "${GC_REPORTER:-}" ]]; then
+    printf '%s\n' "$GC_REPORTER"
+    return 0
+  fi
+  local name
+  name="$(git config user.name 2>/dev/null || true)"
+  if [[ -z "$name" ]]; then
+    name="${USER:-}"
+  fi
+  if [[ -z "$name" ]]; then
+    name="$(whoami 2>/dev/null || true)"
+  fi
+  printf '%s\n' "${name:-maintainer}"
+}
+
+gc_reports_escape() {
+  local s="${1:-}"
+  s="${s//\\/\\\\}"
+  s="${s//$'\n'/\\n}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+gc_reports_issue_file() {
+  local kind="${1:-generic}"
+  local dir="${GC_REPORTS_STORE_DIR:-}"
+  if [[ -z "$dir" ]]; then
+    local base
+    base="$(gc_logs_dir)" || return 1
+    dir="${base}/issue-reports"
+  fi
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    return 1
+  fi
+  local stamp random file
+  stamp="$(date -u +"%Y%m%dT%H%M%SZ")"
+  random="$(printf '%04x%04x' "$RANDOM" "$RANDOM")"
+  file="${dir}/${stamp}-${kind}-${random}.yml"
+  if [[ -e "$file" ]]; then
+    file="${dir}/${stamp}-${kind}-${random}-${RANDOM}.yml"
+  fi
+  if ! : >"$file" 2>/dev/null; then
+    return 1
+  fi
+  printf '%s\n' "$file"
+}
+
+gc_reports_write_issue() {
+  local kind="${1:-generic}"
+  local summary="${2:-}"
+  local definition="${3:-}"
+  local priority="${4:-P2-medium}"
+  local file
+  file="$(gc_reports_issue_file "$kind")" || return 1
+  local summary_escaped
+  summary_escaped="$(gc_reports_escape "$summary")"
+  local reporter
+  reporter="$(gc_reports_current_user)"
+  local timestamp
+  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  {
+    printf 'summary: "%s"\n' "$summary_escaped"
+    printf 'priority: %s\n' "$priority"
+    printf 'issue_definition: |\n'
+    if [[ -n "$definition" ]]; then
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        printf '  %s\n' "$line"
+      done <<<"$definition"
+    else
+      printf '  (no additional details provided)\n'
+    fi
+    printf 'metadata:\n'
+    printf '  type: %s\n' "$kind"
+    printf '  timestamp: "%s"\n' "$timestamp"
+    printf '  reporter: "%s"\n' "$(gc_reports_escape "$reporter")"
+    printf '  command: "%s"\n' "$(gc_reports_escape "${GC_INVOCATION:-$0}")"
+    if [[ -n "${GC_LAST_ERROR_STATUS:-}" ]]; then
+      printf '  exit_code: %s\n' "${GC_LAST_ERROR_STATUS}"
+    fi
+    if [[ -n "${GC_LAST_ERROR_CMD:-}" ]]; then
+      printf '  last_command: "%s"\n' "$(gc_reports_escape "${GC_LAST_ERROR_CMD}")"
+    fi
+    printf '  working_dir: "%s"\n' "$(gc_reports_escape "$PWD")"
+    printf '  status: open\n'
+    printf '  likes: 0\n'
+    printf '  comments: 0\n'
+  } >"$file"
+  printf '%s\n' "$file"
+}
+
+gc_reports_sync_github() {
+  local report_file="${1:-}"
+  local kind="${2:-generic}"
+  local summary="${3:-}"
+  local definition="${4:-}"
+  local priority="${5:-P2-medium}"
+  local cli_version="${VERSION:-}"
+  local binary_path="${GC_SELF_PATH:-}"
+
+  if [[ -z "$binary_path" || ! -r "$binary_path" ]]; then
+    if [[ -n "${CLI_ROOT:-}" && -r "${CLI_ROOT}/bin/${APP_NAME}" ]]; then
+      binary_path="${CLI_ROOT}/bin/${APP_NAME}"
+    else
+      binary_path="$(command -v "${APP_NAME}" 2>/dev/null || true)"
+    fi
+  fi
+
+  local repo="${GC_GITHUB_REPO:-}"
+  local token="${GC_GITHUB_TOKEN:-}"
+  if [[ -z "$repo" || -z "$token" ]]; then
+    return 0
+  fi
+
+  local helper_path
+  helper_path="$(gc_clone_python_tool "reports_sync_github.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+
+  local response
+  if ! response="$(
+    GC_REPORT_SUMMARY="$summary" \
+    GC_REPORT_DEFINITION="$definition" \
+    GC_REPORT_PRIORITY="$priority" \
+    GC_REPORT_KIND="$kind" \
+    GC_REPORT_FILE="$report_file" \
+    GC_REPORT_COMMAND="${GC_INVOCATION:-}" \
+    GC_REPORT_EXIT="${GC_LAST_ERROR_STATUS:-}" \
+    GC_REPORT_LAST_CMD="${GC_LAST_ERROR_CMD:-}" \
+    GC_REPORT_WORKDIR="$PWD" \
+    GC_REPORT_PROJECT="${PROJECT_ROOT:-$PWD}" \
+    GC_REPORTER="${GC_REPORTER:-}" \
+    GC_REPORT_VERSION="$cli_version" \
+    GC_REPORT_BINARY="${binary_path:-}" \
+    python3 "$helper_path" "$repo" "$token"
+  )"; then
+    warn "Failed to create GitHub issue for $(basename "$report_file")."
+    return 0
+  fi
+
+  local issue_url=""
+  local issue_number=""
+  IFS=$'\n' read -r issue_url issue_number <<<"$response"
+  if [[ -n "$issue_url" ]]; then
+    gc_reports_set_metadata_field "$report_file" issue_url "\"$issue_url\""
+    if [[ -n "$issue_number" ]]; then
+      gc_reports_set_metadata_field "$report_file" issue_number "$issue_number"
+    fi
+    info "GitHub issue created -> ${issue_url}"
+  fi
+}
+
+gc_reports_record_issue() {
+  local kind="${1:-generic}"
+  local summary="${2:-}"
+  local definition="${3:-}"
+  local priority="${4:-P2-medium}"
+  local report_file
+  report_file="$(gc_reports_write_issue "$kind" "$summary" "$definition" "$priority")" || return 1
+  gc_reports_sync_github "$report_file" "$kind" "$summary" "$definition" "$priority"
+  printf '%s\n' "$report_file"
+}
+
+gc_reports_touch_activity() {
+  local timestamp="${1:-$(date +%s)}"
+  local command="${2:-}"
+  local file="${GC_REPORTS_ACTIVITY_FILE:-}"
+  [[ -n "$file" ]] || return 0
+  if [[ -n "$command" ]]; then
+    command="${command//$'\n'/ }"
+    printf '%s\t%s\n' "$timestamp" "$command" >"$file" 2>/dev/null || true
+  else
+    printf '%s\n' "$timestamp" >"$file" 2>/dev/null || true
+  fi
+}
+
+gc_reports_activity_trap() {
+  gc_reports_touch_activity "$(date +%s)" "$1"
+  return 0
+}
+
+gc_reports_handle_crash() {
+  local status="${1:-1}"
+  gc_reports_enabled || return 0
+  local summary
+  printf -v summary "Crash (exit %s) while running '%s'" "$status" "${GC_INVOCATION:-$0}"
+  local log_dir
+  if ! log_dir="$(gc_logs_dir)"; then
+    log_dir="<unknown>"
+  fi
+  local -a lines
+  lines=("The CLI exited unexpectedly with status ${status}.")
+  if [[ -n "${GC_LAST_ERROR_CMD:-}" ]]; then
+    lines+=("Last command observed before exit: ${GC_LAST_ERROR_CMD}")
+  fi
+  if [[ -n "${GC_LAST_CRASH_LOG:-}" ]]; then
+    lines+=("Crash log stored at: ${GC_LAST_CRASH_LOG}")
+  fi
+  lines+=("Inspect logs under ${log_dir} for further diagnostics.")
+  local definition=""
+  if ((${#lines[@]})); then
+    printf -v definition '%s\n' "${lines[@]}"
+    definition="${definition%$'\n'}"
+  fi
+  local path
+  if path="$(gc_reports_record_issue "crash" "$summary" "$definition" "P0-critical")"; then
+    warn "Issue report recorded for crash → ${path}"
+  fi
+}
+
+gc_reports_handle_idle() {
+  local idle_seconds="${1:-0}"
+  local heartbeat="${2:-}"
+  local last_command="${3:-}"
+  gc_reports_enabled || return 0
+  local summary
+  printf -v summary "Idle/stall detected after %ss while running '%s'" "$idle_seconds" "${GC_INVOCATION:-$0}"
+  local log_dir
+  if ! log_dir="$(gc_logs_dir)"; then
+    log_dir="<unknown>"
+  fi
+  if [[ -n "$last_command" ]]; then
+    last_command="${last_command//$'\n'/ }"
+  fi
+  local -a lines
+  lines=("No CLI activity recorded for ${idle_seconds} seconds.")
+  if [[ -n "$heartbeat" ]]; then
+    lines+=("Heartbeat file: ${heartbeat}")
+  fi
+  if [[ -n "$last_command" ]]; then
+    lines+=("Last command observed: ${last_command}")
+  fi
+  lines+=("Inspect processes and logs under ${log_dir} to verify whether the command stalled.")
+  local definition=""
+  if ((${#lines[@]})); then
+    printf -v definition '%s\n' "${lines[@]}"
+    definition="${definition%$'\n'}"
+  fi
+  local path
+  if path="$(gc_reports_record_issue "idle" "$summary" "$definition" "P1-high")"; then
+    warn "Issue report recorded for idle stall → ${path}"
+  fi
+}
+
+gc_reports_watchdog_loop() {
+  local timeout="${1:-0}"
+  local interval="${2:-0}"
+  local activity_file="${3:-}"
+  local main_pid="${4:-0}"
+  local sentinel="${5:-}"
+
+  (( timeout > 0 )) || return 0
+  (( interval > 0 )) || interval="$timeout"
+  [[ -n "$activity_file" && -n "$main_pid" ]] || return 0
+
+  while kill -0 "$main_pid" 2>/dev/null; do
+    sleep "$interval" || break
+    [[ -f "$activity_file" ]] || continue
+    local raw
+    raw="$(cat "$activity_file" 2>/dev/null)" || continue
+    local payload="$raw"
+    local last="${payload%%$'\t'*}"
+    local activity_command=""
+    if [[ "$payload" == *$'\t'* ]]; then
+      activity_command="${payload#*$'\t'}"
+    fi
+    [[ "$last" =~ ^[0-9]+$ ]] || continue
+    local now
+    now="$(date +%s)"
+    local delta=$(( now - last ))
+    if (( delta >= timeout )); then
+      if [[ -n "$sentinel" ]]; then
+        printf '%s\n' "$now" >"$sentinel" 2>/dev/null || true
+      fi
+      gc_reports_handle_idle "$delta" "$activity_file" "$activity_command"
+      break
+    fi
+  done
+}
+
+gc_reports_start_watchdog() {
+  local timeout="${1:-0}"
+  local interval="${2:-0}"
+  local activity="${3:-}"
+  local main_pid="${4:-0}"
+  local sentinel="${5:-}"
+
+  if (( timeout <= 0 )); then
+    return 0
+  fi
+  if (( interval <= 0 || interval > timeout )); then
+    interval="$timeout"
+  fi
+  if [[ -z "$activity" || -z "$main_pid" ]]; then
+    return 0
+  fi
+  if [[ -n "${GC_REPORTS_WATCHDOG_PID:-}" ]] && kill -0 "$GC_REPORTS_WATCHDOG_PID" 2>/dev/null; then
+    return 0
+  fi
+
+  gc_reports_watchdog_loop "$timeout" "$interval" "$activity" "$main_pid" "$sentinel" &
+  GC_REPORTS_WATCHDOG_PID=$!
+}
+
+gc_reports_initialize() {
+  gc_reports_enabled || return 0
+  if (( GC_REPORTS_INITIALIZED )); then
+    return 0
+  fi
+  local log_dir
+  if ! log_dir="$(gc_logs_dir)"; then
+    warn "Unable to determine log directory for issue reporting"
+    return 0
+  fi
+  GC_REPORTS_STORE_DIR="${log_dir}/issue-reports"
+  if ! mkdir -p "$GC_REPORTS_STORE_DIR" 2>/dev/null; then
+    warn "Unable to prepare reports directory at ${GC_REPORTS_STORE_DIR}"
+    return 0
+  fi
+  GC_REPORTS_ACTIVITY_FILE="${GC_REPORTS_STORE_DIR}/heartbeat-${GC_MAIN_PID}.txt"
+  GC_REPORTS_IDLE_SENTINEL="${GC_REPORTS_STORE_DIR}/idle-${GC_MAIN_PID}.flag"
+  if ! : >"$GC_REPORTS_ACTIVITY_FILE" 2>/dev/null; then
+    warn "Unable to initialize heartbeat tracking for issue reporting"
+    return 0
+  fi
+  GC_REPORTS_INITIALIZED=1
+  gc_reports_touch_activity "$(date +%s)"
+  gc_reports_start_watchdog "$GC_REPORTS_IDLE_TIMEOUT" "$GC_REPORTS_CHECK_INTERVAL" "$GC_REPORTS_ACTIVITY_FILE" "$GC_MAIN_PID" "$GC_REPORTS_IDLE_SENTINEL"
+  return 0
+}
+
+gc_reports_cleanup() {
+  if [[ -n "${GC_REPORTS_WATCHDOG_PID:-}" ]]; then
+    kill "$GC_REPORTS_WATCHDOG_PID" 2>/dev/null || true
+    wait "$GC_REPORTS_WATCHDOG_PID" 2>/dev/null || true
+    GC_REPORTS_WATCHDOG_PID=""
+  fi
+}
+
+gc_reports_dir() {
+  if [[ -n "${GC_REPORTS_STORE_DIR:-}" ]]; then
+    printf '%s\n' "$GC_REPORTS_STORE_DIR"
+    return 0
+  fi
+  local base
+  base="$(gc_logs_dir)" || return 1
+  local dir="${base}/issue-reports"
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    return 1
+  fi
+  printf '%s\n' "$dir"
+}
+
+gc_reports_set_metadata_field() {
+  local report_file="${1:?report file required}"
+  local key="${2:?metadata key required}"
+  local value="${3:-}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "reports_set_metadata_field.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$report_file" "$key" "$value"
+}
+
+gc_reports_resolve_slug() {
+  local slug="${1:-}"
+  [[ -n "$slug" ]] || return 1
+  local dir
+  dir="$(gc_reports_dir)" || return 1
+  local candidate
+  for ext in yml yaml; do
+    candidate="${dir}/${slug}.${ext}"
+    if [[ -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  candidate="${dir}/${slug}"
+  if [[ -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  local -a matches=()
+  while IFS= read -r file; do
+    local base
+    base="$(basename "$file")"
+    base="${base%.*}"
+    if [[ "$base" == "$slug"* ]]; then
+      matches+=("$file")
+    fi
+  done < <(find "$dir" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print 2>/dev/null)
+  local count="${#matches[@]}"
+  if (( count == 1 )); then
+    printf '%s\n' "${matches[0]}"
+    return 0
+  fi
+  if (( count > 1 )); then
+    warn "Multiple reports match slug '${slug}'."
+    local entry
+    for entry in "${matches[@]}"; do
+      warn "  $(basename "$entry")"
+    done
+    return 2
+  fi
+  return 1
+}
+
+gc_reports_run_work() {
+  local slug="${1:?slug required}"
+  local branch_hint="${2:-}"
+  local push_after="${3:-1}"
+  local prompt_only="${4:-0}"
+  local assignee_override="${5:-}"
+
+  local report_path
+  if ! report_path="$(gc_reports_resolve_slug "$slug")"; then
+    warn "No issue report found for slug: ${slug}"
+    return 1
+  fi
+
+  local branch="${branch_hint:-report/${slug}}"
+  local push_flag="$push_after"
+  if [[ "$push_flag" != "0" ]]; then
+    push_flag=1
+  fi
+  local prompt_only_flag="$prompt_only"
+  if [[ "$prompt_only_flag" != "0" ]]; then
+    prompt_only_flag=1
+  fi
+
+  local report_dir="${GC_DIR}/reports/${slug}"
+  mkdir -p "$report_dir"
+  local prompt_path="${report_dir}/work.md"
+  local project_root="${PROJECT_ROOT:-$PWD}"
+
+  local helper_path
+  helper_path="$(gc_clone_python_tool reports_run_work.py "${PROJECT_ROOT:-$PWD}")" || return 1
+
+  if ! python3 "$helper_path" "$report_path" "$prompt_path" "$project_root" "$slug" "$branch" "$push_flag"
+  then
+    warn "Failed to prepare Codex prompt for report ${slug}"
+    return 1
+  fi
+
+  info "Prepared Codex prompt → ${prompt_path}"
+
+  local now_utc
+  now_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local assignee="${assignee_override:-${GC_REPORT_ASSIGNEE:-$(gc_reports_current_user)}}"
+  if (( prompt_only_flag )); then
+    [[ -n "$assignee" ]] && gc_reports_set_metadata_field "$report_path" assigned "\"$(gc_reports_escape "$assignee")\""
+    gc_reports_set_metadata_field "$report_path" branch "\"$(gc_reports_escape "$branch")\""
+    gc_reports_set_metadata_field "$report_path" status open
+    info "Prompt generated (skipping Codex execution due to --prompt-only)."
+    info "Run: ${CODEX_BIN:-codex} exec --model ${CODEX_MODEL} --cd \"${PROJECT_ROOT:-$PWD}\" < ${prompt_path}"
+    return 0
+  fi
+
+  if [[ -n "$assignee" ]]; then
+    gc_reports_set_metadata_field "$report_path" assigned "\"$(gc_reports_escape "$assignee")\""
+  fi
+  gc_reports_set_metadata_field "$report_path" status in-progress
+  gc_reports_set_metadata_field "$report_path" branch "\"$(gc_reports_escape "$branch")\""
+  gc_reports_set_metadata_field "$report_path" last_started "\"$now_utc\""
+
+  if codex_call "report-${slug}" --step status --prompt "$prompt_path"; then
+    local completed_utc
+    completed_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    gc_reports_set_metadata_field "$report_path" status resolved
+    gc_reports_set_metadata_field "$report_path" last_completed "\"$completed_utc\""
+    ok "Codex resolved report ${slug}"
+    return 0
+  else
+    local failed_utc
+    failed_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    gc_reports_set_metadata_field "$report_path" status open
+    gc_reports_set_metadata_field "$report_path" last_failed "\"$failed_utc\""
+    warn "Codex failed to resolve report ${slug}"
+    return 1
+  fi
+}
+
+gc_reports_set_idle_timeout() {
+  local value="${1:-}"
+  if [[ -z "$value" ]]; then
+    die "--reports-idle-timeout requires a value in seconds"
+  fi
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    die "--reports-idle-timeout expects an integer number of seconds (received: $value)"
+  fi
+  GC_REPORTS_IDLE_TIMEOUT="$value"
+}
+
+gc_reports_extract_global_flags() {
+  GC_FILTERED_ARGS=()
+  local -a args=("$@")
+  local idx=0
+  while (( idx < ${#args[@]} )); do
+    local arg="${args[idx]}"
+    case "$arg" in
+      --)
+        GC_FILTERED_ARGS+=("${args[@]:idx}")
+        return 0
+        ;;
+      --dry-run|--dryrun)
+        GC_DRY_RUN=1
+        ;;
+      --reports-on)
+        GC_REPORTS_ON=1
+        ;;
+      --reports-off)
+        GC_REPORTS_ON=0
+        ;;
+      --reports-idle-timeout=*)
+        gc_reports_set_idle_timeout "${arg#*=}"
+        ;;
+      --reports-idle-timeout)
+        (( idx + 1 < ${#args[@]} )) || die "--reports-idle-timeout requires a value in seconds"
+        idx=$((idx + 1))
+        gc_reports_set_idle_timeout "${args[idx]}"
+        ;;
+      *)
+        GC_FILTERED_ARGS+=("$arg")
+        ;;
+    esac
+    idx=$((idx + 1))
+  done
+}
+
+gc_write_crash_log() {
+  local status="${1:-1}"
+  if (( GC_CRASH_LOGGED )); then
+    return
+  fi
+
+  local log_dir
+  log_dir="$(gc_logs_dir)" || return
+
+  local log_file="${log_dir}/crash.log"
+  local timestamp
+  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local invocation="${GC_INVOCATION:-$0}"
+  local last_command="${GC_LAST_ERROR_CMD:-}"
+
+  {
+    printf 'timestamp=%s\n' "$timestamp"
+    printf 'command=%s\n' "$invocation"
+    printf 'exit_code=%s\n' "$status"
+    if [[ -n "$last_command" ]]; then
+      printf 'last_command=%s\n' "$last_command"
+    fi
+    if [[ -n "${PROJECT_ROOT:-}" ]]; then
+      printf 'project_root=%s\n' "$PROJECT_ROOT"
+    fi
+    printf 'working_dir=%s\n' "$PWD"
+    printf -- '---\n'
+  } >>"$log_file" 2>/dev/null || return
+
+  GC_LAST_CRASH_LOG="$log_file"
+  GC_CRASH_LOGGED=1
+}
+
+gc_exit_handler() {
+  local status="${1:-0}"
+  if (( status != 0 )); then
+    if [[ -n "${GC_ACTIVE_TASK_REPORT:-}" ]]; then
+      local last_cmd="${GC_LAST_ERROR_CMD:-}"
+      local err_class="${GC_LAST_ERROR_CLASS:-UNCLASSIFIED}"
+      local failure_reason="${GC_LAST_ERROR_REASON:-}"
+      if [[ -z "$failure_reason" ]]; then
+        if [[ -n "$last_cmd" ]]; then
+          failure_reason="Command '${last_cmd}' exited with status ${status}."
+        else
+          failure_reason="Unexpected error; inspect crash log."
+        fi
+      else
+        if [[ "$err_class" != "UNCLASSIFIED" && "$err_class" != "NONE" ]]; then
+          failure_reason="${failure_reason} (class: ${err_class})"
+        fi
+      fi
+      gc_flush_logs_hooks || true
+      gc_finalize_active_task "ERR" "$failure_reason"
+    fi
+    if [[ -z "${GC_LAST_ERROR_STATUS:-}" || "${GC_LAST_ERROR_STATUS}" -eq 0 ]]; then
+      GC_LAST_ERROR_STATUS="$status"
+    fi
+    gc_write_crash_log "$status"
+    if gc_reports_enabled; then
+      gc_reports_handle_crash "$status"
+    fi
+  fi
+  gc_reports_cleanup
+}
+
+gc_budget_log_stage() {
+  local stage="${1:-unknown}"
+  local prompt_tokens="${2:-0}"
+  local completion_tokens="${3:-0}"
+  local total_tokens="${4:-0}"
+  local duration_ms="${5:-0}"
+  local pruned_items_raw="${6:-[]}"
+  local tool_bytes_raw="${7:-{}}"
+  local blocked_quota="${8:-false}"
+  local note="${9:-}"
+
+  local log_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
+  mkdir -p "$log_dir"
+  local usage_file="${log_dir}/codex-usage.ndjson"
+
+  local run_id="${GC_BUDGET_RUN_ID:-manual}"
+  local story_ref="${GC_BUDGET_STORY_ID:-}"
+  local task_ref="${GC_BUDGET_TASK_ID:-}"
+  local model_name="${CODEX_MODEL:-gpt-5.1-codex}"
+  local ts
+  ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  local blocked_flag="${blocked_quota:-false}"
+  blocked_flag="${blocked_flag,,}"
+  if [[ "$blocked_flag" != "true" && "$blocked_flag" != "false" ]]; then
+    blocked_flag="false"
+  fi
+
+  local stage_key="${stage:-}"
+  local total_var
+  total_var="$(gc_budget_stage_total_var "$stage_key")"
+  local current_total="${!total_var:-0}"
+  if [[ "$total_tokens" =~ ^[-+]?[0-9]+$ ]]; then
+    local updated_total=$((current_total + total_tokens))
+    printf -v "$total_var" '%s' "$updated_total"
+    local limit_value
+    limit_value="$(gc_budget_get_stage_limit "$stage_key")"
+    if [[ "$limit_value" =~ ^[0-9]+$ ]] && (( limit_value > 0 && updated_total > limit_value )); then
+      local trip_var
+      trip_var="$(gc_budget_stage_tripped_var "$stage_key")"
+      printf -v "$trip_var" '%s' "1"
+      blocked_flag="true"
+    fi
+  fi
+  local helper_path
+  helper_path="$(gc_clone_python_tool "gc_budget_log_stage.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" \
+    "$usage_file" "$ts" "$run_id" "$story_ref" "$task_ref" "$stage" "$model_name" \
+    "$prompt_tokens" "$completion_tokens" "$total_tokens" "$duration_ms" \
+    "$pruned_items_raw" "$tool_bytes_raw" "$blocked_flag" "$note"
+}
+
+gc_record_codex_usage() {
+  local log_file="${1:-}"
+  local task="${2:-}"
+  local model="${3:-}"
+  local prompt_file="${4:-}"
+  local exit_code="${5:-0}"
+  local step="${6:-}"
+  local max_output="${7:-0}"
+  local duration_ms="${8:-0}"
+
+  GC_STAGE_LIMIT_LAST_STEP=""
+  GC_STAGE_LIMIT_LAST_LIMIT=""
+
+  GC_LAST_CODEX_PROMPT_TOKENS=0
+  GC_LAST_CODEX_COMPLETION_TOKENS=0
+  GC_LAST_CODEX_TOTAL_TOKENS=0
+  GC_LAST_CODEX_STDOUT_TAIL_HASH="none"
+  GC_LAST_CODEX_STDOUT_TAIL_BASE64=""
+  GC_LAST_CODEX_TURN_DIFF_HASH=""
+  GC_LAST_CODEX_TURN_DIFF_BLOCKS=0
+
+  [[ -n "$log_file" && -f "$log_file" ]] || return 0
+
+  local usage_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
+  mkdir -p "$usage_dir"
+  local usage_file="${usage_dir}/codex-usage.ndjson"
+  local timestamp
+  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+  local py_output=""
+  local tmp_output
+  tmp_output="$(mktemp "${TMPDIR:-/tmp}/gc-usage-XXXXXX")" || {
+    warn "Failed to record Codex usage for task=${task} model=${model}."
+    return 1
+  }
+
+  local usage_script_py
+  usage_script_py="$(mktemp "${TMPDIR:-/tmp}/gc-usage-script-XXXXXX.py")" || {
+    warn "Failed to prepare Codex usage recorder."
+    rm -f "$tmp_output" || true
+    return 1
+  }
+
+  local usage_source="${GC_SCRIPTS_ROOT}/python/record_codex_usage.py"
+  if [[ ! -f "$usage_source" ]]; then
+    warn "Codex usage recorder missing at ${usage_source}"
+    rm -f "$tmp_output" "$usage_script_py" || true
+    return 1
+  fi
+
+  if ! cp "$usage_source" "$usage_script_py"; then
+    warn "Failed to copy Codex usage recorder."
+    rm -f "$tmp_output" "$usage_script_py" || true
+    return 1
+  fi
+
+
+  if python3 "$usage_script_py" "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" "${GC_COMMAND_FAILURE_CACHE:-}" "${GC_COMMAND_STREAM_CACHE:-}" "${GC_COMMAND_FILE_CACHE:-}" "${GC_COMMAND_SCAN_CACHE:-}" "$step" "$max_output" "$duration_ms" >"$tmp_output"
+  then
+    py_output="$(<"$tmp_output")"
+    rm -f "$usage_script_py" || true
+    rm -f "$tmp_output" || true
+    if [[ -n "$py_output" ]]; then
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        case "$line" in
+          LIMIT_DETECTED$'\t'*)
+            GC_CODEX_USAGE_LIMIT_REACHED=1
+            GC_CODEX_USAGE_LIMIT_CONFIRMED=0
+            GC_CODEX_USAGE_LIMIT_MESSAGE="${line#LIMIT_DETECTED$'\t'}"
+            if gc_usage_limit_is_provider_signal "${GC_CODEX_USAGE_LIMIT_MESSAGE}"; then
+              GC_CODEX_USAGE_LIMIT_CONFIRMED=1
+            fi
+            ;;
+          LIMIT_DETECTED)
+            GC_CODEX_USAGE_LIMIT_REACHED=1
+            GC_CODEX_USAGE_LIMIT_CONFIRMED=0
+            GC_CODEX_USAGE_LIMIT_MESSAGE=""
+            ;;
+          USAGE$'\t'*)
+            IFS=$'\t' read -r _ prompt_val completion_val total_val <<<"$line"
+            if [[ "$prompt_val" =~ ^[0-9]+$ ]]; then
+              GC_LAST_CODEX_PROMPT_TOKENS=$((prompt_val))
+            else
+              GC_LAST_CODEX_PROMPT_TOKENS=0
+            fi
+            if [[ "$completion_val" =~ ^[0-9]+$ ]]; then
+              GC_LAST_CODEX_COMPLETION_TOKENS=$((completion_val))
+            else
+              GC_LAST_CODEX_COMPLETION_TOKENS=0
+            fi
+            if [[ "$total_val" =~ ^[0-9]+$ ]]; then
+              GC_LAST_CODEX_TOTAL_TOKENS=$((total_val))
+            else
+              GC_LAST_CODEX_TOTAL_TOKENS=$((GC_LAST_CODEX_PROMPT_TOKENS + GC_LAST_CODEX_COMPLETION_TOKENS))
+            fi
+            ;;
+          CMDFAIL$'\t'*)
+            local rest="${line#CMDFAIL$'\t'}"
+            local repeat_flag total_fail _ digest encoded_command encoded_summary
+            IFS=$'\t' read -r repeat_flag total_fail _ digest encoded_command encoded_summary <<<"$rest"
+            local command_text summary_text
+            command_text="$(gc_decode_base64 "${encoded_command:-}")"
+            summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
+            command_text="${command_text//$'\r'/ }"
+            command_text="${command_text//$'\n'/ }"
+            summary_text="${summary_text//$'\r'/ }"
+            summary_text="${summary_text//$'\n'/ }"
+            command_text="${command_text#"${command_text%%[![:space:]]*}"}"
+            command_text="${command_text%"${command_text##*[![:space:]]}"}"
+            summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
+            summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
+            if [[ ${#summary_text} -gt 160 ]]; then
+              summary_text="${summary_text:0:157}..."
+            fi
+            if [[ "$repeat_flag" == "1" && -n "$digest" ]]; then
+              if [[ "$GC_COMMAND_FAILURE_WARN_DIGESTS" != *"|$digest|"* ]]; then
+                if [[ -n "$command_text" ]]; then
+                  warn "Repeated command failure detected (x${total_fail}): ${command_text}"
+                else
+                  warn "Repeated command failure detected (x${total_fail})."
+                fi
+                if [[ -n "$summary_text" ]]; then
+                  warn "  Last failure: ${summary_text}"
+                fi
+                GC_COMMAND_FAILURE_WARN_DIGESTS+="|$digest|"
+              fi
+            fi
+            ;;
+          CMDSTREAM$'\t'*)
+            local rest="${line#CMDSTREAM$'\t'}"
+            local digest repeat_flag total_seen encoded_summary encoded_advice
+            IFS=$'\t' read -r digest repeat_flag total_seen encoded_summary encoded_advice <<<"$rest"
+            local summary_text advice_text
+            summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
+            advice_text="$(gc_decode_base64 "${encoded_advice:-}")"
+            summary_text="${summary_text//$'\r'/ }"
+            summary_text="${summary_text//$'\n'/ }"
+            advice_text="${advice_text//$'\r'/ }"
+            advice_text="${advice_text//$'\n'/ }"
+            summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
+            summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
+            advice_text="${advice_text#"${advice_text%%[![:space:]]*}"}"
+            advice_text="${advice_text%"${advice_text##*[![:space:]]}"}"
+            if [[ "$GC_COMMAND_STREAM_WARN_DIGESTS" != *"|$digest|"* ]]; then
+              local repeat_note=""
+              if [[ "$repeat_flag" == "1" ]]; then
+                repeat_note=" (repeat)"
+              fi
+              warn "Sequential sed/cat streaming detected${repeat_note}: ${summary_text}"
+              if [[ -n "$advice_text" ]]; then
+                warn "  Recommendation: ${advice_text}"
+              fi
+              if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
+                warn "  Observed ${total_seen} times; pivot to targeted searches to cut token usage."
+              fi
+              GC_COMMAND_STREAM_WARN_DIGESTS+="|$digest|"
+            fi
+            ;;
+          CMDSCAN$'\t'*)
+            local rest="${line#CMDSCAN$'\t'}"
+            local digest repeat_flag total_seen encoded_command encoded_message
+            IFS=$'\t' read -r digest repeat_flag total_seen encoded_command encoded_message <<<"$rest"
+            local command_text message_text
+            command_text="$(gc_decode_base64 "${encoded_command:-}")"
+            message_text="$(gc_decode_base64 "${encoded_message:-}")"
+            command_text="${command_text//$'\r'/ }"
+            command_text="${command_text//$'\n'/ }"
+            message_text="${message_text//$'\r'/ }"
+            message_text="${message_text//$'\n'/ }"
+            command_text="${command_text#"${command_text%%[![:space:]]*}"}"
+            command_text="${command_text%"${command_text##*[![:space:]]}"}"
+            message_text="${message_text#"${message_text%%[![:space:]]*}"}"
+            message_text="${message_text%"${message_text##*[![:space:]]}"}"
+            if [[ "$GC_COMMAND_SCAN_WARN_DIGESTS" != *"|$digest|"* ]]; then
+              local repeat_note=""
+              if [[ "$repeat_flag" == "1" ]]; then
+                repeat_note=" (repeat)"
+              fi
+              warn "Directory crawl detected${repeat_note}: ${command_text:-<command unavailable>}"
+              if [[ -n "$message_text" ]]; then
+                warn "  Reason: ${message_text}"
+              fi
+              if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
+                warn "  Observed ${total_seen} times; declare new focus before exploring other areas."
+              fi
+              GC_COMMAND_SCAN_WARN_DIGESTS+="|$digest|"
+            fi
+            ;;
+          CMDGUARD$'\t'*)
+            local rest="${line#CMDGUARD$'\t'}"
+            local digest repeat_flag issue_count encoded_command encoded_message
+            IFS=$'\t' read -r digest repeat_flag issue_count encoded_command encoded_message <<<"$rest"
+            local command_text message_text
+            command_text="$(gc_decode_base64 "${encoded_command:-}")"
+            message_text="$(gc_decode_base64 "${encoded_message:-}")"
+            command_text="${command_text//$'\r'/ }"
+            command_text="${command_text//$'\n'/ }"
+            message_text="${message_text//$'\r'/ }"
+            message_text="${message_text//$'\n'/ }"
+            command_text="${command_text#"${command_text%%[![:space:]]*}"}"
+            command_text="${command_text%"${command_text##*[![:space:]]}"}"
+            message_text="${message_text#"${message_text%%[![:space:]]*}"}"
+            message_text="${message_text%"${message_text##*[![:space:]]}"}"
+            if [[ "$GC_COMMAND_GUARD_WARN_DIGESTS" != *"|$digest|"* ]]; then
+              warn "Guardrails blocked expensive command: ${command_text:-pnpm}"
+              if [[ -n "$message_text" ]]; then
+                warn "  Fix before retry: ${message_text}"
+              fi
+              if [[ "$issue_count" =~ ^[0-9]+$ && "$issue_count" -gt 1 ]]; then
+                warn "  Multiple pre-check issues detected; update plan/focus once resolved."
+              fi
+              GC_COMMAND_GUARD_WARN_DIGESTS+="|$digest|"
+            fi
+            ;;
+          CMDFILE$'\t'*)
+            local rest="${line#CMDFILE$'\t'}"
+            local digest repeat_flag total_seen encoded_summary encoded_excerpt
+            IFS=$'\t' read -r digest repeat_flag total_seen encoded_summary encoded_excerpt <<<"$rest"
+            local summary_text excerpt_text
+            summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
+            excerpt_text="$(gc_decode_base64 "${encoded_excerpt:-}")"
+            summary_text="${summary_text//$'\r'/ }"
+            summary_text="${summary_text//$'\n'/ }"
+            excerpt_text="${excerpt_text//$'\r'/ }"
+            excerpt_text="${excerpt_text//$'\n'/ }"
+            summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
+            summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
+            excerpt_text="${excerpt_text#"${excerpt_text%%[![:space:]]*}"}"
+            excerpt_text="${excerpt_text%"${excerpt_text##*[![:space:]]}"}"
+            if [[ "$repeat_flag" == "1" ]]; then
+              if [[ "$GC_COMMAND_FILE_WARN_DIGESTS" != *"|$digest|"* ]]; then
+                warn "Repeated file read detected: ${summary_text}"
+                if [[ -n "$excerpt_text" ]]; then
+                  local preview="$excerpt_text"
+                  if [[ ${#preview} -gt 140 ]]; then
+                    preview="${preview:0:137}..."
+                  fi
+                  warn "  Refer to cached excerpt instead of re-running cat/sed: \"${preview}\""
+                else
+                  warn "  Refer to the cached excerpt listed in the prompt instead of re-reading the file."
+                fi
+                if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
+                  warn "  Observed ${total_seen} reads for this slice; reuse the cached snippet unless the file changed."
+                fi
+                GC_COMMAND_FILE_WARN_DIGESTS+="|$digest|"
+              fi
+            else
+              if [[ -n "$summary_text" ]]; then
+                info "Cached file excerpt saved: ${summary_text}"
+              fi
+            fi
+            ;;
+        esac
+      done <<<"$py_output"
+      if [[ -n "$step" ]]; then
+        # shellcheck disable=SC2034  # tracked for downstream diagnostics
+        GC_LAST_CODEX_OUTPUT_STEP="$step"
+      fi
+      if [[ "$max_output" =~ ^[0-9]+$ ]]; then
+        # shellcheck disable=SC2034  # tracked for downstream diagnostics
+        GC_LAST_CODEX_OUTPUT_LIMIT="$max_output"
+      else
+        # shellcheck disable=SC2034  # tracked for downstream diagnostics
+        GC_LAST_CODEX_OUTPUT_LIMIT=0
+      fi
+    fi
+    local limit_value="${GC_CODEX_MAX_TOKENS_PER_TASK:-0}"
+    if [[ "$limit_value" =~ ^[0-9]+$ ]]; then
+      limit_value=$((limit_value))
+      if (( limit_value > 0 && GC_LAST_CODEX_TOTAL_TOKENS > limit_value )); then
+        # shellcheck disable=SC2034
+        GC_CODEX_USAGE_LIMIT_REACHED=1
+        # shellcheck disable=SC2034
+        GC_CODEX_USAGE_LIMIT_CONFIRMED=1
+        if [[ -z "${GC_CODEX_USAGE_LIMIT_MESSAGE:-}" ]]; then
+          GC_CODEX_USAGE_LIMIT_MESSAGE="Codex tokens ${GC_LAST_CODEX_TOTAL_TOKENS} exceeded per-task limit ${limit_value}."
+        fi
+      fi
+    fi
+    if command -v python3 >/dev/null 2>&1; then
+      local tail_info=""
+      local tail_helper=""
+      if tail_helper="$(gc_clone_python_tool "codex_log_tail.py" "${PROJECT_ROOT:-$PWD}")"; then
+        tail_info="$(python3 "$tail_helper" "$log_file")" || tail_info=""
+      else
+        tail_info=""
+      fi
+      if [[ -n "$tail_info" ]]; then
+        local tail_hash tail_b64 turn_hash turn_blocks
+        IFS=$'\n' read -r tail_hash tail_b64 turn_hash turn_blocks <<<"$tail_info"
+        # shellcheck disable=SC2034
+        [[ -n "$tail_hash" ]] && GC_LAST_CODEX_STDOUT_TAIL_HASH="$tail_hash"
+        # shellcheck disable=SC2034
+        [[ -n "$tail_b64" ]] && GC_LAST_CODEX_STDOUT_TAIL_BASE64="$tail_b64"
+        # shellcheck disable=SC2034
+        [[ -n "$turn_hash" ]] && GC_LAST_CODEX_TURN_DIFF_HASH="$turn_hash"
+        if [[ "$turn_blocks" =~ ^[0-9]+$ ]]; then
+          # shellcheck disable=SC2034
+          GC_LAST_CODEX_TURN_DIFF_BLOCKS="$turn_blocks"
+        fi
+      fi
+    fi
+    local stage_blocked="false"
+    if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
+      stage_blocked="true"
+    fi
+    local stage_pruned="${GC_CURRENT_PRUNED_ITEMS:-[]}" 
+    if [[ -z "$stage_pruned" ]]; then
+      stage_pruned="[]"
+    fi
+    gc_budget_log_stage "${step:-patch}" "${GC_LAST_CODEX_PROMPT_TOKENS:-0}" "${GC_LAST_CODEX_COMPLETION_TOKENS:-0}" "${GC_LAST_CODEX_TOTAL_TOKENS:-0}" "${duration_ms:-0}" "$stage_pruned" "{}" "$stage_blocked"
+    if [[ -n "${step:-}" ]] && gc_budget_stage_tripped "${step}"; then
+      GC_STAGE_LIMIT_LAST_STEP="${step}"
+      GC_STAGE_LIMIT_LAST_LIMIT="$(gc_budget_get_stage_limit "${step}")"
+    fi
+    rm -f "$log_file" || true
+    return 0
+  else
+    rm -f "$tmp_output" || true
+    warn "Failed to record Codex usage for task=${task} model=${model}."
+    return 1
+  fi
+}
+
+gc_set_llm_output_limit_if_valid() {
+  local var_name="$1"
+  local candidate="${2//[[:space:]]/}"
+  if [[ "$candidate" =~ ^[0-9]+$ ]] && (( candidate > 0 )); then
+    printf -v "$var_name" '%s' "$candidate"
+  fi
+}
+
+gc_load_llm_output_limits() {
+  local root="${1:-${PROJECT_ROOT:-$PWD}}"
+  local helper=""
+  if helper="$(gc_clone_python_tool "load_output_limits.py" "$root")"; then
+    :
+  else
+    return 1
+  fi
+  local raw_output=""
+  if ! raw_output="$(python3 "$helper" "$root" 2>/dev/null)"; then
+    return 1
+  fi
+  while IFS='=' read -r key value; do
+    [[ -z "${key// }" ]] && continue
+    case "$key" in
+      plan) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_PLAN "$value" ;;
+      status) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_STATUS "$value" ;;
+      patch) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_PATCH "$value" ;;
+      hard_cap) gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_HARD_CAP "$value" ;;
+    esac
+  done <<<"$raw_output"
+  return 0
+}
+
+gc_output_limit_default_for_step() {
+  local step="${1:-patch}"
+  case "${step,,}" in
+    plan) printf '%s\n' "$GC_LLM_OUTPUT_LIMIT_PLAN_DEFAULT" ;;
+    status) printf '%s\n' "$GC_LLM_OUTPUT_LIMIT_STATUS_DEFAULT" ;;
+    patch|*) printf '%s\n' "$GC_LLM_OUTPUT_LIMIT_PATCH_DEFAULT" ;;
+  esac
+}
+
+gc_output_limit_for_step() {
+  local step="${1:-patch}"
+  local step_lower="${step,,}"
+  local limit
+  case "$step_lower" in
+    plan) limit="$GC_LLM_OUTPUT_LIMIT_PLAN" ;;
+    status) limit="$GC_LLM_OUTPUT_LIMIT_STATUS" ;;
+    patch) limit="$GC_LLM_OUTPUT_LIMIT_PATCH" ;;
+    *) step_lower="patch"; limit="$GC_LLM_OUTPUT_LIMIT_PATCH" ;;
+  esac
+  if ! [[ "$limit" =~ ^[0-9]+$ ]] || (( limit <= 0 )); then
+    limit="$(gc_output_limit_default_for_step "$step_lower")"
+  fi
+  local hard_cap="$GC_LLM_OUTPUT_LIMIT_HARD_CAP"
+  if ! [[ "$hard_cap" =~ ^[0-9]+$ ]] || (( hard_cap <= 0 )); then
+    hard_cap="$GC_LLM_OUTPUT_LIMIT_HARD_CAP_DEFAULT"
+  fi
+  if (( limit > hard_cap )); then
+    limit="$hard_cap"
+  fi
+  printf '%s\n' "$limit"
+}
+
+gc_log_blocked_quota() {
+  local meta_path="$1"
+  local task_id="$2"
+  local story_slug="$3"
+  local run_stamp="$4"
+  local model="$5"
+
+  [[ -f "$meta_path" ]] || return 0
+
+  local log_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
+  local log_path="${log_dir}/work-on-tasks/blocked-quota.ndjson"
+
+  python3 "${GC_SCRIPTS_ROOT}/python/log_blocked_quota.py" \
+    --meta "$meta_path" \
+    --task-id "$task_id" \
+    --story-slug "$story_slug" \
+    --run-id "$run_stamp" \
+    --model "$model" \
+    --log "$log_path"
+}
+
+gc_log_task_metrics() {
+  local run_id="$1"
+  local story_slug="$2"
+  local task_number="$3"
+  local task_id="$4"
+  local status="$5"
+  local story_points="$6"
+  local tokens_retrieve="${7:-0}"
+  local tokens_plan="${8:-0}"
+  local tokens_patch="${9:-0}"
+  local tokens_verify="${10:-0}"
+  local tokens_prompt_estimate="${11:-0}"
+  local llm_prompt_tokens="${12:-0}"
+  local llm_completion_tokens="${13:-0}"
+
+  local helper_path
+  helper_path="$(gc_clone_python_tool "log_task_metrics.py" "${PROJECT_ROOT:-$PWD}")" || return 0
+  local log_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/work-on-tasks"
+  mkdir -p "$log_dir"
+  local log_path="${log_dir}/task-metrics.ndjson"
+
+  python3 "$helper_path" \
+    --log "$log_path" \
+    --run-id "$run_id" \
+    --story "$story_slug" \
+    --task-number "$task_number" \
+    --task-id "$task_id" \
+    --status "$status" \
+    --story-points "$story_points" \
+    --tokens-retrieve "$tokens_retrieve" \
+    --tokens-plan "$tokens_plan" \
+    --tokens-patch "$tokens_patch" \
+    --tokens-verify "$tokens_verify" \
+    --prompt-estimate "$tokens_prompt_estimate" \
+    --llm-prompt "$llm_prompt_tokens" \
+    --llm-completion "$llm_completion_tokens"
+}
+
+gc_bootstrap_reset_state() {
+  local file
+  file="$(gc_bootstrap_state_file)"
+  rm -f "$file"
+}
+
+gc_bootstrap_mark_step() {
+  local step="${1:?step required}"
+  local status="${2:?status required}"
+  local file
+  file="$(gc_bootstrap_state_file)"
+  mkdir -p "$(dirname "$file")"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "bootstrap_mark_step.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$file" "$step" "$status" || return 1
+}
+
+gc_bootstrap_mark_complete() {
+  local file
+  file="$(gc_bootstrap_state_file)"
+  mkdir -p "$(dirname "$file")"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "bootstrap_mark_complete.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$file" || return 1
+}
+
+gc_bootstrap_step_is_done() {
+  local step="${1:?step required}"
+  local file
+  file="$(gc_bootstrap_state_file)"
+  [[ -f "$file" ]] || return 1
+  local helper_path
+  helper_path="$(gc_clone_python_tool "bootstrap_step_is_done.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$file" "$step"
+}
+
+gc_bootstrap_run_step() {
+  local step="${1:?step required}"
+  shift
+  if gc_bootstrap_step_is_done "$step"; then
+    info "Step '${step}' already completed; skipping."
+    return 0
+  fi
+  if "$@"; then
+    gc_bootstrap_mark_step "$step" "done"
+    return 0
+  else
+    gc_bootstrap_mark_step "$step" "failed"
+    return 1
+  fi
+}
+
+gc_bootstrap_have_rfp() {
+  local stage_dir="${STAGING_DIR:-}"
+  local input_dir="${INPUT_DIR:-}"
+  [[ -n "$stage_dir" && -f "$stage_dir/docs/rfp.md" ]] && return 0
+  [[ -n "$stage_dir" && -f "$stage_dir/rfp.md" ]] && return 0
+  [[ -n "$input_dir" && -f "$input_dir/rfp.md" ]] && return 0
+  return 1
+}
+
+gc_auto_project_template() {
+  local project_root="${1:?project root required}"
+  local templates_root="${2:?templates root required}"
+  shift 2
+  local -a template_dirs=("$@")
+  local count=${#template_dirs[@]}
+  (( count )) || return 1
+  if (( count == 1 )); then
+    printf '%s\n' "${template_dirs[0]}"
+    return 0
+  fi
+
+  local rfp_path
+  rfp_path="$(gc_find_primary_rfp "$project_root")"
+  [[ -n "$rfp_path" ]] || return 1
+
+  local helper_path
+  helper_path="$(gc_clone_python_tool "auto_project_template.py" "$project_root")" || return 1
+  python3 "$helper_path" "$rfp_path" "${template_dirs[@]}"
+}
+
+gc_copy_project_template() {
+  local template_dir="${1:?template directory required}"
+  local project_root="${2:?project root required}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "copy_project_template.py" "$project_root")" || return 1
+  python3 "$helper_path" "$template_dir" "$project_root"
+}
+
+gc_apply_project_template() {
+  local project_root="${1:?project root required}"
+  local template_request="${2:-auto}"
+  local templates_root
+  templates_root="$(gc_project_templates_root)"
+
+  mapfile -t available_templates < <(find "$templates_root" -mindepth 1 -maxdepth 1 -type d | sort)
+  (( ${#available_templates[@]} )) || {
+    info "No project templates available under ${templates_root}; continuing without scaffolding."
+    return 0
+  }
+
+  local chosen=""
+  local request_lower
+  request_lower="$(to_lower "$template_request")"
+  if [[ "$request_lower" == "skip" ]]; then
+    info "Skipping project template scaffolding (per flag)."
+    return 0
+  fi
+
+  if [[ "$request_lower" != "auto" ]]; then
+      for tpl in "${available_templates[@]}"; do
+        local tpl_name
+        tpl_name="$(basename "$tpl")"
+      if [[ "$(to_lower "$tpl_name")" == "$request_lower" ]]; then
+        chosen="$tpl"
+        template_request="$tpl_name"
+        break
+      fi
+    done
+    if [[ -z "$chosen" ]]; then
+      warn "Template '${template_request}' not found under ${templates_root}; available: $(printf '%s ' "${available_templates[@]##*/}")"
+      return 1
+    fi
+  else
+    chosen="$(gc_auto_project_template "$project_root" "$templates_root" "${available_templates[@]}")"
+    if [[ -z "$chosen" ]]; then
+      info "No matching project template determined automatically; continuing without scaffolding."
+      return 0
+    fi
+  fi
+
+  local template_name
+  template_name="$(basename "$chosen")"
+  info "Applying project template → ${template_name}"
+  if ! gc_copy_project_template "$chosen" "$project_root"; then
+    warn "Failed to copy template '${template_name}'"
+    return 1
+  fi
+}
+
+gc_parse_jira_tasks() {
+  local jira_file="${1:?jira markdown path required}"
+  local out_json="${2:?output json path required}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "parse_jira_tasks.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$jira_file" "$out_json"
+}
+
+gc_agents_registry_cmd() {
+  local helper_path
+  helper_path="$(gc_clone_python_tool "agents_registry.py" "${PROJECT_ROOT:-$PWD}")" || return "$GC_AGENT_EXIT_IO"
+  python3 "$helper_path" "$@"
+}
+
+gc_agents_validate_cmd() {
+  local helper_path
+  helper_path="$(gc_clone_python_tool "agents_validate.py" "${PROJECT_ROOT:-$PWD}")" || return "$GC_AGENT_EXIT_IO"
+  python3 "$helper_path" "$@"
+}
+
+gc_run_agents_cli() {
+  local project="${1:?project root required}"
+  local db_path="${2:?database path required}"
+  shift 2
+  local helper_path
+  helper_path="$(gc_clone_python_tool "agents_cli.py" "$project")" || return "$GC_AGENT_EXIT_IO"
+  GC_CLI_ROOT="${CLI_ROOT:-}" python3 "$helper_path" --project "$project" --db-path "$db_path" "$@"
+}
+
+gc_agents_emit_agent_json() {
+  local indent="${1:-0}"
+  python3 - "$indent" <<'PY'
+import json
+import sys
+
+indent = int(sys.argv[1])
+raw = sys.stdin.read()
+if not raw.strip():
+    sys.stderr.write("agents command returned no JSON output; run with --verbose for details.\n")
+    sys.exit(1)
+try:
+    payload = json.loads(raw)
+except json.JSONDecodeError as exc:
+    sys.stderr.write("agents command produced invalid JSON ({}):\n".format(exc))
+    sys.stderr.write(raw)
+    if not raw.endswith("\n"):
+        sys.stderr.write("\n")
+    sys.exit(1)
+indent_value = None if indent <= 0 else indent
+warnings = []
+agent_payload = None
+if isinstance(payload, dict):
+    warnings = payload.get("warnings") or []
+    if "agent" in payload:
+        agent_payload = payload["agent"]
+target = agent_payload if agent_payload is not None else payload
+text = json.dumps(target, indent=indent_value)
+sys.stdout.write(text)
+if not text.endswith("\n"):
+    sys.stdout.write("\n")
+for warning in warnings:
+    sys.stderr.write(f"Warning: {warning}\n")
+PY
+}
+
+gc_ensure_agents_schema() {
+  local db_path="${1:-}"
+  [[ -n "$db_path" ]] || return 1
+  [[ -f "$db_path" ]] || return 0
+  local helper_path
+  helper_path="$(gc_clone_python_tool "ensure_agents_schema.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path"
+}
+
+gc_build_tasks_db() {
+  local tasks_json="${1:?tasks json path required}"
+  local db_path="${2:?sqlite db path required}"
+  local force_flag="${3:-0}"
+  local helper_path
+  gc_clone_python_tool "ensure_agents_schema.py" "${PROJECT_ROOT:-$PWD}" >/dev/null 2>&1 || true
+  gc_clone_python_tool "task_comments.py" "${PROJECT_ROOT:-$PWD}" >/dev/null 2>&1 || true
+  helper_path="$(gc_clone_python_tool "build_tasks_db.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$tasks_json" "$db_path" "$force_flag"
+}
+
+GC_CONTEXT_SKIP_SUBSTRINGS=(
+  "/.gpt-creator/staging/plan/work/runs/"
+  "/.gpt-creator/staging/plan/create-jira-tasks/prompts/"
+  "/.gpt-creator/staging/plan/create-sds/prompts/"
+  "/.gpt-creator/logs/"
+  "/.git/"
+  "/node_modules/"
+  "/dist/"
+  "/build/"
+  "/docs/automation/prompts/"
+)
+GC_CONTEXT_SKIP_SUFFIXES=(
+  ".meta.json"
+  ".log"
+  ".log.gz"
+)
+
+gc_context_should_skip_path() {
+  local path="${1:-}"
+  [[ -n "$path" ]] || return 1
+  local normalized="${path//\\//}"
+  local pattern
+  for pattern in "${GC_CONTEXT_SKIP_SUBSTRINGS[@]}"; do
+    if [[ "$normalized" == *"$pattern"* ]]; then
+      return 0
+    fi
+  done
+  for pattern in "${GC_CONTEXT_SKIP_SUFFIXES[@]}"; do
+    if [[ "$normalized" == *"$pattern" ]]; then
+      return 0
+    fi
+  done
+  local -a extra_patterns=()
+  if declare -p GC_CONTEXT_EXCLUDES >/dev/null 2>&1; then
+    extra_patterns=("${GC_CONTEXT_EXCLUDES[@]}")
+  elif [[ -n "${GC_CONTEXT_EXCLUDES:-}" ]]; then
+    while IFS= read -r _gc_extra_pattern; do
+      [[ -n "$_gc_extra_pattern" ]] || continue
+      extra_patterns+=("$_gc_extra_pattern")
+    done <<<"$(printf '%s\n' "$GC_CONTEXT_EXCLUDES" | tr ':' '\n')"
+  fi
+  for pattern in "${extra_patterns[@]}"; do
+    if [[ "$normalized" == *"$pattern"* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+gc_build_context_file() {
+  local dest_file="${1:?context destination required}"
+  local staging_dir="${2:-$GC_STAGING_DIR}"
+  local max_lines="${GC_CONTEXT_FILE_LINES:-200}"
+  local allow_ui_dump="${GC_CONTEXT_INCLUDE_UI:-0}"
+  local doc_snippet_env="${GC_PROMPT_DOC_SNIPPETS:-}"
+  local doc_snippet_mode=0
+  if [[ -n "$doc_snippet_env" ]]; then
+    case "${doc_snippet_env,,}" in
+      0|false|no) doc_snippet_mode=0 ;;
+      *) doc_snippet_mode=1 ;;
+    esac
+  fi
+  local pointer_digest_helper=""
+  local context_doc_snippet_helper=""
+  local context_dump_helper=""
+  if (( doc_snippet_mode )); then
+    pointer_digest_helper="$(gc_clone_python_tool "context_pointer_digest.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+    context_doc_snippet_helper="$(gc_clone_python_tool "context_doc_snippet_dump.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  fi
+  context_dump_helper="$(gc_clone_python_tool "context_dump_file.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local -A gc_context_pointer_seen=()
+  local -a skip_patterns=()
+  if declare -p GC_CONTEXT_SKIP_PATTERNS >/dev/null 2>&1; then
+    skip_patterns=("${GC_CONTEXT_SKIP_PATTERNS[@]}")
+  fi
+  mkdir -p "$(dirname "$dest_file")"
+  {
+    echo "# Project Context (auto-generated)"
+    echo
+    shopt -s nullglob
+    shopt -s globstar 2>/dev/null || true
+    local f
+    local -a patterns=(
+      "$staging_dir"/pdr.* 
+      "$staging_dir"/sds.* 
+      "$staging_dir"/openapi.* 
+      "$staging_dir"/*.md 
+      "$staging_dir"/*.mdx 
+      "$staging_dir"/*.adoc 
+      "$staging_dir"/*.mmd 
+      "$staging_dir"/*.sql 
+      "$staging_dir"/*.yml 
+      "$staging_dir"/*.yaml
+    )
+    if [[ "$allow_ui_dump" == "1" ]]; then
+      patterns+=("$staging_dir"/*ui*pages*.* "$staging_dir"/*rfp*.*)
+    fi
+    for f in "${patterns[@]}"; do
+      [[ -f "$f" ]] || continue
+      if gc_context_should_skip_path "$f"; then
+        continue
+      fi
+      local base_name
+      base_name="$(basename "$f")"
+
+      local pointer_digest=""
+      if (( doc_snippet_mode )); then
+        pointer_digest="$(GC_CONTEXT_POINTER_FILE="$f" python3 "$pointer_digest_helper")" || pointer_digest=""
+        if [[ -n "$pointer_digest" ]]; then
+          local existing=""
+          if [[ -n "${gc_context_pointer_seen[$pointer_digest]+_}" ]]; then
+            existing="${gc_context_pointer_seen[$pointer_digest]}"
+          fi
+          if [[ -n "$existing" ]]; then
+            echo ""
+            echo "----- FILE: ${base_name} -----"
+            echo "(duplicate staged doc skipped; same initial content as ${existing})"
+            continue
+          fi
+          gc_context_pointer_seen[$pointer_digest]="$base_name"
+        fi
+      fi
+
+      local skip_file=0
+      if ((${#skip_patterns[@]} > 0)); then
+        local pattern
+        for pattern in "${skip_patterns[@]}"; do
+          [[ -n "$pattern" ]] || continue
+          if [[ "$base_name" == "$pattern" || "$f" == "$pattern" ]]; then
+            skip_file=1
+            break
+          fi
+          # Treat plain patterns without glob characters as substring matches.
+          if [[ "$pattern" != *'*'* && "$pattern" != *'?'* ]]; then
+            if [[ "$f" == *"$pattern"* ]]; then
+              skip_file=1
+              break
+            fi
+          fi
+        done
+      fi
+      (( skip_file )) && continue
+
+      echo ""
+      echo "----- FILE: ${base_name} -----"
+      local mime=""
+      if command -v file >/dev/null 2>&1; then
+        mime="$(file -b --mime-type "$f" 2>/dev/null || true)"
+      fi
+      if [[ -n "$mime" ]]; then
+        case "$mime" in
+          text/*|application/json|application/vnd.openxmlformats-officedocument*|application/xml|application/xhtml+xml)
+            ;;
+          *)
+            echo "(skipped non-text file; path: $f)"
+            continue
+            ;;
+        esac
+      fi
+      if (( doc_snippet_mode )); then
+        GC_CONTEXT_POINTER_MODE=1 GC_CONTEXT_POINTER_DIGEST="$pointer_digest" GC_DUMP_FILE="$f" GC_MAX_LINES="$max_lines" python3 "$context_doc_snippet_helper"
+      else
+        GC_DUMP_FILE="$f" GC_MAX_LINES="$max_lines" python3 "$context_dump_helper"
+      fi
+    done
+    shopt -u globstar 2>/dev/null || true
+    shopt -u nullglob || true
+  } >"$dest_file"
+}
+
+gc_discovery_is_stale() {
+  local discovery_file="${1:-}"
+  shift || true
+  local -a required_keys=("$@")
+  if [[ -z "$discovery_file" || ! -f "$discovery_file" || ! -s "$discovery_file" ]]; then
+    return 0
+  fi
+  local helper_path
+  helper_path="$(gc_clone_python_tool "discovery_is_stale.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$discovery_file" "${required_keys[@]}"
+}
+
+gc_discovery_fill_defaults() {
+  local discovery_file="${1:-}"
+  shift || true
+  local -a required_keys=("$@")
+  [[ -n "$discovery_file" && -f "$discovery_file" ]] || return 1
+  local helper_path
+  helper_path="$(gc_clone_python_tool "discovery_fill_defaults.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$discovery_file" "${required_keys[@]}"
+}
+
+gc_refresh_discovery_if_needed() {
+  local discovery_file="${STAGING_DIR}/discovery.yaml"
+  local -a required=("pdr" "sds" "rfp" "jira" "ui_pages" "openapi")
+  if gc_discovery_is_stale "$discovery_file" "${required[@]}"; then
+    info "Discovery manifest missing context; running scan + normalize."
+    if ! cmd_scan --project "$PROJECT_ROOT"; then
+      warn "Automatic scan failed; rerun 'gpt-creator scan' manually."
+      return
+    fi
+    if ! cmd_normalize --project "$PROJECT_ROOT"; then
+      warn "Automatic normalize failed; rerun 'gpt-creator normalize' manually."
+      return
+    fi
+    if ! gc_discovery_is_stale "$discovery_file" "${required[@]}"; then
+      ok "Discovery manifest refreshed."
+    else
+      warn "Discovery manifest still incomplete after refresh; check project docs."
+      if gc_discovery_fill_defaults "$discovery_file" "${required[@]}"; then
+        if ! gc_discovery_is_stale "$discovery_file" "${required[@]}"; then
+          ok "Discovery manifest supplemented with placeholder entries."
+        fi
+      fi
+    fi
+  fi
+}
+
+gc_clear_active_task() {
+  unset GC_ACTIVE_TASK_DB
+  unset GC_ACTIVE_TASK_SLUG
+  unset GC_ACTIVE_TASK_INDEX
+  unset GC_ACTIVE_RUN_STAMP
+  unset GC_ACTIVE_TASK_NUMBER
+  unset GC_ACTIVE_TASK_ID
+  unset GC_ACTIVE_TASK_REPORT
+  unset GC_ACTIVE_TASK_ARCHIVE
+  unset GC_ACTIVE_TASK_PROMPT
+  unset GC_ACTIVE_TASK_OUTPUT
+  unset GC_ACTIVE_TASK_FINALIZED
+}
+
+gc_finalize_active_task() {
+  local signal="${1:-INT}"
+  local reason="${2:-Interrupted}"
+  local report_path="${GC_ACTIVE_TASK_REPORT:-}"
+  [[ -n "$report_path" ]] || return 0
+
+  if [[ "${GC_ACTIVE_TASK_FINALIZED:-0}" == "1" ]]; then
+    return 0
+  fi
+  GC_ACTIVE_TASK_FINALIZED=1
+
+  local archive_path="${GC_ACTIVE_TASK_ARCHIVE:-}"
+  local prompt_path="${GC_ACTIVE_TASK_PROMPT:-}"
+  local output_path="${GC_ACTIVE_TASK_OUTPUT:-}"
+  local task_number="${GC_ACTIVE_TASK_NUMBER:-unknown}"
+  local task_id="${GC_ACTIVE_TASK_ID:-}"
+  local slug="${GC_ACTIVE_TASK_SLUG:-unknown}"
+  local tasks_db="${GC_ACTIVE_TASK_DB:-}"
+  local task_index="${GC_ACTIVE_TASK_INDEX:-}"
+  local run_stamp="${GC_ACTIVE_RUN_STAMP:-manual}"
+  local timestamp
+  timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+  mkdir -p "$(dirname "$report_path")"
+  local prompt_entry="$prompt_path"
+  local output_entry="$output_path"
+  local report_entry_display="$report_path"
+  if [[ -n "$PROJECT_ROOT" ]]; then
+    local project_prefix="${PROJECT_ROOT%/}/"
+    if [[ "$prompt_entry" == "$project_prefix"* ]]; then
+      prompt_entry="${prompt_entry#$project_prefix}"
+    fi
+    if [[ "$output_entry" == "$project_prefix"* ]]; then
+      output_entry="${output_entry#$project_prefix}"
+    fi
+    if [[ "$report_entry_display" == "$project_prefix"* ]]; then
+      report_entry_display="${report_entry_display#$project_prefix}"
+    fi
+  fi
+
+  {
+    printf 'task_number: %s\n' "$task_number"
+    printf 'task_id: %s\n' "${task_id:-}"
+    printf 'task_title: %s\n' "(interrupted)"
+    printf 'story_slug: %s\n' "$slug"
+    printf 'status: %s\n' "interrupted"
+    printf 'timestamp: %s\n' "$timestamp"
+    printf 'attempts: %s\n' "0"
+    printf 'apply_status: %s\n' "interrupted"
+    printf 'changes_applied: %s\n' "false"
+    printf 'prompt_path: %s\n' "${prompt_entry:-"(none)"}"
+    printf 'output_path: %s\n' "${output_entry:-"(none)"}"
+    printf 'notes:\n'
+    if [[ -n "$signal" ]]; then
+      printf '  - %s (signal %s); rerun work-on-tasks to resume.\n' "$reason" "$signal"
+    else
+      printf '  - %s; rerun work-on-tasks to resume.\n' "$reason"
+    fi
+  } >"$report_path"
+
+  if [[ -n "$archive_path" ]]; then
+    mkdir -p "$(dirname "$archive_path")"
+    cp -f "$report_path" "$archive_path" 2>/dev/null || true
+  fi
+
+  if [[ -n "$tasks_db" && -n "$slug" && -n "$task_index" ]]; then
+    local report_entry_db="$report_entry_display"
+    local prompt_db="$prompt_entry"
+    local output_db="$output_entry"
+    local notes_payload="Interrupted by signal ${signal}; rerun work-on-tasks to resume."
+    gc_record_task_progress \
+      "$tasks_db" \
+      "$slug" \
+      "$task_index" \
+      "$run_stamp" \
+      "on-hold" \
+      "$report_entry_db" \
+      "$prompt_db" \
+      "$output_db" \
+      "0" \
+      "0" \
+      "0" \
+      "0" \
+      "0" \
+      "interrupted" \
+      "false" \
+      "$notes_payload" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "$timestamp" \
+      "0" \
+      "0" \
+      "0" \
+      "0" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "" \
+      "0" \
+      "interrupted"
+    gc_update_task_state "$tasks_db" "$slug" "$task_index" "on-hold" "$run_stamp"
+  fi
+
+  local banner_id="$task_id"
+  if [[ -z "$banner_id" ]]; then
+    banner_id="${slug:-story}-${task_number}"
+  fi
+  local detail="${reason//[$'\r\n']/ }"
+  while [[ "$detail" == *"  "* ]]; do
+    detail="${detail//  / }"
+  done
+  local terminal_state_display="${signal:-Interrupted}"
+  gc_render_task_end_panel \
+    "$banner_id" \
+    "INTERRUPTED" \
+    "$terminal_state_display" \
+    "0S" \
+    "—" \
+    "0" \
+    "0" \
+    "0" \
+    "" \
+    "" \
+    "" \
+    "$detail"
+  # Interrupted/error finalization
+  gc_finalize_and_report "interrupted" "$reason"
+
+  gc_clear_active_task
+}
+
+gc_interrupt_handler() {
+  local signal="${1:-INT}"
+  trap - INT TERM TSTP QUIT
+  warn "Received ${signal}; finalising active task and exiting."
+  gc_finalize_active_task "$signal" "Interrupted"
+  local code=128
+  case "$signal" in
+    INT) code=130 ;;
+    TERM) code=143 ;;
+    TSTP) code=148 ;;
+    QUIT) code=131 ;;
+  esac
+  exit "$code"
+}
+
+gc_build_context_digest() {
+  local context_file="${1:?context file required}"
+  local digest_file="${2:?digest destination required}"
+  local limit_lines="${3:-400}"
+  [[ -f "$context_file" ]] || {
+    printf '%s\n' "(warn) context digest skipped; missing source ${context_file}" >&2
+    return 1
+  }
+  local helper_path
+  helper_path="$(gc_clone_python_tool "build_context_digest.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$context_file" "$digest_file" "$limit_lines"
+}
+
+gc_refresh_context_tail() {
+  local context_file="${1:?context file required}"
+  local tail_file="${2:?tail file required}"
+  local mode="${3:-digest}"
+  local limit="${4:-0}"
+
+  [[ -n "$tail_file" ]] || {
+    printf '%s\n' "$mode"
+    return 0
+  }
+
+  if (( limit <= 0 )); then
+    : >"$tail_file"
+    printf '%s\n' "$mode"
+    return 0
+  fi
+
+  local effective_mode="$mode"
+  case "$mode" in
+    digest)
+      if gc_build_context_digest "$context_file" "$tail_file" "$limit"; then
+        printf '%s\n' "$effective_mode"
+        return 0
+      fi
+      warn "Failed to build context digest (limit=${limit}); falling back to raw tail."
+      effective_mode="raw"
+      ;;
+  esac
+
+  case "$effective_mode" in
+    raw)
+      if ! tail -n "$limit" "$context_file" >"$tail_file" 2>/dev/null; then
+        cp "$context_file" "$tail_file"
+      fi
+      ;;
+    *)
+      if ! tail -n "$limit" "$context_file" >"$tail_file" 2>/dev/null; then
+        cp "$context_file" "$tail_file"
+      fi
+      ;;
+  esac
+
+  printf '%s\n' "$effective_mode"
+}
+
+gc_update_work_state() {
+  local db_path="${1:?tasks database path required}"
+  local story_slug="${2:?story slug required}"
+  local status="${3:?status required}"
+  local completed="${4:-0}"
+  local total="${5:-0}"
+  local run_stamp="${6:-manual}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "update_work_state.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path" "$story_slug" "$status" "$completed" "$total" "$run_stamp"
+}
+
+gc_update_task_state() {
+  local db_path="${1:?tasks database path required}"
+  local story_slug="${2:?story slug required}"
+  local position="${3:?task position required}"
+  local status="${4:?status required}"
+  local run_stamp="${5:-manual}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "update_task_state.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path" "$story_slug" "$position" "$status" "$run_stamp"
+}
+
+gc_mark_task_abandoned_for_budget() {
+  local db_path="${1:?tasks database path required}"
+  local story_slug="${2:?story slug required}"
+  local position="${3:?task position required}"
+  local run_stamp="${4:-manual}"
+  gc_update_task_state "$db_path" "$story_slug" "$position" "abandoned-for-budget" "$run_stamp"
+}
+
+gc_history_dir_name_for_task() {
+  local task_number="${1:-}"
+  local story_slug="${2:-}"
+  local task_id="${3:-}"
+  local label_parts=()
+  if [[ -n "$task_number" ]]; then
+    label_parts+=("task-${task_number}")
+  fi
+  if [[ -n "$story_slug" ]]; then
+    label_parts+=("$story_slug")
+  fi
+  if [[ -n "$task_id" ]]; then
+    label_parts+=("$task_id")
+  fi
+  local label=""
+  local part
+  for part in "${label_parts[@]}"; do
+    if [[ -z "$label" ]]; then
+      label="$part"
+    else
+      label+="-${part}"
+    fi
+  done
+  if [[ -z "$label" ]]; then
+    label="task"
+  fi
+  label="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')"
+  label="$(printf '%s' "$label" | sed -E 's/[^a-z0-9_.-]+/-/g')"
+  label="$(printf '%s' "$label" | sed -E 's/^[-_.]+//; s/[-_.]+$//')"
+  if [[ -z "$label" ]]; then
+    label="task"
+  fi
+  printf '%s\n' "$label"
+}
+
+gc_record_task_progress() {
+  local db_path="${1:?tasks database path required}"
+  local story_slug="${2:?story slug required}"
+  local position="${3:?task position required}"
+  local run_stamp="${4:-manual}"
+  local status="${5:-}"
+  local log_path="${6:-}"
+  local prompt_path="${7:-}"
+  local output_path="${8:-}"
+  local attempts="${9:-0}"
+  local tokens_total="${10:-0}"
+  local tokens_estimate="${11:-0}"
+  local llm_prompt_tokens="${12:-0}"
+  local llm_completion_tokens="${13:-0}"
+  local duration_seconds="${14:-0}"
+  local apply_status="${15:-}"
+  local changes_applied="${16:-0}"
+  local notes_text="${17:-}"
+  local written_text="${18:-}"
+  local patched_text="${19:-}"
+  local commands_text="${20:-}"
+  local observation_hash="${21:-}"
+  local occurred_at="${22:-}"
+  local tokens_retrieve="${23:-0}"
+  local tokens_plan="${24:-0}"
+  local tokens_patch="${25:-0}"
+  local tokens_verify="${26:-0}"
+  local story_points="${27:-}"
+  local verify_status="${28:-}"
+  local verify_summary="${29:-}"
+  local verify_report="${30:-}"
+  local verify_details="${31:-}"
+  local meta_plan_flag="${32:-0}"
+  local meta_focus_flag="${33:-0}"
+  local meta_no_changes_flag="${34:-0}"
+  local meta_already_flag="${35:-0}"
+  local commit_sha="${36:-}"
+  local commit_status="${37:-}"
+  local push_status="${38:-}"
+  local push_remote="${39:-}"
+  local push_branch="${40:-}"
+  local push_error="${41:-}"
+  local attempt_signature="${42:-}"
+  local changes_count="${43:-0}"
+  local outcome_reason="${44:-}"
+  local history_summary_path="${45:-}"
+  local history_meta_path="${46:-}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "record_task_progress.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" \
+    "$db_path" \
+    "$story_slug" \
+    "$position" \
+    "$run_stamp" \
+    "$status" \
+    "$log_path" \
+    "$prompt_path" \
+    "$output_path" \
+    "$attempts" \
+    "$tokens_total" \
+    "$tokens_estimate" \
+    "$llm_prompt_tokens" \
+    "$llm_completion_tokens" \
+    "$duration_seconds" \
+    "$apply_status" \
+    "$changes_applied" \
+    "$notes_text" \
+    "$written_text" \
+    "$patched_text" \
+    "$commands_text" \
+    "$observation_hash" \
+    "$occurred_at" \
+    "$tokens_retrieve" \
+    "$tokens_plan" \
+    "$tokens_patch" \
+    "$tokens_verify" \
+    "$story_points" \
+    "$verify_status" \
+    "$verify_summary" \
+    "$verify_report" \
+    "$verify_details" \
+    "$meta_plan_flag" \
+    "$meta_focus_flag" \
+    "$meta_no_changes_flag" \
+    "$meta_already_flag" \
+    "$commit_sha" \
+    "$commit_status" \
+    "$push_status" \
+    "$push_remote" \
+    "$push_branch" \
+    "$push_error" \
+    "$attempt_signature" \
+    "$changes_count" \
+    "$outcome_reason" \
+    "$history_summary_path" \
+    "$history_meta_path"
+}
+
+gc_make_observation_hash() {
+  local seed="${1:-}"
+  if [[ -z "$seed" ]]; then
+    return 1
+  fi
+  local helper_path
+  helper_path="$(gc_clone_python_tool "gc_make_observation_hash.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$seed"
+}
+
+gc_update_throughput_metrics() {
+  local db_path="${1:?tasks database path required}"
+  local action="${2:?throughput action required}"
+  local story_slug="${3:-}"
+  local position="${4:-}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "update_throughput_metrics.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path" "$action" "$story_slug" "$position"
+}
+
+gc_backlog_guard_snapshot() {
+  local db_path="${1:?tasks database path required}"
+  local output_path="${2:-}"
+  local window_days="${3:-}"
+  local wip_limit="${4:-}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "backlog_guard.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local -a args=("snapshot" "--db" "$db_path")
+  local epics_raw="${GC_BACKLOG_GUARD_EPICS:-}"
+  local -a epics=()
+  if [[ -n "$epics_raw" ]]; then
+    epics_raw="${epics_raw//,/ }"
+    read -r -a epics <<<"$epics_raw"
+  fi
+  local epic_value
+  for epic_value in "${epics[@]}"; do
+    epic_value="${epic_value//[[:space:]]/}"
+    [[ -n "$epic_value" ]] || continue
+    args+=("--epic" "$epic_value")
+  done
+  if [[ -n "$window_days" ]]; then
+    args+=("--window-days" "$window_days")
+  fi
+  if [[ -n "$wip_limit" ]]; then
+    args+=("--wip-limit" "$wip_limit")
+  fi
+  if [[ -n "$output_path" ]]; then
+    mkdir -p "$(dirname "$output_path")"
+    args+=("--output" "$output_path")
+  fi
+  python3 "$helper_path" "${args[@]}"
+}
+
+gc_backlog_guard_compare() {
+  local before_path="${1:?before snapshot path required}"
+  local after_path="${2:?after snapshot path required}"
+  local wip_limit="${3:-}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "backlog_guard.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  local -a args=("compare" "--before" "$before_path" "--after" "$after_path")
+  local epics_raw="${GC_BACKLOG_GUARD_EPICS:-}"
+  local -a epics=()
+  if [[ -n "$epics_raw" ]]; then
+    epics_raw="${epics_raw//,/ }"
+    read -r -a epics <<<"$epics_raw"
+  fi
+  local epic_value
+  for epic_value in "${epics[@]}"; do
+    epic_value="${epic_value//[[:space:]]/}"
+    [[ -n "$epic_value" ]] || continue
+    args+=("--epic" "$epic_value")
+  done
+  if [[ -n "$wip_limit" ]]; then
+    args+=("--wip-limit" "$wip_limit")
+  fi
+  python3 "$helper_path" "${args[@]}"
+}
+
+gc_rewind_backlog_from_task() {
+  local db_path="${1:?tasks database path required}"
+  local task_ref_raw="${2:?task reference required}"
+  local story_hint_raw="${3:-}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "rewind_backlog_from_task.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path" "$task_ref_raw" "$story_hint_raw"
+}
+
+gc_align_task_story_slugs() {
+  local db_path="${1:?tasks database path required}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "align_task_story_slugs.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path"
+}
+
+gc_reset_task_progress() {
+  local db_path="${1:?tasks database path required}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "reset_task_progress.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path"
+}
+
+gc_sync_story_totals() {
+  local db_path="${1:?tasks database path required}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "sync_story_totals.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path"
+}
+
+gc_fetch_story_task_counts() {
+  local db_path="${1:?tasks database path required}"
+  local story_slug="${2:?story slug required}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "fetch_story_task_counts.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path" "$story_slug"
+}
+
+gc_fetch_migration_epoch() {
+  local db_path="${1:?tasks database path required}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "fetch_migration_epoch.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path"
+}
+
+gc_trim_memory() {
+  local phase="${1:-memory-cycle}"
+  info "[memory] Reclaiming resources (${phase})"
+
+  local helper_path
+  helper_path="$(gc_clone_python_tool "trim_memory.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  if command -v python3 >/dev/null 2>&1; then
+    python3 "$helper_path" >/dev/null 2>&1 || true
+  fi
+}
+
+gc_count_pending_tasks() {
+  local db_path="${1:?tasks database path required}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "count_pending_tasks.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path"
+}
+
+gc_count_unstarted_tasks() {
+  local db_path="${1:?tasks database path required}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "count_unstarted_tasks.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path"
+}
+
+gc_tasks_db_has_rows() {
+  local db_path="${1:?tasks database path required}"
+  [[ -f "$db_path" ]] || return 1
+  local helper_path
+  helper_path="$(gc_clone_python_tool "tasks_db_has_rows.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$db_path"
+}
+
+gc_has_legacy_tasks_json() {
+  local json_dir="${PLAN_DIR}/create-jira-tasks/json"
+  [[ -f "${json_dir}/epics.json" ]] || return 1
+  [[ -d "${json_dir}/stories" ]] || return 1
+  [[ -d "${json_dir}/tasks" ]] || return 1
+  return 0
+}
+
+gc_rebuild_tasks_db_from_json() {
+  local force_flag="${1:-0}"
+  local json_dir="${PLAN_DIR}/create-jira-tasks/json"
+  local epics_json="${json_dir}/epics.json"
+  local stories_dir="${json_dir}/stories"
+  local tasks_dir="${json_dir}/tasks"
+  local refined_dir="${json_dir}/refined"
+  [[ -f "$epics_json" ]] || return 1
+  [[ -d "$stories_dir" ]] || return 1
+  [[ -d "$tasks_dir" ]] || return 1
+
+  local payload="${json_dir}/tasks_payload.json"
+  python3 "${CLI_ROOT}/src/lib/create-jira-tasks/to_payload.py" \
+    "$epics_json" "$stories_dir" "$tasks_dir" "$refined_dir" "$payload" || return 1
+
+  local tasks_workspace="${PLAN_DIR}/tasks"
+  mkdir -p "$tasks_workspace"
+  local db_path="${tasks_workspace}/tasks.db"
+  python3 "${CLI_ROOT}/src/lib/create-jira-tasks/to_sqlite.py" \
+    "$payload" "$db_path" "$force_flag" || return 1
+
+  return 0
+}
+
+# docker compose helper (prefers "docker compose" then docker-compose)
+docker_compose() {
+  local project_name="${GC_DOCKER_PROJECT_NAME:-${COMPOSE_PROJECT_NAME:-}}"
+  if [[ -z "$project_name" ]]; then
+    local base
+    base="$(basename "${PROJECT_ROOT:-$PWD}")"
+    project_name="$(slugify_name "$base")"
+  fi
+  local compose_verbose_flag=""
+  if [[ -n "${GC_DOCKER_VERBOSE:-}" ]]; then
+    compose_verbose_flag="--verbose"
+  fi
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    if [[ -n "$compose_verbose_flag" ]]; then
+      COMPOSE_PROJECT_NAME="$project_name" docker compose "$compose_verbose_flag" "$@"
+    else
+      COMPOSE_PROJECT_NAME="$project_name" docker compose "$@"
+    fi
+  elif command -v docker-compose >/dev/null 2>&1; then
+    if [[ -n "$compose_verbose_flag" ]]; then
+      docker-compose -p "$project_name" "$compose_verbose_flag" "$@"
+    else
+      docker-compose -p "$project_name" "$@"
+    fi
+  else
+    die "Docker CLI not available. Install Docker Desktop or docker-compose before running this command."
+  fi
+}
+
+gc_compose_port() {
+  local compose_file="$1" service="$2" container_port="${3:-}"
+  [[ -f "$compose_file" ]] || return 1
+  local output=""
+  if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    output="$(COMPOSE_PROJECT_NAME="$GC_DOCKER_PROJECT_NAME" docker compose -f "$compose_file" port "$service" "$container_port" 2>/dev/null | head -n1)"
+  fi
+  if [[ -z "$output" ]] && command -v docker-compose >/dev/null 2>&1; then
+    output="$(docker-compose -p "$GC_DOCKER_PROJECT_NAME" -f "$compose_file" port "$service" "$container_port" 2>/dev/null | head -n1)"
+  fi
+  [[ -n "$output" ]] || return 1
+  output="${output##*:}"
+  [[ "$output" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$output"
+}
+
+gc_container_name() {
+  local service="$1"
+  printf '%s-%s\n' "${GC_DOCKER_PROJECT_NAME}" "$service"
+}
+
+container_exists() {
+  local name="$1"
+  docker ps -a --format '{{.Names}}' | grep -Fxq "$name"
+}
+
+container_state() {
+  local name="$1"
+  docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null || echo "absent"
+}
+
+gc_start_created_containers() {
+  local compose_file="$1"
+  shift || true
+  local -a services=("$@")
+  local service container state any_started=0
+
+  for service in "${services[@]}"; do
+    container="$(gc_container_name "$service")"
+    if ! container_exists "$container"; then
+      continue
+    fi
+    state="$(container_state "$container")"
+    if [[ "$state" == "created" ]]; then
+      info "Container ${container} stuck in 'created'; attempting manual start"
+      if docker start "$container" >/dev/null 2>&1; then
+        any_started=1
+      else
+        warn "Failed to start ${container}; attempting compose start fallback"
+        docker_compose -f "$compose_file" start "$service" >/dev/null 2>&1 || true
+      fi
+    fi
+  done
+
+  if (( any_started == 1 )); then
+    local wait_seconds=0
+    local timeout="${GC_DOCKER_HEALTH_TIMEOUT:-10}"
+    local poll_interval="${GC_DOCKER_HEALTH_INTERVAL:-1}"
+    (( poll_interval <= 0 )) && poll_interval=1
+    while (( wait_seconds < timeout )); do
+      local all_ready=1
+      for service in "${services[@]}"; do
+        container="$(gc_container_name "$service")"
+        if ! container_exists "$container"; then
+          continue
+        fi
+        state="$(container_state "$container")"
+        case "$state" in
+          running|healthy) continue ;;
+          exited|dead)
+            warn "Container ${container} exited unexpectedly (state=${state}). Check logs."
+            all_ready=0
+            ;;
+          *)
+            all_ready=0
+            ;;
+        esac
+      done
+      if (( all_ready == 1 )); then
+        break
+      fi
+      sleep "$poll_interval"
+      (( wait_seconds += poll_interval )) || true
+    done
+  fi
+}
+
+port_in_use() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && return 0
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -an 2>/dev/null | grep -E "\.${port} .*LISTEN" >/dev/null && return 0
+  fi
+  return 1
+}
+
+find_free_port() {
+  local start="${1:-3306}"
+  local port="$start"; local limit=$((start+100))
+  while (( port <= limit )); do
+    if ! port_in_use "$port" && ! gc_port_is_reserved "$port"; then
+      echo "$port"
+      return 0
+    fi
+    ((port++)) || true
+  done
+  echo "$start"  # fallback
+}
+
+gc_pick_port() {
+  local label="$1"
+  local default="$2"
+  shift 2
+  local service_key
+  service_key="$(slugify_name "$label")"
+  [[ -n "$service_key" ]] || service_key="$label"
+  local existing_port=""
+  existing_port="$(gc_port_for_service "$service_key" 2>/dev/null || true)"
+  gc_unreserve_port "$service_key"
+  local port=""
+  local env_name value
+  for env_name in "$@"; do
+    value="${!env_name:-}"
+    if [[ -n "$value" ]] && [[ "$value" =~ ^[0-9]+$ ]]; then
+      port="$value"
+      break
+    fi
+  done
+  [[ -n "$port" ]] || port="$default"
+  if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+    port="$default"
+  fi
+  local original="$port"
+  local attempts=0
+  local limit=200
+  while (( attempts < limit )); do
+    if (( port < 1 || port > 65535 )); then
+      port="$default"
+    fi
+    if ! port_in_use "$port" && ! gc_port_reserved_by_other "$port" "$service_key"; then
+      break
+    fi
+    ((port++))
+    ((attempts++))
+  done
+  while gc_port_reserved_by_other "$port" "$service_key"; do
+    ((port++))
+  done
+  if (( attempts >= limit )); then
+    warn "Unable to find free port for ${label}; using ${port}" >&2
+  elif [[ -n "$original" && "$port" != "$original" ]]; then
+    info "Port ${original} in use; remapping ${label} to ${port}" >&2
+  elif [[ -z "$existing_port" && "$port" != "$default" ]]; then
+    info "Port ${default} in use; remapping ${label} to ${port}" >&2
+  fi
+  gc_reserve_port "$service_key" "$port"
+  echo "$port"
+}
+
+wait_for_endpoint() {
+  local url="$1" label="$2"
+  local max_time="${3:-${GC_DOCKER_HEALTH_TIMEOUT:-10}}"
+  local delay="${4:-${GC_DOCKER_HEALTH_INTERVAL:-1}}"
+  (( delay <= 0 )) && delay=1
+  (( max_time <= 0 )) && max_time=1
+  local attempts=$(( (max_time + delay - 1) / delay ))
+  (( attempts < 1 )) && attempts=1
+  local i=1
+  while (( i <= attempts )); do
+    if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+      ok "${label} ready → ${url}"
+      return 0
+    fi
+    sleep "$delay"
+    ((i++)) || true
+  done
+  warn "${label} not ready after ${max_time}s → ${url}"
+  return 1
+}
+
+gc_sha256_file() {
+  local path="$1"
+  [[ -f "$path" ]] || return 1
+  local helper_path
+  helper_path="$(gc_clone_python_tool "sha256_file.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$path"
+}
+
+gc_make_attempt_signature() {
+  local task_ref="${1:-}"
+  local payload_path="${2:-}"
+  local prompt_path="${3:-}"
+  local diff_fingerprint="${4:-}"
+  local binder_status="${5:-}"
+  local binder_reason="${6:-}"
+  local meta_path="${7:-}"
+
+  local payload_hash=""
+  local prompt_hash=""
+  local meta_hash=""
+
+  if [[ -n "$payload_path" && -f "$payload_path" ]]; then
+    payload_hash="$(gc_sha256_file "$payload_path" 2>/dev/null || true)"
+  fi
+  if [[ -n "$prompt_path" && -f "$prompt_path" ]]; then
+    prompt_hash="$(gc_sha256_file "$prompt_path" 2>/dev/null || true)"
+  fi
+  if [[ -n "$meta_path" && -f "$meta_path" ]]; then
+    meta_hash="$(gc_sha256_file "$meta_path" 2>/dev/null || true)"
+  fi
+
+  local snapshot="${diff_fingerprint:-}"
+  local binder="${binder_status:-}:${binder_reason:-}"
+  local source="${task_ref}|payload:${payload_hash}|prompt:${prompt_hash}|meta:${meta_hash}|diff:${snapshot}|binder:${binder}"
+
+  local py_bin="${python_bin:-${PYTHON_BIN:-python3}}"
+  if command -v "$py_bin" >/dev/null 2>&1; then
+    local helper_path
+    if helper_path="$(gc_clone_python_tool "make_attempt_signature.py" "${PROJECT_ROOT:-$PWD}")"; then
+      local signature
+      signature="$("$py_bin" "$helper_path" "$source" 2>/dev/null || true)"
+      if [[ -n "$signature" ]]; then
+        printf '%s\n' "$signature"
+        return 0
+      fi
+    fi
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$source" | shasum -a 256 2>/dev/null | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$source" | sha256sum 2>/dev/null | awk '{print $1}'
+  else
+    printf '%s' "$source" | openssl dgst -sha256 2>/dev/null | awk '{print $2}'
+  fi
+}
+
+gc_host_prepare_pnpm() {
+  if command -v pnpm >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v corepack >/dev/null 2>&1; then
+    corepack enable pnpm >/dev/null 2>&1 || true
+    local version="${GC_PNPM_VERSION:-10.17.1}"
+    corepack prepare "pnpm@${version}" --activate >/dev/null 2>&1 || \
+      corepack use "pnpm@${version}" >/dev/null 2>&1 || true
+  fi
+  command -v pnpm >/dev/null 2>&1
+}
+
+gc_refresh_stack_prepare_node_modules() {
+  [[ "${GC_SKIP_HOST_PNPM_INSTALL:-0}" == "1" ]] && return 0
+  local root="${PROJECT_ROOT:-$PWD}"
+  local lock_file="${root}/pnpm-lock.yaml"
+  local has_manifest=0
+  if [[ -f "${root}/pnpm-workspace.yaml" || -f "${root}/package.json" ]]; then
+    has_manifest=1
+  fi
+  (( has_manifest )) || return 0
+
+  local modules_dir="${root}/node_modules/.pnpm"
+  local stamp_file="${root}/node_modules/.pnpm-lock.hash"
+  local need_install=0
+  local lock_hash=""
+
+  if [[ -f "$lock_file" ]]; then
+    lock_hash="$(gc_sha256_file "$lock_file" 2>/dev/null || true)"
+  fi
+
+  if [[ ! -d "$modules_dir" ]]; then
+    need_install=1
+  else
+    if [[ -z "$lock_hash" ]]; then
+      need_install=1
+    else
+      local stamp_hash=""
+      [[ -f "$stamp_file" ]] && stamp_hash="$(cat "$stamp_file" 2>/dev/null || true)"
+      if [[ "$lock_hash" != "$stamp_hash" ]]; then
+        need_install=1
+      fi
+    fi
+  fi
+
+  if (( need_install )); then
+    if [[ ! -f "$lock_file" ]]; then
+      info "pnpm lockfile missing; generating via install"
+    fi
+    info "Installing workspace dependencies via pnpm (host)"
+    if ! gc_host_prepare_pnpm; then
+      warn "pnpm is not available on the host; skipping host install (containers may retry)."
+      return 0
+    fi
+    local install_rc=0
+    if (cd "$root" && CI=1 PNPM_IGNORE_NODE_VERSION=1 pnpm install --frozen-lockfile --unsafe-perm --prefer-offline --engine-strict=false --reporter=append-only); then
+      install_rc=0
+    else
+      warn "pnpm install --frozen-lockfile failed; retrying without frozen lockfile"
+      if (cd "$root" && CI=1 PNPM_IGNORE_NODE_VERSION=1 pnpm install --unsafe-perm --prefer-offline --engine-strict=false --no-frozen-lockfile --reporter=append-only); then
+        install_rc=0
+      else
+        install_rc=1
+      fi
+    fi
+    if (( install_rc == 0 )); then
+      lock_hash="$(gc_sha256_file "$lock_file" 2>/dev/null || true)"
+      if [[ -n "$lock_hash" ]]; then
+        mkdir -p "${root}/node_modules"
+        printf '%s' "$lock_hash" > "$stamp_file"
+      else
+        rm -f "$stamp_file"
+      fi
+      ok "Host dependencies installed"
+    else
+      warn "Host pnpm install failed; containers will attempt dependency installation."
+    fi
+  fi
+}
+
+render_template_file() {
+  local src="$1" dest="$2"
+  local db_name="${GC_DB_NAME:-${DB_NAME:-app}}"
+  local db_user="${GC_DB_USER:-${DB_USER:-app}}"
+  local db_pass="${GC_DB_PASSWORD:-${DB_PASSWORD:-app_pass}}"
+  local db_host_port="${GC_DB_HOST_PORT:-${DB_HOST_PORT:-3306}}"
+  local db_root_pass="${GC_DB_ROOT_PASSWORD:-${DB_ROOT_PASSWORD:-root}}"
+  local project_slug="${GC_DOCKER_PROJECT_NAME:-${PROJECT_SLUG:-$(slugify_name "$(basename "${PROJECT_ROOT:-$PWD}")")}}"
+  local api_host_port="${GC_API_HOST_PORT:-${API_HOST_PORT:-3000}}"
+  local web_host_port="${GC_WEB_HOST_PORT:-${WEB_HOST_PORT:-5173}}"
+  local admin_host_port="${GC_ADMIN_HOST_PORT:-${ADMIN_HOST_PORT:-5174}}"
+  local proxy_host_port="${GC_PROXY_HOST_PORT:-${PROXY_HOST_PORT:-8080}}"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "render_template_file.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$src" "$dest" "$db_name" "$db_user" "$db_pass" "$db_host_port" "$db_root_pass" "$project_slug" "$api_host_port" "$web_host_port" "$admin_host_port" "$proxy_host_port"
+}
+
+gc_render_sql() {
+  local src="$1" dest="$2" database="$3" app_user="$4" app_pass="$5"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "render_sql.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$src" "$dest" "$database" "$app_user" "$app_pass"
+}
+
+gc_temp_file() {
+  local dir="$1" prefix="$2" suffix="$3"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "temp_file.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$dir" "$prefix" "$suffix"
+}
+
+gc_execute_sql() {
+  local compose_file="$1" sql_file="$2" database="$3"
+  local root_user="$4" root_pass="$5" app_user="$6" app_pass="$7" fallback_init="$8" label="$9"
+  local import_ok=0
+  [[ -n "$label" ]] || label="operation"
+  local container_host="127.0.0.1"
+
+  if [[ -f "$compose_file" ]]; then
+    if docker_compose -f "$compose_file" ps >/dev/null 2>&1; then
+      info "Using docker-compose db service for ${label}"
+      docker_compose -f "$compose_file" up -d db >/dev/null 2>&1 || true
+      if [[ -n "$root_pass" ]]; then
+        if docker_compose -f "$compose_file" exec -T db mysql -h"${container_host}" -u"${root_user}" -p"${root_pass}" "${database}" < "${sql_file}"; then
+          import_ok=1
+        else
+          warn "Root ${label} failed; retrying as ${app_user}"
+        fi
+      else
+        if docker_compose -f "$compose_file" exec -T db mysql -h"${container_host}" -u"${root_user}" "${database}" < "${sql_file}"; then
+          import_ok=1
+        fi
+      fi
+      if [[ "$import_ok" -ne 1 ]]; then
+        if docker_compose -f "$compose_file" exec -T db mysql -h"${container_host}" -u"${app_user}" ${app_pass:+-p"${app_pass}"} "${database}" < "${sql_file}"; then
+          import_ok=1
+        fi
+      fi
+      if [[ "$import_ok" -ne 1 && -n "$fallback_init" && -f "$fallback_init" ]]; then
+        local fallback_output="" fallback_user="" fallback_pass="" fallback_helper=""
+        fallback_helper="$(gc_clone_python_tool "fallback_sql_credentials.py" "${PROJECT_ROOT:-$PWD}")" || fallback_helper=""
+        if [[ -n "$fallback_helper" ]]; then
+          fallback_output="$(python3 "$fallback_helper" "$fallback_init" 2>/dev/null || true)"
+        fi
+        if [[ -n "$fallback_output" ]]; then
+          IFS=$'\n' read -r fallback_user fallback_pass _ <<<"$fallback_output"
+          unset IFS
+          if [[ -n "$fallback_user" && -n "$fallback_pass" ]]; then
+            if docker_compose -f "$compose_file" exec -T db mysql -h"${container_host}" -u"${fallback_user}" ${fallback_pass:+-p"${fallback_pass}"} "${database}" < "${sql_file}"; then
+              import_ok=1
+            fi
+          fi
+        fi
+      fi
+      if [[ "$import_ok" -eq 1 ]]; then
+        return 0
+      fi
+    fi
+  fi
+
+  local host="${DB_HOST:-127.0.0.1}"
+  local port="${DB_HOST_PORT:-${GC_DB_HOST_PORT:-${DB_PORT:-3306}}}"
+  if ${MYSQL_BIN} -h "$host" -P "$port" -u "$root_user" ${root_pass:+-p"${root_pass}"} "$database" < "$sql_file"; then
+    return 0
+  fi
+
+  if ${MYSQL_BIN} -h "$host" -P "$port" -u "$app_user" ${app_pass:+-p"${app_pass}"} "$database" < "$sql_file"; then
+    return 0
+  fi
+
+  return 1
+}
+gc_refresh_stack_collect_sql() {
+  local root="$1"
+  local helper_path
+  helper_path="$(gc_clone_python_tool "refresh_stack_collect_sql.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$root"
+}
+
+gc_refresh_stack_exec_mysql() {
+  local container_id="$1" sql_file="$2" user="$3" password="$4" database="$5"
+  local port="${6:-3306}"
+
+  [[ -n "$container_id" ]] || return 1
+  [[ -f "$sql_file" ]] || return 1
+  local -a cmd=(docker exec -i "$container_id" mysql --protocol=TCP -h 127.0.0.1 -P "$port" "-u${user}")
+  if [[ -n "$password" ]]; then
+    cmd+=("-p${password}")
+  fi
+  if [[ -n "$database" ]]; then
+    cmd+=("$database")
+  fi
+  if ! "${cmd[@]}" <"$sql_file"; then
+    return 1
+  fi
+  return 0
+}
+
+gc_refresh_stack_exec_inline_sql() {
+  local container_id="$1" user="$2" password="$3" database="$4"
+  local port="${5:-3306}"
+  local sql_content
+  sql_content="$(cat)"
+  local -a cmd=(docker exec -i "$container_id" mysql --protocol=TCP -h 127.0.0.1 -P "$port" "-u${user}")
+  if [[ -n "$password" ]]; then
+    cmd+=("-p${password}")
+  fi
+  if [[ -n "$database" ]]; then
+    cmd+=("$database")
+  fi
+  if ! printf "%s" "$sql_content" | "${cmd[@]}"; then
+    return 1
+  fi
+  return 0
+}
+
+gc_refresh_stack_inspect_containers() {
+  local compose_file="${1:?compose file required}"
+  local -a container_ids=()
+  mapfile -t container_ids < <(docker_compose -f "$compose_file" ps --all -q 2>/dev/null | awk 'NF')
+  if (( ${#container_ids[@]} == 0 )); then
+    mapfile -t container_ids < <(docker_compose -f "$compose_file" ps -q 2>/dev/null | awk 'NF')
+  fi
+  if (( ${#container_ids[@]} == 0 )); then
+    printf '%s\n' "No containers found for project ${GC_DOCKER_PROJECT_NAME}."
+    return 1
+  fi
+
+  local inspect_json=""
+  if ! inspect_json="$(docker inspect "${container_ids[@]}" 2>/dev/null)"; then
+    printf '%s\n' "Failed to inspect Docker containers for project ${GC_DOCKER_PROJECT_NAME}."
+    return 1
+  fi
+
+  local helper_path
+  helper_path="$(gc_clone_python_tool "refresh_stack_inspect_containers.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  INSPECT_JSON="${inspect_json}" python3 "$helper_path"
+
+}
+
+
+gc_refresh_stack_wait_for_containers() {
+  local compose_file="${1:?compose file required}"
+  local timeout="${2:-${GC_DOCKER_HEALTH_TIMEOUT:-10}}"
+  local interval="${3:-${GC_DOCKER_HEALTH_INTERVAL:-1}}"
+  (( interval <= 0 )) && interval=1
+  local elapsed=0
+  local output rc
+
+  while (( elapsed <= timeout )); do
+    output="$(gc_refresh_stack_inspect_containers "$compose_file")"
+    rc=$?
+    if (( rc == 0 )); then
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        info "$line"
+      done <<<"$output"
+      return 0
+    elif (( rc == 2 )); then
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        info "$line"
+      done <<<"$output"
+      sleep "$interval"
+      (( elapsed += interval ))
+      continue
+    else
+      while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        warn "$line"
+      done <<<"$output"
+      return 1
+    fi
+  done
+
+  warn "Timed out after ${timeout}s waiting for containers to report healthy state."
+  output="$(gc_refresh_stack_inspect_containers "$compose_file")"
+  rc=$?
+  local log_fn=warn
+  if (( rc == 0 )); then
+    log_fn=info
+  fi
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    "$log_fn" "$line"
+  done <<<"$output"
+  (( rc == 0 )) || return 1
+  return 0
+}
+
+# ---------- Scan helpers ----------
+has_pattern() { LC_ALL=C grep -E -i -m 1 -q -- "$1" "$2" 2>/dev/null; }
+classify_file() {
+  local path="$1"
+  local name="${path##*/}"
+  local lower
+  lower="$(to_lower "$name")"
+  local path_norm
+  path_norm="$(to_lower "$path")"
+  local ext="${lower##*.}"
+  local type="" conf=0
+
+  case "$ext" in
+    md)
+      if [[ "$lower" == *pdr* ]]; then type="pdr"; conf=0.95
+      elif [[ "$lower" == *sds* ]]; then type="sds"; conf=0.92
+      elif [[ "$lower" == *rfp* ]]; then type="rfp"; conf=0.9
+      elif [[ "$lower" == *jira* ]]; then type="jira"; conf=0.88
+      elif [[ "$lower" == *ui*pages* || "$lower" == *website*ui*pages* ]]; then type="ui_pages"; conf=0.85
+      elif has_pattern '\bJIRA\b|Issue Key' "$path"; then type="jira"; conf=0.6
+      fi
+      ;;
+    yml|yaml|json)
+      if has_pattern '^[[:space:]]*openapi[[:space:]]*:[[:space:]]*3' "$path" || has_pattern '"openapi"[[:space:]]*:' "$path" || has_pattern '"swagger"[[:space:]]*:' "$path"; then
+        type="openapi"; conf=0.94
+      fi
+      ;;
+    sql)
+      type="sql"; conf=0.65
+      if has_pattern 'CREATE[[:space:]]+TABLE' "$path"; then conf=0.8; fi
+      ;;
+    mmd)
+      type="mermaid"; conf=0.7
+      ;;
+    html)
+      local is_html=0
+      if [[ "$path_norm" == *"page_samples"* || "$path_norm" == *"page-samples"* ]]; then
+        is_html=1
+      elif echo "$lower" | grep -Eq '(abo|auth|prg|evt|ctn)[0-9]+\.html'; then
+        is_html=1
+      fi
+      if [[ $is_html -eq 1 ]]; then
+        type="page_sample_html"; conf=0.7
+      fi
+      ;;
+    css)
+      local is_css=0
+      if [[ "$path_norm" == *"page_samples"* || "$path_norm" == *"samples"* ]]; then
+        is_css=1
+      elif [[ "$lower" == *style.css ]]; then
+        is_css=1
+      fi
+      if [[ $is_css -eq 1 ]]; then
+        type="page_sample_css"; conf=0.6
+      fi
+      ;;
+  esac
+
+  if [[ -n "$type" ]]; then
+    printf '%s|%.2f\n' "$type" "$conf"
+  fi
+}
+
+
+_gc_agents_require_db() {
+  local tasks_db="${PLAN_DIR}/tasks/tasks.db"
+  if [[ ! -f "$tasks_db" ]]; then
+    gc_agents_fail "$GC_AGENT_EXIT_DB" "Tasks database not found at ${tasks_db}. Run 'gpt-creator create-tasks' first." || true
+    return 1
+  fi
+  printf '%s\n' "$tasks_db"
+  return 0
+}
+
+
+
+
+
+gc_write_task_prompt() {
+  local db_path="${1:?tasks db path required}"
+  local story_slug="${2:?story slug required}"
+  local task_index="${3:?task index required}"
+  local prompt_path="${4:?prompt path required}"
+  local context_tail="${5:-}"
+  local model_name="${6:-$CODEX_MODEL}"
+  local project_root="${7:-$PROJECT_ROOT}"
+  local staging_dir="${8:-$GC_STAGING_DIR}"
+  local task_binder_helper
+  task_binder_helper="$(gc_clone_python_tool "task_binder.py" "$project_root")" || return 1
+  : "$task_binder_helper"
+  local compose_helper
+  compose_helper="$(gc_clone_python_tool "compose_sections.py" "$project_root")" || return 1
+  : "$compose_helper"
+  local prompt_helper
+  prompt_helper="$(gc_clone_python_tool "document_index.py" "$project_root")" || return 1
+  python3 "$prompt_helper" "$db_path" "$story_slug" "$task_index" "$prompt_path" "$context_tail" "$model_name" "$project_root" "$staging_dir"
+}
+
+# Return success (0) when note language implies manual follow-up is required.
+gc_note_requires_followup() {
+  local note_text="${1:-}"
+  local note_lower="${note_text,,}"
+
+  [[ -n "$note_lower" ]] || return 1
+
+  if [[ "$note_lower" == *"parse-error"* ]]; then
+    return 0
+  fi
+
+  if [[ "$note_lower" == *"no manual"* || "$note_lower" == *"no manual steps"* || "$note_lower" == *"no manual verification"* || "$note_lower" == *"no manual review"* || "$note_lower" == *"no review needed"* || "$note_lower" == *"no review required"* || "$note_lower" == *"no action required"* || "$note_lower" == *"no follow-up"* || "$note_lower" == *"no follow up"* ]]; then
+    return 1
+  fi
+
+  if [[ "$note_lower" == *"optional"* || "$note_lower" == *"recommended"* || "$note_lower" == *"informational"* || "$note_lower" == *"for reference"* ]]; then
+    if [[ "$note_lower" != *"requires"* && "$note_lower" != *"required"* && "$note_lower" != *"must"* && "$note_lower" != *"need"* && "$note_lower" != *"needs"* && "$note_lower" != *"needed"* && "$note_lower" != *"blocked"* && "$note_lower" != *"blocker"* && "$note_lower" != *"pending"* ]]; then
+      return 1
+    fi
+  fi
+
+  if [[ "$note_lower" == *"error"* || "$note_lower" == *"failure"* || "$note_lower" == *"failed"* ]]; then
+    if [[ "$note_lower" == *"no error"* || "$note_lower" == *"no errors"* || "$note_lower" == *"without error"* || "$note_lower" == *"error free"* || "$note_lower" == *"error-free"* || "$note_lower" == *"errors resolved"* || "$note_lower" == *"errors addressed"* || "$note_lower" == *"failure resolved"* || "$note_lower" == *"failure addressed"* ]]; then
+      :
+    else
+      return 0
+    fi
+  fi
+
+  local contains_manual=0
+  if [[ "$note_lower" == *"manual"* || "$note_lower" == *"manually"* ]]; then
+    contains_manual=1
+  fi
+
+  if (( contains_manual )); then
+    if [[ "$note_lower" == *"manual steps optional"* || "$note_lower" == *"manual testing optional"* || "$note_lower" == *"manual qa optional"* || "$note_lower" == *"manual testing recommended"* || "$note_lower" == *"manual qa recommended"* || "$note_lower" == *"manual review optional"* || "$note_lower" == *"manual verification optional"* ]]; then
+      contains_manual=0
+    fi
+  fi
+
+  if (( contains_manual )); then
+    local -a manual_triggers=(
+      "requires"
+      "required"
+      "require"
+      "must"
+      "need"
+      "needs"
+      "needed"
+      "manual follow-up"
+      "manual follow up"
+      "manual followup"
+      "manual verification"
+      "manual review"
+      "manual steps"
+      "manual patch"
+      "manual fix"
+      "manual merge"
+      "manual deploy"
+      "manual migration"
+      "manual intervention"
+      "manual action"
+      "apply manually"
+      "manually apply"
+      "manually patch"
+      "manually merge"
+      "manually verify"
+      "could not"
+      "can't"
+      "cannot"
+      "unable"
+      "failed"
+      "failure"
+      "todo"
+      "tbd"
+      "pending"
+      "block"
+      "blocked"
+      "follow-up"
+      "follow up"
+      "followup"
+    )
+    for trigger in "${manual_triggers[@]}"; do
+      if [[ "$note_lower" == *"$trigger"* ]]; then
+        return 0
+      fi
+    done
+  fi
+
+  if [[ "$note_lower" == *"review"* ]]; then
+    if [[ "$note_lower" == *"no review"* || "$note_lower" == *"reviewed"* ]]; then
+      return 1
+    fi
+    local -a review_triggers=(
+      "needs review"
+      "need review"
+      "required review"
+      "requires review"
+      "review required"
+      "pending review"
+      "awaiting review"
+      "please review"
+      "for review"
+      "manual review"
+      "review manually"
+      "review and apply"
+      "review this change"
+    )
+    for trigger in "${review_triggers[@]}"; do
+      if [[ "$note_lower" == *"$trigger"* ]]; then
+        return 0
+      fi
+    done
+  fi
+
+  return 1
+}
+usage() {
+  (
+    APP_NAME="$APP_NAME"
+    VERSION="$VERSION"
+    GC_REPORTS_IDLE_TIMEOUT="${GC_REPORTS_IDLE_TIMEOUT}"
+    gc_render_template "help/global_usage.txt"
+  ) 2>/dev/null || true
+
+  echo
+  echo "Commands:"
+  gc_usage_commands | awk '{printf "  %s\n", $0}'
+  echo
+  echo "Run 'gpt-creator <command> --help' for details."
+}
+
+# --- Error classes & retry policy -------------------------------------------
+# Basic status heuristics
+gc_is_transient_status() {
+  local code="${1:-0}"
+  case "$code" in
+    0) return 1 ;;
+    124|137|143) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# --- Doctor (self-check) ----------------------------------------------------
+# ---------------------------------------------------------------------------
+
+# --- Finalization lock helpers (atomic, workspace-agnostic) -----------------
+gc__slug() {
+  local s="${1:-}"
+  s="${s//[^A-Za-z0-9._-]/_}"
+  printf '%s' "$s"
+}
+
+gc_finalize_lock_key() {
+  local story="${GC_ACTIVE_STORY_SLUG:-${slug:-story}}"
+  local num="${GC_ACTIVE_TASK_NUMBER:-${task_index:-unknown}}"
+  local run="${GC_ACTIVE_RUN_STAMP:-manual}"
+  gc__slug "${story}-${num}-${run}"
+}
+
+gc_finalize_lock_path() {
+  local base
+  base="$(gc_from_root ".gpt-creator/locks/finalize")"
+  mkdir -p "$base" 2>/dev/null || true
+  printf '%s/%s.lockdir' "$base" "$(gc_finalize_lock_key)"
+}
+
+gc_try_acquire_finalize_lock() {
+  local lockdir
+  lockdir="$(gc_finalize_lock_path)"
+  if mkdir "$lockdir" 2>/dev/null; then
+    GC_FINALIZE_LOCK_DIR="$lockdir"
+    return 0
+  fi
+  return 1
+}
+
+gc_mark_finalize_done() {
+  local lockdir="${GC_FINALIZE_LOCK_DIR:-$(gc_finalize_lock_path)}"
+  : >"${lockdir}/.done" 2>/dev/null || true
+}
+# ---------------------------------------------------------------------------
+
+# --- Child error bridge (Node/Python -> Bash finalizer) ---------------------
+gc_child_unhandled_bridge() {
+  local finalize_key
+  finalize_key="$(gc_finalize_lock_key)"
+  if [[ "${GC_FINALIZE_AND_REPORT_DONE:-}" == "$finalize_key" ]]; then
+    return 0
+  fi
+  local reason="${1:-Child process reported an unhandled exception.}"
+  GC_LAST_ERROR_CLASS="${GC_LAST_ERROR_CLASS:-PERMANENT}"
+  GC_LAST_ERROR_REASON="${GC_LAST_ERROR_REASON:-$reason}"
+  GC_LAST_ERROR_STATUS="${GC_LAST_ERROR_STATUS:-1}"
+  gc_flush_logs_hooks || true
+  gc_finalize_active_task "ERR" "$reason"
+}
+# ---------------------------------------------------------------------------
+
+if [[ -z "${PROJECT_ROOT:-}" ]]; then
+  PROJECT_ROOT="$(gc_detect_project_root)"
+fi
+export PROJECT_ROOT
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  gc_preflight_config
+  local shell_bin="${BASH:-bash}"
+  case "$cmd" in
+    help|-h|--help)
+      usage
+      ;;
+    version|-v|--version) echo "${APP_NAME} ${VERSION}" ;;
+    create-project)
+      gc_load_cmd create-project
+      cmd_create_project "$@"
+      ;;
+    bootstrap)
+      gc_load_cmd bootstrap
+      cmd_bootstrap "$@"
+      ;;
+    scan)
+      gc_load_cmd scan
+      cmd_scan "$@"
+      ;;
+    normalize)
+      gc_load_cmd normalize
+      cmd_normalize "$@"
+      ;;
+    apply-block)
+      gc_load_cmd apply-block
+      cmd_apply_block "$@"
+      ;;
+    plan)
+      gc_load_cmd plan
+      cmd_plan "$@"
+      ;;
+    generate)
+      gc_load_cmd generate
+      cmd_generate "$@"
+      ;;
+    db)
+      gc_load_cmd db
+      cmd_db "$@"
+      ;;
+    run)
+      gc_load_cmd run
+      cmd_run "$@"
+      ;;
+    refresh-stack)
+      gc_load_cmd refresh-stack
+      cmd_refresh_stack "$@"
+      ;;
+    qa)
+      gc_load_cmd qa
+      cmd_qa "$@"
+      ;;
+    qa-llm)
+      gc_load_cmd qa-llm
+      cmd_qa_llm "$@"
+      ;;
+    verify)
+      gc_load_cmd verify
+      cmd_verify "$@"
+      ;;
+    migrate-tasks)
+      gc_load_cmd migrate-tasks
+      cmd_migrate_tasks_json "$@"
+      ;;
+    refine-tasks)
+      gc_load_cmd refine-tasks
+      cmd_refine_tasks "$@"
+      ;;
+    create-sds)     "$shell_bin" "$CLI_ROOT/src/cli/create-sds.sh" "$@" ;;
+    create-pdr)     "$shell_bin" "$CLI_ROOT/src/cli/create-pdr.sh" "$@" ;;
+    create-jira-tasks) "$CLI_ROOT/src/cli/create-jira-tasks.sh" "$@" ;;
+    create-db-dump) "$shell_bin" "$CLI_ROOT/src/cli/create-db-dump.sh" "$@" ;;
+    docdex)         cmd_docdex "$@" ;;
+    create-tasks)
+      gc_load_cmd create-tasks
+      cmd_create_tasks "$@"
+      ;;
+    create-agent)
+      gc_load_cmd create-agent
+      cmd_create_agent "$@"
+      ;;
+    list-agents)
+      gc_load_cmd list-agents
+      cmd_list_agents "$@"
+      ;;
+    list-llms)
+      gc_load_cmd list-llms
+      cmd_list_llms "$@"
+      ;;
+    check-llms)
+      gc_load_cmd check-llms
+      cmd_check_llms "$@"
+      ;;
+    install-llm)
+      gc_load_cmd install-llm
+      cmd_install_llm "$@"
+      ;;
+    sync-llms)
+      gc_load_cmd sync-llms
+      cmd_sync_llms "$@"
+      ;;
+    review-tasks)
+      gc_load_cmd review-tasks
+      cmd_review_tasks "$@"
+      ;;
+    qa-tasks)
+      gc_load_cmd qa-tasks
+      cmd_qa_tasks "$@"
+      ;;
+    show-agent)
+      gc_load_cmd show-agent
+      cmd_show_agent "$@"
+      ;;
+    edit-agent)
+      gc_load_cmd edit-agent
+      cmd_edit_agent "$@"
+      ;;
+    agent-check)
+      gc_load_cmd agent-check
+      cmd_agent_check "$@"
+      ;;
+    test-agent)
+      gc_load_cmd test-agent
+      cmd_test_agent "$@"
+      ;;
+    delete-agent)
+      gc_load_cmd delete-agent
+      cmd_delete_agent "$@"
+      ;;
+    export-agents)
+      gc_load_cmd export-agents
+      cmd_export_agents "$@"
+      ;;
+    import-agents)
+      gc_load_cmd import-agents
+      cmd_import_agents "$@"
+      ;;
+    backlog)
+      gc_load_cmd backlog
+      cmd_backlog "$@"
+      ;;
+    order-tasks)
+      gc_load_cmd order-tasks
+      cmd_order_tasks "$@"
+      ;;
+    dag)
+      gc_load_cmd dag
+      cmd_dag "$@"
+      ;;
+    estimate)
+      gc_load_cmd estimate
+      cmd_estimate "$@"
+      ;;
+    tokens)
+      gc_load_cmd tokens
+      cmd_tokens "$@"
+      ;;
+    reports)
+      gc_load_cmd reports
+      cmd_reports "$@"
+      ;;
+    doctor)
+      gc_load_cmd doctor
+      cmd_doctor "$@"
+      ;;
+    task-convert)
+      gc_load_cmd create-tasks
+      cmd_task_convert "$@" ;;
+    show-file)
+      gc_load_cmd show-file
+      cmd_show_file "$@"
+      ;;
+    sweep-artifacts)  cmd_sweep_artifacts "$@" ;;
+    tidy-progress)  cmd_tidy_progress "$@" ;;
+    next)
+      gc_load_cmd next
+      cmd_next "$@"
+      ;;
+    why)
+      gc_load_cmd why
+      cmd_why "$@"
+      ;;
+    work-on-tasks)
+      if [[ "${GC_TASK_ORDER:-global-dag}" == "global-dag" ]]; then
+        "$shell_bin" "$CLI_ROOT/scripts/work-on-tasks-global.sh" "$@"
+      else
+        gc_load_cmd work-on-tasks
+        cmd_work_on_tasks "$@"
+      fi
+      ;;
+    iterate)
+      gc_load_cmd iterate
+      cmd_iterate "$@"
+      ;;
+    keys)
+      gc_load_cmd keys
+      cmd_keys "$@"
+      ;;
+    binder)         cmd_binder "$@" ;;
+    tui)
+      gc_load_cmd tui
+      cmd_tui "$@"
+      ;;
+    update)
+      gc_load_cmd update
+      cmd_update "$@"
+      ;;
+    *) die "Unknown command: ${cmd}. See '${APP_NAME} help'" ;;
+  esac
+}
+
+gc_load_api_keys
+
+GC_ORIGINAL_ARGS=("$@")
+gc_reports_extract_global_flags "$@"
+set -- "${GC_FILTERED_ARGS[@]}"
+if gc_env_truthy "${GC_DRY_RUN:-0}"; then
+  GC_DRY_RUN=1
+else
+  GC_DRY_RUN=0
+fi
+export GC_DRY_RUN
+gc_dry_run_notice || true
+
+GC_INVOCATION="$0"
+if ((${#GC_ORIGINAL_ARGS[@]})); then
+  GC_INVOCATION+=" $(printf '%q ' "${GC_ORIGINAL_ARGS[@]}")"
+  GC_INVOCATION="${GC_INVOCATION% }"
+fi
+
+WORKSPACE_GUARD_PATH="${GC_SCRIPTS_ROOT}/workspace_guard.sh"
+DOC_CATALOG_GUARD_PATH="${GC_SCRIPTS_ROOT}/doc_catalog_guard.sh"
+DEP_GUARD_PATH="${GC_SCRIPTS_ROOT}/dep_guard.sh"
+
+# shellcheck source=scripts/workspace_guard.sh
+. "$WORKSPACE_GUARD_PATH" "$@"
+
+# shellcheck source=scripts/doc_catalog_guard.sh
+. "$DOC_CATALOG_GUARD_PATH" "$@"
+
+# shellcheck source=scripts/dep_guard.sh
+. "$DEP_GUARD_PATH" "$@"
+
+if [[ -z "${GC_RUNTIME_DIR:-}" ]]; then
+  GC_RUNTIME_DIR="${CLI_ROOT}/runtime"
+fi
+export GC_RUNTIME_DIR
+
+: "${GC_RESET_TTY_SIGNALS:=1}"
+if (( GC_RESET_TTY_SIGNALS )) && [[ -t 0 || -t 1 || -t 2 ]]; then
+  if [[ -t 0 ]]; then
+    stty isig </dev/stdin >/dev/null 2>&1 || true
+  elif [[ -t 1 ]]; then
+    stty isig </dev/stdout >/dev/null 2>&1 || true
+  elif [[ -t 2 ]]; then
+    stty isig </dev/stderr >/dev/null 2>&1 || true
+  fi
+fi
+
+: "${CI:=1}"
+: "${TZ:=UTC}"
+: "${NODE_ENV:=test}"
+export CI TZ NODE_ENV
+
+: "${PNPM_IGNORE_NODE_VERSION:=1}"
+: "${NPM_CONFIG_ENGINE_STRICT:=false}"
+: "${YARN_IGNORE_NODE:=1}"
+: "${GC_PREFLIGHT_I18N_AUTO_SYNC_LIMIT:=1}"
+: "${WORK_ON_TASKS_SKIP_I18N_GUARD:=1}"
+export PNPM_IGNORE_NODE_VERSION NPM_CONFIG_ENGINE_STRICT YARN_IGNORE_NODE GC_PREFLIGHT_I18N_AUTO_SYNC_LIMIT WORK_ON_TASKS_SKIP_I18N_GUARD
+
+if command -v id >/dev/null 2>&1; then
+  if [[ -z "${GC_STACK_UID:-}" ]]; then
+    GC_STACK_UID="$(id -u)"
+  fi
+  if [[ -z "${GC_STACK_GID:-}" ]]; then
+    GC_STACK_GID="$(id -g)"
+  fi
+  export GC_STACK_UID GC_STACK_GID
+fi
+
+GC_RUNTIME_HOOKS_DIR="${GC_SCRIPTS_ROOT}/runtime-hooks"
+GC_NODE_TRAP_MODULE="${GC_RUNTIME_HOOKS_DIR}/node-global-trap.cjs"
+if [[ -d "$GC_RUNTIME_HOOKS_DIR" ]]; then
+  case ":${PYTHONPATH:-}:" in
+    *":${GC_RUNTIME_HOOKS_DIR}:"*)
+      ;;
+    *)
+      export PYTHONPATH="${GC_RUNTIME_HOOKS_DIR}${PYTHONPATH:+:$PYTHONPATH}"
+      ;;
+  esac
+  if [[ -f "$GC_NODE_TRAP_MODULE" ]]; then
+    if [[ "${NODE_OPTIONS:-}" != *"--unhandled-rejections=strict"* ]]; then
+      NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--unhandled-rejections=strict"
+    fi
+    case " ${NODE_OPTIONS:-} " in
+      *"${GC_NODE_TRAP_MODULE}"*)
+        ;;
+      *)
+        NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--require ${GC_NODE_TRAP_MODULE}"
+        ;;
+    esac
+    export NODE_OPTIONS
+  fi
+fi
+
+TS_PRELOAD="${GC_RUNTIME_DIR}/ts-preload.cjs"
+if [[ -f "$TS_PRELOAD" ]]; then
+  case " ${NODE_OPTIONS:-} " in
+    *"$TS_PRELOAD"*)
+      ;;
+    *)
+      if [[ -n "${NODE_OPTIONS:-}" ]]; then
+        export NODE_OPTIONS="--require $TS_PRELOAD ${NODE_OPTIONS}"
+      else
+        export NODE_OPTIONS="--require $TS_PRELOAD"
+      fi
+      ;;
+  esac
+fi
+
+GC_SCHEMA_EVIDENCE_PATH="${GC_WORKSPACE_DIR:-$PWD}/.gpt-creator/index/schema-evidence.json"
+mkdir -p "$(dirname "$GC_SCHEMA_EVIDENCE_PATH")"
+if command -v node >/dev/null 2>&1; then
+  node "$CLI_ROOT/scripts/schema_evidence.js" build --out "$GC_SCHEMA_EVIDENCE_PATH" >/dev/null 2>&1 || true
+fi
+export GC_SCHEMA_EVIDENCE_PATH
+
+if gc_reports_enabled; then
+  trap 'gc_reports_activity_trap "$BASH_COMMAND"' DEBUG
+fi
+
+trap 'gc_child_unhandled_bridge "Unhandled error from child process"' USR1
+trap 'gc_interrupt_handler INT' INT
+trap 'gc_interrupt_handler TERM' TERM
+trap 'gc_interrupt_handler TSTP' TSTP
+trap 'gc_interrupt_handler QUIT' QUIT
+
+trap 'gc_capture_error_context $? "$BASH_COMMAND"' ERR
+trap 'gc_exit_handler $?' EXIT
+
+main "$@"

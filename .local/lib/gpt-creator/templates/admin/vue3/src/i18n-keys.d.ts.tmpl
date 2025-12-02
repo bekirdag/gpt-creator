@@ -1,0 +1,23 @@
+export const authKeyEntries = [
+  'auth.brand',
+  'auth.dashboard',
+  'auth.users',
+  'auth.content',
+  'auth.settings',
+  'auth.logout',
+  'auth.welcome',
+] as const;
+
+export type AuthKey = typeof authKeyEntries[number];
+
+export const localeKeys = [
+  'auth.brand',
+  'auth.dashboard',
+  'auth.users',
+  'auth.content',
+  'auth.settings',
+  'auth.logout',
+  'auth.welcome',
+] as const;
+
+export type LocaleKey = typeof localeKeys[number];

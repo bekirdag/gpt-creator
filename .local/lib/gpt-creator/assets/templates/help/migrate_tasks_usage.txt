@@ -1,0 +1,9 @@
+Usage: gpt-creator migrate-tasks [--project PATH] [--force]
+
+Populate the tasks SQLite database from the JSON outputs produced by
+`gpt-creator create-jira-tasks` (under plan/create-jira-tasks/json).
+
+Options:
+  --project PATH  Project root (defaults to current directory)
+  --force         Rebuild the database without restoring prior task status metadata
+

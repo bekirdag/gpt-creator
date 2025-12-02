@@ -1,0 +1,11 @@
+Usage: prisma-generate-safe.sh [project-root] [-- prisma-cli-args...]
+
+Runs `prisma generate` with workspace-independent safeguards:
+  • Ensures Prisma engine binaries are written to a writable cache
+  • Falls back across pnpm, npx, and globally installed prisma CLIs
+  • Ignores Node engine pinning when pnpm runs with a mismatched runtime
+
+Examples:
+  scripts/prisma-generate-safe.sh
+  scripts/prisma-generate-safe.sh /path/to/project
+  scripts/prisma-generate-safe.sh . -- --schema apps/api/prisma/schema.prisma

@@ -1,0 +1,16 @@
+Usage: gpt-creator export-agents [options]
+
+Export agents from the current project as JSON. By default, the payload is
+written to stdout; pass --output to save to a file.
+
+Filters:
+  --client CLIENT
+  --model MODEL
+  --active true|false
+  --name-like TEXT
+  --tag TAG            (repeatable)
+
+Options:
+  --output PATH        Write JSON to PATH (defaults to stdout)
+  --include-keys       Include stored client API keys (disabled by default)
+  -h, --help           Show this help message

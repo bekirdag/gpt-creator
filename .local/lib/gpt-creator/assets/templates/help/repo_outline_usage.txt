@@ -1,0 +1,31 @@
+Usage:
+  python3 "$GC_REPO_OUTLINE_PY" [options]
+  # Fallback outside gpt-creator: python3 tools/scripts/python/repo_outline.py [options]
+
+Purpose:
+  Print a concise directory outline (and a few representative files) so you can
+  understand the repo layout without running dozens of `ls`/`sed` commands.
+
+Key options:
+  --root PATH            Root folder to scan (default: current directory)
+  --max-depth N          How many directory levels to display (default: 2)
+  --files-per-dir N      How many files to show per directory (default: 5, set 0 to skip)
+  --max-items N          Max entries per directory (dirs + files, default: 20)
+  --focus PATH           Add detailed sections for important subtrees (repeatable)
+  --ignore NAME          Skip additional directory/file names (repeatable)
+  --include-hidden       Show entries starting with '.'
+
+Examples:
+  # Quick overview of the repo root
+  python3 "$GC_REPO_OUTLINE_PY"
+
+  # Dive deeper into apps/api while keeping the main tree shallow
+  python3 "$GC_REPO_OUTLINE_PY" --max-depth 1 --focus apps/api --focus apps/api/src
+
+  # Emphasize scripts without clutter from node_modules or dist
+  python3 "$GC_REPO_OUTLINE_PY" --focus scripts --ignore node_modules --ignore dist
+
+Tips:
+  • Copy/paste the outline into your task log instead of dumping entire files.
+  • Combine with `--focus apps/api/src/admin` when you need a reminder of nested modules.
+  • Adjust `--files-per-dir 0` if you only care about directory names.

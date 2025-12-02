@@ -1,0 +1,14 @@
+generate-web — scaffold Vue 3 public website (Vite)
+
+Usage:
+  gpt-creator generate web [options]
+
+Options:
+  --style <file>       Path to site CSS (e.g., style.css or style_sheet.md tokens)
+  --samples <dir>      Path to page_samples directory (with *.html)
+  --ui-doc <file>      Path to UI pages specification markdown
+  --out <dir>          Output directory (default: ${GEN_WEB_OUT_DEFAULT})
+  --no-install         Skip pnpm install/build
+  -n, --dry-run        Create prompt only; do not call Codex
+  -h, --help           Show help
+

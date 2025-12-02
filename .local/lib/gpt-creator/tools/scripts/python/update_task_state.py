@@ -1,0 +1,168 @@
+import sqlite3
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+LOCKABLE_STATUSES = {
+    "complete",
+    "completed",
+    "completed-no-changes",
+    "ready-to-review",
+    "ready_to_review",
+    "ready-to-review-no-changes",
+    "ready_for_review",
+    "ready-for-review",
+    "ready-for-qa",
+    "ready-to-qa",
+    "ready_to_qa",
+    "ready_for_qa",
+    "blocked-budget",
+    "blocked-quota",
+    "blocked-merge-conflict",
+    "blocked-schema-drift",
+    "blocked-schema-guard-error",
+    "blocked-push",
+    "skipped-already-complete",
+}
+
+
+def _is_blocked_dependency(status: str) -> bool:
+    return (status or "").strip().lower().startswith("blocked-dependency(")
+
+
+def update_task_state(
+    db_path: Path,
+    story_slug: str,
+    position: str,
+    status: str,
+    run_stamp: str,
+    *,
+    timestamp_override: Optional[str] = None,
+) -> None:
+    position_int = int(position)
+    run_stamp = run_stamp or "manual"
+    timestamp = timestamp_override or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(tasks)")
+    existing_columns = {row["name"] for row in cur.fetchall()}
+    for column, ddl in (
+        ("started_at", "TEXT"),
+        ("completed_at", "TEXT"),
+        ("locked_by_migration", "INTEGER DEFAULT 0"),
+        ("reopened_by_migration", "INTEGER DEFAULT 0"),
+        ("reopened_by_migration_at", "TEXT"),
+        ("last_run", "TEXT"),
+        ("updated_at", "TEXT"),
+    ):
+        if column not in existing_columns:
+            try:
+                cur.execute(f"ALTER TABLE tasks ADD COLUMN {column} {ddl}")
+                existing_columns.add(column)
+            except sqlite3.DatabaseError:
+                pass
+    row = cur.execute(
+        """
+        SELECT id, status, started_at, completed_at, locked_by_migration,
+               reopened_by_migration, reopened_by_migration_at
+          FROM tasks
+         WHERE story_slug = ? AND position = ?
+        """,
+        (story_slug, position_int),
+    ).fetchone()
+
+    if row is not None:
+        current_status = (row["status"] or "").strip().lower()
+        locked_by_migration = int(row["locked_by_migration"] or 0)
+        reopened_by_migration = int(row["reopened_by_migration"] or 0)
+        status_lower = (status or "").strip().lower()
+
+        if locked_by_migration and status_lower not in LOCKABLE_STATUSES and not _is_blocked_dependency(status_lower):
+            allow_reopen = False
+            if status_lower == current_status:
+                allow_reopen = True
+            elif status_lower == "blocked-migration-transition":
+                allow_reopen = True
+            if not allow_reopen:
+                conn.close()
+                return
+
+        fields = [
+            ("status", status),
+            ("last_run", run_stamp),
+            ("updated_at", timestamp),
+        ]
+
+        started_at = row["started_at"]
+        completed_at = row["completed_at"]
+
+        if status in {"in-progress"} and not started_at:
+            fields.append(("started_at", timestamp))
+        elif status in {
+            "complete",
+            "completed",
+            "completed-no-changes",
+            "ready-to-review",
+            "ready_to_review",
+            "ready-to-review-no-changes",
+            "ready_for_review",
+            "ready-for-review",
+            "ready-for-qa",
+            "ready-to-qa",
+            "ready_to_qa",
+            "ready_for_qa",
+            "skipped-already-complete",
+        }:
+            if not started_at:
+                fields.append(("started_at", timestamp))
+            fields.append(("completed_at", timestamp))
+        elif status == "pending":
+            fields.append(("started_at", None))
+            fields.append(("completed_at", None))
+        elif status in {"blocked", "blocked-quota", "blocked-schema-drift", "blocked-schema-guard-error"} or _is_blocked_dependency(status):
+            if not started_at:
+                fields.append(("started_at", timestamp))
+
+        if locked_by_migration and status_lower not in LOCKABLE_STATUSES and not _is_blocked_dependency(status_lower):
+            fields.append(("locked_by_migration", 0))
+            fields.append(("reopened_by_migration", 1))
+            if not reopened_by_migration:
+                fields.append(("reopened_by_migration_at", timestamp))
+        elif status_lower in LOCKABLE_STATUSES or _is_blocked_dependency(status_lower):
+            fields.append(("locked_by_migration", 1))
+
+        set_clause = ", ".join(f"{col} = ?" for col, _ in fields)
+        params = [value for _, value in fields] + [story_slug, position_int]
+        cur.execute(f"UPDATE tasks SET {set_clause} WHERE story_slug = ? AND position = ?", params)
+
+    conn.commit()
+    conn.close()
+
+
+def main() -> int:
+    if len(sys.argv) < 6:
+        return 1
+
+    db_path = Path(sys.argv[1])
+    story_slug = sys.argv[2]
+    position = sys.argv[3]
+    status = sys.argv[4]
+    run_stamp = sys.argv[5]
+    timestamp_override = sys.argv[6] if len(sys.argv) > 6 else ""
+
+    update_task_state(
+        db_path,
+        story_slug,
+        position,
+        status,
+        run_stamp,
+        timestamp_override=timestamp_override or None,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

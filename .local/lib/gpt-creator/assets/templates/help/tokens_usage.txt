@@ -1,0 +1,4 @@
+Usage: gpt-creator tokens [--project PATH] [--details] [--json]
+
+Print aggregated Codex token usage captured under .gpt-creator/logs/codex-usage.ndjson.
+

@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cols=$(tput cols 2>/dev/null || echo 80)
+width=${GC_REVIEW_HEADER_WIDTH:-60}
+if (( cols < width )); then width="$cols"; fi
+(( width < 40 )) && width=40
+inner=$((width - 2))
+title="Auto Review :: ${GC_REVIEW_TITLE:-unknown}"
+trimmed_title="${title:0:$inner}"
+pad=$((inner - ${#trimmed_title}))
+(( pad < 0 )) && pad=0
+left=$((pad / 2))
+right=$((pad - left))
+rep(){ local char="$1" count="$2"; printf '%0.s%s' $(seq 1 "$count") "$char"; }
+C_TITLE=$(tput setaf 6 2>/dev/null || true)
+C_BORDER=$(tput setaf 4 2>/dev/null || true)
+RESET=$(tput sgr0 2>/dev/null || true)
+printf "%s╭" "$C_BORDER"; rep "─" "$inner"; printf "╮%s\n" "$RESET"
+printf "%s│%s%s%s%s%s│%s\n" "$C_BORDER" "$(printf '%*s' "$left" '')" "$C_TITLE" "$trimmed_title" "$RESET" "$(printf '%*s' "$right" '')" "$RESET"
+printf "%s╰" "$C_BORDER"; rep "─" "$inner"; printf "╯%s\n" "$RESET"
+
+- **Status:** ${GC_REVIEW_STATUS:-unknown}
+- **Tokens used:** ${GC_REVIEW_TOKENS:-unknown}
+- **Run:** ${GC_REVIEW_RUN:-unknown}
+- **Timestamp:** ${GC_REVIEW_TIMESTAMP:-unknown}
+
+## Summary
+Provide a short summary of the automated review outcome here. Mention any risky areas, files touched, or follow-up steps required.
+
+## Findings
+1. _Finding #1_
+2. _Finding #2_
+
+## Next Steps
+- [ ] Verify CI/build status
+- [ ] Run targeted tests if needed
+- [ ] Coordinate with reviewers/stakeholders

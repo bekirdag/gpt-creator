@@ -1,0 +1,12 @@
+Usage: gpt-creator show-agent --name NAME [--project PATH] [--full] [--json]
+
+Display the stored metadata for a single agent.
+
+Flags:
+  --name NAME    Required agent identifier.
+  --project DIR  Project root (defaults to current working directory).
+  --full         Include full job/character documents (printed verbatim; long docs will be piped through the configured pager if available).
+  --json         Emit the agent record as JSON (pair with --full to include docs).
+
+When --full is omitted, only summaries and metadata are shown so sensitive doc
+bodies stay out of logs by default.

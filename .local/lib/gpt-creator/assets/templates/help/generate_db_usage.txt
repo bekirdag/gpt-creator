@@ -1,0 +1,10 @@
+Usage:
+  gpt-creator generate db [--orm prisma|typeorm] [--db-url mysql://...] [--sql path.sql] [--out apps/api]
+Options:
+  --orm           ORM target. Default: prisma
+  --db-url        MySQL connection URL for introspection (e.g., mysql://user:pass@127.0.0.1:3306/app)
+  --sql           Optional SQL dump to import before introspection
+  --out           API project directory where schema/ORM files will be written. Default: apps/api
+  --model         Codex model for fallback generation. Default from ${GEN_DB_CODEX_MODEL_DEFAULT}
+  -h, --help      Show help
+

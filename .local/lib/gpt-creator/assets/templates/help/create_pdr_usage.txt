@@ -1,0 +1,11 @@
+Usage: gpt-creator create-pdr [options]
+
+Generate a Product Requirements Document (PDR) from the staged Request for Proposal (RFP) using Codex.
+
+Options:
+  --project PATH   Project root (defaults to current directory)
+  --model NAME     Codex model to use (default: gpt-5.1-codex (high))
+  --agent NAME     Resolve the model from a stored agent persona (fallbacks to raw model id when missing)
+  --dry-run        Skip Codex calls but emit the derived prompts
+  --force          Regenerate all stages even if outputs already exist
+  -h, --help       Show this help message

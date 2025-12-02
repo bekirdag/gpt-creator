@@ -1,0 +1,11 @@
+Usage: ${RUN_OPEN_CMD_NAME} run-open [--web] [--admin] [--api] [--all] [--web-url URL] [--admin-url URL] [--api-url URL]
+
+Defaults:
+  --web-url   ${RUN_OPEN_WEB_DEFAULT}
+  --admin-url ${RUN_OPEN_ADMIN_DEFAULT}
+  --api-url   ${RUN_OPEN_API_DEFAULT}
+
+Examples:
+  ${RUN_OPEN_CMD_NAME} run-open --web --admin
+  ${RUN_OPEN_CMD_NAME} run-open --api --api-url http://localhost:3000/health
+

@@ -1,0 +1,323 @@
+{
+  "clients": {
+    "openai": {
+      "label": "OpenAI Codex",
+      "adapter": "codex_cli",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "apiBaseEnv": "OPENAI_API_BASE",
+      "defaultApiBase": "https://api.openai.com/v1",
+      "orgEnv": "OPENAI_ORG_ID",
+      "defaultHeaders": {
+        "OpenAI-Beta": "assistants=v2"
+      },
+      "installHint": "Install the Codex CLI and ensure 'codex' is on PATH (see https://platform.openai.com).",
+      "installCommands": {
+        "default": "echo 'Visit https://platform.openai.com and install the Codex CLI. Ensure the codex binary is on PATH.'",
+        "macos": "echo 'Install the Codex CLI package from https://platform.openai.com and ensure codex is on PATH.'",
+        "windows": "powershell -Command \"Write-Host 'Install the Codex CLI from https://platform.openai.com and add it to PATH.'\""
+      },
+      "defaultModel": "gpt-5.1-codex-max",
+      "models": [
+        "gpt-5-codex",
+        "gpt-5.1-codex",
+        "gpt-5.1-codex-max"
+      ],
+      "envVars": [
+        "OPENAI_API_KEY",
+        "GC_OPENAI_API_KEY",
+        "GC_OPENAI_KEY"
+      ],
+      "maxContextTokens": 105000,
+      "maxOutputTokens": 4000,
+      "retry": {
+        "maxAttempts": 3,
+        "initialDelayMs": 2000,
+        "backoffFactor": 1.5
+      }
+    },
+    "ollama": {
+      "label": "Ollama",
+      "adapter": "command",
+      "defaultModel": "gpt-oss",
+      "models": [
+        "gpt-oss"
+      ],
+      "adapterConfig": {
+        "command": [
+          "ollama",
+          "run",
+          "{model}"
+        ],
+        "messageJoiner": "\n\n",
+        "promptTemplate": "{system}\n\n{messages}",
+        "timeoutSeconds": 180
+      },
+      "installHint": "Requires Ollama with the gpt-oss model pulled.",
+      "installCommands": {
+        "default": "ollama pull gpt-oss",
+        "macos": "ollama pull gpt-oss",
+        "windows": "ollama pull gpt-oss"
+      }
+    },
+    "anthropic": {
+      "label": "Anthropic Claude",
+      "adapter": "anthropic",
+      "apiKeyEnv": "ANTHROPIC_API_KEY",
+      "apiBaseEnv": "ANTHROPIC_API_BASE",
+      "defaultApiBase": "https://api.anthropic.com",
+      "orgEnv": "",
+      "defaultHeaders": {
+        "anthropic-version": "2023-06-01"
+      },
+      "installHint": "Uses Anthropic HTTP APIs directly; no CLI installation required.",
+      "installCommands": {},
+      "defaultModel": "claude-3.7-sonnet",
+      "models": [
+        "claude-3.7-sonnet",
+        "claude-3.7-haiku"
+      ],
+      "envVars": [
+        "ANTHROPIC_API_KEY"
+      ],
+      "maxContextTokens": 200000,
+      "maxOutputTokens": 4000,
+      "retry": {
+        "maxAttempts": 3,
+        "initialDelayMs": 3000,
+        "backoffFactor": 1.5
+      }
+    },
+    "xai": {
+      "label": "xAI Grok",
+      "adapter": "xai",
+      "apiKeyEnv": "GROK_API_KEY",
+      "apiBaseEnv": "GROK_API_BASE",
+      "defaultApiBase": "https://api.x.ai/v1",
+      "orgEnv": "GROK_ORG_ID",
+      "defaultHeaders": {},
+      "installHint": "Uses xAI HTTP APIs directly; no CLI installation required.",
+      "installCommands": {},
+      "defaultModel": "grok-4",
+      "models": [
+        "grok-3",
+        "grok-4"
+      ],
+      "envVars": [
+        "GROK_API_KEY"
+      ],
+      "maxContextTokens": 131000,
+      "maxOutputTokens": 4000,
+      "retry": {
+        "maxAttempts": 3,
+        "initialDelayMs": 2500,
+        "backoffFactor": 1.4
+      }
+    },
+    "gemini": {
+      "label": "Google Gemini CLI",
+      "adapter": "command",
+      "adapterConfig": {
+        "command": [
+          "gemini",
+          "chat",
+          "--model",
+          "{model}"
+        ],
+        "env": {
+          "GEMINI_API_KEY": "${GEMINI_API_KEY}"
+        },
+        "promptTemplate": "{system}\n\n{messages}",
+        "messageJoiner": "\n\n",
+        "timeoutSeconds": 120
+      },
+      "installHint": "Install the Google Gemini CLI and ensure 'gemini' is on PATH (see https://ai.google.dev).",
+      "installCommands": {
+        "default": "npm install -g @google/gemini-cli",
+        "macos": "brew install gemini-cli",
+        "windows": "npm install -g @google/gemini-cli"
+      },
+      "apiKeyEnv": "GEMINI_API_KEY",
+      "apiBaseEnv": "",
+      "defaultApiBase": "",
+      "orgEnv": "",
+      "defaultHeaders": {},
+      "defaultModel": "gemini-2.5-pro",
+      "models": [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash"
+      ],
+      "envVars": [
+        "GEMINI_API_KEY"
+      ],
+      "maxContextTokens": 200000,
+      "maxOutputTokens": 8192,
+      "retry": {
+        "maxAttempts": 3,
+        "initialDelayMs": 1500,
+        "backoffFactor": 1.5
+      }
+    },
+    "claude-code": {
+      "label": "Anthropic Claude Code CLI",
+      "adapter": "command",
+      "defaultModel": "claude-code",
+      "models": [
+        "claude-code"
+      ],
+      "adapterConfig": {
+        "command": [
+          "claude-code"
+        ],
+        "messageJoiner": "\n\n",
+        "promptTemplate": "{messages}"
+      },
+      "installHint": "Install the Claude Code CLI and ensure 'claude-code' is on PATH.",
+      "installCommands": {
+        "default": "npm install -g @anthropic-ai/claude-code",
+        "macos": "brew install --cask claude-code",
+        "windows": "npm install -g @anthropic-ai/claude-code"
+      }
+    },
+    "codestral": {
+      "label": "Mistral Codestral CLI",
+      "adapter": "command",
+      "defaultModel": "codestral-latest",
+      "models": [
+        "codestral-latest"
+      ],
+      "adapterConfig": {
+        "command": [
+          "mistral-chat",
+          "--model",
+          "{model}"
+        ],
+        "messageJoiner": "\n\n",
+        "promptTemplate": "{messages}"
+      },
+      "installHint": "Install the Mistral SDK/CLI so 'mistral-chat' is available.",
+      "installCommands": {
+        "default": "pip install mistralai",
+        "macos": "pip install mistralai",
+        "windows": "pip install mistralai"
+      }
+    },
+    "deepseek": {
+      "label": "DeepSeek CLI",
+      "adapter": "command",
+      "defaultModel": "deepseek-coder-v2",
+      "models": [
+        "deepseek-coder-v2"
+      ],
+      "adapterConfig": {
+        "command": [
+          "run-deepseek-cli",
+          "--model",
+          "{model}"
+        ],
+        "messageJoiner": "\n\n",
+        "promptTemplate": "{messages}"
+      },
+      "installHint": "Install the DeepSeek CLI (Node or Python) and ensure it is on PATH.",
+      "installCommands": {
+        "default": "npm install -g run-deepseek-cli",
+        "macos": "npm install -g run-deepseek-cli",
+        "windows": "pip install deepseek-cli"
+      }
+    },
+    "codellama": {
+      "label": "Meta Code Llama (Ollama)",
+      "adapter": "command",
+      "defaultModel": "codellama",
+      "models": [
+        "codellama"
+      ],
+      "adapterConfig": {
+        "command": [
+          "ollama",
+          "run",
+          "{model}"
+        ],
+        "messageJoiner": "\n\n",
+        "promptTemplate": "{messages}"
+      },
+      "installHint": "Install Ollama and pull the codellama model.",
+      "installCommands": {
+        "default": "ollama pull codellama",
+        "macos": "ollama pull codellama",
+        "windows": "ollama pull codellama"
+      }
+    },
+    "gpt-oss": {
+      "label": "GPT-OSS (Ollama)",
+      "adapter": "command",
+      "defaultModel": "gpt-oss",
+      "models": [
+        "gpt-oss"
+      ],
+      "adapterConfig": {
+        "command": [
+          "ollama",
+          "run",
+          "{model}"
+        ],
+        "messageJoiner": "\n\n",
+        "promptTemplate": "{system}\n\n{messages}",
+        "timeoutSeconds": 180
+      },
+      "installHint": "Requires Ollama with the gpt-oss model pulled.",
+      "installCommands": {
+        "default": "ollama pull gpt-oss",
+        "macos": "ollama pull gpt-oss",
+        "windows": "ollama pull gpt-oss"
+      }
+    },
+    "starcoder2": {
+      "label": "BigCode StarCoder2 CLI",
+      "adapter": "command",
+      "defaultModel": "starcoder2",
+      "models": [
+        "starcoder2"
+      ],
+      "adapterConfig": {
+        "command": [
+          "starcoder-cli",
+          "--model",
+          "{model}"
+        ],
+        "messageJoiner": "\n\n",
+        "promptTemplate": "{messages}"
+      },
+      "installHint": "Install the StarCoder CLI or run via Ollama.",
+      "installCommands": {
+        "default": "npm install -g starcoder-cli",
+        "macos": "npm install -g starcoder-cli",
+        "windows": "npm install -g starcoder-cli"
+      }
+    },
+    "qwen-code": {
+      "label": "Qwen Code CLI",
+      "adapter": "command",
+      "defaultModel": "qwen2.5-coder",
+      "models": [
+        "qwen2.5-coder"
+      ],
+      "adapterConfig": {
+        "command": [
+          "qwen-code",
+          "--model",
+          "{model}"
+        ],
+        "messageJoiner": "\n\n",
+        "promptTemplate": "{messages}"
+      },
+      "installHint": "Install the Qwen Code CLI and ensure 'qwen-code' is available.",
+      "installCommands": {
+        "default": "npm install -g @qwen-code/qwen-code",
+        "macos": "npm install -g @qwen-code/qwen-code",
+        "windows": "npm install -g @qwen-code/qwen-code"
+      }
+    }
+  }
+}

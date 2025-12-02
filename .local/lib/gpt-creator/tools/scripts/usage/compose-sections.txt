@@ -1,0 +1,33 @@
+# compose_sections.py
+
+Utilities for emitting prompt sections without duplicate preambles.
+
+## Usage
+
+```python
+from scripts.python.compose_sections import (
+    emit_preamble_once,
+    dedupe_and_coalesce,
+    format_sections,
+)
+
+sections = [
+    ("System", "You are Codex"),
+    ("System", "You are Codex"),
+    ("Context", "Doc snippet"),
+    ("Plan", "1. Do thing"),
+]
+
+final_text = format_sections(
+    dedupe_and_coalesce(
+        emit_preamble_once(sections)
+    )
+)
+print(final_text)
+```
+
+- `emit_preamble_once` drops repeated "System"/"Preamble" headings.
+- `dedupe_and_coalesce` merges identical headings/bodies and trims whitespace.
+- `format_sections` outputs Markdown with `## Heading` separators.
+
+Call these helpers from custom prompt builders (e.g., `create-jira-tasks`, binder pipelines) so the resulting prompt stays lean and avoids repeated boilerplate that would otherwise boost the prompt token count.

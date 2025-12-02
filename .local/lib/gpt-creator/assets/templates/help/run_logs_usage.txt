@@ -1,0 +1,14 @@
+Usage: ${RUN_LOGS_CMD_NAME} run-logs [options]
+
+Options:
+  -p, --project-dir PATH   Project root (default: current directory)
+  -s, --service NAME       Specific service to tail (e.g., api, web, admin, db)
+      --since DURATION     Only show logs since e.g. "10m", "1h"
+  -n, --tail N             Number of lines to show (default: ${RUN_LOGS_DEFAULT_TAIL})
+  -f, --follow             Follow logs (stream)
+  -h, --help               Show this help
+
+Examples:
+  ${RUN_LOGS_CMD_NAME} run-logs -f
+  ${RUN_LOGS_CMD_NAME} run-logs --service api --since 30m -f
+

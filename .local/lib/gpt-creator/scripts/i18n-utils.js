@@ -1,0 +1,647 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+
+function isPlainObject(value) {
+  return Object.prototype.toString.call(value) === '[object Object]';
+}
+
+function readDirSafe(dirPath) {
+  try {
+    return fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+function isVisibleDirectory(entry) {
+  return entry.isDirectory() && !entry.name.startsWith('.');
+}
+
+function normaliseNewlines(text) {
+  return (text || '').replace(/\r\n/g, '\n');
+}
+
+function ensureDirSync(dirPath) {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
+}
+
+function stripBom(text) {
+  if (!text) {
+    return '';
+  }
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function sanitiseJsonInput(text) {
+  if (typeof text !== 'string') {
+    return '';
+  }
+  const normalised = normaliseNewlines(stripBom(text)).replace(/\u0000/g, '');
+  return normalised;
+}
+
+function stripJsonComments(text) {
+  if (!text) {
+    return '';
+  }
+  let result = '';
+  let inString = false;
+  let escapeNext = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let idx = 0; idx < text.length; idx++) {
+    const char = text[idx];
+    const nextChar = text[idx + 1];
+
+    if (inString) {
+      result += char;
+      if (escapeNext) {
+        escapeNext = false;
+      } else if (char === '\\') {
+        escapeNext = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (inLineComment) {
+      if (char === '\n') {
+        inLineComment = false;
+        result += '\n';
+      }
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (char === '*' && nextChar === '/') {
+        inBlockComment = false;
+        idx += 1;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+
+    if (char === '/' && nextChar === '/') {
+      inLineComment = true;
+      idx += 1;
+      continue;
+    }
+
+    if (char === '/' && nextChar === '*') {
+      inBlockComment = true;
+      idx += 1;
+      continue;
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
+function removeTrailingCommas(text) {
+  if (!text) {
+    return '';
+  }
+  let result = '';
+  let inString = false;
+  let escapeNext = false;
+
+  for (let idx = 0; idx < text.length; idx++) {
+    const char = text[idx];
+
+    if (inString) {
+      result += char;
+      if (escapeNext) {
+        escapeNext = false;
+      } else if (char === '\\') {
+        escapeNext = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      result += char;
+      continue;
+    }
+
+    if (char === ',') {
+      let lookahead = idx + 1;
+      let shouldSkip = false;
+      while (lookahead < text.length) {
+        const lookChar = text[lookahead];
+        if (lookChar === ' ' || lookChar === '\t' || lookChar === '\n' || lookChar === '\r') {
+          lookahead += 1;
+          continue;
+        }
+        if (lookChar === '}' || lookChar === ']') {
+          shouldSkip = true;
+        }
+        break;
+      }
+      if (shouldSkip) {
+        continue;
+      }
+    }
+
+    result += char;
+  }
+
+  return result;
+}
+
+function listJsonFiles(baseDir) {
+  const results = [];
+  const stack = [{ dir: baseDir, prefix: '' }];
+
+  while (stack.length > 0) {
+    const { dir, prefix } = stack.pop();
+    const entries = readDirSafe(dir);
+    for (const entry of entries) {
+      const relName = prefix ? path.join(prefix, entry.name) : entry.name;
+      const absPath = path.join(dir, entry.name);
+      if (isVisibleDirectory(entry)) {
+        stack.push({ dir: absPath, prefix: relName });
+      } else if (entry.isFile() && entry.name.endsWith('.json')) {
+        results.push(relName);
+      }
+    }
+  }
+
+  results.sort((a, b) => a.localeCompare(b));
+  return results;
+}
+
+function loadLocaleFile(filePath, options = {}) {
+  const { autoRepair = true } = options;
+  const exists = fs.existsSync(filePath);
+  if (!exists) {
+    return { exists: false, data: {}, raw: '', error: null };
+  }
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const data = JSON.parse(sanitiseJsonInput(raw));
+    return { exists: true, data, raw, error: null };
+  } catch (error) {
+    let raw = '';
+    try {
+      raw = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      raw = '';
+    }
+    if (autoRepair) {
+      const repaired = attemptRepairLocaleFile(filePath, raw);
+      if (repaired) {
+        return repaired;
+      }
+    }
+    return { exists: true, data: {}, raw, error };
+  }
+}
+
+function extractBalancedJsonValue(text) {
+  if (!text) {
+    return null;
+  }
+
+  const stack = [];
+  let start = -1;
+  let inString = false;
+  let escapeNext = false;
+
+  for (let idx = 0; idx < text.length; idx++) {
+    const char = text[idx];
+
+    if (inString) {
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      if (char === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{' || char === '[') {
+      if (start === -1) {
+        start = idx;
+      }
+      stack.push(char === '{' ? '}' : ']');
+      continue;
+    }
+
+    if (char === '}' || char === ']') {
+      if (stack.length === 0) {
+        return null;
+      }
+      const expected = stack.pop();
+      if ((char === '}' && expected !== '}') || (char === ']' && expected !== ']')) {
+        return null;
+      }
+      if (stack.length === 0) {
+        return text.slice(start, idx + 1);
+      }
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function attemptRepairLocaleFile(filePath, raw) {
+  const candidates = [];
+  const seen = new Set();
+  const enqueue = (value) => {
+    if (typeof value !== 'string') {
+      return;
+    }
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      return;
+    }
+    seen.add(trimmed);
+    candidates.push(trimmed);
+  };
+
+  const sanitised = sanitiseJsonInput(raw);
+  enqueue(sanitised);
+  enqueue(extractBalancedJsonValue(sanitised));
+
+  const commentFree = stripJsonComments(sanitised);
+  enqueue(commentFree);
+  enqueue(extractBalancedJsonValue(commentFree));
+
+  for (const candidate of candidates) {
+    const withoutTrailing = removeTrailingCommas(candidate).trim();
+    if (!withoutTrailing) {
+      continue;
+    }
+    try {
+      const data = JSON.parse(withoutTrailing);
+      const serialised = serialiseLocale(data);
+      fs.writeFileSync(filePath, serialised, 'utf8');
+      const relativePath = path.relative(process.cwd(), filePath);
+      console.warn(`[i18n-autoheal] Repaired invalid JSON in ${relativePath || filePath}`);
+      return {
+        exists: true,
+        data,
+        raw: serialised,
+        error: null,
+        repaired: true,
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function flattenLocaleTree(value, prefix = '') {
+  const entries = [];
+  if (isPlainObject(value)) {
+    for (const key of Object.keys(value)) {
+      const nextPrefix = prefix ? `${prefix}${key}.` : `${key}.`;
+      entries.push(...flattenLocaleTree(value[key], nextPrefix));
+    }
+  } else {
+    const key = prefix.endsWith('.') ? prefix.slice(0, -1) : prefix;
+    entries.push([key, value == null ? '' : String(value)]);
+  }
+  return entries;
+}
+
+function placeholdersFor(text) {
+  const matches = String(text || '').match(/\{[a-zA-Z0-9_]+\}/g);
+  if (!matches) {
+    return [];
+  }
+  const unique = Array.from(new Set(matches));
+  unique.sort();
+  return unique;
+}
+
+function sortObjectDeep(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => (isPlainObject(item) || Array.isArray(item) ? sortObjectDeep(item) : item));
+  }
+  if (!isPlainObject(value)) {
+    return value;
+  }
+  const sortedKeys = Object.keys(value).sort((a, b) => a.localeCompare(b));
+  const result = {};
+  for (const key of sortedKeys) {
+    const child = value[key];
+    if (isPlainObject(child) || Array.isArray(child)) {
+      result[key] = sortObjectDeep(child);
+    } else {
+      result[key] = child;
+    }
+  }
+  return result;
+}
+
+function serialiseLocale(value) {
+  const sorted = sortObjectDeep(value);
+  return `${JSON.stringify(sorted, null, 2)}\n`;
+}
+
+function discoverLocaleContexts(projectRoot, baseLocale = 'en') {
+  const contexts = [];
+  const appsRoot = path.join(projectRoot, 'apps');
+  const appEntries = readDirSafe(appsRoot).filter((entry) => isVisibleDirectory(entry));
+  for (const appEntry of appEntries) {
+    const localesRoot = path.join(appsRoot, appEntry.name, 'src', 'locales');
+    if (!fs.existsSync(localesRoot)) {
+      continue;
+    }
+    const baseDir = path.join(localesRoot, baseLocale);
+    if (!fs.existsSync(baseDir) || !fs.statSync(baseDir).isDirectory()) {
+      continue;
+    }
+    const targetLocales = new Set();
+    for (const entry of readDirSafe(localesRoot)) {
+      if (isVisibleDirectory(entry) && entry.name !== baseLocale) {
+        targetLocales.add(entry.name);
+      }
+    }
+    if (targetLocales.size === 0) {
+      continue;
+    }
+    const baseFiles = listJsonFiles(baseDir);
+    contexts.push({
+      appName: appEntry.name,
+      localesRoot,
+      baseLocale,
+      baseDir,
+      targetLocales: Array.from(targetLocales).sort((a, b) => a.localeCompare(b)),
+      baseFiles,
+    });
+  }
+  return contexts;
+}
+
+function collectLocaleIssues(projectRoot) {
+  const contexts = discoverLocaleContexts(projectRoot);
+  const issues = [];
+
+  for (const context of contexts) {
+    const baseCache = new Map();
+
+    for (const relativeFile of context.baseFiles) {
+      const basePath = path.join(context.baseDir, relativeFile);
+      let baseInfo = baseCache.get(relativeFile);
+      if (!baseInfo) {
+        baseInfo = loadLocaleFile(basePath);
+        baseCache.set(relativeFile, baseInfo);
+      }
+
+      if (baseInfo.error) {
+        issues.push({
+          app: context.appName,
+          locale: context.baseLocale,
+          file: relativeFile,
+          type: 'invalid-json',
+          message: baseInfo.error.message || String(baseInfo.error),
+        });
+        continue;
+      }
+
+      if (!isPlainObject(baseInfo.data)) {
+        issues.push({
+          app: context.appName,
+          locale: context.baseLocale,
+          file: relativeFile,
+          type: 'invalid-structure',
+          message: 'Base locale root must be an object.',
+        });
+        continue;
+      }
+
+      const baseMap = Object.fromEntries(flattenLocaleTree(baseInfo.data));
+
+      for (const locale of context.targetLocales) {
+        const targetPath = path.join(context.localesRoot, locale, relativeFile);
+        const targetInfo = loadLocaleFile(targetPath);
+
+        if (targetInfo.error) {
+          issues.push({
+            app: context.appName,
+            locale,
+            file: relativeFile,
+            type: 'invalid-json',
+            message: targetInfo.error.message || String(targetInfo.error),
+          });
+          continue;
+        }
+
+        if (!targetInfo.exists) {
+          issues.push({
+            app: context.appName,
+            locale,
+            file: relativeFile,
+            type: 'missing-file',
+            missingKeys: Object.keys(baseMap),
+          });
+          continue;
+        }
+
+        if (!isPlainObject(targetInfo.data)) {
+          issues.push({
+            app: context.appName,
+            locale,
+            file: relativeFile,
+            type: 'invalid-structure',
+            message: 'Locale file must export an object.',
+          });
+          continue;
+        }
+
+        const targetMap = Object.fromEntries(flattenLocaleTree(targetInfo.data));
+
+        const missingKeys = Object.keys(baseMap).filter((key) => !(key in targetMap));
+        const extraKeys = Object.keys(targetMap).filter((key) => !(key in baseMap));
+        const placeholderMismatch = [];
+        for (const key of Object.keys(baseMap)) {
+          if (!(key in targetMap)) {
+            continue;
+          }
+          const baseVars = placeholdersFor(baseMap[key]);
+          const targetVars = placeholdersFor(targetMap[key]);
+          if (baseVars.length !== targetVars.length || baseVars.some((value, idx) => value !== targetVars[idx])) {
+            placeholderMismatch.push({
+              key,
+              base: baseVars,
+              locale: targetVars,
+            });
+          }
+        }
+
+        const expectedSerialised = serialiseLocale(targetInfo.data);
+        const actualSerialised = `${normaliseNewlines(targetInfo.raw)}${targetInfo.raw.endsWith('\n') ? '' : '\n'}`.replace(/\r\n/g, '\n');
+        const formatMismatch = expectedSerialised !== actualSerialised;
+
+        if (missingKeys.length || extraKeys.length || placeholderMismatch.length || formatMismatch) {
+          const issue = {
+            app: context.appName,
+            locale,
+            file: relativeFile,
+          };
+          if (missingKeys.length) {
+            issue.missingKeys = missingKeys;
+          }
+          if (extraKeys.length) {
+            issue.extraKeys = extraKeys;
+          }
+          if (placeholderMismatch.length) {
+            issue.placeholderMismatch = placeholderMismatch;
+          }
+          if (formatMismatch) {
+            issue.formatMismatch = true;
+          }
+          issues.push(issue);
+        }
+      }
+    }
+  }
+
+  return { contexts, issues };
+}
+
+function mergeLocaleTrees(baseNode, targetNode) {
+  if (Array.isArray(baseNode)) {
+    if (Array.isArray(targetNode)) {
+      return { value: targetNode.slice(), changed: false };
+    }
+    return { value: baseNode.slice(), changed: true };
+  }
+
+  if (isPlainObject(baseNode)) {
+    const result = {};
+    let changed = false;
+    if (isPlainObject(targetNode)) {
+      for (const key of Object.keys(targetNode)) {
+        if (!Object.prototype.hasOwnProperty.call(baseNode, key)) {
+          changed = true;
+        }
+      }
+    } else if (targetNode !== undefined) {
+      changed = true;
+    }
+
+    const orderedKeys = Object.keys(baseNode).sort((a, b) => a.localeCompare(b));
+    for (const key of orderedKeys) {
+      const baseValue = baseNode[key];
+      const targetValue =
+        isPlainObject(targetNode) && Object.prototype.hasOwnProperty.call(targetNode, key)
+          ? targetNode[key]
+          : undefined;
+
+      if (isPlainObject(baseValue)) {
+        const childTarget = isPlainObject(targetValue) ? targetValue : {};
+        const childResult = mergeLocaleTrees(baseValue, childTarget);
+        result[key] = childResult.value;
+        if (childResult.changed || (!isPlainObject(targetValue) && targetValue !== undefined)) {
+          changed = true;
+        }
+      } else {
+        if (targetValue === undefined || isPlainObject(targetValue) || Array.isArray(targetValue)) {
+          result[key] = `TODO_${baseValue == null ? '' : String(baseValue)}`;
+          if (targetValue !== undefined) {
+            changed = true;
+          }
+        } else {
+          result[key] = targetValue;
+        }
+      }
+    }
+    return { value: result, changed };
+  }
+
+  if (targetNode === undefined) {
+    return { value: `TODO_${baseNode == null ? '' : String(baseNode)}`, changed: true };
+  }
+  if (isPlainObject(targetNode) || Array.isArray(targetNode)) {
+    return { value: `TODO_${baseNode == null ? '' : String(baseNode)}`, changed: true };
+  }
+  return { value: targetNode, changed: false };
+}
+
+function findLocaleRejects(projectRoot) {
+  const rejects = new Set();
+  const appsRoot = path.join(projectRoot, 'apps');
+  if (fs.existsSync(appsRoot)) {
+    const rootStack = [appsRoot];
+    while (rootStack.length > 0) {
+      const current = rootStack.pop();
+      for (const entry of readDirSafe(current)) {
+        const absPath = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          rootStack.push(absPath);
+        } else if (
+          entry.isFile() &&
+          entry.name.endsWith('.rej') &&
+          absPath.split(path.sep).includes('locales')
+        ) {
+          rejects.add(absPath);
+        }
+      }
+    }
+  }
+
+  const contexts = discoverLocaleContexts(projectRoot);
+  for (const context of contexts) {
+    const stack = [context.localesRoot];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      for (const entry of readDirSafe(current)) {
+        const absPath = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(absPath);
+        } else if (entry.isFile() && entry.name.endsWith('.rej')) {
+          rejects.add(absPath);
+        }
+      }
+    }
+  }
+
+  return Array.from(rejects).sort((a, b) => a.localeCompare(b));
+}
+
+module.exports = {
+  collectLocaleIssues,
+  discoverLocaleContexts,
+  ensureDirSync,
+  findLocaleRejects,
+  flattenLocaleTree,
+  loadLocaleFile,
+  mergeLocaleTrees,
+  normaliseNewlines,
+  serialiseLocale,
+  sortObjectDeep,
+};

@@ -1,0 +1,23 @@
+Usage: gpt-creator list-llms [options]
+
+List LLM catalog entries stored in .gpt-creator/staging/plan/tasks/tasks.db.
+
+Options:
+  --project DIR        Project root (defaults to current directory)
+  --provider ID        Filter by provider id (e.g., openai, anthropic)
+  --adapter NAME       Filter by adapter name (codex_cli, command, anthropic)
+  --source NAME        Filter by source (catalog, registry)
+  --model ID           Filter by model id
+  --name-like TEXT     Fuzzy match on provider/model names
+  --limit N            Limit the number of rows returned
+  --status STATUS      Filter by install status (repeatable: installed, missing,
+                       not_applicable, pending, unknown)
+  --needs-key          Only show entries missing required API keys
+  --json               Emit JSON instead of a table
+  --warn-keys          Show API key warnings (default)
+  --no-warn-keys       Hide API key warnings column
+  -h, --help           Show this help text
+
+Examples:
+  gpt-creator list-llms --project ./repo --provider openai
+  gpt-creator list-llms --adapter command --json

@@ -1,0 +1,55 @@
+Usage: gpt-creator work-on-tasks [options]
+
+Execute tasks from the project SQLite backlog using Codex, with resumable progress.
+
+Options:
+  --project PATH       Project root (defaults to current directory)
+  --story ID|SLUG      Start from the matching story id or slug (inclusive)
+  --from-task REF      Resume from task REF (task id or story-slug:position) and continue forward
+  --fresh              Ignore saved progress and start from the first story
+  --complete-on-followup
+                        Keep task status as complete even when follow-up notes are recorded
+  --auto-push[=REMOTE/BRANCH]
+                        Push commits after each successful task (defaults to upstream or origin/current)
+  --agent NAME         Override the Codex model for this run (alias: --codex-model; default: gpt-5.1-codex (high))
+  --keep-artifacts     Retain Codex prompt/output files for each task (default cleans up)
+  --memory-cycle       Process one task at a time, prune caches, and auto-resume to limit memory usage
+  --batch-size NUM     Process at most NUM tasks this run, then pause (default: unlimited)
+  --sleep-between SEC  Sleep SEC seconds between tasks (default: 0)
+  --context-lines NUM  Include the last NUM lines of shared context in each prompt (default: 400)
+  --context-none       Skip attaching shared context to task prompts
+  --context-file-lines NUM
+                        Limit each shared-context file to NUM lines before summarising (default: 200)
+  --context-skip GLOB  Ignore matching files when building shared context (repeatable)
+  --prompt-compact     Use the compact instruction/schema block (default setting)
+  --prompt-expanded    Restore the legacy verbose instruction/schema block
+  --context-doc-snippets
+                        (default) Pull scoped excerpts for referenced docs/endpoints when available
+  --no-context-doc-snippets
+                        Disable doc-snippet mode and include staged docs verbatim
+  --on-empty-apply MODE  Handle clean empty apply results: complete (default), retry, or fail
+  --plan-max-out NUM    Max output tokens for planning/status updates (default: 450; respects config/overrides)
+  --status-max-out NUM  Max output tokens for per-task status notes (default: 350)
+  --patch-max-out NUM   Max output tokens for code/diff responses (default: 7000)
+  --out-hard-cap NUM    Absolute ceiling for any Codex response (default: 12000)
+  --sample-lines NUM   Include at most NUM chunks of minified sample payloads (default: 0; increase to view raw content)
+  --max-tokens NUM     Override per-task hard token limit (defaults to model context minus reserved output)
+  --soft-limit RATIO   Override soft budget ratio (0 < ratio ≤ 1, default: 0.85)
+  --reserve-output NUM Reserve NUM tokens for model output (default: 1024)
+  --stop-on-overbudget[=true|false]
+                        Halt the run when a prompt exceeds the hard budget (default: true)
+  --max-tokens-per-stage stage=NUM
+                        Override a specific stage budget (e.g. --max-tokens-per-stage patch=15000)
+  --auto-abandon-top-offenders
+                        Force auto-abandon when prior runs exceeded stage budgets regardless of config
+  --no-auto-abandon-top-offenders
+                        Disable auto-abandon for offender stages even if configured
+  --binder-ttl DUR     Retain binder cache for duration (e.g. 7d, 12h; default: 7d)
+  --binder-max-size SIZE
+                        Maximum on-disk size for binder cache (supports KB/MB/GB suffixes; default: 200MB)
+  --binder-clear-on-migration
+                        Drop cached binders when the task migration epoch changes
+  --no-binder          Disable binder cache reuse for this run
+  --diff-repeat-limit NUM
+                        Override Codex diff repeat guard threshold (default: GC_CODEX_DIFF_REPEAT_LIMIT or 6)
+  --idle-timeout SEC   Abort the run if no forward progress occurs for SEC seconds (default: 0 → disabled)

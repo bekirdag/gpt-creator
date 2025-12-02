@@ -1,0 +1,11 @@
+Usage: gpt-creator create-db-dump [options]
+
+Generate MySQL schema and seed dumps directly from the SDS.
+
+Options:
+  --project PATH   Project root (defaults to current directory)
+  --model NAME     Codex model to use (default: gpt-5.1-codex (high))
+  --agent NAME     Resolve the model from a stored agent persona (fallbacks to raw model id when missing)
+  --dry-run        Prepare prompts but do not invoke Codex
+  --force          Regenerate outputs even if they already exist
+  -h, --help       Show this help message

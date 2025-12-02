@@ -1,0 +1,50 @@
+# Example manifest for tools/scripts/python/rest_check_runner.py
+name: postman-echo-smoke
+description: Demo checks against https://postman-echo.com to illustrate runner features.
+base_url: https://postman-echo.com
+
+defaults:
+  method: GET
+  timeout: 15
+  headers:
+    User-Agent: rest-check-runner/1.0
+    Accept: application/json
+  expect:
+    status: 200
+    max_latency_ms: 5000
+
+checks:
+  - name: health
+    request:
+      url: /get
+      params:
+        ping: health
+    expect:
+      json_equals:
+        args.ping: health
+
+  - name: echo-json
+    request:
+      method: POST
+      url: /post
+      json:
+        ping: pong
+    expect:
+      json_equals:
+        json.ping: pong
+      body_contains:
+        - '"ping":"pong"'
+
+  - name: list-headers
+    request:
+      url: /headers
+    expect:
+      json_exists:
+        - headers.host
+        - headers.accept
+
+  - name: status-204
+    request:
+      url: /status/204
+    expect:
+      status: 204

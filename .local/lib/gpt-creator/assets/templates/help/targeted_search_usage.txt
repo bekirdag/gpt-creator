@@ -1,0 +1,43 @@
+Usage:
+  python3 "$GC_TARGETED_SEARCH_PY" --pattern PATTERN --paths DIR [options]
+  # Fallback outside gpt-creator: python3 tools/scripts/python/targeted_search.py …
+
+Purpose:
+  Search a focused slice of the repo (limited depth/file count) instead of
+  writing ad-hoc `python3 - <<'PY' os.walk(...)` scripts that scan everything.
+
+Key options:
+  --pattern/-p TEXT      Pattern to find (repeatable). Literal by default.
+  --regex                Treat patterns as regular expressions.
+  --case-sensitive       Make matches case-sensitive (default: insensitive).
+  --paths/-P PATH        Directories or files to inspect (required, repeatable).
+  --ext EXT              File extensions to include (defaults: .ts, .tsx, .js,
+                         .jsx, .py, .md). Repeat to add more.
+  --max-depth N          Directory depth to traverse (default: 4).
+  --max-files N          Max files to scan before stopping (default: 200).
+  --allow-large          Allow scanning past --max-files (use sparingly).
+  --max-matches N        Stop after this many hits (default: 200).
+  --context N            Show N context lines around each hit.
+  --include-hidden       Include dotfiles and dot-directories.
+
+Examples:
+  # Find REQUEST_ID_HEADER inside admin API controllers (depth limited)
+  python3 "$GC_TARGETED_SEARCH_PY" \
+    --pattern REQUEST_ID_HEADER \
+    --paths apps/api/src/admin --ext .ts --max-depth 3
+
+  # Case-sensitive regex search for Controller('events') across events module
+  python3 "$GC_TARGETED_SEARCH_PY" \
+    --pattern "@Controller\\('events'\\)" --regex --case-sensitive \
+    --paths apps/api/src/events --ext .ts
+
+  # Check multiple patterns within a few files
+  python3 "$GC_TARGETED_SEARCH_PY" \
+    -p logProgramPublishEvent -p conflictId \
+    -P apps/api/src/admin/admin-program.controller.ts
+
+Tips:
+  • Always pass the narrowest `--paths` possible; the script refuses giant scans
+    unless you opt in with `--allow-large`.
+  • Use multiple `--pattern` flags instead of running the command repeatedly.
+  • Set `--context 2` when you need surrounding lines for quick review.

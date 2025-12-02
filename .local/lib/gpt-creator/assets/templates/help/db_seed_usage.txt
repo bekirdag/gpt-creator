@@ -1,0 +1,5 @@
+Usage: ${DB_SEED_CMD_NAME} [--service db] [--compose <file>] [--from sql_file]
+   --service   Docker Compose service name for MySQL (default: db)
+   --compose   Path to docker compose file (default: ./docker/compose.yaml or ./docker-compose.yml)
+   --from      Optional path to a seed .sql file. If omitted, default seeds are applied.
+

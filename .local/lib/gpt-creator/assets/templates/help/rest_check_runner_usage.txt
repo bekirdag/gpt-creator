@@ -1,0 +1,85 @@
+Usage:
+  python3 "$GC_REST_CHECK_RUNNER_PY" path/to/manifest.[yaml|toml] [options]
+  # Fallback outside gpt-creator: python3 tools/scripts/python/rest_check_runner.py …
+
+Requirements:
+  python3.9+ plus `pip install httpx pyyaml`
+
+Purpose:
+  Run repeatable REST smoke/regression checks without writing bespoke Python code.
+  Drop your endpoints, auth, payloads, and success predicates in a manifest,
+  then call the runner locally or from CI.
+
+Options:
+  --only pattern1,pattern2   Run only matching checks (glob on check names)
+  --skip pattern1,pattern2   Skip matching checks
+  --fail-fast                Stop after the first failure
+  --format text|json         Append JSON summary for downstream automation
+  --env-file FILE            Load KEY=VALUE pairs before resolving {{env:VAR}}
+  --dry-run                  Show which checks would run without calling APIs
+
+Manifest outline:
+  name: my-stack-smoke
+  base_url: https://api.example.com
+  auth:
+    headers:
+      Authorization: "Bearer {{env:STACK_API_TOKEN}}"
+  defaults:
+    method: GET
+    timeout: 10
+    headers:
+      Accept: application/json
+    params:
+      locale: en-US
+    expect:
+      status: 200
+      max_latency_ms: 1500
+  checks:
+    - name: health
+      request:
+        url: /healthz
+      expect:
+        json_equals:
+          status: ok
+
+    - name: create-task
+      request:
+        method: POST
+        url: /v1/tasks
+        json:
+          title: "smoke task"
+          description: "created by rest_check_runner"
+      expect:
+        status: 201
+        json_exists:
+          - data.id
+        json_not_null:
+          - data.id
+        body_not_contains:
+          - error
+        headers:
+          content-type: application/json
+
+Supported expectation keys:
+  status / status_in (int or list)
+  max_latency_ms (number)
+  headers (mapping of expected header values, case-insensitive)
+  body_contains / body_not_contains (string or list)
+  json_equals (dotted path -> value match)
+  json_exists (list of dotted paths that must be present)
+  json_not_null (list of dotted paths that must resolve to non-null/non-empty values)
+
+Placeholders:
+  Use {{env:VAR_NAME}} anywhere inside the manifest to pull from the current
+  environment or from files passed via --env-file. Missing variables abort the run.
+
+Examples:
+  # Parse but skip execution
+  python3 "$GC_REST_CHECK_RUNNER_PY" assets/templates/examples/rest_check_manifest.example.yaml --dry-run
+
+  # Run a focused subset and emit JSON summary alongside text output
+  python3 "$GC_REST_CHECK_RUNNER_PY" smoke.yaml --only "auth-*,users-*"
+
+Sample manifest:
+  See assets/templates/examples/rest_check_manifest.example.yaml for a ready-to-run
+  postman-echo.com demo that exercises the major features.

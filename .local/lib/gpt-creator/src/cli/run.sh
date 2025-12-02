@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
+
+GC_TEMPLATE_ROOT="${ROOT_DIR}/assets/templates"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/src/cli/lib/templates.sh"
+
+# Optional shared helpers
+if [[ -f "$ROOT_DIR/src/gpt-creator.sh" ]]; then source "$ROOT_DIR/src/gpt-creator.sh"; fi
+if [[ -f "$ROOT_DIR/src/constants.sh" ]]; then source "$ROOT_DIR/src/constants.sh"; fi
+
+# Fallback helpers if not sourced
+gc_cli_log(){ printf "[%s] %s\n" "$(date +'%H:%M:%S')" "$*"; }
+gc_cli_warn(){ printf "\033[33m[WARN]\033[0m %s\n" "$*"; }
+gc_cli_die(){ printf "\033[31m[ERROR]\033[0m %s\n" "$*" >&2; exit 1; }
+gc_cli_heading(){ printf "\n\033[36m== %s ==\033[0m\n" "$*"; }
+
+slugify() {
+  local s="${1:-}"
+  s="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')"
+  s="$(printf '%s' "$s" | tr -cs 'a-z0-9' '-')"
+  s="$(printf '%s' "$s" | sed -E 's/-+/-/g; s/^-+//; s/-+$//')"
+  printf '%s\n' "${s:-gptcreator}"
+}
+
+PROJECT_SLUG="${GC_DOCKER_PROJECT_NAME:-$(slugify "$(basename "$ROOT_DIR")")}";
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-$PROJECT_SLUG}"
+usage() {
+  gc_cli_render_template "help/run_usage.txt"
+}
+
+[[ $# -lt 1 ]] && { usage; exit 1; }
+CMD="$1"; shift || true
+
+# Resolve compose file
+if [[ -f "$ROOT_DIR/docker/compose.yaml" ]]; then COMPOSE_FILE="$ROOT_DIR/docker/compose.yaml";
+elif [[ -f "$ROOT_DIR/docker-compose.yml" ]]; then COMPOSE_FILE="$ROOT_DIR/docker-compose.yml";
+else COMPOSE_FILE=""; fi
+
+case "$CMD" in
+  compose-up)
+    "$ROOT_DIR/src/cli/run-compose-up.sh" "$@"
+    ;;
+  logs)
+    SVC="${1:-api}"; shift || true
+    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
+    exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" logs -f --tail=200 "$SVC"
+    ;;
+  ps)
+    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
+    exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" ps
+    ;;
+  open)
+    TARGET="${1:-web}"
+    URL_WEB="${APP_WEB_URL:-http://localhost:5173}"
+    URL_ADMIN="${APP_ADMIN_URL:-http://localhost:5174}"
+    URL_API="${APP_API_URL:-http://localhost:3000/health}"
+    case "$TARGET" in
+      web) open "$URL_WEB" >/dev/null 2>&1 || xdg-open "$URL_WEB" || echo "$URL_WEB";;
+      admin) open "$URL_ADMIN" >/dev/null 2>&1 || xdg-open "$URL_ADMIN" || echo "$URL_ADMIN";;
+      api) open "$URL_API" >/dev/null 2>&1 || xdg-open "$URL_API" || echo "$URL_API";;
+      *) gc_cli_die "Unknown target: $TARGET (web|admin|api)";;
+    esac
+    ;;
+  stop)
+    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
+    exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" stop
+    ;;
+  down)
+    [[ -n "$COMPOSE_FILE" ]] || gc_cli_die "Compose file not found"
+    exec env COMPOSE_PROJECT_NAME="$PROJECT_SLUG" docker compose -f "$COMPOSE_FILE" down
+    ;;
+  -h|--help)
+    usage;;
+  *)
+    gc_cli_die "Unknown run command: $CMD"
+    ;;
+esac

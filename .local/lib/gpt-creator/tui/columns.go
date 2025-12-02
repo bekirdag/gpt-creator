@@ -1,0 +1,4937 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"math"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
+	reansi "github.com/muesli/reflow/ansi"
+	"github.com/muesli/reflow/truncate"
+)
+
+const (
+	maxColumnScroll = 240
+	ellipsis        = "..."
+)
+
+func columnHeaderWidth(totalWidth, panelFrameWidth, titleFrameWidth int) int {
+	inner := totalWidth - panelFrameWidth - titleFrameWidth
+	if inner < 1 {
+		return 1
+	}
+	return inner
+}
+
+// Only the internal frame (padding + border). Ignore margins so headers render
+// edge-to-edge inside the panel without a trailing gap.
+func horizontalInnerFrameSize(s lipgloss.Style) int {
+	return s.GetBorderLeftSize() + s.GetBorderRightSize() + s.GetPaddingLeft() + s.GetPaddingRight()
+}
+
+type column interface {
+	SetSize(width, height int)
+	Update(msg tea.Msg) (column, tea.Cmd)
+	View(styles styles, focused bool) string
+	Title() string
+	FocusValue() string
+	ScrollHorizontal(delta int) bool
+}
+
+type mouseAwareColumn interface {
+	HandleMouse(localX, localY int, msg tea.MouseMsg) (column, tea.Cmd)
+}
+
+type hoverAwareColumn interface {
+	ClearHover()
+}
+
+type spacerColumn struct {
+	width  int
+	height int
+}
+
+func newSpacerColumn() *spacerColumn {
+	return &spacerColumn{}
+}
+
+func (c *spacerColumn) SetSize(width, height int) {
+	if width < 0 {
+		width = 0
+	}
+	if height < 0 {
+		height = 0
+	}
+	c.width = width
+	c.height = height
+}
+
+func (c *spacerColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	return c, nil
+}
+
+func (c *spacerColumn) View(styles styles, focused bool) string {
+	if c.width <= 0 || c.height <= 0 {
+		return ""
+	}
+	height := c.height
+	if height < 1 {
+		height = 1
+	}
+	return lipgloss.NewStyle().
+		Width(c.width).
+		Height(height).
+		Render("")
+}
+
+func (c *spacerColumn) Title() string {
+	return ""
+}
+
+func (c *spacerColumn) FocusValue() string {
+	return ""
+}
+
+func (c *spacerColumn) ScrollHorizontal(int) bool {
+	return false
+}
+
+type selectableColumnDelegate struct {
+	list.DefaultDelegate
+	column *selectableColumn
+}
+
+type columnRect struct {
+	x      int
+	y      int
+	width  int
+	height int
+}
+
+func (r columnRect) contains(px, py int) bool {
+	if r.width <= 0 || r.height <= 0 {
+		return false
+	}
+	if px < r.x || py < r.y {
+		return false
+	}
+	if px >= r.x+r.width {
+		return false
+	}
+	if py >= r.y+r.height {
+		return false
+	}
+	return true
+}
+
+type selectableColumn struct {
+	title             string
+	model             list.Model
+	delegate          *selectableColumnDelegate
+	width             int
+	height            int
+	scrollX           int
+	onSelect          func(entry listEntry) tea.Cmd
+	onHighlight       func(entry listEntry) tea.Cmd
+	activationHint    string
+	panelFrameWidth   int
+	normalTitleBase   lipgloss.Style
+	normalDescBase    lipgloss.Style
+	hasNormalStyles   bool
+	selectedTitleBase lipgloss.Style
+	selectedDescBase  lipgloss.Style
+	hasSelectedStyles bool
+	panelStyle        lipgloss.Style
+	panelFocusedStyle lipgloss.Style
+	columnTitleStyle  lipgloss.Style
+	contentOffsetX    int
+	contentOffsetY    int
+	contentPaddingTop int
+	hoverIndex        int
+	hoverTitleBase    lipgloss.Style
+	hoverDescBase     lipgloss.Style
+	hoverTitle        lipgloss.Style
+	hoverDesc         lipgloss.Style
+	hasHoverStyles    bool
+	hoverPrefix       string
+	hoverPrefixStyle  lipgloss.Style
+	hoverPrefixWidth  int
+	debugLog          func(format string, args ...interface{})
+	debugLastColWidth int
+	debugLastTitle    int
+}
+
+type listEntry struct {
+	title   string
+	desc    string
+	payload any
+}
+
+func (e listEntry) Title() string       { return e.title }
+func (e listEntry) Description() string { return e.desc }
+func (e listEntry) FilterValue() string { return e.title }
+
+func newSelectableColumn(title string, items []list.Item, width int, onSelect func(listEntry) tea.Cmd) *selectableColumn {
+	baseDelegate := list.NewDefaultDelegate()
+
+	column := &selectableColumn{
+		title:          title,
+		width:          width,
+		onSelect:       onSelect,
+		activationHint: "Click or Enter to open",
+		hoverIndex:     -1,
+		// hoverPrefix:    "› ",
+		hoverPrefix: "",
+	}
+
+	column.hoverPrefixWidth = runewidth.StringWidth(column.hoverPrefix)
+	column.delegate = &selectableColumnDelegate{
+		DefaultDelegate: baseDelegate,
+		column:          column,
+	}
+
+	m := list.New(items, column.delegate, width, 20)
+	m.Title = ""
+	m.SetShowStatusBar(false)
+	m.SetFilteringEnabled(true)
+	m.SetShowHelp(false)
+	m.SetShowPagination(false)
+	column.model = m
+	return column
+}
+
+func (c *selectableColumn) SetDebugLogger(fn func(format string, args ...interface{})) {
+	c.debugLog = fn
+}
+
+func (c *selectableColumn) SetItems(items []list.Item) {
+	c.model.SetItems(items)
+	if len(items) > 0 {
+		c.model.Select(0)
+	}
+	c.hoverIndex = -1
+}
+
+func (c *selectableColumn) SetSize(width, height int) {
+	c.width = width
+	if height < 3 {
+		height = 3
+	}
+	c.height = height
+	c.applyModelSize()
+}
+
+func (c *selectableColumn) applyModelSize() {
+	effectiveWidth := c.width + c.scrollX
+	if effectiveWidth < c.width {
+		effectiveWidth = c.width
+	}
+	contentHeight := c.height - 2
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+	c.model.SetSize(effectiveWidth, contentHeight)
+	c.updateSelectedWidths()
+	c.updateNormalWidths()
+	c.updateHoverWidths()
+	c.recalcContentOffsets()
+}
+
+func (c *selectableColumn) contentWidth() int {
+	width := c.width
+	if width < 1 {
+		width = 1
+	}
+	inner := width - c.panelFrameWidth
+	if inner < 1 {
+		inner = 1
+	}
+	return inner
+}
+
+func (c *selectableColumn) updateSelectedWidths() {
+	if c.delegate == nil || !c.hasSelectedStyles {
+		return
+	}
+	inner := c.contentWidth()
+	selected := c.selectedTitleBase
+	desc := c.selectedDescBase
+	if inner > 0 {
+		selected = selected.Width(inner)
+		desc = desc.Width(inner)
+	}
+	c.delegate.Styles.SelectedTitle = selected
+	c.delegate.Styles.SelectedDesc = desc
+}
+
+func (c *selectableColumn) updateNormalWidths() {
+	if c.delegate == nil {
+		return
+	}
+	inner := c.contentWidth()
+	if inner < 1 {
+		inner = 1
+	}
+	if c.hasNormalStyles {
+		title := c.normalTitleBase.Width(inner)
+		c.delegate.Styles.NormalTitle = title
+		c.delegate.Styles.DimmedTitle = title.Copy().Faint(true)
+		desc := c.normalDescBase.Width(inner)
+		c.delegate.Styles.NormalDesc = desc
+		c.delegate.Styles.DimmedDesc = desc.Copy().Faint(true)
+	}
+}
+
+func (c *selectableColumn) updateHoverWidths() {
+	if !c.hasHoverStyles {
+		return
+	}
+	inner := c.contentWidth()
+	hoverTitle := c.hoverTitleBase
+	hoverDesc := c.hoverDescBase
+	if inner > 0 {
+		hoverTitle = hoverTitle.Width(inner)
+		hoverDesc = hoverDesc.Width(inner)
+	}
+	c.hoverTitle = hoverTitle
+	c.hoverDesc = hoverDesc
+}
+
+func (c *selectableColumn) recalcContentOffsets() {
+	panelLeft := c.panelStyle.GetBorderLeftSize() + c.panelStyle.GetPaddingLeft()
+	focusedLeft := c.panelFocusedStyle.GetBorderLeftSize() + c.panelFocusedStyle.GetPaddingLeft()
+	left := maxInt(panelLeft, focusedLeft)
+
+	panelTop := c.panelStyle.GetBorderTopSize() + c.panelStyle.GetPaddingTop()
+	focusedTop := c.panelFocusedStyle.GetBorderTopSize() + c.panelFocusedStyle.GetPaddingTop()
+	top := maxInt(panelTop, focusedTop)
+
+	titleHeight := 1
+	if strings.TrimSpace(c.title) != "" {
+		titleFrame := horizontalInnerFrameSize(c.columnTitleStyle)
+		titleWidth := columnHeaderWidth(c.width, c.panelFrameWidth, titleFrame)
+		rendered := c.columnTitleStyle.Width(titleWidth).Render(c.title)
+		if h := lipgloss.Height(rendered); h > 0 {
+			titleHeight = h
+		}
+	}
+
+	c.contentOffsetX = left
+	c.contentOffsetY = top + titleHeight + c.contentPaddingTop
+}
+
+func (c *selectableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	prev := c.model.Index()
+	switch m := msg.(type) {
+	case tea.KeyMsg:
+		switch m.String() {
+		case "enter":
+			if c.onSelect != nil {
+				if item, ok := c.model.SelectedItem().(listEntry); ok {
+					return c, c.onSelect(item)
+				}
+			}
+		case "n":
+			if c.model.FilterState() != list.Unfiltered && !c.model.SettingFilter() {
+				c.model.CursorDown()
+				if cmd := c.highlightSelection(prev); cmd != nil {
+					return c, cmd
+				}
+				return c, nil
+			}
+		case "N":
+			if c.model.FilterState() != list.Unfiltered && !c.model.SettingFilter() {
+				c.model.CursorUp()
+				if cmd := c.highlightSelection(prev); cmd != nil {
+					return c, cmd
+				}
+				return c, nil
+			}
+		}
+	}
+	var cmd tea.Cmd
+	c.model, cmd = c.model.Update(msg)
+	if extra := c.highlightSelection(prev); extra != nil {
+		if cmd != nil {
+			return c, tea.Batch(cmd, extra)
+		}
+		return c, extra
+	}
+	return c, cmd
+}
+
+func (c *selectableColumn) highlightSelection(prev int) tea.Cmd {
+	if c.onHighlight == nil || c.model.Index() == prev {
+		return nil
+	}
+	if item, ok := c.model.SelectedItem().(listEntry); ok {
+		return c.onHighlight(item)
+	}
+	return nil
+}
+
+func (c *selectableColumn) setHoverIndex(idx int) {
+	if idx < 0 || idx >= len(c.model.VisibleItems()) {
+		c.ClearHover()
+		return
+	}
+	if c.hoverIndex == idx {
+		return
+	}
+	c.hoverIndex = idx
+}
+
+func (c *selectableColumn) ClearHover() {
+	if c.hoverIndex == -1 {
+		return
+	}
+	c.hoverIndex = -1
+}
+
+func (c *selectableColumn) HandleMouse(localX, localY int, msg tea.MouseMsg) (column, tea.Cmd) {
+	if msg.Type == tea.MouseWheelUp {
+		return c, c.handleMouseWheel(-1)
+	}
+	if msg.Type == tea.MouseWheelDown {
+		return c, c.handleMouseWheel(1)
+	}
+
+	if localX < c.contentOffsetX || localY < c.contentOffsetY {
+		return c, nil
+	}
+	contentY := localY - c.contentOffsetY
+	if contentY < 0 {
+		return c, nil
+	}
+
+	items := c.model.VisibleItems()
+	if len(items) == 0 {
+		return c, nil
+	}
+
+	slotHeight := c.delegate.Height() + c.delegate.Spacing() + 1
+	if slotHeight <= 0 {
+		slotHeight = 1
+	}
+
+	indexOnPage := contentY / slotHeight
+
+	start, end := c.model.Paginator.GetSliceBounds(len(items))
+	itemsOnPage := end - start
+	if itemsOnPage <= 0 {
+		return c, nil
+	}
+	if indexOnPage >= itemsOnPage {
+		return c, nil
+	}
+
+	target := start + indexOnPage
+	if target < 0 || target >= len(items) {
+		return c, nil
+	}
+	c.setHoverIndex(target)
+
+	prev := c.model.Index()
+	c.model.Select(target)
+
+	var cmds []tea.Cmd
+	if target != prev {
+		if cmd := c.highlightSelection(prev); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+
+	if msg.Type == tea.MouseLeft && c.onSelect != nil {
+		if item, ok := c.model.SelectedItem().(listEntry); ok {
+			if cmd := c.onSelect(item); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+	}
+
+	return c, tea.Batch(cmds...)
+}
+
+func (d *selectableColumnDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	defaultItem, ok := item.(list.DefaultItem)
+	if !ok {
+		return
+	}
+
+	title := defaultItem.Title()
+	desc := defaultItem.Description()
+
+	width := m.Width()
+	if width <= 0 {
+		return
+	}
+
+	s := &d.Styles
+
+	hovered := false
+	var hoverTitle lipgloss.Style
+	var hoverDesc lipgloss.Style
+	var hoverPrefix string
+	var hoverPrefixStyle lipgloss.Style
+	prefixWidth := 0
+
+	if d.column != nil && d.column.hasHoverStyles && d.column.hoverIndex == index {
+		hovered = true
+		hoverTitle = d.column.hoverTitle
+		hoverDesc = d.column.hoverDesc
+		hoverPrefix = d.column.hoverPrefix
+		hoverPrefixStyle = d.column.hoverPrefixStyle
+		prefixWidth = d.column.hoverPrefixWidth
+	}
+
+	textWidth := width - s.NormalTitle.GetPaddingLeft() - s.NormalTitle.GetPaddingRight()
+	if textWidth < 0 {
+		textWidth = 0
+	}
+	if hovered && prefixWidth > 0 {
+		if prefixWidth >= textWidth {
+			textWidth = 0
+		} else {
+			textWidth -= prefixWidth
+		}
+	}
+
+	title = truncate.StringWithTail(title, uint(textWidth), ellipsis)
+
+	if d.ShowDescription {
+		var lines []string
+		maxLines := d.Height()
+		if maxLines < 1 {
+			maxLines = 1
+		}
+		for i, line := range strings.Split(desc, "\n") {
+			if i >= maxLines-1 {
+				break
+			}
+			lines = append(lines, truncate.StringWithTail(line, uint(textWidth), ellipsis))
+		}
+		desc = strings.Join(lines, "\n")
+	}
+
+	matchedRunes := m.MatchesForItem(index)
+	isSelected := index == m.Index()
+	filterState := m.FilterState()
+	emptyFilter := filterState == list.Filtering && m.FilterValue() == ""
+	isFiltered := filterState == list.Filtering || filterState == list.FilterApplied
+
+	switch {
+	case emptyFilter:
+		title = s.DimmedTitle.Render(title)
+		desc = s.DimmedDesc.Render(desc)
+	case isSelected && filterState != list.Filtering:
+		if isFiltered {
+			unmatched := s.SelectedTitle.Inline(true)
+			matched := unmatched.Copy().Inherit(s.FilterMatch)
+			title = lipgloss.StyleRunes(title, matchedRunes, matched, unmatched)
+		}
+		title = s.SelectedTitle.Render(title)
+		desc = s.SelectedDesc.Render(desc)
+	case hovered:
+		if isFiltered {
+			unmatched := hoverTitle.Inline(true)
+			matched := unmatched.Copy().Inherit(s.FilterMatch)
+			title = lipgloss.StyleRunes(title, matchedRunes, matched, unmatched)
+		}
+		title = hoverTitle.Render(title)
+		desc = hoverDesc.Render(desc)
+	default:
+		if isFiltered {
+			unmatched := s.NormalTitle.Inline(true)
+			matched := unmatched.Copy().Inherit(s.FilterMatch)
+			title = lipgloss.StyleRunes(title, matchedRunes, matched, unmatched)
+		}
+		title = s.NormalTitle.Render(title)
+		desc = s.NormalDesc.Render(desc)
+	}
+
+	if hovered && hoverPrefix != "" {
+		renderedPrefix := hoverPrefixStyle.Render(hoverPrefix)
+		title = lipgloss.JoinHorizontal(lipgloss.Left, renderedPrefix, title)
+	}
+
+	if d.ShowDescription {
+		fmt.Fprintf(w, "%s\n%s", title, desc)
+		return
+	}
+	fmt.Fprintf(w, "%s", title)
+}
+
+func (c *selectableColumn) handleMouseWheel(delta int) tea.Cmd {
+	prev := c.model.Index()
+	if delta < 0 {
+		c.model.CursorUp()
+	} else if delta > 0 {
+		c.model.CursorDown()
+	}
+	if cmd := c.highlightSelection(prev); cmd != nil {
+		return cmd
+	}
+	return nil
+}
+
+func (c *selectableColumn) View(s styles, focused bool) string {
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleWidth := columnHeaderWidth(c.width, panelFrame, titleFrame)
+	if c.debugLog != nil {
+		if c.width != c.debugLastColWidth || titleWidth != c.debugLastTitle {
+			c.debugLog("column %q width=%d titleWidth=%d panelFrame=%d titleFrame=%d scrollX=%d", c.title, c.width, titleWidth, panelFrame, titleFrame, c.scrollX)
+			c.debugLastColWidth = c.width
+			c.debugLastTitle = titleWidth
+		}
+	}
+	title := s.columnTitle.Width(titleWidth).Render(c.title)
+	content := c.model.View()
+	leading := countLeadingBlankLines(content)
+	if leading != c.contentPaddingTop {
+		c.contentPaddingTop = leading
+		c.recalcContentOffsets()
+	}
+	body := lipgloss.JoinVertical(lipgloss.Left, title, content)
+	headerLines := lipgloss.Height(title)
+	if headerLines < 0 {
+		headerLines = 0
+	}
+	return renderPanelWithScroll(panel, c.width, c.height, c.scrollX, body, bg, headerLines)
+}
+
+func (c *selectableColumn) Title() string {
+	return c.title
+}
+
+func (c *selectableColumn) FocusValue() string {
+	if item, ok := c.model.SelectedItem().(listEntry); ok {
+		return item.title
+	}
+	return ""
+}
+
+func (c *selectableColumn) ScrollHorizontal(delta int) bool {
+	if delta == 0 {
+		return false
+	}
+	newOffset := c.scrollX + delta
+	if newOffset < 0 {
+		newOffset = 0
+	}
+	if newOffset > maxColumnScroll {
+		newOffset = maxColumnScroll
+	}
+	if newOffset == c.scrollX {
+		return false
+	}
+	c.scrollX = newOffset
+	c.applyModelSize()
+	return true
+}
+
+func (c *selectableColumn) SelectedEntry() (listEntry, bool) {
+	if entry, ok := c.model.SelectedItem().(listEntry); ok {
+		return entry, true
+	}
+	return listEntry{}, false
+}
+
+func (c *selectableColumn) CanMoveDown() bool {
+	items := c.model.Items()
+	if len(items) <= 1 {
+		return false
+	}
+	idx := c.model.Index()
+	if idx < 0 {
+		return true
+	}
+	return idx < len(items)-1
+}
+
+func (c *selectableColumn) SetHighlightFunc(fn func(listEntry) tea.Cmd) {
+	c.onHighlight = fn
+}
+
+func (c *selectableColumn) SetActivationHint(hint string) {
+	trimmed := strings.TrimSpace(hint)
+	c.activationHint = trimmed
+}
+
+func (c *selectableColumn) ActivationHint() string {
+	if c.onSelect == nil {
+		return ""
+	}
+	if c.activationHint == "" {
+		return ""
+	}
+	if items := c.model.VisibleItems(); len(items) == 0 {
+		return ""
+	}
+	return c.activationHint
+}
+
+func (c *selectableColumn) ApplyStyles(s styles) {
+	if c.delegate != nil {
+		normal := s.textBlock.Copy().
+			Background(crushSurfacePassive).
+			Padding(0, 2)
+		desc := s.textBlock.Copy().
+			Foreground(crushForegroundMuted).
+			Background(crushSurfacePassive).
+			Padding(0, 2)
+		c.panelFrameWidth = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+		c.normalTitleBase = normal
+		c.normalDescBase = desc
+		c.hasNormalStyles = true
+		highlight := s.listSel.Copy().
+			ColorWhitespace(true).
+			Foreground(crushPrimaryBright).
+			Underline(true).
+			Padding(0, 2)
+		c.selectedTitleBase = highlight
+		c.selectedDescBase = highlight.Copy().
+			Underline(false).
+			Foreground(crushAccent)
+		c.hasSelectedStyles = true
+
+		c.delegate.Styles.NormalTitle = normal
+		c.delegate.Styles.DimmedTitle = normal.Copy().Faint(true)
+		c.delegate.Styles.NormalDesc = desc
+		c.delegate.Styles.DimmedDesc = desc.Copy().Faint(true)
+		c.delegate.Styles.SelectedTitle = c.selectedTitleBase
+		c.delegate.Styles.SelectedDesc = c.selectedDescBase
+		c.delegate.Styles.FilterMatch = s.cmdPrompt.Copy().Underline(true).
+			Background(crushSurface).
+			ColorWhitespace(true)
+		hover := normal.Copy().
+			Foreground(crushPrimaryBright).
+			Underline(true)
+		c.hoverTitleBase = hover
+		c.hoverDescBase = desc.Copy().
+			Foreground(crushAccent).
+			Underline(false)
+		c.hoverPrefixStyle = s.cmdPrompt.Copy().
+			Foreground(crushPrimaryBright)
+		c.hoverPrefixWidth = runewidth.StringWidth(c.hoverPrefix)
+		c.hasHoverStyles = true
+		c.model.SetDelegate(c.delegate)
+		c.updateSelectedWidths()
+		c.updateNormalWidths()
+		c.updateHoverWidths()
+	}
+
+	c.panelStyle = s.panel
+	c.panelFocusedStyle = s.panelFocused
+	c.columnTitleStyle = s.columnTitle
+
+	c.model.Styles.Title = s.columnTitle.Copy()
+	c.model.Styles.TitleBar = lipgloss.NewStyle()
+	c.model.Styles.Spinner = s.statusHint.Copy().Foreground(crushAccent)
+	c.model.Styles.FilterPrompt = s.cmdPrompt.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.FilterCursor = s.cmdPrompt.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.StatusBar = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.StatusEmpty = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true).
+		Faint(true)
+	c.model.Styles.StatusBarActiveFilter = s.cmdPrompt.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.StatusBarFilterCount = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.NoItems = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true).
+		Faint(true)
+	c.model.Styles.PaginationStyle = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.HelpStyle = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.ActivePaginationDot = s.statusSeg.Copy().Foreground(crushAccent).SetString("●")
+	c.model.Styles.InactivePaginationDot = s.statusHint.Copy().SetString("●")
+	c.model.Styles.DividerDot = s.statusHint.Copy().SetString(" • ")
+	c.model.Styles.DefaultFilterCharacterMatch = s.cmdPrompt.Copy().Underline(true).
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.recalcContentOffsets()
+}
+
+type backlogTreeEntry struct {
+	title    string
+	desc     string
+	node     backlogNode
+	level    int
+	status   string
+	selected bool
+}
+
+func (e backlogTreeEntry) Title() string {
+	prefix := strings.Repeat("  ", e.level)
+	marker := "*"
+	switch e.node.Type {
+	case backlogNodeEpic:
+		if e.selected {
+			marker = "[x]"
+		} else {
+			marker = "[ ]"
+		}
+	case backlogNodeStory:
+		marker = "-"
+	}
+	status := ""
+	if trimmed := strings.TrimSpace(e.status); trimmed != "" {
+		status = fmt.Sprintf(" [%s]", strings.ToUpper(trimmed))
+	}
+	return fmt.Sprintf("%s%s %s%s", prefix, marker, e.title, status)
+}
+
+func (e backlogTreeEntry) Description() string {
+	return e.desc
+}
+
+func (e backlogTreeEntry) FilterValue() string {
+	return e.title
+}
+
+type backlogTreeColumn struct {
+	title             string
+	model             list.Model
+	delegate          *list.DefaultDelegate
+	width             int
+	height            int
+	onHighlight       func(backlogNode) tea.Cmd
+	onToggle          func(backlogNode) tea.Cmd
+	onActivate        func(backlogNode) tea.Cmd
+	panelFrameWidth   int
+	selectedTitleBase lipgloss.Style
+	selectedDescBase  lipgloss.Style
+	hasSelectedStyles bool
+	activationHint    string
+}
+
+func newBacklogTreeColumn(title string) *backlogTreeColumn {
+	delegate := list.NewDefaultDelegate()
+
+	column := &backlogTreeColumn{
+		title:          title,
+		width:          28,
+		delegate:       &delegate,
+		activationHint: "Click or Enter to open, Space to toggle",
+	}
+
+	model := list.New([]list.Item{}, column.delegate, 28, 20)
+	model.Title = title
+	model.SetShowStatusBar(false)
+	model.SetFilteringEnabled(false)
+	model.SetShowHelp(false)
+	model.SetShowPagination(false)
+
+	column.model = model
+	return column
+}
+
+func (c *backlogTreeColumn) SetCallbacks(onHighlight, onToggle, onActivate func(backlogNode) tea.Cmd) {
+	c.onHighlight = onHighlight
+	c.onToggle = onToggle
+	c.onActivate = onActivate
+}
+
+func (c *backlogTreeColumn) SetActivationHint(hint string) {
+	c.activationHint = strings.TrimSpace(hint)
+}
+
+func (c *backlogTreeColumn) ActivationHint() string {
+	if c.activationHint == "" {
+		return ""
+	}
+	if len(c.model.Items()) == 0 {
+		return ""
+	}
+	return c.activationHint
+}
+
+func (c *backlogTreeColumn) ApplyStyles(s styles) {
+	if c.delegate != nil {
+		normal := s.listItem.Copy().ColorWhitespace(true)
+		desc := s.statusHint.Copy().
+			Background(crushSurface).
+			ColorWhitespace(true).
+			Padding(0, 0, 0, 2)
+		c.panelFrameWidth = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+		highlight := s.listSel.Copy().
+			ColorWhitespace(true).
+			Foreground(crushPrimaryBright).
+			Underline(true)
+		c.selectedTitleBase = highlight
+		c.selectedDescBase = highlight.Copy().
+			Underline(false).
+			Foreground(crushAccent)
+		c.hasSelectedStyles = true
+
+		c.delegate.SetSpacing(0)
+		c.delegate.Styles.NormalTitle = normal
+		c.delegate.Styles.DimmedTitle = normal.Copy().Faint(true)
+		c.delegate.Styles.NormalDesc = desc
+		c.delegate.Styles.DimmedDesc = desc.Copy().Faint(true)
+		c.delegate.Styles.SelectedTitle = c.selectedTitleBase
+		c.delegate.Styles.SelectedDesc = c.selectedDescBase
+		c.delegate.Styles.FilterMatch = s.cmdPrompt.Copy().Underline(true).
+			Background(crushSurface).
+			ColorWhitespace(true)
+		c.model.SetDelegate(c.delegate)
+		c.updateSelectedWidths()
+	}
+
+	c.model.Styles.Title = s.columnTitle.Copy()
+	c.model.Styles.TitleBar = lipgloss.NewStyle()
+	c.model.Styles.Spinner = s.statusHint.Copy().Foreground(crushAccent)
+	c.model.Styles.NoItems = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true).
+		Faint(true)
+	c.model.Styles.StatusBar = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.StatusEmpty = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true).
+		Faint(true)
+	c.model.Styles.PaginationStyle = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.HelpStyle = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.ActivePaginationDot = s.statusSeg.Copy().Foreground(crushAccent).SetString("●")
+	c.model.Styles.InactivePaginationDot = s.statusHint.Copy().SetString("●")
+	c.model.Styles.DividerDot = s.statusHint.Copy().SetString(" • ")
+}
+
+func (c *backlogTreeColumn) SetItems(items []list.Item) {
+	c.model.SetItems(items)
+	if len(items) > 0 {
+		c.model.Select(0)
+	}
+}
+
+func (c *backlogTreeColumn) selectedEntry() (backlogTreeEntry, bool) {
+	if entry, ok := c.model.SelectedItem().(backlogTreeEntry); ok {
+		return entry, true
+	}
+	return backlogTreeEntry{}, false
+}
+
+func (c *backlogTreeColumn) SetSize(width, height int) {
+	c.width = width
+	if height < 3 {
+		height = 3
+	}
+	c.height = height
+	c.model.SetSize(width, height-2)
+	c.updateSelectedWidths()
+}
+
+func (c *backlogTreeColumn) contentWidth() int {
+	width := c.width
+	if width < 1 {
+		width = 1
+	}
+	inner := width - c.panelFrameWidth
+	if inner < 1 {
+		inner = 1
+	}
+	return inner
+}
+
+func (c *backlogTreeColumn) updateSelectedWidths() {
+	if c.delegate == nil || !c.hasSelectedStyles {
+		return
+	}
+	inner := c.contentWidth()
+	selected := c.selectedTitleBase
+	desc := c.selectedDescBase
+	if inner > 0 {
+		selected = selected.Width(inner)
+		desc = desc.Width(inner)
+	}
+	c.delegate.Styles.SelectedTitle = selected
+	c.delegate.Styles.SelectedDesc = desc
+}
+
+func (c *backlogTreeColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	var cmds []tea.Cmd
+	prevIndex := c.model.Index()
+
+	var cmd tea.Cmd
+	c.model, cmd = c.model.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "enter":
+			if entry, ok := c.selectedEntry(); ok && c.onActivate != nil {
+				cmds = append(cmds, c.onActivate(entry.node))
+			}
+		case "space":
+			if entry, ok := c.selectedEntry(); ok && c.onToggle != nil {
+				cmds = append(cmds, c.onToggle(entry.node))
+			}
+		}
+	}
+
+	if c.model.Index() != prevIndex {
+		if entry, ok := c.selectedEntry(); ok && c.onHighlight != nil {
+			cmds = append(cmds, c.onHighlight(entry.node))
+		}
+	}
+
+	return c, tea.Batch(cmds...)
+}
+
+func (c *backlogTreeColumn) View(s styles, focused bool) string {
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleWidth := columnHeaderWidth(c.width, panelFrame, titleFrame)
+	title := s.columnTitle.Width(titleWidth).Render(c.title)
+	body := lipgloss.JoinVertical(lipgloss.Left, title, c.model.View())
+	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg, 0)
+}
+
+func (c *backlogTreeColumn) Title() string {
+	return c.title
+}
+
+func (c *backlogTreeColumn) FocusValue() string {
+	if entry, ok := c.selectedEntry(); ok {
+		return entry.title
+	}
+	return ""
+}
+
+func (c *backlogTreeColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func (c *backlogTreeColumn) CanMoveDown() bool {
+	items := c.model.Items()
+	if len(items) <= 1 {
+		return false
+	}
+	idx := c.model.Index()
+	if idx < 0 {
+		return true
+	}
+	return idx < len(items)-1
+}
+
+func (c *backlogTreeColumn) SelectNode(node backlogNode) {
+	if len(c.model.Items()) == 0 {
+		return
+	}
+	if node.IsZero() {
+		c.model.Select(0)
+		return
+	}
+	for idx, item := range c.model.Items() {
+		if entry, ok := item.(backlogTreeEntry); ok && entry.node.Equals(node) {
+			c.model.Select(idx)
+			return
+		}
+	}
+	c.model.Select(0)
+}
+
+type backlogTableColumn struct {
+	title       string
+	table       table.Model
+	width       int
+	height      int
+	rows        []backlogRow
+	onHighlight func(backlogRow) tea.Cmd
+	onToggle    func(backlogRow) tea.Cmd
+}
+
+func newBacklogTableColumn(title string) *backlogTableColumn {
+	columns := []table.Column{
+		{Title: "Key", Width: 10},
+		{Title: "Title", Width: 32},
+		{Title: "Type", Width: 8},
+		{Title: "Status", Width: 8},
+		{Title: "Assignee", Width: 12},
+		{Title: "Updated", Width: 10},
+	}
+	model := table.New(
+		table.WithColumns(columns),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+	return &backlogTableColumn{
+		title: title,
+		table: model,
+	}
+}
+
+func (c *backlogTableColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
+}
+
+func (c *backlogTableColumn) SetCallbacks(onHighlight, onToggle func(backlogRow) tea.Cmd) {
+	c.onHighlight = onHighlight
+	c.onToggle = onToggle
+}
+
+func (c *backlogTableColumn) SetRows(rows []backlogRow) {
+	c.rows = rows
+	tableRows := make([]table.Row, len(rows))
+	for i, row := range rows {
+		typeLabel := ""
+		switch row.Type {
+		case backlogNodeEpic:
+			typeLabel = "Epic"
+		case backlogNodeStory:
+			typeLabel = "Story"
+		case backlogNodeTask:
+			typeLabel = "Task"
+		default:
+			typeLabel = "?"
+		}
+		title := row.Title
+		if row.Depth > 0 {
+			title = strings.Repeat("  ", row.Depth) + title
+		}
+		updated := ""
+		if !row.UpdatedAt.IsZero() {
+			updated = formatRelativeTime(row.UpdatedAt)
+		}
+		tableRows[i] = table.Row{
+			row.Key,
+			title,
+			typeLabel,
+			strings.ToUpper(row.Status),
+			row.Assignee,
+			updated,
+		}
+	}
+	c.table.SetRows(tableRows)
+	if len(tableRows) > 0 {
+		c.table.SetCursor(0)
+	}
+}
+
+func (c *backlogTableColumn) SetSize(width, height int) {
+	if width < 30 {
+		width = 30
+	}
+	if height < 6 {
+		height = 6
+	}
+	c.width = width
+	c.height = height
+
+	colWidths := []int{12, width - 48, 8, 8, 14, 12}
+	if len(colWidths) >= 2 {
+		if colWidths[1] < 20 {
+			colWidths[1] = 20
+		}
+	}
+	c.table.SetColumns([]table.Column{
+		{Title: "Key", Width: colWidths[0]},
+		{Title: "Title", Width: colWidths[1]},
+		{Title: "Type", Width: colWidths[2]},
+		{Title: "Status", Width: colWidths[3]},
+		{Title: "Assignee", Width: colWidths[4]},
+		{Title: "Updated", Width: colWidths[5]},
+	})
+	c.table.SetHeight(height - 3)
+}
+
+func (c *backlogTableColumn) selectedRow() (backlogRow, bool) {
+	if len(c.rows) == 0 {
+		return backlogRow{}, false
+	}
+	idx := c.table.Cursor()
+	if idx < 0 || idx >= len(c.rows) {
+		return backlogRow{}, false
+	}
+	return c.rows[idx], true
+}
+
+func (c *backlogTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	var cmds []tea.Cmd
+	prev := c.table.Cursor()
+
+	var cmd tea.Cmd
+	c.table, cmd = c.table.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "space":
+			if row, ok := c.selectedRow(); ok && c.onToggle != nil {
+				cmds = append(cmds, c.onToggle(row))
+			}
+		case "enter":
+			if row, ok := c.selectedRow(); ok && c.onHighlight != nil {
+				cmds = append(cmds, c.onHighlight(row))
+			}
+		}
+	}
+
+	if c.table.Cursor() != prev {
+		if row, ok := c.selectedRow(); ok && c.onHighlight != nil {
+			cmds = append(cmds, c.onHighlight(row))
+		}
+	}
+
+	return c, tea.Batch(cmds...)
+}
+
+func (c *backlogTableColumn) View(s styles, focused bool) string {
+	body := lipgloss.JoinVertical(lipgloss.Left, s.columnTitle.Render(c.title), c.table.View())
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg, 0)
+}
+
+func (c *backlogTableColumn) Title() string {
+	return c.title
+}
+
+func (c *backlogTableColumn) FocusValue() string {
+	if row, ok := c.selectedRow(); ok {
+		return row.Title
+	}
+	return ""
+}
+
+func (c *backlogTableColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func (c *backlogTableColumn) CanMoveDown() bool {
+	if len(c.rows) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.rows)-1
+}
+
+func (c *backlogTableColumn) SelectNode(node backlogNode) {
+	if len(c.rows) == 0 {
+		return
+	}
+	for idx, row := range c.rows {
+		if row.Node.Equals(node) {
+			c.table.SetCursor(idx)
+			return
+		}
+	}
+	c.table.SetCursor(0)
+}
+
+type artifactTreeEntry struct {
+	node artifactNode
+}
+
+func (e artifactTreeEntry) Title() string {
+	icon := "•"
+	if e.node.IsDir {
+		if e.node.Expanded {
+			icon = "▾"
+		} else if e.node.HasChildren {
+			icon = "▸"
+		} else {
+			icon = "▹"
+		}
+	}
+	prefix := strings.Repeat("  ", e.node.Level)
+	return fmt.Sprintf("%s%s %s", prefix, icon, e.node.Name)
+}
+
+func (e artifactTreeEntry) Description() string {
+	if e.node.IsDir {
+		return e.node.Rel
+	}
+	parts := []string{}
+	if e.node.Size > 0 {
+		parts = append(parts, formatByteSize(e.node.Size))
+	}
+	if !e.node.ModTime.IsZero() {
+		parts = append(parts, formatRelativeTime(e.node.ModTime))
+	}
+	if len(parts) == 0 {
+		return e.node.Rel
+	}
+	return strings.Join(parts, " • ")
+}
+
+func (e artifactTreeEntry) FilterValue() string {
+	return e.node.Rel
+}
+
+type artifactTreeColumn struct {
+	title             string
+	model             list.Model
+	delegate          *list.DefaultDelegate
+	width             int
+	height            int
+	onHighlight       func(artifactNode) tea.Cmd
+	onToggle          func(artifactNode) tea.Cmd
+	onActivate        func(artifactNode) tea.Cmd
+	panelFrameWidth   int
+	selectedTitleBase lipgloss.Style
+	selectedDescBase  lipgloss.Style
+	hasSelectedStyles bool
+	activationHint    string
+}
+
+func newArtifactTreeColumn(title string) *artifactTreeColumn {
+	delegate := list.NewDefaultDelegate()
+
+	column := &artifactTreeColumn{
+		title:          title,
+		width:          36,
+		delegate:       &delegate,
+		activationHint: "Click or Enter to open, Space to toggle",
+	}
+
+	model := list.New([]list.Item{}, column.delegate, 36, 20)
+	model.Title = title
+	model.SetShowStatusBar(false)
+	model.SetFilteringEnabled(false)
+	model.SetShowHelp(false)
+	model.SetShowPagination(false)
+
+	column.model = model
+	return column
+}
+
+func (c *artifactTreeColumn) SetCallbacks(onHighlight, onToggle, onActivate func(artifactNode) tea.Cmd) {
+	c.onHighlight = onHighlight
+	c.onToggle = onToggle
+	c.onActivate = onActivate
+}
+
+func (c *artifactTreeColumn) SetActivationHint(hint string) {
+	c.activationHint = strings.TrimSpace(hint)
+}
+
+func (c *artifactTreeColumn) ActivationHint() string {
+	if c.activationHint == "" {
+		return ""
+	}
+	if len(c.model.Items()) == 0 {
+		return ""
+	}
+	return c.activationHint
+}
+
+func (c *artifactTreeColumn) ApplyStyles(s styles) {
+	if c.delegate != nil {
+		normal := s.listItem.Copy().ColorWhitespace(true)
+		desc := s.statusHint.Copy().
+			Background(crushSurface).
+			ColorWhitespace(true).
+			Padding(0, 0, 0, 2)
+		c.panelFrameWidth = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+		highlight := s.listSel.Copy().
+			ColorWhitespace(true).
+			Foreground(crushPrimaryBright).
+			Underline(true)
+		c.selectedTitleBase = highlight
+		c.selectedDescBase = highlight.Copy().
+			Underline(false).
+			Foreground(crushAccent)
+		c.hasSelectedStyles = true
+
+		c.delegate.SetSpacing(0)
+		c.delegate.Styles.NormalTitle = normal
+		c.delegate.Styles.DimmedTitle = normal.Copy().Faint(true)
+		c.delegate.Styles.NormalDesc = desc
+		c.delegate.Styles.DimmedDesc = desc.Copy().Faint(true)
+		c.delegate.Styles.SelectedTitle = c.selectedTitleBase
+		c.delegate.Styles.SelectedDesc = c.selectedDescBase
+		c.delegate.Styles.FilterMatch = s.cmdPrompt.Copy().Underline(true).
+			Background(crushSurface).
+			ColorWhitespace(true)
+		c.model.SetDelegate(c.delegate)
+		c.updateSelectedWidths()
+	}
+
+	c.model.Styles.Title = s.columnTitle.Copy()
+	c.model.Styles.TitleBar = lipgloss.NewStyle()
+	c.model.Styles.Spinner = s.statusHint.Copy().Foreground(crushAccent)
+	c.model.Styles.NoItems = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true).
+		Faint(true)
+	c.model.Styles.StatusBar = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.StatusEmpty = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true).
+		Faint(true)
+	c.model.Styles.PaginationStyle = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.HelpStyle = s.statusHint.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+	c.model.Styles.ActivePaginationDot = s.statusSeg.Copy().Foreground(crushAccent).SetString("●")
+	c.model.Styles.InactivePaginationDot = s.statusHint.Copy().SetString("●")
+	c.model.Styles.DividerDot = s.statusHint.Copy().SetString(" • ")
+}
+
+func (c *artifactTreeColumn) SetNodes(nodes []artifactNode) {
+	items := make([]list.Item, len(nodes))
+	for i, node := range nodes {
+		items[i] = artifactTreeEntry{node: node}
+	}
+	c.model.SetItems(items)
+	if len(items) > 0 {
+		c.model.Select(0)
+	}
+}
+
+func (c *artifactTreeColumn) selectedEntry() (artifactTreeEntry, bool) {
+	if entry, ok := c.model.SelectedItem().(artifactTreeEntry); ok {
+		return entry, true
+	}
+	return artifactTreeEntry{}, false
+}
+
+func (c *artifactTreeColumn) SelectedNode() (artifactNode, bool) {
+	if entry, ok := c.selectedEntry(); ok {
+		return entry.node, true
+	}
+	return artifactNode{}, false
+}
+
+func (c *artifactTreeColumn) SelectRel(rel string) {
+	normalized := normalizeRel(rel)
+	items := c.model.Items()
+	for idx, item := range items {
+		entry, ok := item.(artifactTreeEntry)
+		if !ok {
+			continue
+		}
+		if normalizeRel(entry.node.Rel) == normalized {
+			c.model.Select(idx)
+			return
+		}
+	}
+}
+
+func (c *artifactTreeColumn) SetSize(width, height int) {
+	c.width = maxInt(width, 24)
+	if height < 3 {
+		height = 3
+	}
+	c.height = height
+	c.model.SetSize(c.width, height-2)
+	c.updateSelectedWidths()
+}
+
+func (c *artifactTreeColumn) contentWidth() int {
+	width := c.width
+	if width < 1 {
+		width = 1
+	}
+	inner := width - c.panelFrameWidth
+	if inner < 1 {
+		inner = 1
+	}
+	return inner
+}
+
+func (c *artifactTreeColumn) updateSelectedWidths() {
+	if c.delegate == nil || !c.hasSelectedStyles {
+		return
+	}
+	inner := c.contentWidth()
+	selected := c.selectedTitleBase
+	desc := c.selectedDescBase
+	if inner > 0 {
+		selected = selected.Width(inner)
+		desc = desc.Width(inner)
+	}
+	c.delegate.Styles.SelectedTitle = selected
+	c.delegate.Styles.SelectedDesc = desc
+}
+
+func (c *artifactTreeColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	prev := c.model.Index()
+	var cmds []tea.Cmd
+
+	var cmd tea.Cmd
+	c.model, cmd = c.model.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "enter":
+			if entry, ok := c.selectedEntry(); ok {
+				if entry.node.IsDir {
+					if c.onToggle != nil {
+						cmds = append(cmds, c.onToggle(entry.node))
+					}
+				} else if c.onActivate != nil {
+					cmds = append(cmds, c.onActivate(entry.node))
+				}
+			}
+		case "space":
+			if entry, ok := c.selectedEntry(); ok && entry.node.IsDir {
+				if c.onToggle != nil {
+					cmds = append(cmds, c.onToggle(entry.node))
+				}
+			}
+		case "right", "l":
+			if entry, ok := c.selectedEntry(); ok && entry.node.IsDir && !entry.node.Expanded {
+				if c.onToggle != nil {
+					cmds = append(cmds, c.onToggle(entry.node))
+				}
+			}
+		case "left", "h":
+			if entry, ok := c.selectedEntry(); ok {
+				if entry.node.IsDir && entry.node.Expanded {
+					if c.onToggle != nil {
+						cmds = append(cmds, c.onToggle(entry.node))
+					}
+				} else if entry.node.Parent != "" {
+					parentRel := entry.node.Parent
+					c.SelectRel(parentRel)
+					if c.onHighlight != nil {
+						if node, ok := c.SelectedNode(); ok {
+							cmds = append(cmds, c.onHighlight(node))
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if c.model.Index() != prev {
+		if c.onHighlight != nil {
+			if entry, ok := c.selectedEntry(); ok {
+				if run := c.onHighlight(entry.node); run != nil {
+					cmds = append(cmds, run)
+				}
+			}
+		}
+	}
+
+	if len(cmds) == 0 {
+		return c, nil
+	}
+	return c, tea.Batch(cmds...)
+}
+
+func (c *artifactTreeColumn) View(s styles, focused bool) string {
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleWidth := columnHeaderWidth(c.width, panelFrame, titleFrame)
+	title := s.columnTitle.Width(titleWidth).Render(c.title)
+	body := lipgloss.JoinVertical(lipgloss.Left, title, c.model.View())
+	return renderPanelWithScroll(panel, c.width, c.height, 0, body, bg, 0)
+}
+
+func (c *artifactTreeColumn) Title() string {
+	return c.title
+}
+
+func (c *artifactTreeColumn) FocusValue() string {
+	if node, ok := c.SelectedNode(); ok {
+		return node.Rel
+	}
+	return ""
+}
+
+func (c *artifactTreeColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func (c *artifactTreeColumn) CanMoveDown() bool {
+	items := c.model.Items()
+	if len(items) <= 1 {
+		return false
+	}
+	idx := c.model.Index()
+	if idx < 0 {
+		return true
+	}
+	return idx < len(items)-1
+}
+
+type actionColumn struct {
+	title       string
+	table       table.Model
+	width       int
+	height      int
+	panelFrame  int
+	items       []featureItemDefinition
+	selected    map[int]bool
+	onHighlight func(featureItemDefinition, bool) tea.Cmd
+}
+
+func newActionColumn(title string) *actionColumn {
+	columns := []table.Column{
+		{Title: "Action", Width: 18},
+		{Title: "Details", Width: 42},
+	}
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithFocused(true),
+		table.WithHeight(8),
+	)
+
+	return &actionColumn{
+		title:    title,
+		table:    t,
+		selected: make(map[int]bool),
+	}
+}
+
+func (c *actionColumn) SetHighlightFunc(fn func(featureItemDefinition, bool) tea.Cmd) {
+	c.onHighlight = fn
+}
+
+func (c *actionColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
+	c.panelFrame = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+}
+
+func (c *actionColumn) SetItems(items []featureItemDefinition) {
+	c.items = items
+	c.selected = make(map[int]bool)
+	c.refreshRows()
+	if len(items) > 0 {
+		c.table.SetCursor(0)
+	}
+}
+
+func (c *actionColumn) SetTitle(title string) {
+	trimmed := strings.TrimSpace(title)
+	if trimmed == "" {
+		return
+	}
+	c.title = trimmed
+}
+
+func (c *actionColumn) SelectKey(key string) {
+	if key == "" {
+		return
+	}
+	for idx, item := range c.items {
+		if item.Key == key {
+			c.table.SetCursor(idx)
+			return
+		}
+	}
+}
+
+func (c *actionColumn) SelectedItem() (featureItemDefinition, bool) {
+	if len(c.items) == 0 {
+		return featureItemDefinition{}, false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 || cursor >= len(c.items) {
+		return featureItemDefinition{}, false
+	}
+	return c.items[cursor], true
+}
+
+func (c *actionColumn) SelectedItems() []featureItemDefinition {
+	if len(c.selected) == 0 {
+		return nil
+	}
+	entries := make([]featureItemDefinition, 0, len(c.selected))
+	for i, item := range c.items {
+		if c.selected[i] {
+			entries = append(entries, item)
+		}
+	}
+	return entries
+}
+
+func (c *actionColumn) CanMoveDown() bool {
+	if len(c.items) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.items)-1
+}
+
+func (c *actionColumn) ClearSelection() {
+	if len(c.selected) == 0 {
+		return
+	}
+	c.selected = make(map[int]bool)
+	c.refreshRows()
+}
+
+func (c *actionColumn) SetSize(width, height int) {
+	if width < 20 {
+		width = 20
+	}
+	if height < 5 {
+		height = 5
+	}
+	c.width = width
+	c.height = height
+
+	actionWidth := maxInt(18, width/3)
+	detailsWidth := maxInt(width-actionWidth-4, 24)
+	c.table.SetColumns([]table.Column{
+		{Title: "Action", Width: actionWidth},
+		{Title: "Details", Width: detailsWidth},
+	})
+	c.table.SetHeight(height - 3)
+}
+
+func (c *actionColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	prev := c.table.Cursor()
+	var cmds []tea.Cmd
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case " ":
+			if c.toggleSelection(c.table.Cursor()) && c.onHighlight != nil {
+				if item, ok := c.SelectedItem(); ok {
+					if run := c.onHighlight(item, false); run != nil {
+						cmds = append(cmds, run)
+					}
+				}
+			}
+			if len(cmds) == 0 {
+				return c, nil
+			}
+			return c, tea.Batch(cmds...)
+		case "esc":
+			if len(c.selected) > 0 {
+				c.ClearSelection()
+				return c, nil
+			}
+		}
+	}
+
+	var cmd tea.Cmd
+	c.table, cmd = c.table.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "enter" {
+			if c.onHighlight != nil {
+				if item, ok := c.SelectedItem(); ok {
+					if run := c.onHighlight(item, true); run != nil {
+						cmds = append(cmds, run)
+					}
+				}
+			}
+		}
+	}
+
+	if c.table.Cursor() != prev {
+		if c.onHighlight != nil {
+			if item, ok := c.SelectedItem(); ok {
+				if run := c.onHighlight(item, false); run != nil {
+					cmds = append(cmds, run)
+				}
+			}
+		}
+	}
+
+	return c, tea.Batch(cmds...)
+}
+
+func (c *actionColumn) View(s styles, focused bool) string {
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleWidth := columnHeaderWidth(c.width, panelFrame, titleFrame)
+	title := s.columnTitle.Width(titleWidth).Render(c.title)
+	var body string
+	if len(c.items) == 0 {
+		body = s.listItem.Copy().Faint(true).Render("No actions available")
+	} else {
+		body = c.table.View()
+	}
+	inner := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, inner, bg, 0)
+}
+
+func (c *actionColumn) Title() string {
+	return c.title
+}
+
+func (c *actionColumn) FocusValue() string {
+	if item, ok := c.SelectedItem(); ok {
+		return item.Title
+	}
+	return ""
+}
+
+type textEditorColumn struct {
+	title               string
+	width               int
+	height              int
+	panelStyle          lipgloss.Style
+	panelFocusedStyle   lipgloss.Style
+	columnTitleStyle    lipgloss.Style
+	hintStyle           lipgloss.Style
+	statusErrorStyle    lipgloss.Style
+	statusSuccessStyle  lipgloss.Style
+	buttonStyle         lipgloss.Style
+	buttonDisabledStyle lipgloss.Style
+	scrollbarTrackStyle lipgloss.Style
+	scrollbarThumbStyle lipgloss.Style
+	panelFrameWidth     int
+	panelFrameHeight    int
+	textarea            textarea.Model
+	onSave              func(string) tea.Cmd
+	scrollbarWidth      int
+	scrollbarGap        int
+	scrollTop           int
+	totalDisplayRows    int
+	original            string
+	hasSaved            bool
+	dirty               bool
+	saving              bool
+	status              string
+	statusKind          string
+	hint                string
+	saveButtonArea      columnRect
+}
+
+func newTextEditorColumn(title string) *textEditorColumn {
+	ta := textarea.New()
+	ta.Prompt = ""
+	ta.CharLimit = 0
+	ta.FocusedStyle.CursorLine = ta.FocusedStyle.CursorLine.Copy().Background(crushSurfaceElevated)
+	ta.SetHeight(10)
+	ta.SetWidth(40)
+	ta.ShowLineNumbers = false
+	return &textEditorColumn{
+		title:            title,
+		textarea:         ta,
+		hint:             "cmd/ctrl+s save • esc: C1",
+		scrollbarWidth:   1,
+		scrollbarGap:     1,
+		totalDisplayRows: 1,
+	}
+}
+
+func (c *textEditorColumn) ApplyStyles(s styles) {
+	c.panelStyle = s.panel
+	c.panelFocusedStyle = s.panelFocused
+	c.columnTitleStyle = s.columnTitle
+	c.hintStyle = s.statusHint
+	c.statusErrorStyle = s.listItem.Copy().Foreground(crushDanger)
+	c.statusSuccessStyle = s.listItem.Copy().Foreground(crushAccent)
+	c.buttonStyle = s.tabActive.Copy().
+		Foreground(crushBackground).
+		Background(crushAccent).
+		Padding(0, 2).
+		Bold(true)
+	c.buttonDisabledStyle = s.statusHint.Copy().
+		Background(crushSurface).
+		Padding(0, 2)
+	c.scrollbarTrackStyle = s.statusHint.Copy().
+		Foreground(crushForegroundFaint)
+	c.scrollbarThumbStyle = s.statusHint.Copy().
+		Foreground(crushAccent).
+		Bold(true)
+	c.panelFrameWidth = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+	c.panelFrameHeight = maxInt(s.panel.GetVerticalFrameSize(), s.panelFocused.GetVerticalFrameSize())
+}
+
+func (c *textEditorColumn) SetHint(hint string) {
+	c.hint = strings.TrimSpace(hint)
+}
+
+func (c *textEditorColumn) SetOnSave(fn func(string) tea.Cmd) {
+	c.onSave = fn
+}
+
+func (c *textEditorColumn) SetContent(value string, markSaved bool) {
+	c.textarea.SetValue(value)
+	for c.textarea.Line() > 0 {
+		c.textarea.CursorUp()
+	}
+	c.textarea.CursorStart()
+	c.scrollTop = 0
+	c.original = value
+	c.hasSaved = markSaved
+	c.saving = false
+	c.updateDirtyFlag()
+	if !markSaved {
+		c.status = ""
+		c.statusKind = ""
+	}
+}
+
+func (c *textEditorColumn) FocusEditor() {
+	c.textarea.Focus()
+}
+
+func (c *textEditorColumn) BlurEditor() {
+	c.textarea.Blur()
+}
+
+func (c *textEditorColumn) SetSize(width, height int) {
+	c.width = width
+	if height < 6 {
+		height = 6
+	}
+	c.height = height
+
+	innerWidth := c.contentWidth()
+	if innerWidth < 16 {
+		innerWidth = 16
+	}
+	usableWidth := innerWidth - c.scrollbarWidth - c.scrollbarGap
+	if usableWidth < 12 {
+		usableWidth = 12
+	}
+	c.textarea.SetWidth(usableWidth)
+
+	innerHeight := c.contentHeight()
+	editorHeight := innerHeight - 5
+	if editorHeight < 1 {
+		editorHeight = 1
+	}
+	c.textarea.SetHeight(editorHeight)
+}
+
+func (c *textEditorColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	switch message := msg.(type) {
+	case tea.KeyMsg:
+		switch message.String() {
+		case "ctrl+s", "cmd+s":
+			if cmd := c.triggerSave(); cmd != nil {
+				return c, cmd
+			}
+		case "esc":
+			return c, func() tea.Msg { return tea.KeyMsg{Type: tea.KeyLeft} }
+		}
+	}
+	var cmd tea.Cmd
+	c.textarea, cmd = c.textarea.Update(msg)
+	prevDirty := c.dirty
+	c.updateDirtyFlag()
+	if c.saving && cmd == nil {
+		// keep saving state until response arrives
+	}
+	if c.dirty && !c.saving && (msg != nil) {
+		if !prevDirty || c.statusKind == "success" || c.statusKind == "error" {
+			c.status = "Unsaved changes"
+			c.statusKind = "hint"
+		}
+	}
+	if !c.dirty && !c.saving && prevDirty {
+		if c.hasSaved {
+			c.status = "Draft saved"
+			c.statusKind = "success"
+		} else {
+			c.status = ""
+			c.statusKind = ""
+		}
+	}
+	return c, cmd
+}
+
+func (c *textEditorColumn) View(s styles, focused bool) string {
+	if focused {
+		if !c.textarea.Focused() {
+			c.textarea.Focus()
+		}
+	} else if c.textarea.Focused() {
+		c.textarea.Blur()
+	}
+
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleFrame := horizontalInnerFrameSize(c.columnTitleStyle)
+	headerWidth := columnHeaderWidth(c.width, panelFrame, titleFrame)
+	header := c.columnTitleStyle.Width(headerWidth).Render(c.title)
+
+	innerWidth := c.contentWidth()
+	if innerWidth < 16 {
+		innerWidth = 16
+	}
+
+	saveRow, saveLabel, saveEnabled := c.renderSaveRow(innerWidth)
+	statusRow := c.renderStatusRow(innerWidth)
+	c.updateScrollMetrics()
+	editorView := c.textarea.View()
+	editorView = c.attachScrollbar(editorView)
+
+	body := lipgloss.JoinVertical(lipgloss.Left, header, saveRow, statusRow, "", editorView)
+
+	rendered := renderPanelWithScroll(panel, c.width, c.height, 0, body, bg, 0)
+	c.updateSaveButtonArea(rendered, header, saveLabel, saveEnabled, panel)
+	return rendered
+}
+
+func (c *textEditorColumn) Title() string {
+	return c.title
+}
+
+func (c *textEditorColumn) FocusValue() string {
+	if c.saving {
+		return "Saving draft"
+	}
+	if c.dirty || !c.hasSaved {
+		return "Draft unsaved"
+	}
+	return "Draft saved"
+}
+
+func (c *textEditorColumn) ActivationHint() string {
+	return c.hint
+}
+
+func (c *textEditorColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func (c *textEditorColumn) HandleMouse(localX, localY int, msg tea.MouseMsg) (column, tea.Cmd) {
+	if msg.Type != tea.MouseLeft {
+		return c, nil
+	}
+	if !c.saveButtonArea.contains(localX, localY) {
+		return c, nil
+	}
+	if cmd := c.triggerSave(); cmd != nil {
+		return c, cmd
+	}
+	return c, nil
+}
+
+func (c *textEditorColumn) triggerSave() tea.Cmd {
+	if c.onSave == nil {
+		return nil
+	}
+	if c.saving {
+		return nil
+	}
+	if !c.dirty && c.hasSaved {
+		return nil
+	}
+	c.saving = true
+	c.status = "Saving draft…"
+	c.statusKind = "hint"
+	value := c.textarea.Value()
+	return c.onSave(value)
+}
+
+func (c *textEditorColumn) updateDirtyFlag() {
+	current := c.textarea.Value()
+	c.dirty = !c.hasSaved || current != c.original
+}
+
+func (c *textEditorColumn) renderSaveRow(innerWidth int) (string, string, bool) {
+	label := " Save "
+	if c.saving {
+		label = " Saving… "
+	} else if c.dirty || !c.hasSaved {
+		label = " Save Draft "
+	} else {
+		label = " Saved "
+	}
+	saveEnabled := !c.saving && (c.dirty || !c.hasSaved)
+	style := c.buttonDisabledStyle
+	if saveEnabled {
+		style = c.buttonStyle
+	}
+	button := style.Render(label)
+	buttonWidth := runewidth.StringWidth(button)
+	if buttonWidth > innerWidth {
+		buttonWidth = innerWidth
+		button = sliceLineANSI(button, 0, innerWidth, "")
+	}
+	hint := strings.TrimSpace(c.hint)
+	var row string
+	if hint != "" {
+		hintSegment := c.hintStyle.Copy().Render(hint)
+		row = lipgloss.JoinHorizontal(lipgloss.Left, button, "  ", hintSegment)
+	} else {
+		row = button
+	}
+	rowWidth := stringWidthANSI(row)
+	if rowWidth < innerWidth {
+		row += strings.Repeat(" ", innerWidth-rowWidth)
+	}
+	return row, strings.TrimSpace(label), saveEnabled
+}
+
+func (c *textEditorColumn) updateSaveButtonArea(rendered, header, label string, saveEnabled bool, panel lipgloss.Style) {
+	if !saveEnabled {
+		c.saveButtonArea = columnRect{}
+		return
+	}
+	needle := strings.TrimSpace(label)
+	lines := strings.Split(rendered, "\n")
+	panelLeft := panel.GetBorderLeftSize() + panel.GetPaddingLeft()
+	panelRight := panel.GetBorderRightSize() + panel.GetPaddingRight()
+	if panelLeft < 0 {
+		panelLeft = 0
+	}
+	if panelRight < 0 {
+		panelRight = 0
+	}
+	innerWidth := c.width - panelLeft - panelRight
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	for i, line := range lines {
+		if strings.Contains(stripANSI(line), needle) {
+			c.saveButtonArea = columnRect{x: panelLeft, y: i, width: innerWidth, height: 1}
+			return
+		}
+	}
+	// Fallback: align based on header height if we can't match the rendered line.
+	headerLines := lipgloss.Height(header)
+	if headerLines < 0 {
+		headerLines = 0
+	}
+	panelTop := panel.GetBorderTopSize() + panel.GetPaddingTop()
+	if panelTop < 0 {
+		panelTop = 0
+	}
+	c.saveButtonArea = columnRect{
+		x:      panelLeft,
+		y:      panelTop + headerLines,
+		width:  innerWidth,
+		height: 1,
+	}
+}
+
+func stripANSI(line string) string {
+	if line == "" {
+		return ""
+	}
+	var (
+		builder strings.Builder
+		seq     strings.Builder
+		ansi    bool
+	)
+	for _, r := range line {
+		if ansi {
+			seq.WriteRune(r)
+			if reansi.IsTerminator(r) {
+				ansi = false
+				seq.Reset()
+			}
+			continue
+		}
+		if r == reansi.Marker {
+			ansi = true
+			seq.Reset()
+			seq.WriteRune(r)
+			continue
+		}
+		builder.WriteRune(r)
+	}
+	return builder.String()
+}
+
+func countLeadingBlankLines(value string) int {
+	if strings.TrimSpace(value) == "" {
+		// Entire content is blank; treat as zero padding to avoid out-of-range math.
+		return 0
+	}
+	lines := strings.Split(value, "\n")
+	count := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func (c *textEditorColumn) renderStatusRow(innerWidth int) string {
+	msg := strings.TrimSpace(c.status)
+	style := c.hintStyle
+	switch c.statusKind {
+	case "error":
+		style = c.statusErrorStyle
+	case "success":
+		style = c.statusSuccessStyle
+	default:
+		if msg == "" {
+			msg = c.hint
+			style = c.hintStyle
+		}
+	}
+	if msg == "" {
+		msg = strings.Repeat(" ", innerWidth)
+	}
+	rendered := style.Render(msg)
+	width := stringWidthANSI(rendered)
+	if width < innerWidth {
+		rendered += strings.Repeat(" ", innerWidth-width)
+	}
+	return rendered
+}
+
+func (c *textEditorColumn) contentWidth() int {
+	width := c.width - c.panelFrameWidth
+	if width < 1 {
+		width = c.width - 2
+	}
+	if width < 1 {
+		width = 1
+	}
+	return width
+}
+
+func (c *textEditorColumn) contentHeight() int {
+	height := c.height - c.panelFrameHeight
+	if height < 1 {
+		height = c.height
+	}
+	if height < 1 {
+		height = 1
+	}
+	return height
+}
+
+func (c *textEditorColumn) MarkSaved(content, rel string) {
+	c.original = content
+	c.hasSaved = true
+	c.saving = false
+	c.updateDirtyFlag()
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		rel = "docs/rfp.md"
+	}
+	c.status = fmt.Sprintf("Saved %s", rel)
+	c.statusKind = "success"
+}
+
+func (c *textEditorColumn) SaveFailed(reason string) {
+	c.saving = false
+	c.updateDirtyFlag()
+	c.status = reason
+	c.statusKind = "error"
+}
+
+func (c *textEditorColumn) SetStatus(message, kind string) {
+	c.status = strings.TrimSpace(message)
+	c.statusKind = strings.TrimSpace(kind)
+}
+
+func (c *textEditorColumn) attachScrollbar(editorView string) string {
+	lines := strings.Split(editorView, "\n")
+	height := len(lines)
+	scrollbar := c.renderScrollbar(height)
+	if strings.TrimSpace(scrollbar) == "" {
+		return editorView
+	}
+	scrollLines := strings.Split(scrollbar, "\n")
+	if len(scrollLines) < height {
+		diff := height - len(scrollLines)
+		for i := 0; i < diff; i++ {
+			scrollLines = append(scrollLines, strings.Repeat(" ", c.scrollbarGap+c.scrollbarWidth))
+		}
+	}
+	for i := 0; i < height; i++ {
+		lines[i] = lines[i] + scrollLines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (c *textEditorColumn) renderScrollbar(height int) string {
+	if height <= 0 {
+		return ""
+	}
+	total := c.totalDisplayRows
+	if total <= height {
+		segment := strings.Repeat(" ", c.scrollbarGap) + c.scrollbarTrackStyle.Render("│")
+		return strings.TrimRight(strings.Repeat(segment+"\n", height), "\n")
+	}
+	thumbSize := int(math.Round(float64(height*height) / float64(total)))
+	if thumbSize < 1 {
+		thumbSize = 1
+	}
+	if thumbSize > height {
+		thumbSize = height
+	}
+	maxTop := total - height
+	thumbStart := 0
+	if maxTop > 0 {
+		thumbStart = int(math.Round(float64(c.scrollTop) * float64(height-thumbSize) / float64(maxTop)))
+		if thumbStart < 0 {
+			thumbStart = 0
+		}
+		if thumbStart > height-thumbSize {
+			thumbStart = height - thumbSize
+		}
+	}
+	lines := make([]string, height)
+	for i := 0; i < height; i++ {
+		style := c.scrollbarTrackStyle
+		char := "│"
+		if i >= thumbStart && i < thumbStart+thumbSize {
+			style = c.scrollbarThumbStyle
+			char = "█"
+		}
+		lines[i] = strings.Repeat(" ", c.scrollbarGap) + style.Render(char)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (c *textEditorColumn) updateScrollMetrics() {
+	height := c.textarea.Height()
+	if height < 1 {
+		height = len(strings.Split(c.textarea.View(), "\n"))
+	}
+	width := c.textarea.Width()
+	if width < 1 {
+		width = 1
+	}
+	lineWraps, total := computeWrappedLineCounts(c.textarea.Value(), width, c.textarea.LineCount())
+	if total <= 0 {
+		total = 1
+	}
+	cursorLine := c.textarea.Line()
+	if cursorLine < 0 {
+		cursorLine = 0
+	}
+	if cursorLine >= len(lineWraps) {
+		cursorLine = len(lineWraps) - 1
+		if cursorLine < 0 {
+			cursorLine = 0
+		}
+	}
+	cursorOffset := 0
+	for i := 0; i < cursorLine && i < len(lineWraps); i++ {
+		cursorOffset += lineWraps[i]
+	}
+	lineInfo := c.textarea.LineInfo()
+	cursorOffset += lineInfo.RowOffset
+	maxTop := maxInt(total-height, 0)
+	if c.scrollTop > maxTop {
+		c.scrollTop = maxTop
+	}
+	if cursorOffset < c.scrollTop {
+		c.scrollTop = cursorOffset
+	} else if cursorOffset >= c.scrollTop+height {
+		c.scrollTop = cursorOffset - height + 1
+	}
+	if c.scrollTop < 0 {
+		c.scrollTop = 0
+	}
+	if c.scrollTop > maxTop {
+		c.scrollTop = maxTop
+	}
+	c.totalDisplayRows = maxInt(total, 1)
+}
+
+func (c *actionColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+type envTableColumn struct {
+	title      string
+	table      table.Model
+	width      int
+	height     int
+	panelFrame int
+	entries    []envEntry
+	reveal     map[string]bool
+	onEdit     func(envEntry) tea.Cmd
+	onToggle   func(envEntry) tea.Cmd
+	onCopy     func(envEntry) tea.Cmd
+}
+
+func newEnvTableColumn(title string) *envTableColumn {
+	columns := []table.Column{
+		{Title: "Key", Width: 24},
+		{Title: "Value", Width: 44},
+		{Title: "Secret?", Width: 9},
+		{Title: "Source", Width: 24},
+	}
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithFocused(true),
+		table.WithHeight(8),
+	)
+
+	return &envTableColumn{
+		title:  title,
+		table:  t,
+		reveal: make(map[string]bool),
+	}
+}
+
+func (c *envTableColumn) SetOnEdit(fn func(envEntry) tea.Cmd) {
+	c.onEdit = fn
+}
+
+func (c *envTableColumn) SetOnToggle(fn func(envEntry) tea.Cmd) {
+	c.onToggle = fn
+}
+
+func (c *envTableColumn) SetOnCopy(fn func(envEntry) tea.Cmd) {
+	c.onCopy = fn
+}
+
+func (c *envTableColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
+	c.panelFrame = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+}
+
+func (c *envTableColumn) SelectedEntry() (envEntry, bool) {
+	cursor := c.table.Cursor()
+	if cursor < 0 || cursor >= len(c.entries) {
+		return envEntry{}, false
+	}
+	return c.entries[cursor], true
+}
+
+func (c *envTableColumn) SetEntries(entries []envEntry, reveal map[string]bool) {
+	selectedID := ""
+	if entry, ok := c.SelectedEntry(); ok {
+		selectedID = envEntryIdentifier(entry)
+	}
+	c.entries = append([]envEntry(nil), entries...)
+	if reveal == nil {
+		reveal = make(map[string]bool)
+	}
+	c.reveal = make(map[string]bool, len(reveal))
+	for k, v := range reveal {
+		c.reveal[k] = v
+	}
+	rows := make([]table.Row, len(entries))
+	for i, entry := range entries {
+		rows[i] = c.buildRow(entry)
+	}
+	c.table.SetRows(rows)
+	if len(rows) == 0 {
+		return
+	}
+	target := 0
+	if selectedID != "" {
+		for idx, entry := range c.entries {
+			if envEntryIdentifier(entry) == selectedID {
+				target = idx
+				break
+			}
+		}
+	}
+	if target < 0 {
+		target = 0
+	}
+	if target >= len(rows) {
+		target = len(rows) - 1
+	}
+	c.table.SetCursor(target)
+}
+
+func (c *envTableColumn) buildRow(entry envEntry) table.Row {
+	value := entry.Value
+	id := envEntryIdentifier(entry)
+	revealed := c.reveal[id]
+	if entry.Secret && !revealed {
+		if strings.TrimSpace(value) == "" {
+			value = "[hidden empty]"
+		} else {
+			value = maskedSecret(value)
+		}
+	} else if strings.TrimSpace(value) == "" {
+		value = "(empty)"
+	}
+	secretLabel := ""
+	if entry.Secret {
+		if revealed {
+			secretLabel = "yes (shown)"
+		} else {
+			secretLabel = "yes"
+		}
+	}
+	source := entry.Source
+	if strings.TrimSpace(source) == "" {
+		source = "(unknown)"
+	}
+	return table.Row{
+		entry.Key,
+		value,
+		secretLabel,
+		source,
+	}
+}
+
+func (c *envTableColumn) SetSize(width, height int) {
+	if width < 20 {
+		width = 20
+	}
+	if height < 5 {
+		height = 5
+	}
+	c.width = width
+	c.height = height
+
+	keyWidth := maxInt(16, width/4)
+	valueWidth := maxInt(width-keyWidth-28, 28)
+	if valueWidth > 64 {
+		valueWidth = 64
+	}
+	secretWidth := 9
+	sourceWidth := maxInt(width-keyWidth-valueWidth-secretWidth-4, 18)
+
+	c.table.SetColumns([]table.Column{
+		{Title: "Key", Width: keyWidth},
+		{Title: "Value", Width: valueWidth},
+		{Title: "Secret?", Width: secretWidth},
+		{Title: "Source", Width: sourceWidth},
+	})
+	c.table.SetHeight(height - 3)
+}
+
+func (c *envTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	var cmd tea.Cmd
+	c.table, cmd = c.table.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		key := strings.ToLower(keyMsg.String())
+		switch key {
+		case "enter":
+			if c.onEdit != nil {
+				if entry, ok := c.SelectedEntry(); ok {
+					if run := c.onEdit(entry); run != nil {
+						cmds = append(cmds, run)
+					}
+				}
+			}
+		case "r":
+			if c.onToggle != nil {
+				if entry, ok := c.SelectedEntry(); ok {
+					if run := c.onToggle(entry); run != nil {
+						cmds = append(cmds, run)
+					}
+				}
+			}
+		case "y":
+			if c.onCopy != nil {
+				if entry, ok := c.SelectedEntry(); ok {
+					if run := c.onCopy(entry); run != nil {
+						cmds = append(cmds, run)
+					}
+				}
+			}
+		}
+	}
+
+	if len(cmds) == 0 {
+		return c, nil
+	}
+	return c, tea.Batch(cmds...)
+}
+
+func (c *actionColumn) refreshRows() {
+	rows := make([]table.Row, len(c.items))
+	for i, item := range c.items {
+		rows[i] = c.renderRow(i, item)
+	}
+	c.table.SetRows(rows)
+}
+
+func (c *actionColumn) refreshRow(index int) {
+	if index < 0 || index >= len(c.items) {
+		return
+	}
+	rows := c.table.Rows()
+	if index < 0 || index >= len(rows) {
+		return
+	}
+	rows[index] = c.renderRow(index, c.items[index])
+	c.table.SetRows(rows)
+}
+
+func (c *actionColumn) renderRow(index int, item featureItemDefinition) table.Row {
+	label := item.Title
+	desc := item.Desc
+	if item.Disabled {
+		label = "! " + label
+		if strings.TrimSpace(item.DisabledReason) != "" {
+			desc = item.DisabledReason
+		} else if strings.TrimSpace(desc) == "" {
+			desc = "Temporarily unavailable"
+		}
+	}
+	marker := "[ ]"
+	if c.selected != nil && c.selected[index] {
+		marker = "[x]"
+	}
+	label = fmt.Sprintf("%s %s", marker, label)
+	return table.Row{label, desc}
+}
+
+func (c *actionColumn) toggleSelection(index int) bool {
+	if index < 0 || index >= len(c.items) {
+		return false
+	}
+	if c.selected == nil {
+		c.selected = make(map[int]bool)
+	}
+	if c.selected[index] {
+		delete(c.selected, index)
+	} else {
+		c.selected[index] = true
+	}
+	c.refreshRow(index)
+	return true
+}
+
+func (c *envTableColumn) View(s styles, focused bool) string {
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	title := s.columnTitle.Width(columnHeaderWidth(c.width, panelFrame, titleFrame)).Render(c.title)
+	var body string
+	if len(c.entries) == 0 {
+		body = s.listItem.Copy().Faint(true).Render("No variables detected")
+	} else {
+		body = c.table.View()
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg, 0)
+}
+
+func (c *envTableColumn) Title() string {
+	return c.title
+}
+
+func (c *envTableColumn) FocusValue() string {
+	if entry, ok := c.SelectedEntry(); ok {
+		return entry.Key
+	}
+	return ""
+}
+
+func (c *envTableColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func (c *envTableColumn) CanMoveDown() bool {
+	if len(c.entries) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.entries)-1
+}
+
+func envEntryIdentifier(entry envEntry) string {
+	return fmt.Sprintf("%s::%s::%d", entry.Source, entry.Key, entry.LineIndex)
+}
+
+func maskedSecret(value string) string {
+	length := len(value)
+	if length <= 0 {
+		return "[hidden]"
+	}
+	if length > 16 {
+		length = 16
+	}
+	return strings.Repeat("*", length)
+}
+
+type servicesTableColumn struct {
+	title       string
+	table       table.Model
+	width       int
+	height      int
+	panelFrame  int
+	items       []featureItemDefinition
+	onHighlight func(featureItemDefinition, bool) tea.Cmd
+	latencyOK   lipgloss.Style
+	latencySlow lipgloss.Style
+	latencyFail lipgloss.Style
+}
+
+func newServicesTableColumn(title string) *servicesTableColumn {
+	columns := []table.Column{
+		{Title: "Service", Width: 16},
+		{Title: "Container", Width: 28},
+		{Title: "State", Width: 10},
+		{Title: "Health", Width: 12},
+		{Title: "Latency", Width: 10},
+		{Title: "Ports", Width: 24},
+		{Title: "Restarts", Width: 9},
+	}
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+	return &servicesTableColumn{
+		title: title,
+		table: t,
+	}
+}
+
+func (c *servicesTableColumn) SetHighlightFunc(fn func(featureItemDefinition, bool) tea.Cmd) {
+	c.onHighlight = fn
+}
+
+func (c *servicesTableColumn) SetItems(items []featureItemDefinition) {
+	c.items = items
+	rows := make([]table.Row, len(items))
+	for i, item := range items {
+		if item.Meta != nil && item.Meta["serviceRow"] == "1" {
+			rows[i] = table.Row{
+				item.Meta["service"],
+				item.Meta["container"],
+				item.Meta["state"],
+				item.Meta["health"],
+				c.renderLatencyCell(item.Meta),
+				item.Meta["ports"],
+				item.Meta["restarts"],
+			}
+		} else {
+			label := item.Title
+			if strings.TrimSpace(label) == "" {
+				label = item.Desc
+			}
+			if item.Disabled {
+				label = "! " + label
+			}
+			rows[i] = table.Row{
+				label,
+				item.Desc,
+				"",
+				"",
+				"",
+				"",
+				"",
+			}
+		}
+	}
+	c.table.SetRows(rows)
+	if len(rows) > 0 {
+		c.table.SetCursor(0)
+	}
+}
+
+func (c *servicesTableColumn) renderLatencyCell(meta map[string]string) string {
+	if meta == nil {
+		return ""
+	}
+	value := strings.TrimSpace(meta["latency"])
+	if value == "" {
+		value = "n/a"
+	}
+	status := strings.ToLower(strings.TrimSpace(meta["latencyStatus"]))
+	switch status {
+	case "timeout":
+		return c.latencyFail.Render(value)
+	case "unknown":
+		return c.latencySlow.Render(value)
+	default:
+		return c.latencyOK.Render(value)
+	}
+}
+
+func (c *servicesTableColumn) SelectKey(key string) {
+	if key == "" {
+		return
+	}
+	for idx, item := range c.items {
+		if item.Key == key {
+			c.table.SetCursor(idx)
+			return
+		}
+	}
+}
+
+func (c *servicesTableColumn) SelectedItem() (featureItemDefinition, bool) {
+	if len(c.items) == 0 {
+		return featureItemDefinition{}, false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 || cursor >= len(c.items) {
+		return featureItemDefinition{}, false
+	}
+	return c.items[cursor], true
+}
+
+func (c *servicesTableColumn) SetSize(width, height int) {
+	if width < 36 {
+		width = 36
+	}
+	if height < 6 {
+		height = 6
+	}
+	c.width = width
+	c.height = height
+
+	serviceWidth := maxInt(14, width/7+6)
+	containerWidth := maxInt(24, width/3)
+	stateWidth := 10
+	healthWidth := 12
+	latencyWidth := 10
+	restartsWidth := 9
+	portsWidth := width - serviceWidth - containerWidth - stateWidth - healthWidth - latencyWidth - restartsWidth - 7
+	if portsWidth < 16 {
+		portsWidth = 16
+	}
+
+	c.table.SetColumns([]table.Column{
+		{Title: "Service", Width: serviceWidth},
+		{Title: "Container", Width: containerWidth},
+		{Title: "State", Width: stateWidth},
+		{Title: "Health", Width: healthWidth},
+		{Title: "Latency", Width: latencyWidth},
+		{Title: "Ports", Width: portsWidth},
+		{Title: "Restarts", Width: restartsWidth},
+	})
+	c.table.SetHeight(height - 3)
+}
+
+func (c *servicesTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	prev := c.table.Cursor()
+	var cmds []tea.Cmd
+
+	var cmd tea.Cmd
+	c.table, cmd = c.table.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "enter" && c.onHighlight != nil {
+			if item, ok := c.SelectedItem(); ok {
+				if run := c.onHighlight(item, true); run != nil {
+					cmds = append(cmds, run)
+				}
+			}
+		}
+	}
+
+	if c.table.Cursor() != prev && c.onHighlight != nil {
+		if item, ok := c.SelectedItem(); ok {
+			if run := c.onHighlight(item, false); run != nil {
+				cmds = append(cmds, run)
+			}
+		}
+	}
+
+	return c, tea.Batch(cmds...)
+}
+
+func (c *servicesTableColumn) View(s styles, focused bool) string {
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	title := s.columnTitle.Width(columnHeaderWidth(c.width, panelFrame, titleFrame)).Render(c.title)
+	var body string
+	if len(c.items) == 0 {
+		body = s.listItem.Copy().Faint(true).Render("No services detected")
+	} else {
+		body = c.table.View()
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg, 0)
+}
+
+func (c *servicesTableColumn) Title() string {
+	return c.title
+}
+
+func (c *servicesTableColumn) FocusValue() string {
+	if item, ok := c.SelectedItem(); ok {
+		if item.Meta != nil && item.Meta["service"] != "" {
+			return item.Meta["service"]
+		}
+		return item.Title
+	}
+	return ""
+}
+
+func (c *servicesTableColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func (c *servicesTableColumn) CanMoveDown() bool {
+	if len(c.items) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.items)-1
+}
+
+func (c *servicesTableColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
+	c.panelFrame = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+	badgeBase := lipgloss.NewStyle().Padding(0, 1)
+	c.latencyOK = badgeBase.Copy().Foreground(crushForeground).Background(crushSurfaceSoft)
+	c.latencySlow = badgeBase.Copy().Foreground(crushForegroundMuted).Background(crushSurfaceSoft)
+	c.latencyFail = badgeBase.Copy().Foreground(crushForeground).Background(crushDanger).Bold(true)
+}
+
+type tokensTableColumn struct {
+	title       string
+	table       table.Model
+	width       int
+	height      int
+	panelFrame  int
+	group       tokensGroupMode
+	rows        []tokensTableRow
+	context     string
+	empty       string
+	onHighlight func(tokensTableRow) tea.Cmd
+}
+
+func newTokensTableColumn(title string) *tokensTableColumn {
+	columns := []table.Column{
+		{Title: "Date", Width: 16},
+		{Title: "Command", Width: 24},
+		{Title: "Calls", Width: 8},
+		{Title: "Tokens", Width: 12},
+		{Title: "Est. $", Width: 10},
+	}
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+	return &tokensTableColumn{
+		title: title,
+		table: t,
+	}
+}
+
+func (c *tokensTableColumn) SetHighlightFunc(fn func(tokensTableRow) tea.Cmd) {
+	c.onHighlight = fn
+}
+
+func (c *tokensTableColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
+	c.panelFrame = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+}
+
+func (c *tokensTableColumn) SetSize(width, height int) {
+	if width < 32 {
+		width = 32
+	}
+	if height < 6 {
+		height = 6
+	}
+	c.width = width
+	c.height = height
+	c.configureColumns()
+	c.table.SetHeight(height - 3)
+}
+
+func (c *tokensTableColumn) configureColumns() {
+	if c.width == 0 {
+		return
+	}
+	labelWidth := maxInt(16, c.width/3)
+	secondaryWidth := maxInt(18, c.width/3)
+	remaining := c.width - labelWidth - secondaryWidth - 12 - 10 - 6
+	if remaining < 10 {
+		remaining = 10
+	}
+	callsWidth := 8
+	tokensWidth := remaining
+	costWidth := 10
+
+	switch c.group {
+	case tokensGroupByCommand:
+		c.table.SetColumns([]table.Column{
+			{Title: "Command", Width: labelWidth},
+			{Title: "Last", Width: secondaryWidth},
+			{Title: "Calls", Width: callsWidth},
+			{Title: "Tokens", Width: tokensWidth},
+			{Title: "Est. $", Width: costWidth},
+		})
+	default:
+		c.table.SetColumns([]table.Column{
+			{Title: "Date", Width: labelWidth},
+			{Title: "Command", Width: secondaryWidth},
+			{Title: "Calls", Width: callsWidth},
+			{Title: "Tokens", Width: tokensWidth},
+			{Title: "Est. $", Width: costWidth},
+		})
+	}
+}
+
+func (c *tokensTableColumn) SetPlaceholder(message string) {
+	c.rows = nil
+	c.context = ""
+	c.empty = message
+	c.table.SetRows(nil)
+}
+
+func (c *tokensTableColumn) SetData(rows []tokensTableRow, group tokensGroupMode, context, empty string) {
+	c.group = group
+	c.context = context
+	c.empty = empty
+	c.rows = append([]tokensTableRow(nil), rows...)
+	c.configureColumns()
+	tableRows := make([]table.Row, len(c.rows))
+	for i, row := range c.rows {
+		tableRows[i] = table.Row{
+			row.Label,
+			row.Secondary,
+			formatIntComma(row.Calls),
+			formatIntComma(row.Tokens),
+			formatCost(row.Cost),
+		}
+	}
+	c.table.SetRows(tableRows)
+	if len(tableRows) > 0 {
+		c.table.SetCursor(0)
+	}
+}
+
+func (c *tokensTableColumn) SelectKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for idx, row := range c.rows {
+		if row.Key == key {
+			c.table.SetCursor(idx)
+			return true
+		}
+	}
+	return false
+}
+
+func (c *tokensTableColumn) SelectedRow() (tokensTableRow, bool) {
+	if len(c.rows) == 0 {
+		return tokensTableRow{}, false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 || cursor >= len(c.rows) {
+		return tokensTableRow{}, false
+	}
+	return c.rows[cursor], true
+}
+
+func (c *tokensTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	prevCursor := c.table.Cursor()
+	var cmd tea.Cmd
+	c.table, cmd = c.table.Update(msg)
+	if cmd != nil {
+		return c, cmd
+	}
+	if c.table.Cursor() != prevCursor && c.onHighlight != nil {
+		if row, ok := c.SelectedRow(); ok {
+			if run := c.onHighlight(row); run != nil {
+				return c, run
+			}
+		}
+	}
+	return c, nil
+}
+
+func (c *tokensTableColumn) View(s styles, focused bool) string {
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	title := s.columnTitle.Width(columnHeaderWidth(c.width, panelFrame, titleFrame)).Render(c.title)
+	var body string
+	if len(c.rows) == 0 {
+		message := strings.TrimSpace(c.empty)
+		if message == "" {
+			message = "No usage data"
+		}
+		body = s.listItem.Copy().Faint(true).Render(message)
+	} else {
+		body = c.table.View()
+	}
+	if context := strings.TrimSpace(c.context); context != "" {
+		body = lipgloss.JoinVertical(lipgloss.Left, s.statusHint.Render(context), body)
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg, 0)
+}
+
+func (c *tokensTableColumn) Title() string {
+	return c.title
+}
+
+func (c *tokensTableColumn) FocusValue() string {
+	if row, ok := c.SelectedRow(); ok {
+		return row.Label
+	}
+	return ""
+}
+
+func (c *tokensTableColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func (c *tokensTableColumn) CanMoveDown() bool {
+	if len(c.rows) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.rows)-1
+}
+
+type reportTableRow struct {
+	entry      reportEntry
+	timeLabel  string
+	typeLabel  string
+	summary    string
+	actionHint string
+}
+
+type reportsTableColumn struct {
+	title        string
+	table        table.Model
+	width        int
+	height       int
+	panelFrame   int
+	summaryWidth int
+	rows         []reportTableRow
+	placeholder  string
+	onHighlight  func(reportEntry, bool) tea.Cmd
+}
+
+func newReportsTableColumn(title string) *reportsTableColumn {
+	columns := []table.Column{
+		{Title: "Time", Width: 18},
+		{Title: "Type", Width: 14},
+		{Title: "Summary", Width: 42},
+		{Title: "Open", Width: 8},
+	}
+	t := table.New(
+		table.WithColumns(columns),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+	return &reportsTableColumn{
+		title: title,
+		table: t,
+	}
+}
+
+func (c *reportsTableColumn) SetHighlightFunc(fn func(reportEntry, bool) tea.Cmd) {
+	c.onHighlight = fn
+}
+
+func (c *reportsTableColumn) ApplyStyles(s styles) {
+	c.table.SetStyles(table.Styles{
+		Header:   s.tableHeader,
+		Cell:     s.tableCell,
+		Selected: s.tableActive,
+	})
+	c.panelFrame = maxInt(s.panel.GetHorizontalFrameSize(), s.panelFocused.GetHorizontalFrameSize())
+}
+
+func (c *reportsTableColumn) SetSize(width, height int) {
+	if width < 32 {
+		width = 32
+	}
+	if height < 6 {
+		height = 6
+	}
+	c.width = width
+	c.height = height
+	c.configureColumns()
+	c.table.SetHeight(height - 3)
+}
+
+func (c *reportsTableColumn) configureColumns() {
+	if c.width == 0 {
+		return
+	}
+	timeWidth := 18
+	typeWidth := 14
+	actionWidth := 8
+	summaryWidth := c.width - timeWidth - typeWidth - actionWidth - 6
+	if summaryWidth < 18 {
+		summaryWidth = 18
+	}
+	c.summaryWidth = summaryWidth
+	c.table.SetColumns([]table.Column{
+		{Title: "Time", Width: timeWidth},
+		{Title: "Type", Width: typeWidth},
+		{Title: "Summary", Width: summaryWidth},
+		{Title: "Open", Width: actionWidth},
+	})
+}
+
+func (c *reportsTableColumn) SetPlaceholder(message string) {
+	c.rows = nil
+	c.placeholder = strings.TrimSpace(message)
+	c.table.SetRows(nil)
+}
+
+func (c *reportsTableColumn) SetEntries(entries []reportEntry) {
+	c.configureColumns()
+	c.rows = make([]reportTableRow, len(entries))
+	tableRows := make([]table.Row, len(entries))
+	for i, entry := range entries {
+		row := reportTableRow{
+			entry:      entry,
+			timeLabel:  formatReportTableTime(entry.Timestamp),
+			typeLabel:  defaultIfEmpty(entry.Type, titleCase(entry.Format)),
+			summary:    truncateWidth(defaultIfEmpty(entry.Title, entry.RelPath), c.summaryWidth),
+			actionHint: "Open",
+		}
+		c.rows[i] = row
+		tableRows[i] = table.Row{
+			row.timeLabel,
+			row.typeLabel,
+			row.summary,
+			row.actionHint,
+		}
+	}
+	c.table.SetRows(tableRows)
+	if len(tableRows) > 0 {
+		c.table.SetCursor(0)
+	}
+}
+
+func (c *reportsTableColumn) SelectedEntry() (reportEntry, bool) {
+	if len(c.rows) == 0 {
+		return reportEntry{}, false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 || cursor >= len(c.rows) {
+		return reportEntry{}, false
+	}
+	return c.rows[cursor].entry, true
+}
+
+func (c *reportsTableColumn) SelectKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for idx, row := range c.rows {
+		if row.entry.Key == key {
+			c.table.SetCursor(idx)
+			return true
+		}
+	}
+	return false
+}
+
+func (c *reportsTableColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	prev := c.table.Cursor()
+	var cmds []tea.Cmd
+	var cmd tea.Cmd
+	c.table, cmd = c.table.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		if keyMsg.String() == "enter" && c.onHighlight != nil {
+			if entry, ok := c.SelectedEntry(); ok {
+				if run := c.onHighlight(entry, true); run != nil {
+					cmds = append(cmds, run)
+				}
+			}
+		}
+	}
+
+	if c.table.Cursor() != prev && c.onHighlight != nil {
+		if entry, ok := c.SelectedEntry(); ok {
+			if run := c.onHighlight(entry, false); run != nil {
+				cmds = append(cmds, run)
+			}
+		}
+	}
+
+	if len(cmds) == 0 {
+		return c, nil
+	}
+	return c, tea.Batch(cmds...)
+}
+
+func (c *reportsTableColumn) View(s styles, focused bool) string {
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	panelFrame := panel.GetHorizontalFrameSize()
+	title := s.columnTitle.Width(columnHeaderWidth(c.width, panelFrame, titleFrame)).Render(c.title)
+	var body string
+	if len(c.rows) == 0 {
+		message := c.placeholder
+		if message == "" {
+			message = "No reports captured"
+		}
+		body = s.listItem.Copy().Faint(true).Render(message)
+	} else {
+		body = c.table.View()
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, title, body)
+	return renderPanelWithScroll(panel, c.width, c.height, 0, content, bg, 0)
+}
+
+func (c *reportsTableColumn) Title() string {
+	return c.title
+}
+
+func (c *reportsTableColumn) FocusValue() string {
+	if entry, ok := c.SelectedEntry(); ok {
+		return entry.Title
+	}
+	return ""
+}
+
+func (c *reportsTableColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func (c *reportsTableColumn) CanMoveDown() bool {
+	if len(c.rows) <= 1 {
+		return false
+	}
+	cursor := c.table.Cursor()
+	if cursor < 0 {
+		return true
+	}
+	return cursor < len(c.rows)-1
+}
+
+func formatReportTableTime(ts time.Time) string {
+	if ts.IsZero() {
+		return "(unknown)"
+	}
+	return ts.Local().Format("02 Jan 15:04")
+}
+
+func truncateWidth(text string, width int) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return "(no summary)"
+	}
+	if width <= 0 {
+		width = 40
+	}
+	if runewidth.StringWidth(trimmed) <= width {
+		return trimmed
+	}
+	if width <= 1 {
+		return "…"
+	}
+	return runewidth.Truncate(trimmed, width, "…")
+}
+
+func defaultIfEmpty(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+type previewColumn struct {
+	title       string
+	width       int
+	height      int
+	rawContent  string
+	rendered    string
+	useMarkdown bool
+	view        viewport.Model
+}
+
+func newPreviewColumn(width int) *previewColumn {
+	vp := viewport.New(width, 20)
+	return &previewColumn{
+		title: "Preview",
+		view:  vp,
+	}
+}
+
+func (p *previewColumn) ApplyStyles(s styles) {
+	p.view.Style = s.body.Copy().
+		Background(crushSurface).
+		ColorWhitespace(true)
+}
+
+func (p *previewColumn) SetSize(width, height int) {
+	p.width = width
+	if height < 3 {
+		height = 3
+	}
+	p.height = height
+	p.view.Width = width - 2
+	p.view.Height = height - 3
+	setMarkdownWordWrap(p.view.Width)
+	p.refresh()
+}
+
+func (p *previewColumn) SetContent(content string) {
+	p.rawContent = content
+	p.useMarkdown = shouldRenderAsMarkdown(content)
+	p.refresh()
+}
+
+func (p *previewColumn) SetMarkdownContent(content string) {
+	p.rawContent = content
+	p.useMarkdown = true
+	p.refresh()
+}
+
+func (p *previewColumn) Update(msg tea.Msg) (column, tea.Cmd) {
+	var cmd tea.Cmd
+	p.view, cmd = p.view.Update(msg)
+	return p, cmd
+}
+
+func (p *previewColumn) View(s styles, focused bool) string {
+	panel := s.panel
+	bg := crushSurface
+	if focused {
+		panel = s.panelFocused
+		bg = crushSurfaceElevated
+	}
+	panelFrame := panel.GetHorizontalFrameSize()
+	titleFrame := horizontalInnerFrameSize(s.columnTitle)
+	header := s.columnTitle.Width(columnHeaderWidth(p.width, panelFrame, titleFrame)).Render(p.title)
+	body := lipgloss.JoinVertical(lipgloss.Left, header, p.view.View())
+	return renderPanelWithScroll(panel, p.width, p.height, 0, body, bg, 0)
+}
+
+func (p *previewColumn) Title() string {
+	return p.title
+}
+
+func (p *previewColumn) FocusValue() string {
+	return ""
+}
+
+func (p *previewColumn) ScrollHorizontal(delta int) bool {
+	return false
+}
+
+func (p *previewColumn) Refresh() {
+	p.refresh()
+}
+
+func (p *previewColumn) refresh() {
+	rendered := p.rawContent
+	if p.useMarkdown {
+		setMarkdownWordWrap(p.view.Width)
+		rendered = RenderMarkdown(p.rawContent)
+	}
+	p.rendered = rendered
+	p.view.SetContent(rendered)
+}
+
+func shouldRenderAsMarkdown(content string) bool {
+	if strings.Contains(content, "\x1b[") {
+		return false
+	}
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return false
+	}
+	if strings.Contains(trimmed, "```") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "#") || strings.Contains(trimmed, "\n#") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "> ") || strings.Contains(trimmed, "\n> ") {
+		return true
+	}
+	if strings.Contains(trimmed, "[") && strings.Contains(trimmed, "](") {
+		return true
+	}
+	if strings.Contains(trimmed, "\n|") && strings.Contains(trimmed, "|") {
+		return true
+	}
+	return false
+}
+
+// helpers to build column items
+
+type featureDefinition struct {
+	Key   string
+	Title string
+	Desc  string
+}
+
+type featureItemDefinition struct {
+	Key             string
+	Title           string
+	Desc            string
+	Command         []string
+	ProjectFlag     string
+	ProjectRequired bool
+	PreviewKey      string
+	Meta            map[string]string
+	Disabled        bool
+	DisabledReason  string
+	Artifacts       []pipelineArtifact
+	PipelineState   pipelineState
+	PipelineIndex   int
+	LastUpdated     time.Time
+}
+
+var featureDefinitions = []featureDefinition{
+	{Key: "overview", Title: "Overview", Desc: "Pipeline & health"},
+	{Key: "tasks", Title: "Epics/Stories/Tasks", Desc: "Backlog hierarchy"},
+	{Key: "docs", Title: "Docs", Desc: "Generated documentation"},
+	{Key: "generate", Title: "Generate", Desc: "Code generation"},
+	{Key: "artifacts", Title: "Artifacts", Desc: "Browse staging outputs & apps"},
+	{Key: "database", Title: "Database", Desc: "Provision/seed/dump"},
+	{Key: "services", Title: "Run/Services", Desc: "Docker services"},
+	{Key: "verify", Title: "Verify", Desc: "Testing handled outside gpt-creator"},
+	{Key: "tokens", Title: "Tokens", Desc: "Usage summaries"},
+	{Key: "reports", Title: "Reports", Desc: "Automation reports"},
+	{Key: "env", Title: "Env Editor", Desc: "Environment variables"},
+	{Key: "settings", Title: "Settings", Desc: "Workspace defaults & updates"},
+}
+
+var featureItemsByKey = map[string][]featureItemDefinition{
+	"overview": {
+		{Key: "pipeline", Title: "Pipeline Status", Desc: "scan → run"},
+		{Key: "activity", Title: "Recent Activity", Desc: "Latest runs & timestamps"},
+	},
+	"tasks": {
+		{Key: "create-jira-tasks", Title: "create-jira-tasks", Desc: "Generate backlog from staged docs", Command: []string{"create-jira-tasks"}, ProjectRequired: true},
+		{Key: "migrate-tasks", Title: "migrate-tasks", Desc: "Rebuild tasks.db from JSON artifacts", Command: []string{"migrate-tasks"}, ProjectRequired: true},
+		{Key: "refine-tasks", Title: "refine-tasks", Desc: "Refine existing backlog entries", Command: []string{"refine-tasks"}, ProjectRequired: true},
+		{Key: "create-tasks", Title: "create-tasks", Desc: "Import Jira markdown into backlog DB", Command: []string{"create-tasks"}, ProjectRequired: true},
+		{Key: "work-on-tasks", Title: "work-on-tasks", Desc: "Execute backlog automation loop", Command: []string{"work-on-tasks"}, ProjectRequired: true},
+		{Key: "backlog-progress", Title: "backlog --progress", Desc: "Summarise backlog progress", Command: []string{"backlog", "--progress"}, ProjectRequired: true},
+	},
+	"docs": {
+		{Key: "create-pdr", Title: "create-pdr", Desc: "Generate Product Design Record", Command: []string{"create-pdr"}, ProjectRequired: true, PreviewKey: "doc:pdr"},
+		{Key: "create-sds", Title: "create-sds", Desc: "Generate System Design Spec", Command: []string{"create-sds"}, ProjectRequired: true, PreviewKey: "doc:sds"},
+		{Key: "docs-attach-rfp", Title: "attach-rfp", Desc: "Copy external RFP into staging/inputs/", ProjectRequired: true, Meta: map[string]string{"docsAction": "attach-rfp"}},
+	},
+	"generate": {
+		{Key: "generate-all", Title: "generate all", Desc: "Regenerate all targets", Command: []string{"generate", "all"}, ProjectRequired: true},
+		{Key: "generate-api", Title: "generate api", Desc: "Regenerate API sources", Command: []string{"generate", "api"}, ProjectRequired: true, PreviewKey: "path:apps/api"},
+		{Key: "generate-web", Title: "generate web", Desc: "Regenerate web app", Command: []string{"generate", "web"}, ProjectRequired: true, PreviewKey: "path:apps/web"},
+		{Key: "generate-admin", Title: "generate admin", Desc: "Regenerate admin app", Command: []string{"generate", "admin"}, ProjectRequired: true, PreviewKey: "path:apps/admin"},
+		{Key: "generate-db", Title: "generate db", Desc: "Regenerate database artifacts", Command: []string{"generate", "db"}, ProjectRequired: true, PreviewKey: "path:apps/db"},
+		{Key: "generate-docker", Title: "generate docker", Desc: "Regenerate Docker assets", Command: []string{"generate", "docker"}, ProjectRequired: true, PreviewKey: "path:docker"},
+	},
+	"database": {
+		{Key: "db-provision", Title: "db provision", Desc: "Provision database containers", Command: []string{"db", "provision"}, ProjectRequired: true},
+		{Key: "db-import", Title: "db import", Desc: "Import database snapshot", Command: []string{"db", "import"}, ProjectRequired: true},
+		{Key: "db-seed", Title: "db seed", Desc: "Seed development data", Command: []string{"db", "seed"}, ProjectRequired: true},
+		{Key: "create-db-dump", Title: "create-db-dump", Desc: "Export schema and seed SQL", Command: []string{"create-db-dump"}, ProjectRequired: true, PreviewKey: "dbdump"},
+	},
+	"services": {
+		{Key: "run-up", Title: "run up", Desc: "Start docker-compose stack", Command: []string{"run", "up"}, ProjectRequired: true, Meta: map[string]string{"requiresDocker": "1"}},
+		{Key: "run-logs", Title: "run logs", Desc: "Tail compose logs", Command: []string{"run", "logs"}, ProjectRequired: true, Meta: map[string]string{"requiresDocker": "1"}},
+		{Key: "run-open", Title: "run open", Desc: "Open web/admin endpoints", Command: []string{"run", "open"}, ProjectRequired: true, Meta: map[string]string{"requiresDocker": "1"}},
+		{Key: "run-down", Title: "run down", Desc: "Tear down stack", Command: []string{"run", "down"}, ProjectRequired: true, Meta: map[string]string{"requiresDocker": "1"}},
+	},
+	"verify": {
+		{
+			Key:             "verify-acceptance",
+			Title:           "verify acceptance",
+			Desc:            "Testing automation removed",
+			Command:         []string{"verify", "acceptance"},
+			ProjectRequired: true,
+			PreviewKey:      "path:.gpt-creator/staging/verify",
+			Meta:            map[string]string{"requiresDocker": "1"},
+			Disabled:        true,
+			DisabledReason:  "Testing is out of scope for gpt-creator.",
+		},
+		{
+			Key:             "verify-all",
+			Title:           "verify all",
+			Desc:            "Testing automation removed",
+			Command:         []string{"verify", "all"},
+			ProjectRequired: true,
+			PreviewKey:      "path:.gpt-creator/staging/verify",
+			Meta:            map[string]string{"requiresDocker": "1"},
+			Disabled:        true,
+			DisabledReason:  "Testing is out of scope for gpt-creator.",
+		},
+	},
+	"tokens": {
+		{Key: "tokens-details", Title: "tokens --details", Desc: "Summarise token usage with details", Command: []string{"tokens", "--details"}, ProjectRequired: true, PreviewKey: "path:.gpt-creator/logs/codex-usage.ndjson"},
+	},
+	"reports": {
+		{Key: "reports-list", Title: "reports list", Desc: "List generated automation reports", Command: []string{"reports", "list"}, ProjectRequired: true, PreviewKey: "path:reports"},
+		{Key: "reports-backlog", Title: "reports backlog", Desc: "Show pending issue backlog", Command: []string{"reports", "backlog"}, ProjectRequired: true},
+	},
+	"settings": {
+		{Key: "settings-workspaces", Title: "Workspace roots", Desc: "Configure workspace search paths"},
+		{Key: "settings-theme", Title: "Theme", Desc: "Switch between auto, light, or dark modes"},
+		{Key: "settings-concurrency", Title: "Concurrency", Desc: "Set max background jobs"},
+		{Key: "settings-docker", Title: "Docker path", Desc: "Choose docker CLI binary"},
+		{Key: "settings-update", Title: "Update", Desc: "Run gpt-creator update / --force"},
+	},
+	"env": {
+		{Key: "project-env", Title: "Project .env", Desc: "Review project .env contents", PreviewKey: "env:project"},
+		{Key: "apps-env", Title: "Applications .env", Desc: "Review apps/*/.env entries", PreviewKey: "env:apps"},
+	},
+}
+
+func featureItemsForKey(key string) []featureItemDefinition {
+	defs, ok := featureItemsByKey[key]
+	if !ok {
+		return nil
+	}
+	items := make([]featureItemDefinition, len(defs))
+	for i, def := range defs {
+		clone := def
+		if def.Meta != nil {
+			clone.Meta = map[string]string{}
+			for k, v := range def.Meta {
+				clone.Meta[k] = v
+			}
+		}
+		clone.Disabled = def.Disabled
+		clone.DisabledReason = def.DisabledReason
+		clone.Artifacts = append([]pipelineArtifact(nil), def.Artifacts...)
+		clone.PipelineState = def.PipelineState
+		clone.PipelineIndex = def.PipelineIndex
+		clone.LastUpdated = def.LastUpdated
+		items[i] = clone
+	}
+	return items
+}
+
+func featureItemEntries(project *discoveredProject, featureKey string, dockerAvailable bool) []featureItemDefinition {
+	var items []featureItemDefinition
+	appendDefaults := true
+	var docHistory []featureItemDefinition
+
+	switch featureKey {
+	case "overview":
+		appendDefaults = false
+		items = append(items, buildOverviewItems(project)...)
+	case "tasks":
+		if project != nil && project.Stats.TasksTotal > 0 {
+			items = append(items, featureItemDefinition{
+				Key:        "tasks-progress",
+				Title:      "Backlog progress",
+				Desc:       fmt.Sprintf("%d/%d tasks complete", project.Stats.TasksDone, project.Stats.TasksTotal),
+				PreviewKey: "tasks:progress",
+			})
+		}
+	case "docs":
+		if summary := docsSummary(project); summary != "" {
+			items = append(items, featureItemDefinition{
+				Key:   "docs-summary",
+				Title: "Documentation",
+				Desc:  summary,
+			})
+		}
+		docHistory = docHistoryItems(project)
+	case "generate":
+		items = append(items, buildGenerateItems(project)...)
+		appendDefaults = false
+	case "database":
+		var dumpInfo databaseDumpInfo
+		if project != nil {
+			dumpInfo = gatherDatabaseDumpInfo(project.Path)
+		}
+		if summary := databaseSummaryFromInfo(project, dumpInfo); summary != "" {
+			items = append(items, featureItemDefinition{
+				Key:   "db-summary",
+				Title: "Database status",
+				Desc:  summary,
+			})
+		}
+		items = decorateDatabaseItems(project, items, dumpInfo)
+	case "services":
+		appendDefaults = false
+		if !dockerAvailable {
+			items = append(items, featureItemDefinition{
+				Key:        "services-docker-missing",
+				Title:      "Docker required",
+				Desc:       "Install Docker Desktop / CLI to inspect services.",
+				PreviewKey: "",
+			})
+			appendDefaults = true
+			break
+		}
+		if svcItems, err := gatherServiceItems(project, dockerAvailable); err == nil && len(svcItems) > 0 {
+			items = append(items, svcItems...)
+		} else {
+			if err != nil {
+				items = append(items, featureItemDefinition{
+					Key:   "services-error",
+					Title: "Docker status unavailable",
+					Desc:  err.Error(),
+				})
+			} else if summary := servicesSummary(project); summary != "" {
+				items = append(items, featureItemDefinition{
+					Key:   "services-summary",
+					Title: "Service snapshot",
+					Desc:  summary,
+				})
+			} else {
+				items = append(items, featureItemDefinition{
+					Key:   "services-empty",
+					Title: "No services detected",
+					Desc:  "Run `gpt-creator run up` to start the compose stack.",
+				})
+			}
+			appendDefaults = true
+		}
+	case "verify":
+		appendDefaults = false
+		items = append(items, featureItemDefinition{
+			Key:   "verify-disabled",
+			Title: "Testing outside scope",
+			Desc:  "gpt-creator focuses on code creation; manage QA with your own tooling.",
+		})
+		items = append(items, featureItemsForKey("verify")...)
+	case "tokens":
+		if summary := tokensSummary(project); summary != "" {
+			items = append(items, featureItemDefinition{
+				Key:   "tokens-summary",
+				Title: "Token usage",
+				Desc:  summary,
+			})
+		}
+	case "reports":
+		if summary := reportsSummary(project); summary != "" {
+			items = append(items, featureItemDefinition{
+				Key:   "reports-summary",
+				Title: "Reports",
+				Desc:  summary,
+			})
+		}
+	case "env":
+		if summary := envPreview(project); summary != "" {
+			items = append(items, featureItemDefinition{
+				Key:   "env-preview",
+				Title: ".env keys",
+				Desc:  summary,
+			})
+		}
+	}
+
+	if appendDefaults {
+		defs := featureItemsForKey(featureKey)
+		for _, def := range defs {
+			items = append(items, def)
+		}
+	}
+	if featureKey == "docs" && len(docHistory) > 0 {
+		items = append(items, docHistory...)
+	}
+	if !dockerAvailable {
+		for i := range items {
+			if itemRequiresDocker(items[i]) {
+				items[i].Disabled = true
+				if strings.TrimSpace(items[i].DisabledReason) == "" {
+					items[i].DisabledReason = "Requires Docker Desktop / CLI"
+				}
+			}
+		}
+	}
+	return items
+}
+
+func decorateDatabaseItems(project *discoveredProject, items []featureItemDefinition, info databaseDumpInfo) []featureItemDefinition {
+	for idx := range items {
+		if items[idx].Key != "create-db-dump" {
+			continue
+		}
+		item := &items[idx]
+		if item.Meta == nil {
+			item.Meta = make(map[string]string)
+		}
+		if info.DirRel != "" {
+			item.Meta["dbDumpDirRel"] = info.DirRel
+		}
+		if info.Found {
+			item.LastUpdated = info.Latest
+			item.Desc = buildDatabaseActionDescription(info)
+			for _, file := range info.Files {
+				switch file.Kind {
+				case "schema":
+					item.Meta["dbSchemaRel"] = file.RelPath
+					item.Meta["dbSchemaMod"] = file.ModTime.UTC().Format(time.RFC3339)
+					item.Meta["dbSchemaSize"] = fmt.Sprintf("%d", file.Size)
+				case "seed":
+					item.Meta["dbSeedRel"] = file.RelPath
+					item.Meta["dbSeedMod"] = file.ModTime.UTC().Format(time.RFC3339)
+					item.Meta["dbSeedSize"] = fmt.Sprintf("%d", file.Size)
+				}
+			}
+		} else if info.DirPresent && strings.TrimSpace(info.DirRel) != "" {
+			placeholder := fmt.Sprintf("Awaiting schema.sql/seed.sql under %s", trimDumpRel(info.DirRel))
+			if strings.TrimSpace(item.Desc) == "" || strings.Contains(strings.ToLower(item.Desc), "export schema") {
+				item.Desc = placeholder
+			}
+		}
+	}
+	return items
+}
+
+func buildDatabaseActionDescription(info databaseDumpInfo) string {
+	if !info.Found {
+		return ""
+	}
+	var parts []string
+	for _, file := range info.Files {
+		name := filepath.Base(file.RelPath)
+		piece := fmt.Sprintf("%s %s ago", name, formatRelativeTime(file.ModTime))
+		if file.Size > 0 {
+			piece += fmt.Sprintf(" • %s", formatByteSize(file.Size))
+		}
+		parts = append(parts, piece)
+	}
+	if info.DirRel != "" {
+		parts = append(parts, trimDumpRel(info.DirRel))
+	}
+	return strings.Join(parts, " • ")
+}
+
+func buildOverviewItems(project *discoveredProject) []featureItemDefinition {
+	if project == nil {
+		return nil
+	}
+	stats := project.Stats
+	if len(stats.Pipeline) == 0 {
+		return []featureItemDefinition{{
+			Key:   "overview-empty",
+			Title: "Pipeline unavailable",
+			Desc:  "No pipeline data yet – run create-project to bootstrap.",
+			Meta:  map[string]string{"overview": "empty"},
+		}}
+	}
+
+	var items []featureItemDefinition
+	for idx, step := range stats.Pipeline {
+		icon := pipelineStateGlyph(step.State)
+		desc := pipelineStepSummary(step)
+		meta := map[string]string{
+			"overview":      "pipeline",
+			"pipelineStep":  step.Label,
+			"pipelineState": string(step.State),
+		}
+		items = append(items, featureItemDefinition{
+			Key:           fmt.Sprintf("pipeline-step-%d", idx),
+			Title:         fmt.Sprintf("%s %s", icon, step.Label),
+			Desc:          desc,
+			Artifacts:     append([]pipelineArtifact(nil), step.Artifacts...),
+			PipelineState: step.State,
+			PipelineIndex: idx,
+			LastUpdated:   step.LastUpdated,
+			Meta:          meta,
+		})
+	}
+
+	if stats.TasksTotal > 0 {
+		percent := percentOf(stats.TasksDone, stats.TasksTotal)
+		items = append(items, featureItemDefinition{
+			Key:   "overview-tasks",
+			Title: fmt.Sprintf("Tasks %d%%", percent),
+			Desc:  fmt.Sprintf("%d/%d complete", stats.TasksDone, stats.TasksTotal),
+			Meta:  map[string]string{"overview": "tasks"},
+		})
+	}
+	items = append(items, featureItemDefinition{
+		Key:     "overview-run-create-project",
+		Title:   "Run create-project",
+		Desc:    "Idempotent pipeline bootstrap (scan → run).",
+		Command: []string{"create-project", project.Path},
+		Meta: map[string]string{
+			"overview": "action",
+			"action":   "create-project",
+		},
+	})
+
+	return items
+}
+
+func pipelineStateGlyph(state pipelineState) string {
+	switch state {
+	case pipelineStateDone:
+		return "✓"
+	case pipelineStateActive:
+		return "●"
+	default:
+		return "…"
+	}
+}
+
+func pipelineStateLabel(state pipelineState) string {
+	switch state {
+	case pipelineStateDone:
+		return "done"
+	case pipelineStateActive:
+		return "in-progress"
+	default:
+		return "pending"
+	}
+}
+
+func pipelineStepSummary(step pipelineStepStatus) string {
+	switch step.State {
+	case pipelineStateDone:
+		if step.LastUpdated.IsZero() {
+			return "Completed"
+		}
+		return fmt.Sprintf("Completed %s ago", formatRelativeTime(step.LastUpdated))
+	case pipelineStateActive:
+		return "In progress - ready to run"
+	default:
+		return "Pending - waiting on previous steps"
+	}
+}
+
+func percentOf(value, total int) int {
+	if total <= 0 {
+		return 0
+	}
+	return (value*100 + total/2) / total
+}
+
+func formatRelativeTime(ts time.Time) string {
+	if ts.IsZero() {
+		return "N/A"
+	}
+	delta := time.Since(ts)
+	if delta < time.Minute {
+		return "just now"
+	}
+	if delta < time.Hour {
+		return fmt.Sprintf("%dm", int(delta.Minutes()))
+	}
+	if delta < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(delta.Hours()))
+	}
+	if delta < 7*24*time.Hour {
+		return fmt.Sprintf("%dd", int(delta.Hours()/24))
+	}
+	return ts.Format("2006-01-02")
+}
+
+func renderOverviewPreview(project *discoveredProject, item featureItemDefinition) string {
+	if project == nil {
+		return "Select a project to inspect the pipeline.\n"
+	}
+
+	var b strings.Builder
+	b.WriteString(renderPipeline(project))
+	b.WriteString("\n")
+
+	switch item.Meta["overview"] {
+	case "pipeline":
+		idx := item.PipelineIndex
+		if idx >= 0 && idx < len(project.Stats.Pipeline) {
+			step := project.Stats.Pipeline[idx]
+			b.WriteString(fmt.Sprintf("%s - %s\n", step.Label, capitalizeWord(pipelineStateLabel(step.State))))
+			if step.LastUpdated.IsZero() {
+				b.WriteString("No artifacts yet.\n")
+			} else {
+				b.WriteString(fmt.Sprintf("Last updated: %s ago\n", formatRelativeTime(step.LastUpdated)))
+			}
+			if len(step.Artifacts) == 0 {
+				if step.LastUpdated.IsZero() {
+					b.WriteString("\nNo artifacts yet.\n")
+				} else {
+					b.WriteString("\nArtifacts unavailable.\n")
+				}
+			} else {
+				b.WriteString("\nArtifacts:\n")
+				for _, art := range step.Artifacts {
+					b.WriteString(fmt.Sprintf("• %s (%s ago)\n", art.Path, formatRelativeTime(art.ModTime)))
+				}
+			}
+		}
+	case "tasks":
+		stats := project.Stats
+		percent := percentOf(stats.TasksDone, stats.TasksTotal)
+		b.WriteString(fmt.Sprintf("Tasks: %d/%d complete (%d%%).\n", stats.TasksDone, stats.TasksTotal, percent))
+		if stats.TasksTotal > 0 {
+			bar := renderProgressBar(float64(stats.TasksDone)/float64(max(stats.TasksTotal, 1)), 42)
+			b.WriteString(bar)
+			b.WriteRune('\n')
+		}
+		b.WriteString("Use backlog commands to drill into epics/stories.\n")
+	case "verify":
+		b.WriteString("Testing is outside gpt-creator's remit; coordinate QA with your own processes.\n")
+	case "action":
+		switch item.Meta["action"] {
+		case "create-project":
+			b.WriteString("Re-run the entire pipeline. Safe to run again; regenerates missing artifacts and code scaffolds.\n")
+		case "verify-all":
+			b.WriteString("Testing automation commands remain only for legacy compatibility.\n")
+		}
+	default:
+		if strings.TrimSpace(item.Desc) != "" {
+			b.WriteString(item.Desc + "\n")
+		}
+	}
+
+	return b.String()
+}
+
+func buildGenerateItems(project *discoveredProject) []featureItemDefinition {
+	if project == nil {
+		return nil
+	}
+
+	changeSet, err := gatherGenerateChanges(project.Path)
+	if err != nil {
+		return []featureItemDefinition{{
+			Key:      "generate-error",
+			Title:    "Generation status unavailable",
+			Desc:     fmt.Sprintf("Failed to inspect project: %v", err),
+			Disabled: true,
+		}}
+	}
+
+	defaults := featureItemsForKey("generate")
+	var allItem featureItemDefinition
+	targetBase := make(map[string]featureItemDefinition)
+	for _, def := range defaults {
+		switch {
+		case def.Key == "generate-all":
+			allItem = def
+		case strings.HasPrefix(def.Key, "generate-"):
+			target := strings.TrimPrefix(def.Key, "generate-")
+			targetBase[target] = def
+		}
+	}
+
+	var items []featureItemDefinition
+
+	if allItem.Key != "" {
+		counts := aggregateGenerateCounts(changeSet)
+		meta := ensureMeta(allItem.Meta)
+		meta["generateKind"] = "command"
+		meta["generateTarget"] = "all"
+		meta["generateSource"] = changeSet.Source
+		meta["generateSummary"] = counts.Summary()
+		meta["generateCount"] = strconv.Itoa(counts.Total())
+		if changeSet.Warning != "" {
+			meta["generateWarning"] = changeSet.Warning
+		}
+		allItem.Meta = meta
+		if counts.Total() > 0 {
+			allItem.Title = fmt.Sprintf("%s (%d)", allItem.Title, counts.Total())
+			allItem.Desc = formatGenerateSummary(counts, changeSet.Source)
+		} else {
+			allItem.Desc = "Regenerate all targets"
+		}
+		allItem.PreviewKey = "generate:command"
+		items = append(items, allItem)
+	}
+
+	for _, key := range changeSet.Keys {
+		entry := changeSet.Targets[key]
+		def := entry.Definition
+		if def.Key == "" {
+			if candidate, ok := generateTargetByKey(key); ok {
+				def = candidate
+			}
+		}
+		baseItem, ok := targetBase[key]
+		if !ok {
+			baseItem = featureItemDefinition{
+				Key:             "generate-" + key,
+				Title:           fmt.Sprintf("generate %s", key),
+				Desc:            fmt.Sprintf("Regenerate %s assets", strings.ToUpper(key)),
+				Command:         []string{"generate", key},
+				ProjectRequired: true,
+			}
+		}
+		counts := entry.Counts
+		meta := ensureMeta(baseItem.Meta)
+		meta["generateKind"] = "target"
+		meta["generateTarget"] = key
+		meta["generateSource"] = changeSet.Source
+		meta["generateSummary"] = counts.Summary()
+		meta["generateCount"] = strconv.Itoa(counts.Total())
+		if changeSet.Warning != "" {
+			meta["generateWarning"] = changeSet.Warning
+		}
+		if changeSet.Source == generateDiffSourceSnapshot && changeSet.SnapshotRoot != "" {
+			meta["generateSnapshotRoot"] = changeSet.SnapshotRoot
+			if !changeSet.SnapshotStamp.IsZero() {
+				meta["generateSnapshotAt"] = changeSet.SnapshotStamp.Format(time.RFC3339)
+			}
+		}
+		baseItem.Meta = meta
+
+		title := def.Title
+		if title == "" {
+			title = strings.ToUpper(key)
+		}
+		if counts.Total() > 0 {
+			baseItem.Title = fmt.Sprintf("%s (%d)", title, counts.Total())
+			baseItem.Desc = formatGenerateSummary(counts, changeSet.Source)
+		} else {
+			baseItem.Title = fmt.Sprintf("%s (0)", title)
+			baseItem.Desc = "No pending changes detected"
+		}
+		baseItem.PreviewKey = "generate:target"
+		items = append(items, baseItem)
+
+		for _, change := range entry.Files {
+			items = append(items, buildGenerateFileItem(changeSet.Source, key, change, changeSet.Warning))
+		}
+	}
+
+	if changeSet.Warning != "" {
+		items = append(items, featureItemDefinition{
+			Key:        "generate-warning",
+			Title:      "Snapshot mode",
+			Desc:       changeSet.Warning,
+			PreviewKey: "generate:warning",
+			Meta: map[string]string{
+				"generateKind":    "warning",
+				"generateWarning": changeSet.Warning,
+			},
+		})
+	}
+
+	return items
+}
+
+func aggregateGenerateCounts(set generateChangeSet) changeCounts {
+	var total changeCounts
+	for _, key := range set.Keys {
+		entry := set.Targets[key]
+		total.Added += entry.Counts.Added
+		total.Modified += entry.Counts.Modified
+		total.Deleted += entry.Counts.Deleted
+		total.Renamed += entry.Counts.Renamed
+	}
+	return total
+}
+
+func ensureMeta(meta map[string]string) map[string]string {
+	if meta == nil {
+		return map[string]string{}
+	}
+	clone := make(map[string]string, len(meta))
+	for k, v := range meta {
+		clone[k] = v
+	}
+	return clone
+}
+
+func formatGenerateSummary(counts changeCounts, source string) string {
+	if counts.Total() == 0 {
+		return "No pending changes"
+	}
+	summary := counts.Summary()
+	if source != "" {
+		return fmt.Sprintf("%s • source: %s", summary, strings.ToUpper(source))
+	}
+	return summary
+}
+
+func buildGenerateFileItem(source, targetKey string, change generateFileChange, warning string) featureItemDefinition {
+	status := change.StatusLabel
+	if strings.TrimSpace(status) == "" {
+		status = strings.ToUpper(change.Status)
+	}
+	descParts := []string{status}
+	if source != "" {
+		descParts = append(descParts, strings.ToUpper(source))
+	}
+	if change.Status == "renamed" && strings.TrimSpace(change.OldPath) != "" {
+		descParts = append(descParts, fmt.Sprintf("from %s", change.OldPath))
+	}
+	desc := strings.Join(descParts, " • ")
+	meta := map[string]string{
+		"generateKind":        "file",
+		"generateTarget":      targetKey,
+		"generatePath":        change.Path,
+		"generateStatus":      change.Status,
+		"generateStatusLabel": status,
+		"generateDiffSource":  source,
+	}
+	if change.OldPath != "" {
+		meta["generateOldPath"] = change.OldPath
+	}
+	if change.SnapshotOld != "" {
+		meta["generateSnapshotOld"] = change.SnapshotOld
+	}
+	if warning != "" {
+		meta["generateWarning"] = warning
+	}
+	return featureItemDefinition{
+		Key:        "generate-file-" + targetKey + "-" + sanitizeGenerateKey(change.Path),
+		Title:      "  • " + change.Path,
+		Desc:       desc,
+		Meta:       meta,
+		PreviewKey: "generate:diff",
+	}
+}
+
+func sanitizeGenerateKey(path string) string {
+	replacer := strings.NewReplacer(
+		" ", "_",
+		"/", "_",
+		"\\", "_",
+		".", "_",
+		":", "_",
+	)
+	key := replacer.Replace(path)
+	key = strings.Trim(key, "_")
+	if key == "" {
+		key = "file"
+	}
+	return key
+}
+
+func renderGeneratePreview(project *discoveredProject, item featureItemDefinition) string {
+	if project == nil {
+		return "Select a project to inspect generate targets.\n"
+	}
+	if item.Meta == nil {
+		return "Re-run generation for API/Web/Admin/DB/Docker targets and inspect diffs.\n"
+	}
+
+	kind := item.Meta["generateKind"]
+	switch kind {
+	case "command":
+		count := item.Meta["generateCount"]
+		summary := strings.TrimSpace(item.Meta["generateSummary"])
+		source := strings.ToUpper(strings.TrimSpace(item.Meta["generateSource"]))
+		var b strings.Builder
+		fmt.Fprintf(&b, "Queue generation across all targets.\n")
+		if summary != "" && summary != "No pending changes" {
+			fmt.Fprintf(&b, "Pending changes: %s\n", summary)
+		}
+		if count != "" {
+			fmt.Fprintf(&b, "Files touched: %s\n", count)
+		}
+		if source != "" {
+			fmt.Fprintf(&b, "Diff source: %s\n", source)
+		}
+		b.WriteString("\nPress Enter to run `generate all`.\n")
+		return b.String()
+	case "target":
+		var b strings.Builder
+		target := item.Meta["generateTarget"]
+		count := item.Meta["generateCount"]
+		summary := strings.TrimSpace(item.Meta["generateSummary"])
+		source := strings.ToUpper(strings.TrimSpace(item.Meta["generateSource"]))
+		fmt.Fprintf(&b, "Target: %s\n", strings.ToUpper(target))
+		if summary != "" {
+			fmt.Fprintf(&b, "Status: %s\n", summary)
+		}
+		if count != "" {
+			fmt.Fprintf(&b, "Files changed: %s\n", count)
+		}
+		if source != "" {
+			fmt.Fprintf(&b, "Diff source: %s\n", source)
+		}
+		if warning := strings.TrimSpace(item.Meta["generateWarning"]); warning != "" {
+			fmt.Fprintf(&b, "\nNotice: %s\n", warning)
+		}
+		b.WriteString("\nPress Enter to run targeted generation.\n")
+		b.WriteString("Highlight a file below to inspect its diff.\n")
+		return b.String()
+	case "file":
+		var b strings.Builder
+		path := item.Meta["generatePath"]
+		status := item.Meta["generateStatusLabel"]
+		if status == "" {
+			status = strings.ToUpper(item.Meta["generateStatus"])
+		}
+		source := strings.ToUpper(strings.TrimSpace(item.Meta["generateDiffSource"]))
+		fmt.Fprintf(&b, "File: %s\n", path)
+		if status != "" {
+			fmt.Fprintf(&b, "Status: %s\n", status)
+		}
+		if old := strings.TrimSpace(item.Meta["generateOldPath"]); old != "" {
+			fmt.Fprintf(&b, "Renamed from: %s\n", old)
+		}
+		if source != "" {
+			fmt.Fprintf(&b, "Diff source: %s\n", source)
+		}
+		if warning := strings.TrimSpace(item.Meta["generateWarning"]); warning != "" {
+			fmt.Fprintf(&b, "\nNotice: %s\n", warning)
+		}
+		b.WriteString("\nPress Enter to view a unified diff.\n")
+		b.WriteString("Press `o` to open the file in your editor.\n")
+		return b.String()
+	case "warning":
+		return item.Meta["generateWarning"] + "\n"
+	default:
+		return "Re-run generation for API/Web/Admin/DB/Docker targets and inspect diffs.\n"
+	}
+}
+
+func capitalizeWord(s string) string {
+	if s == "" {
+		return s
+	}
+	lower := strings.ToLower(s)
+	return strings.ToUpper(lower[:1]) + lower[1:]
+}
+
+func renderSettingsPreview(item featureItemDefinition) string {
+	if item.Meta != nil {
+		if preview := strings.TrimSpace(item.Meta["settingsPreview"]); preview != "" {
+			if strings.HasSuffix(preview, "\n") {
+				return preview
+			}
+			return preview + "\n"
+		}
+	}
+	return "Configure workspace defaults and run updates.\n"
+}
+
+func itemPreview(project *discoveredProject, featureKey string, item featureItemDefinition) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", item.Title)
+	b.WriteString(strings.Repeat("─", len(item.Title)))
+	b.WriteString("\n\n")
+
+	if project != nil {
+		stats := project.Stats
+		fmt.Fprintf(&b, "Project: %s\nPath: %s\n", project.Name, project.Path)
+		if stats.StageTotal > 0 {
+			fmt.Fprintf(&b, "Stage: %s (%d/%d)\n", stats.StageLabel, stats.StageIndex, stats.StageTotal)
+			if stats.NextStage != "" {
+				fmt.Fprintf(&b, "Next: %s\n", stats.NextStage)
+			}
+		}
+		if stats.TasksTotal > 0 {
+			fmt.Fprintf(&b, "Tasks: %d/%d complete\n", stats.TasksDone, stats.TasksTotal)
+		}
+		if !project.Stats.LastRun.IsZero() {
+			fmt.Fprintf(&b, "Last activity: %s\n", project.Stats.LastRun.Format(time.RFC822))
+		}
+		b.WriteString("\n")
+		b.WriteString(item.Desc + "\n\n")
+	}
+
+	switch featureKey {
+	case "overview":
+		b.WriteString(renderOverviewPreview(project, item))
+	case "tasks":
+		b.WriteString("Trigger backlog automation commands directly from here.\n")
+	case "docs":
+		b.WriteString(renderDocsPreview(project, item))
+	case "generate":
+		b.WriteString(renderGeneratePreview(project, item))
+	case "database":
+		b.WriteString("Provision, import, seed, or export the project database.\n")
+	case "services":
+		b.WriteString("Monitor docker-compose services, container health, and HTTP endpoints.\n")
+		b.WriteString("Shortcuts: u=up • l=logs • d=down • o=open endpoint • 1-9 open specific endpoint.\n")
+	case "tokens":
+		b.WriteString("Track Codex/OpenAI token usage and costs over time.\n")
+	case "reports":
+		b.WriteString("Browse automation reports and captured run logs.\n")
+		b.WriteString("Shortcuts: enter/o open • e export • y copy path.\n")
+	case "settings":
+		b.WriteString(renderSettingsPreview(item))
+	case "env":
+		b.WriteString("Review and edit .env values across project applications (editing coming soon).\n")
+	case "verify":
+		b.WriteString("Testing is managed outside of gpt-creator; rely on your team's QA pipeline.\n")
+	default:
+		if item.Desc == "" {
+			b.WriteString("Use this command from the preview panel.\n")
+		}
+	}
+
+	if item.Disabled {
+		reason := strings.TrimSpace(item.DisabledReason)
+		if reason == "" {
+			reason = "Action disabled."
+		}
+		b.WriteString("\nStatus: " + reason + "\n")
+	} else if len(item.Command) > 0 {
+		b.WriteString("\nCommand:\n  gpt-creator ")
+		b.WriteString(strings.Join(item.Command, " "))
+		if project != nil {
+			flag := item.ProjectFlag
+			if flag == "" {
+				flag = "--project"
+			}
+			if flag != "" {
+				b.WriteString(" ")
+				b.WriteString(flag)
+				b.WriteString(" \"")
+				b.WriteString(project.Path)
+				b.WriteString("\"")
+			}
+		}
+		b.WriteString("\nPress Enter while focused on the preview to run this command.\n")
+	} else if project == nil {
+		b.WriteString("\nSelect or add a project to enable commands.\n")
+	}
+
+	return b.String()
+}
+
+func docsSummary(project *discoveredProject) string {
+	if project == nil {
+		return ""
+	}
+	docsDir := filepath.Join(project.Path, ".gpt-creator", "staging", "docs")
+	variations := []string{"PDR.md", "pdr.md", "product-design-record.md", "SDS.md", "sds.md", "system-design-spec.md"}
+	for _, name := range variations {
+		path := filepath.Join(docsDir, name)
+		if info, err := os.Stat(path); err == nil {
+			return fmt.Sprintf("%s updated %s", name, info.ModTime().Format(time.RFC822))
+		}
+	}
+	if info, err := os.Stat(docsDir); err == nil {
+		return fmt.Sprintf("Docs updated %s", info.ModTime().Format(time.RFC822))
+	}
+	return ""
+}
+
+func generationSummary(project *discoveredProject) string {
+	if project == nil {
+		return ""
+	}
+	targets := map[string]string{
+		"API":    filepath.Join(project.Path, "apps", "api"),
+		"Web":    filepath.Join(project.Path, "apps", "web"),
+		"Admin":  filepath.Join(project.Path, "apps", "admin"),
+		"DB":     filepath.Join(project.Path, "apps", "db"),
+		"Docker": filepath.Join(project.Path, "docker"),
+	}
+	var available []string
+	for label, path := range targets {
+		if dirExists(path) {
+			available = append(available, label)
+		}
+	}
+	if len(available) == 0 {
+		return ""
+	}
+	return "Available: " + strings.Join(available, ", ")
+}
+
+func databaseSummary(project *discoveredProject) string {
+	if project == nil {
+		return ""
+	}
+	info := gatherDatabaseDumpInfo(project.Path)
+	summary := databaseSummaryFromInfo(project, info)
+	if summary != "" {
+		return summary
+	}
+	return ""
+}
+
+func databaseSummaryFromInfo(project *discoveredProject, info databaseDumpInfo) string {
+	if project == nil {
+		return ""
+	}
+	if info.Found {
+		return buildDatabaseActionDescription(info)
+	}
+	if info.DirPresent && strings.TrimSpace(info.DirRel) != "" {
+		return fmt.Sprintf("Awaiting schema.sql/seed.sql under %s", trimDumpRel(info.DirRel))
+	}
+	dbDir := filepath.Join(project.Path, "db")
+	if stat, err := os.Stat(dbDir); err == nil && stat.IsDir() {
+		return fmt.Sprintf("db/ updated %s", stat.ModTime().Format(time.RFC822))
+	}
+	legacyDir := filepath.Join(project.Path, ".gpt-creator", "staging", "db")
+	if stat, err := os.Stat(legacyDir); err == nil && stat.IsDir() {
+		return fmt.Sprintf("staging/db updated %s", stat.ModTime().Format(time.RFC822))
+	}
+	return ""
+}
+
+func servicesSummary(project *discoveredProject) string {
+	if project == nil {
+		return ""
+	}
+	compose := filepath.Join(project.Path, "docker-compose.yml")
+	if info, err := os.Stat(compose); err == nil {
+		return fmt.Sprintf("docker-compose.yml updated %s", info.ModTime().Format(time.RFC822))
+	}
+	dockerDir := filepath.Join(project.Path, "docker")
+	if dirExists(dockerDir) {
+		return "Docker resources ready"
+	}
+	return ""
+}
+
+func tokensSummary(project *discoveredProject) string {
+	if project == nil {
+		return ""
+	}
+	logPath := filepath.Join(project.Path, ".gpt-creator", "logs", "codex-usage.ndjson")
+	if info, err := os.Stat(logPath); err == nil {
+		return fmt.Sprintf("Usage log updated %s", info.ModTime().Format(time.RFC822))
+	}
+	return ""
+}
+
+func reportsSummary(project *discoveredProject) string {
+	if project == nil {
+		return ""
+	}
+	reportsDir := filepath.Join(project.Path, "reports")
+	entries, err := os.ReadDir(reportsDir)
+	if err != nil || len(entries) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d reports available", len(entries))
+}
+
+func envPreview(project *discoveredProject) string {
+	if project == nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(project.Path, ".env"))
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	var keys []string
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if idx := strings.Index(line, "="); idx > 0 {
+			keys = append(keys, line[:idx])
+		}
+		if len(keys) >= 4 {
+			break
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	return "Keys: " + strings.Join(keys, ", ")
+}
+
+func itemRequiresDocker(item featureItemDefinition) bool {
+	if item.Meta != nil && item.Meta["requiresDocker"] == "1" {
+		return true
+	}
+	if strings.HasPrefix(item.Key, "run-") || strings.HasPrefix(item.Key, "verify-") {
+		return true
+	}
+	if len(item.Command) == 0 {
+		return false
+	}
+	switch item.Command[0] {
+	case "run", "verify":
+		return true
+	}
+	return false
+}
+
+func stringWidthANSI(line string) int {
+	if line == "" {
+		return 0
+	}
+	var width int
+	ansiMode := false
+	for _, r := range line {
+		if ansiMode {
+			if reansi.IsTerminator(r) {
+				ansiMode = false
+			}
+			continue
+		}
+		if r == reansi.Marker {
+			ansiMode = true
+			continue
+		}
+		width += runewidth.RuneWidth(r)
+	}
+	return width
+}
+
+func computeWrappedLineCounts(text string, width int, expectedLines int) ([]int, int) {
+	if width < 1 {
+		width = 1
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	if expectedLines > len(lines) {
+		extra := expectedLines - len(lines)
+		for i := 0; i < extra; i++ {
+			lines = append(lines, "")
+		}
+	}
+	wrapped := make([]int, len(lines))
+	total := 0
+	for i, line := range lines {
+		rows := wrappedRowCount(line, width)
+		wrapped[i] = rows
+		total += rows
+	}
+	return wrapped, total
+}
+
+func wrappedRowCount(line string, width int) int {
+	runes := []rune(line)
+	segments := wrapRunesForWidth(runes, width)
+	if len(segments) == 0 {
+		return 1
+	}
+	return len(segments)
+}
+
+func wrapRunesForWidth(runes []rune, width int) [][]rune {
+	if width < 1 {
+		width = 1
+	}
+	var (
+		lines  = [][]rune{{}}
+		word   = []rune{}
+		row    int
+		spaces int
+	)
+
+	for _, r := range runes {
+		if unicode.IsSpace(r) {
+			spaces++
+		} else {
+			word = append(word, r)
+		}
+
+		if spaces > 0 {
+			if runewidth.StringWidth(string(lines[row]))+runewidth.StringWidth(string(word))+spaces > width {
+				row++
+				lines = append(lines, []rune{})
+				lines[row] = append(lines[row], word...)
+				lines[row] = append(lines[row], repeatSpaces(spaces)...)
+				spaces = 0
+				word = nil
+			} else {
+				lines[row] = append(lines[row], word...)
+				lines[row] = append(lines[row], repeatSpaces(spaces)...)
+				spaces = 0
+				word = nil
+			}
+		} else {
+			if len(word) > 0 {
+				lastCharLen := runewidth.RuneWidth(word[len(word)-1])
+				if runewidth.StringWidth(string(word))+lastCharLen > width {
+					if len(lines[row]) > 0 {
+						row++
+						lines = append(lines, []rune{})
+					}
+					lines[row] = append(lines[row], word...)
+					word = nil
+				}
+			}
+		}
+	}
+
+	if runewidth.StringWidth(string(lines[row]))+runewidth.StringWidth(string(word))+spaces >= width {
+		lines = append(lines, []rune{})
+		lines[row+1] = append(lines[row+1], word...)
+		spaces++
+		lines[row+1] = append(lines[row+1], repeatSpaces(spaces)...)
+	} else {
+		lines[row] = append(lines[row], word...)
+		spaces++
+		lines[row] = append(lines[row], repeatSpaces(spaces)...)
+	}
+
+	return lines
+}
+
+func repeatSpaces(n int) []rune {
+	if n <= 0 {
+		return nil
+	}
+	return []rune(strings.Repeat(" ", n))
+}
+
+func renderPanelWithScroll(panel lipgloss.Style, width, height, scrollX int, content string, background lipgloss.Color, fixedLines int) string {
+	if width <= 0 {
+		return ""
+	}
+	if height <= 0 {
+		height = 1
+	}
+
+	innerWidth := width - panel.GetHorizontalFrameSize()
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	innerHeight := height - panel.GetVerticalFrameSize()
+	if innerHeight < 1 {
+		innerHeight = 1
+	}
+
+	lines := strings.Split(content, "\n")
+	if len(lines) < innerHeight {
+		padding := innerHeight - len(lines)
+		for i := 0; i < padding; i++ {
+			lines = append(lines, "")
+		}
+	} else if len(lines) > innerHeight {
+		lines = lines[:innerHeight]
+	}
+
+	bgSeq := ansiBackgroundSequence(background)
+	if fixedLines < 0 {
+		fixedLines = 0
+	}
+	if fixedLines > len(lines) {
+		fixedLines = len(lines)
+	}
+
+	for i := range lines {
+		lineScroll := scrollX
+		if i < fixedLines {
+			lineScroll = 0
+		}
+		lines[i] = sliceLineANSI(lines[i], lineScroll, innerWidth, bgSeq)
+	}
+
+	body := strings.Join(lines, "\n")
+	return panel.Copy().
+		Width(width).
+		Height(height).
+		Render(body)
+}
+
+func sliceLineANSI(line string, start, width int, fillerSeq string) string {
+	if width <= 0 {
+		return ""
+	}
+	if start < 0 {
+		start = 0
+	}
+
+	var out strings.Builder
+	var seq strings.Builder
+	active := []string{}
+	if fillerSeq != "" {
+		active = append(active, fillerSeq)
+	}
+	var capturing bool
+	var ansiMode bool
+	var cellPos int
+	var captured int
+
+	writeActive := func() {
+		if capturing {
+			return
+		}
+		for _, s := range active {
+			out.WriteString(s)
+		}
+		capturing = true
+	}
+
+	for _, r := range line {
+		if ansiMode {
+			seq.WriteRune(r)
+			if reansi.IsTerminator(r) {
+				sequence := seq.String()
+				if capturing {
+					out.WriteString(sequence)
+				} else {
+					if sequence == ansiReset {
+						active = nil
+						if fillerSeq != "" {
+							active = append(active, fillerSeq)
+						}
+					} else {
+						active = append(active, sequence)
+					}
+				}
+				ansiMode = false
+				seq.Reset()
+			}
+			continue
+		}
+		if r == reansi.Marker {
+			ansiMode = true
+			seq.Reset()
+			seq.WriteRune(r)
+			continue
+		}
+
+		rw := runewidth.RuneWidth(r)
+		nextPos := cellPos + rw
+		if nextPos <= start {
+			cellPos = nextPos
+			continue
+		}
+
+		writeActive()
+		if captured+rw > width {
+			break
+		}
+		out.WriteRune(r)
+		captured += rw
+		cellPos = nextPos
+		if captured == width {
+			break
+		}
+	}
+
+	if !capturing {
+		if fillerSeq != "" {
+			return fillerSeq + strings.Repeat(" ", width) + ansiReset
+		}
+		return strings.Repeat(" ", width)
+	}
+
+	if captured < width {
+		if fillerSeq != "" {
+			out.WriteString(fillerSeq)
+		}
+		out.WriteString(strings.Repeat(" ", width-captured))
+	}
+	out.WriteString(ansiReset)
+	return out.String()
+}
+
+func ansiBackgroundSequence(color lipgloss.Color) string {
+	value := strings.TrimSpace(string(color))
+	if value == "" {
+		return ""
+	}
+	value = strings.TrimPrefix(value, "#")
+	if len(value) != 6 {
+		return ""
+	}
+	r, errR := strconv.ParseUint(value[0:2], 16, 8)
+	g, errG := strconv.ParseUint(value[2:4], 16, 8)
+	b, errB := strconv.ParseUint(value[4:6], 16, 8)
+	if errR != nil || errG != nil || errB != nil {
+		return ""
+	}
+	return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}

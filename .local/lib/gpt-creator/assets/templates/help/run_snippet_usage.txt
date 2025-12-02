@@ -1,0 +1,26 @@
+Usage:
+  python3 "$GC_RUN_SNIPPET_PY" /path/to/snippet.py [--argv ...]
+  # Fallback outside gpt-creator: python3 tools/scripts/python/run_snippet.py …
+
+Purpose:
+  Execute short Python helpers without firing placeholder heredocs. The script
+  refuses to run empty/`...` snippets so guards never block on "fill command"
+  errors, while still letting you use heredocs when real content is required.
+
+Typical workflow:
+  cat <<'PY' > /tmp/snippet.py
+  import pathlib
+  root = pathlib.Path(".").resolve()
+  print(root / "apps/api/prisma/schema.prisma")
+  PY
+
+  python3 "$GC_RUN_SNIPPET_PY" /tmp/snippet.py
+
+Options:
+  --allow-placeholder     Skip the placeholder check (use sparingly)
+  --argv ARGS...          Values exposed via sys.argv[1:]
+
+Tips:
+  • Keep snippets under version control when they become reusable scripts.
+  • Combine with `safe_show_file.py` or `targeted_search.py` to gather the inputs
+    you need before writing the snippet.

@@ -1,0 +1,13 @@
+gpt-creator remote installer
+
+Usage:
+  curl -fsSL https://raw.githubusercontent.com/bekirdag/gpt-creator/main/scripts/install-latest.sh -o /tmp/gpt-creator-install.sh
+  bash /tmp/gpt-creator-install.sh -- --prefix /usr/local
+
+Options (pass after -- when invoking the script):
+  --prefix PATH         Install prefix (default: /usr/local)
+  --skip-preflight      Skip dependency checks
+  --force               Overwrite existing symlink if present
+  --repo URL            Install from a different Git repository
+  --ref REF             Checkout a specific branch / tag / commit (default: main)
+  -h, --help            Show this help text

@@ -1,0 +1,24 @@
+import { createI18n } from 'vue-i18n'
+import en from './locales/en/auth.json'
+import tr from './locales/tr/auth.json'
+
+const i18n = createI18n({
+  legacy: false,
+  locale: 'en',
+  fallbackLocale: 'en',
+  warnHtmlInMessage: 'error',
+  missingWarn: true,
+  fallbackWarn: true,
+  messages: {
+    en,
+    tr,
+  },
+})
+
+if (import.meta.env.DEV) {
+  i18n.global.missing = (_locale, key) => {
+    throw new Error(`Missing i18n key: ${key}`)
+  }
+}
+
+export default i18n

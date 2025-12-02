@@ -1,0 +1,2 @@
+Usage: gpt-creator binder clear --story SLUG [--project PATH] [--epic EPIC] [--task TASK]
+

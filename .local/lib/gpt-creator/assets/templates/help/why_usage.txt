@@ -1,0 +1,4 @@
+Usage: gpt-creator why --task TASK_ID [--project PATH] [--story SLUG]
+
+Explain why a task is blocked, including dependency and readiness gates.
+

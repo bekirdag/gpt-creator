@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Heuristic surface detector for create-project.
+
+Reads the staged inputs (or an explicit RFP file) and decides which app surfaces
+to scaffold based on explicit evidence. Output is a space-separated list written
+to stdout.
+
+Surfaces are only returned when the docs clearly call for them; no implicit
+defaults are added (e.g., docker is only returned when containerization is
+mentioned).
+"""
+
+from __future__ import annotations
+
+import argparse
+import pathlib
+from typing import Iterable
+
+
+def gather_text(paths: Iterable[pathlib.Path], limit: int = 200_000) -> str:
+    chunks: list[str] = []
+    for path in paths:
+        try:
+            data = path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if not data:
+            continue
+        chunks.append(data[:limit])
+    return "\n".join(chunks)
+
+
+def detect_surfaces(text: str) -> list[str]:
+    text_lower = text.lower()
+    surfaces: set[str] = set()
+
+    api_keywords = [
+        "api",
+        "endpoint",
+        "rest",
+        "graphql",
+        "backend",
+        "service",
+        "microservice",
+        "nest",
+        "nestjs",
+        "express",
+        "fastify",
+    ]
+    web_keywords = [
+        "web app",
+        "website",
+        "browser-based",
+        "spa",
+        "vue",
+        "react",
+        "angular",
+        "next.js",
+        "astro",
+    ]
+    admin_keywords = [
+        "admin",
+        "backoffice",
+        "operator console",
+        "control panel",
+        "governance ui",
+    ]
+    mobile_keywords = [
+        "mobile app",
+        "react native",
+        "expo",
+        "android",
+        "ios",
+    ]
+    db_keywords = [
+        "database",
+        "mysql",
+        "postgres",
+        "sql",
+        "schema",
+        "table",
+        "entity",
+        "orm",
+    ]
+    docker_keywords = [
+        "docker",
+        "container",
+        "containerize",
+        "kubernetes",
+        "podman",
+        "compose",
+        "helm",
+    ]
+
+    if any(k in text_lower for k in api_keywords):
+        surfaces.add("api")
+    if any(k in text_lower for k in web_keywords):
+        surfaces.add("web")
+    if any(k in text_lower for k in admin_keywords):
+        surfaces.add("admin")
+    if any(k in text_lower for k in mobile_keywords):
+        surfaces.add("mobile")
+    if any(k in text_lower for k in db_keywords):
+        surfaces.add("db")
+    if any(k in text_lower for k in docker_keywords):
+        surfaces.add("docker")
+
+    return sorted(
+        surfaces,
+        key=lambda x: ["api", "db", "web", "admin", "mobile", "docker"].index(x)
+        if x in ["api", "db", "web", "admin", "mobile", "docker"]
+        else 99,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Detect which app surfaces to scaffold.")
+    parser.add_argument("project_root", help="Project root directory")
+    parser.add_argument("--rfp", help="Explicit RFP file to inspect", default=None)
+    args = parser.parse_args()
+
+    project_root = pathlib.Path(args.project_root)
+    if not project_root.exists():
+        return 1
+
+    candidates: list[pathlib.Path] = []
+    if args.rfp:
+        rfp_path = pathlib.Path(args.rfp)
+        if rfp_path.is_file():
+            candidates.append(rfp_path)
+    if not candidates:
+        inputs_dir = project_root / ".gpt-creator" / "staging" / "inputs"
+        if inputs_dir.is_dir():
+            for pattern in ("*.md", "*.txt", "*.rst", "*.html", "*.json", "*.yaml", "*.yml"):
+                candidates.extend(inputs_dir.glob(pattern))
+
+    text = gather_text(candidates)
+    surfaces = detect_surfaces(text)
+    if not surfaces:
+        surfaces = []
+    print(" ".join(surfaces))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

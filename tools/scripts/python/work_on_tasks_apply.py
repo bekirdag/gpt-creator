@@ -317,10 +317,11 @@ def main(argv: List[str]) -> int:
         active_model_env = agent_file_model
     if not active_client and agent_file_client:
         active_client = agent_file_client
+    # Prefer the agent’s model, then user defaults, then Codex defaults.
     model = (
-        os.getenv("DEFAULT_LLM")
+        active_model_env
+        or os.getenv("DEFAULT_LLM")
         or os.getenv("CODEX_MODEL")
-        or active_model_env
         or "gpt-4.1"
     )
     registry_cfg: Optional[Dict[str, object]] = None

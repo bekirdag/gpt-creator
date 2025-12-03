@@ -169,18 +169,28 @@ _cmd_work_on_tasks_impl() {
         shift
         ;;
 
-      --agent|--codex-model)
+      --agent)
         agent_selector="${2:-}"
-        agent_model_override="${agent_selector}"
         agent_flag=1
-        [[ -n "$agent_model_override" ]] || die "--agent requires a Codex model name"
+        [[ -n "$agent_selector" ]] || die "--agent requires an agent name"
         shift 2
         ;;
-      --agent=*|--codex-model=*)
+      --agent=*)
         agent_selector="${1#*=}"
-        agent_model_override="$agent_selector"
         agent_flag=1
-        [[ -n "$agent_model_override" ]] || die "--agent requires a Codex model name"
+        [[ -n "$agent_selector" ]] || die "--agent requires an agent name"
+        shift
+        ;;
+      --codex-model)
+        agent_model_override="${2:-}"
+        agent_flag=1
+        [[ -n "$agent_model_override" ]] || die "--codex-model requires a model name"
+        shift 2
+        ;;
+      --codex-model=*)
+        agent_model_override="${1#*=}"
+        agent_flag=1
+        [[ -n "$agent_model_override" ]] || die "--codex-model requires a model name"
         shift
         ;;
       --keep-artifacts) keep_artifacts=1; shift;;
@@ -805,7 +815,11 @@ _cmd_work_on_tasks_impl() {
   fi
 
   if [[ -z "${GC_ACTIVE_AGENT_ADAPTER:-}" ]]; then
-    GC_ACTIVE_AGENT_ADAPTER="codex_cli"
+    case "${GC_ACTIVE_AGENT_CLIENT:-codex_cli}" in
+      gpt-oss|ollama) GC_ACTIVE_AGENT_ADAPTER="command" ;;
+      openai) GC_ACTIVE_AGENT_ADAPTER="codex_cli" ;;
+      *) GC_ACTIVE_AGENT_ADAPTER="codex_cli" ;;
+    esac
   fi
 
   local order_helper=""

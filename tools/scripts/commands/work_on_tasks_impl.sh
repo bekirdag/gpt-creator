@@ -2369,17 +2369,10 @@ print(error)'
           fi
         fi
         if gc_budget_stage_should_skip "patch"; then
-          skip_flow=1
-          run_blocked_budget=1
-          flow_ok=1
-          task_needs_review=0
-          manual_followups=0
-          keep_output=0
-          task_result_status="abandoned-for-budget"
-          apply_status="auto-abandon"
           skip_reason="$(gc_budget_stage_skip_reason "patch")"
           [[ -z "$skip_reason" ]] && skip_reason="auto-abandon"
-          task_outcome_reason="${task_outcome_reason:-budget-auto-abandon}"
+          warn "  [budget] patch stage would normally be skipped (${skip_reason}); overriding and running patch anyway."
+          gc_budget_set_stage_skip "patch" 0 ""
         fi
       fi
 

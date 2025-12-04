@@ -29,7 +29,8 @@ _cmd_work_on_tasks_impl() {
   local prompt_slim_helper=""
   local prompt_safeguard_helper=""
   local empty_apply_mode=""
-  local prepare_prompts=1
+  # Default behaviour for work-on-tasks: build prompts and immediately run patch.
+  local prepare_prompts=0
   local agent_model_override=""
   local agent_selector=""
   local agent_flag=0
@@ -942,22 +943,30 @@ PY
     warn "work-on-tasks: unable to verify global task order; continuing with existing queue."
   fi
 
-  # Legacy prompt-prep mode is disabled: work-on-tasks always runs prompts+patch.
-  # Hard-set GC_WORK_PREPARE_PROMPTS to 0 so downstream helpers never enter
-  # "prepare prompts only" mode, regardless of existing env configuration.
-  export GC_WORK_PREPARE_PROMPTS=0
-  export GC_SKIP_STORY_PROMPT_SYNC=1
+  # Prompt-prep mode is opt-in via CLI; default is prompts+patch.
+  # Ignore any sticky GC_WORK_PREPARE_PROMPTS from the environment.
+  local prepare_prompts_flag="$prepare_prompts"
+  export GC_WORK_PREPARE_PROMPTS="$prepare_prompts_flag"
+
+  if (( prepare_prompts_flag )); then
+    export GC_SKIP_STORY_PROMPT_SYNC=0
+  else
+    export GC_SKIP_STORY_PROMPT_SYNC=1
+  fi
 
   local work_state_dir="${PLAN_DIR}/work"
   mkdir -p "$work_state_dir"
   local prompt_guard="${work_state_dir}/.prompt_sync.once"
   export GC_WORK_PROMPT_SYNC_RUN_GUARD="$prompt_guard"
-  : > "$prompt_guard"
+  if (( prepare_prompts_flag )); then
+    rm -f "$prompt_guard" 2>/dev/null || true
+  else
+    : > "$prompt_guard"
+  fi
 
+  # Keep prompt snapshots by default for debugging.
   if [[ -z "${GC_PROMPT_PUBLISH_DISABLE:-}" ]]; then
-    # With prompts+patch as the default, keep prompt publishing disabled
-    # unless the caller explicitly opts in via GC_PROMPT_PUBLISH_DISABLE=0.
-    export GC_PROMPT_PUBLISH_DISABLE=1
+    export GC_PROMPT_PUBLISH_DISABLE=0
   fi
 
   local scripts_root="${GC_SCRIPTS_ROOT:-${CLI_ROOT}/tools/scripts}"

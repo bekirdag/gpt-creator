@@ -1,12 +1,11 @@
 Usage: gpt-creator refine-tasks [--project PATH] [--story SLUG] [--model NAME] [--dry-run] [--force]
 
-Refine tasks stored in the SQLite backlog using Codex, updating each task
-record and the refined JSON artifacts as soon as a task is enriched.
+Refine tasks stored in the SQLite backlog using the active adapter, updating
+each task record and the refined JSON artifacts as soon as a task is enriched.
 
 Options:
   --project PATH  Project root (defaults to current directory)
   --story SLUG    Limit refinement to a single story slug (optional)
-  --model NAME    Override Codex model (defaults to CODEX_MODEL/GC defaults)
-  --dry-run       Build prompts without invoking Codex
+  --model NAME    Override adapter model (defaults to GC defaults; when adapter=codex uses CODEX_MODEL)
+  --dry-run       Build prompts without invoking the adapter
   --force         Reset refinement progress and reprocess every task
-

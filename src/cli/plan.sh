@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gpt-creator :: plan — synthesize a build plan from normalized docs using Codex
+# gpt-creator :: plan — synthesize a build plan from normalized docs using the active adapter (default Codex)
 # Usage: gpt-creator plan /path/to/project
 set -Eeuo pipefail
 
@@ -13,8 +13,6 @@ if [[ -f "${__DIR__}/../constants.sh" ]]; then
   source "${__DIR__}/../constants.sh"
 else
   GC_RUNTIME_SUBDIR=".gpt-creator"
-  GC_CODEX_BIN="${GC_CODEX_BIN:-codex}"
-  GC_CODEX_MODEL="${GC_CODEX_MODEL:-gpt-5-high}"
 fi
 
 PROJECT_DIR="${1:-${PWD}}"
@@ -41,7 +39,7 @@ UI_WEB_DIR="${NORM}/ui/website"
 UI_BOF_DIR="${NORM}/ui/backoffice"
 CSS_DIR="${NORM}/ui/styles"
 
-# Compose a compact prompt for Codex (file paths + instructions)
+# Compose a compact prompt for the active adapter (file paths + instructions)
 gc_cli_render_template "prompts/plan_prompt.txt" > "${PROMPT_FILE}"
 
 # Append the actual resolved paths so Codex can reference them (kept compact)
@@ -61,19 +59,23 @@ gc_cli_render_template "prompts/plan_prompt.txt" > "${PROMPT_FILE}"
   [[ -n "${JIRA}" ]] && echo "- Jira tasks: ${JIRA}"
 } >> "${PROMPT_FILE}"
 
-# Invoke Codex client if available, else just emit the prompt path to help the user run it.
-CODEX_BIN="${GC_CODEX_BIN:-${GC_CODEX_BIN:-codex}}"
-MODEL="${GC_CODEX_MODEL:-${GC_CODEX_MODEL:-gpt-5-high}}"
+# Invoke adapter client if available, else just emit the prompt path.
+ADAPTER_BIN="${ADAPTER_CMD:-${CODEX_BIN:-codex}}"
+# Align with CLI default to avoid gated SKUs.
+MODEL="${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${GC_CODEX_MODEL:-gpt-4.1}}}"
 
-if command -v "${CODEX_BIN}" >/dev/null 2>&1; then
-  echo "[plan] Running Codex to produce build plan…"
-  # Generic CLI invocation (adjust if your client uses different flags)
-  "${CODEX_BIN}" chat --model "${MODEL}" --system "You are a precise software build planner." --input-file "${PROMPT_FILE}" > "${PLAN_OUT}"
-  echo "[plan] Build plan written to ${PLAN_OUT}"
-  echo "${PLAN_OUT}"
+if command -v "${ADAPTER_BIN}" >/dev/null 2>&1; then
+  echo "[plan] Running adapter (${ADAPTER_BIN}) to produce build plan…"
+  if "${ADAPTER_BIN}" chat --model "${MODEL}" --system "You are a precise software build planner." --input-file "${PROMPT_FILE}" > "${PLAN_OUT}"; then
+    echo "[plan] Build plan written to ${PLAN_OUT}"
+    echo "${PLAN_OUT}"
+  else
+    echo "[plan][ERROR] Adapter invocation failed; prompt left at ${PROMPT_FILE}" >&2
+    exit 1
+  fi
 else
-  echo "[plan] Codex client not found in PATH. Prompt prepared at:"
+  echo "[plan] Adapter client not found in PATH. Prompt prepared at:"
   echo "${PROMPT_FILE}"
   echo "[plan] Run your client manually, e.g.:"
-  echo "  codex chat --model ${MODEL} --system 'You are a precise software build planner.' --input-file '${PROMPT_FILE}' > '${PLAN_OUT}'"
+  echo "  ${ADAPTER_BIN:-codex} chat --model ${MODEL} --system 'You are a precise software build planner.' --input-file '${PROMPT_FILE}' > '${PLAN_OUT}'"
 fi

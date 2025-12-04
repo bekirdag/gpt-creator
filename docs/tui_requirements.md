@@ -38,7 +38,7 @@ Absolutely—here’s a **complete TUI spec + Bubble Tea implementation plan** t
 
 **Ops & housekeeping**
 
-* `tokens` summarizes usage from `logs/codex-usage.ndjson`. ([GitHub][1])
+* `tokens` summarizes usage from `logs/usage.ndjson` (legacy: `codex-usage.ndjson`), showing adapter/model/stage and tokens in/out/total. ([GitHub][1])
 * `update [--force]` updater. ([GitHub][1])
 * `reports`, plus `--reports-on/off`, idle stall detection & logs. ([GitHub][1])
 
@@ -141,7 +141,7 @@ Steps:
 
 ### J) **Tokens**
 
-* Parse `.gpt-creator/logs/codex-usage.ndjson`; rollups by day/command; total cost estimate. ([GitHub][1])
+* Parse `.gpt-creator/logs/usage.ndjson` (legacy: `codex-usage.ndjson`); rollups by day/command; total cost estimate; show tokens in/out/total. ([GitHub][1])
 
 ### K) **Reports**
 
@@ -336,7 +336,7 @@ func RunJob(j Job, onLine func(string)) error {
 
 ### Tokens
 
-* Parse `logs/codex-usage.ndjson`; chart stats. ([GitHub][1])
+* Parse `logs/usage.ndjson` (legacy: `codex-usage.ndjson`); chart stats including tokens in/out/total. ([GitHub][1])
 
 ### Reports
 
@@ -577,7 +577,7 @@ From the repo README:
 * **DB**: `create-db-dump` (schema + seed). ([GitHub][1])
 * **Tasks pipeline**: `create-jira-tasks`, `migrate-tasks`, `refine-tasks`, `create-tasks`, `work-on-tasks` (legacy `iterate` deprecated). ([GitHub][1])
 * **Verify**: `verify acceptance`, `verify all` (OpenAPI, Lighthouse, a11y, consent, program‑filter). ([GitHub][1])
-* **Usage**: `tokens` reads `.gpt-creator/logs/codex-usage.ndjson`. ([GitHub][1])
+* **Usage**: `tokens` reads `.gpt-creator/logs/usage.ndjson` (legacy: `codex-usage.ndjson`), showing adapter/model/stage with tokens in/out/total. ([GitHub][1])
 * **Prereqs (for Run/Services)**: Docker/`docker compose` required for run & verifications. ([GitHub][1])
 
 **Docker health we’ll show in‑TUI:**
@@ -710,7 +710,7 @@ From the repo README:
 
 **Tokens → C3/C4**
 
-* Read `.gpt-creator/logs/codex-usage.ndjson`; summarize per day/command. ([GitHub][1])
+* Read `.gpt-creator/logs/usage.ndjson` (legacy: `codex-usage.ndjson`); summarize per day/command with tokens in/out/total. ([GitHub][1])
 
 **Reports → C3/C4**
 

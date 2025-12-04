@@ -38,7 +38,7 @@ ACTIVE_STATUSES = {
     "blocked",
     "blocked-budget",
     "blocked-migration-transition",
-    "blocked-quota",
+    "blocked-quota",  # legacy
     "apply-failed-migration-context",
     "blocked-schema-drift",
     "blocked-schema-guard-error",
@@ -58,7 +58,7 @@ BLOCKED_STATUSES = {
     "blocked",
     "blocked-budget",
     "blocked-migration-transition",
-    "blocked-quota",
+    "blocked-quota",  # legacy
     "apply-failed-migration-context",
     "blocked-schema-drift",
     "blocked-schema-guard-error",
@@ -259,15 +259,27 @@ def build_snapshot(
     epic_watch: Iterable[str] = DEFAULT_EPIC_WATCH,
     wip_limit: int = DEFAULT_WIP_LIMIT,
 ) -> Dict[str, Any]:
+    if not db_path.exists():
+        raise FileNotFoundError(f"Tasks database not found: {db_path}")
+    if window_days < 0:
+        window_days = DEFAULT_WINDOW_DAYS
+
     now = _dt.datetime.utcnow().replace(tzinfo=_dt.timezone.utc)
     recent_cutoff = now - _dt.timedelta(days=max(window_days, 0.0))
     epic_watch_slugs = {_slugify(epic) for epic in epic_watch if epic}
 
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    rows = _load_tasks(cur)
-    conn.close()
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        rows = _load_tasks(cur)
+    except sqlite3.Error as exc:
+        raise RuntimeError(f"Failed to read tasks database at {db_path}: {exc}") from exc
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
     total_tasks = len(rows)
     remaining_tasks = 0
@@ -441,6 +453,8 @@ def build_snapshot(
 
 
 def _load_snapshot(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Snapshot file not found: {path}")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -596,12 +610,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "snapshot":
-        snapshot = build_snapshot(
-            args.db,
-            window_days=args.window_days,
-            epic_watch=args.epic,
-            wip_limit=args.wip_limit,
-        )
+        try:
+            snapshot = build_snapshot(
+                args.db,
+                window_days=args.window_days,
+                epic_watch=args.epic,
+                wip_limit=args.wip_limit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR\t{exc}", file=sys.stderr)
+            return 1
         payload = json.dumps(snapshot, indent=2, sort_keys=True)
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -612,8 +630,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if args.command == "compare":
-        before = _load_snapshot(args.before)
-        after = _load_snapshot(args.after)
+        try:
+            before = _load_snapshot(args.before)
+            after = _load_snapshot(args.after)
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR\t{exc}", file=sys.stderr)
+            return 1
         messages = compare_snapshots(before, after, epic_watch=args.epic, wip_limit=args.wip_limit)
         for level, message in messages:
             sys.stdout.write(f"{level}\t{message}\n")

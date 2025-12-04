@@ -170,7 +170,7 @@ resolve_cli_root() {
   local abs_dir
   abs_dir="$(cd "$(dirname "$source")" && pwd)"
   GC_SELF_PATH="${abs_dir}/$(basename "$source")"
-  cd "${abs_dir}/.." && pwd
+  (cd "${abs_dir}/.." && pwd)
 }
 
 cmd_task_convert() {
@@ -325,8 +325,8 @@ mkdir -p "${CLI_SHIM_BIN}" 2>/dev/null || true
 export PATH="${CLI_SHIM_BIN}:${CLI_ROOT}/bin:${PATH}"
 GC_LAST_RENDER_TASK_FOOTER=""
 
-# Default to npm-provided docdex CLI on PATH.
-: "${GC_DOCDEX_BIN:=docdexd}"
+# Default to npm-provided docdex CLI on PATH (matches install docs).
+: "${GC_DOCDEX_BIN:=docdex}"
 export GC_DOCDEX_BIN
 
 gc_template_path() {
@@ -543,7 +543,7 @@ gc_create_env_if_missing() {
   chmod 600 "$env_file" || true
 }
 
-VERSION="0.2.0"
+VERSION="${GC_VERSION_OVERRIDE:-$(node -p "require('${CLI_ROOT:-$PWD}/package.json').version" 2>/dev/null || echo '0.0.0')}"
 APP_NAME="gpt-creator"
 export APP_NAME VERSION
 
@@ -852,7 +852,6 @@ gc_renderer_path_if_enabled() {
   if [[ -n "${CLI_ROOT:-}" ]]; then
     copy_sources+=("${CLI_ROOT}/render_gpt_creator.sh")
     copy_sources+=("${CLI_ROOT}/bin/render_gpt_creator.sh")
-    copy_sources+=("${GC_SCRIPTS_ROOT}/render_task_footer.sh")
     candidates+=("${copy_sources[@]}")
   fi
 
@@ -1941,6 +1940,38 @@ gc_exit_handler() {
   gc_reports_cleanup
 }
 
+gc_adapter_profile_init() {
+  # Generic profiling/config hook. Prefer agent-provided limits; flag status for observability.
+  local adapter="${GC_ACTIVE_AGENT_ADAPTER:-${GC_ACTIVE_ADAPTER:-}}"
+  local model="${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-}}}"
+  GC_ADAPTER_PROFILE_STATUS="skipped"
+  if [[ -n "${GC_ACTIVE_AGENT_MAX_CONTEXT:-}" ]]; then
+    export GC_ADAPTER_MAX_CONTEXT="${GC_ACTIVE_AGENT_MAX_CONTEXT}"
+    GC_ADAPTER_PROFILE_STATUS="agent-limits"
+  fi
+  if [[ -n "${GC_ACTIVE_AGENT_MAX_OUTPUT:-}" ]]; then
+    export GC_ADAPTER_MAX_OUTPUT="${GC_ACTIVE_AGENT_MAX_OUTPUT}"
+    GC_ADAPTER_PROFILE_STATUS="agent-limits"
+  fi
+  if [[ "$adapter" == "codex_cli" || -z "$adapter" ]]; then
+    GC_ADAPTER_PROFILE_STATUS="codex-default"
+  fi
+  if [[ -n "$adapter" && -n "$model" ]]; then
+    info "Adapter profile → adapter=${adapter}, model=${model} (status=${GC_ADAPTER_PROFILE_STATUS})"
+  fi
+}
+
+gc_usage_log_paths() {
+  local log_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
+  mkdir -p "$log_dir"
+  local primary="${GC_USAGE_FILE:-${log_dir}/usage.ndjson}"
+  local legacy="${log_dir}/codex-usage.ndjson"
+  printf '%s\n' "$primary"
+  if [[ "$legacy" != "$primary" ]]; then
+    printf '%s\n' "$legacy"
+  fi
+}
+
 gc_budget_log_stage() {
   local stage="${1:-unknown}"
   local prompt_tokens="${2:-0}"
@@ -1952,14 +1983,13 @@ gc_budget_log_stage() {
   local blocked_quota="${8:-false}"
   local note="${9:-}"
 
-  local log_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
-  mkdir -p "$log_dir"
-  local usage_file="${log_dir}/codex-usage.ndjson"
-
   local run_id="${GC_BUDGET_RUN_ID:-manual}"
   local story_ref="${GC_BUDGET_STORY_ID:-}"
   local task_ref="${GC_BUDGET_TASK_ID:-}"
-  local model_name="${CODEX_MODEL:-gpt-5.1-codex}"
+  local model_name="${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-}}}"
+  if [[ -z "$model_name" ]]; then
+    model_name="unknown-model"
+  fi
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   local blocked_flag="${blocked_quota:-false}"
@@ -1986,10 +2016,18 @@ gc_budget_log_stage() {
   fi
   local helper_path
   helper_path="$(gc_clone_python_tool "gc_budget_log_stage.py" "${PROJECT_ROOT:-$PWD}")" || return 1
-  python3 "$helper_path" \
-    "$usage_file" "$ts" "$run_id" "$story_ref" "$task_ref" "$stage" "$model_name" \
-    "$prompt_tokens" "$completion_tokens" "$total_tokens" "$duration_ms" \
-    "$pruned_items_raw" "$tool_bytes_raw" "$blocked_flag" "$note"
+  local usage_path=""
+  local adapter_name="${GC_ACTIVE_AGENT_ADAPTER:-${GC_ACTIVE_ADAPTER:-}}"
+  if [[ -z "$adapter_name" ]]; then
+    adapter_name="unknown-adapter"
+  fi
+  while IFS= read -r usage_path; do
+    [[ -z "$usage_path" ]] && continue
+    python3 "$helper_path" \
+      "$usage_path" "$ts" "$run_id" "$story_ref" "$task_ref" "$stage" "$model_name" \
+      "$prompt_tokens" "$completion_tokens" "$total_tokens" "$duration_ms" \
+      "$pruned_items_raw" "$tool_bytes_raw" "$blocked_flag" "$note" "$adapter_name"
+  done < <(gc_usage_log_paths)
 }
 
 gc_record_codex_usage() {
@@ -2015,9 +2053,16 @@ gc_record_codex_usage() {
 
   [[ -n "$log_file" && -f "$log_file" ]] || return 0
 
-  local usage_dir="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}"
-  mkdir -p "$usage_dir"
-  local usage_file="${usage_dir}/codex-usage.ndjson"
+  local usage_path=""
+  local usage_paths=()
+  while IFS= read -r usage_path; do
+    [[ -z "$usage_path" ]] && continue
+    usage_paths+=("$usage_path")
+  done < <(gc_usage_log_paths)
+  if ((${#usage_paths[@]} == 0)); then
+    warn "Failed to resolve usage log paths; skipping Codex usage recording."
+    return 1
+  fi
   local timestamp
   timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
@@ -2049,272 +2094,283 @@ gc_record_codex_usage() {
   fi
 
 
-  if python3 "$usage_script_py" "$log_file" "$usage_file" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" "${GC_COMMAND_FAILURE_CACHE:-}" "${GC_COMMAND_STREAM_CACHE:-}" "${GC_COMMAND_FILE_CACHE:-}" "${GC_COMMAND_SCAN_CACHE:-}" "$step" "$max_output" "$duration_ms" >"$tmp_output"
-  then
-    py_output="$(<"$tmp_output")"
-    rm -f "$usage_script_py" || true
-    rm -f "$tmp_output" || true
-    if [[ -n "$py_output" ]]; then
-      while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        case "$line" in
-          LIMIT_DETECTED$'\t'*)
-            GC_CODEX_USAGE_LIMIT_REACHED=1
-            GC_CODEX_USAGE_LIMIT_CONFIRMED=0
-            GC_CODEX_USAGE_LIMIT_MESSAGE="${line#LIMIT_DETECTED$'\t'}"
-            if gc_usage_limit_is_provider_signal "${GC_CODEX_USAGE_LIMIT_MESSAGE}"; then
-              GC_CODEX_USAGE_LIMIT_CONFIRMED=1
-            fi
-            ;;
-          LIMIT_DETECTED)
-            GC_CODEX_USAGE_LIMIT_REACHED=1
-            GC_CODEX_USAGE_LIMIT_CONFIRMED=0
-            GC_CODEX_USAGE_LIMIT_MESSAGE=""
-            ;;
-          USAGE$'\t'*)
-            IFS=$'\t' read -r _ prompt_val completion_val total_val <<<"$line"
-            if [[ "$prompt_val" =~ ^[0-9]+$ ]]; then
-              GC_LAST_CODEX_PROMPT_TOKENS=$((prompt_val))
-            else
-              GC_LAST_CODEX_PROMPT_TOKENS=0
-            fi
-            if [[ "$completion_val" =~ ^[0-9]+$ ]]; then
-              GC_LAST_CODEX_COMPLETION_TOKENS=$((completion_val))
-            else
-              GC_LAST_CODEX_COMPLETION_TOKENS=0
-            fi
-            if [[ "$total_val" =~ ^[0-9]+$ ]]; then
-              GC_LAST_CODEX_TOTAL_TOKENS=$((total_val))
-            else
-              GC_LAST_CODEX_TOTAL_TOKENS=$((GC_LAST_CODEX_PROMPT_TOKENS + GC_LAST_CODEX_COMPLETION_TOKENS))
-            fi
-            ;;
-          CMDFAIL$'\t'*)
-            local rest="${line#CMDFAIL$'\t'}"
-            local repeat_flag total_fail _ digest encoded_command encoded_summary
-            IFS=$'\t' read -r repeat_flag total_fail _ digest encoded_command encoded_summary <<<"$rest"
-            local command_text summary_text
-            command_text="$(gc_decode_base64 "${encoded_command:-}")"
-            summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
-            command_text="${command_text//$'\r'/ }"
-            command_text="${command_text//$'\n'/ }"
-            summary_text="${summary_text//$'\r'/ }"
-            summary_text="${summary_text//$'\n'/ }"
-            command_text="${command_text#"${command_text%%[![:space:]]*}"}"
-            command_text="${command_text%"${command_text##*[![:space:]]}"}"
-            summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
-            summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
-            if [[ ${#summary_text} -gt 160 ]]; then
-              summary_text="${summary_text:0:157}..."
-            fi
-            if [[ "$repeat_flag" == "1" && -n "$digest" ]]; then
-              if [[ "$GC_COMMAND_FAILURE_WARN_DIGESTS" != *"|$digest|"* ]]; then
-                if [[ -n "$command_text" ]]; then
-                  warn "Repeated command failure detected (x${total_fail}): ${command_text}"
-                else
-                  warn "Repeated command failure detected (x${total_fail})."
-                fi
-                if [[ -n "$summary_text" ]]; then
-                  warn "  Last failure: ${summary_text}"
-                fi
-                GC_COMMAND_FAILURE_WARN_DIGESTS+="|$digest|"
+  local usage_path_dest
+  local usage_record_output=""
+  local record_success=0
+  for usage_path_dest in "${usage_paths[@]}"; do
+    if python3 "$usage_script_py" "$log_file" "$usage_path_dest" "$timestamp" "$task" "$model" "$prompt_file" "$exit_code" "${GC_COMMAND_FAILURE_CACHE:-}" "${GC_COMMAND_STREAM_CACHE:-}" "${GC_COMMAND_FILE_CACHE:-}" "${GC_COMMAND_SCAN_CACHE:-}" "$step" "$max_output" "$duration_ms" >"$tmp_output"
+    then
+      [[ -z "$usage_record_output" ]] && usage_record_output="$(<"$tmp_output")"
+      record_success=1
+    else
+      warn "Failed to append usage entry to ${usage_path_dest}; continuing."
+    fi
+  done
+
+  rm -f "$usage_script_py" || true
+  rm -f "$tmp_output" || true
+  py_output="$usage_record_output"
+  if [[ -n "$py_output" ]]; then
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      case "$line" in
+        LIMIT_DETECTED$'\t'*)
+          GC_CODEX_USAGE_LIMIT_REACHED=1
+          GC_CODEX_USAGE_LIMIT_CONFIRMED=0
+          GC_CODEX_USAGE_LIMIT_MESSAGE="${line#LIMIT_DETECTED$'\t'}"
+          if gc_usage_limit_is_provider_signal "${GC_CODEX_USAGE_LIMIT_MESSAGE}"; then
+            GC_CODEX_USAGE_LIMIT_CONFIRMED=1
+          fi
+          ;;
+        LIMIT_DETECTED)
+          GC_CODEX_USAGE_LIMIT_REACHED=1
+          GC_CODEX_USAGE_LIMIT_CONFIRMED=0
+          GC_CODEX_USAGE_LIMIT_MESSAGE=""
+          ;;
+        USAGE$'\t'*)
+          IFS=$'\t' read -r _ prompt_val completion_val total_val <<<"$line"
+          if [[ "$prompt_val" =~ ^[0-9]+$ ]]; then
+            GC_LAST_CODEX_PROMPT_TOKENS=$((prompt_val))
+          else
+            GC_LAST_CODEX_PROMPT_TOKENS=0
+          fi
+          if [[ "$completion_val" =~ ^[0-9]+$ ]]; then
+            GC_LAST_CODEX_COMPLETION_TOKENS=$((completion_val))
+          else
+            GC_LAST_CODEX_COMPLETION_TOKENS=0
+          fi
+          if [[ "$total_val" =~ ^[0-9]+$ ]]; then
+            GC_LAST_CODEX_TOTAL_TOKENS=$((total_val))
+          else
+            GC_LAST_CODEX_TOTAL_TOKENS=$((GC_LAST_CODEX_PROMPT_TOKENS + GC_LAST_CODEX_COMPLETION_TOKENS))
+          fi
+          ;;
+        CMDFAIL$'\t'*)
+          local rest="${line#CMDFAIL$'\t'}"
+          local repeat_flag total_fail _ digest encoded_command encoded_summary
+          IFS=$'\t' read -r repeat_flag total_fail _ digest encoded_command encoded_summary <<<"$rest"
+          local command_text summary_text
+          command_text="$(gc_decode_base64 "${encoded_command:-}")"
+          summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
+          command_text="${command_text//$'\r'/ }"
+          command_text="${command_text//$'\n'/ }"
+          summary_text="${summary_text//$'\r'/ }"
+          summary_text="${summary_text//$'\n'/ }"
+          command_text="${command_text#"${command_text%%[![:space:]]*}"}"
+          command_text="${command_text%"${command_text##*[![:space:]]}"}"
+          summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
+          summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
+          if [[ ${#summary_text} -gt 160 ]]; then
+            summary_text="${summary_text:0:157}..."
+          fi
+          if [[ "$repeat_flag" == "1" && -n "$digest" ]]; then
+            if [[ "$GC_COMMAND_FAILURE_WARN_DIGESTS" != *"|$digest|"* ]]; then
+              if [[ -n "$command_text" ]]; then
+                warn "Repeated command failure detected (x${total_fail}): ${command_text}"
+              else
+                warn "Repeated command failure detected (x${total_fail})."
               fi
-            fi
-            ;;
-          CMDSTREAM$'\t'*)
-            local rest="${line#CMDSTREAM$'\t'}"
-            local digest repeat_flag total_seen encoded_summary encoded_advice
-            IFS=$'\t' read -r digest repeat_flag total_seen encoded_summary encoded_advice <<<"$rest"
-            local summary_text advice_text
-            summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
-            advice_text="$(gc_decode_base64 "${encoded_advice:-}")"
-            summary_text="${summary_text//$'\r'/ }"
-            summary_text="${summary_text//$'\n'/ }"
-            advice_text="${advice_text//$'\r'/ }"
-            advice_text="${advice_text//$'\n'/ }"
-            summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
-            summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
-            advice_text="${advice_text#"${advice_text%%[![:space:]]*}"}"
-            advice_text="${advice_text%"${advice_text##*[![:space:]]}"}"
-            if [[ "$GC_COMMAND_STREAM_WARN_DIGESTS" != *"|$digest|"* ]]; then
-              local repeat_note=""
-              if [[ "$repeat_flag" == "1" ]]; then
-                repeat_note=" (repeat)"
-              fi
-              warn "Sequential sed/cat streaming detected${repeat_note}: ${summary_text}"
-              if [[ -n "$advice_text" ]]; then
-                warn "  Recommendation: ${advice_text}"
-              fi
-              if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
-                warn "  Observed ${total_seen} times; pivot to targeted searches to cut token usage."
-              fi
-              GC_COMMAND_STREAM_WARN_DIGESTS+="|$digest|"
-            fi
-            ;;
-          CMDSCAN$'\t'*)
-            local rest="${line#CMDSCAN$'\t'}"
-            local digest repeat_flag total_seen encoded_command encoded_message
-            IFS=$'\t' read -r digest repeat_flag total_seen encoded_command encoded_message <<<"$rest"
-            local command_text message_text
-            command_text="$(gc_decode_base64 "${encoded_command:-}")"
-            message_text="$(gc_decode_base64 "${encoded_message:-}")"
-            command_text="${command_text//$'\r'/ }"
-            command_text="${command_text//$'\n'/ }"
-            message_text="${message_text//$'\r'/ }"
-            message_text="${message_text//$'\n'/ }"
-            command_text="${command_text#"${command_text%%[![:space:]]*}"}"
-            command_text="${command_text%"${command_text##*[![:space:]]}"}"
-            message_text="${message_text#"${message_text%%[![:space:]]*}"}"
-            message_text="${message_text%"${message_text##*[![:space:]]}"}"
-            if [[ "$GC_COMMAND_SCAN_WARN_DIGESTS" != *"|$digest|"* ]]; then
-              local repeat_note=""
-              if [[ "$repeat_flag" == "1" ]]; then
-                repeat_note=" (repeat)"
-              fi
-              warn "Directory crawl detected${repeat_note}: ${command_text:-<command unavailable>}"
-              if [[ -n "$message_text" ]]; then
-                warn "  Reason: ${message_text}"
-              fi
-              if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
-                warn "  Observed ${total_seen} times; declare new focus before exploring other areas."
-              fi
-              GC_COMMAND_SCAN_WARN_DIGESTS+="|$digest|"
-            fi
-            ;;
-          CMDGUARD$'\t'*)
-            local rest="${line#CMDGUARD$'\t'}"
-            local digest repeat_flag issue_count encoded_command encoded_message
-            IFS=$'\t' read -r digest repeat_flag issue_count encoded_command encoded_message <<<"$rest"
-            local command_text message_text
-            command_text="$(gc_decode_base64 "${encoded_command:-}")"
-            message_text="$(gc_decode_base64 "${encoded_message:-}")"
-            command_text="${command_text//$'\r'/ }"
-            command_text="${command_text//$'\n'/ }"
-            message_text="${message_text//$'\r'/ }"
-            message_text="${message_text//$'\n'/ }"
-            command_text="${command_text#"${command_text%%[![:space:]]*}"}"
-            command_text="${command_text%"${command_text##*[![:space:]]}"}"
-            message_text="${message_text#"${message_text%%[![:space:]]*}"}"
-            message_text="${message_text%"${message_text##*[![:space:]]}"}"
-            if [[ "$GC_COMMAND_GUARD_WARN_DIGESTS" != *"|$digest|"* ]]; then
-              warn "Guardrails blocked expensive command: ${command_text:-pnpm}"
-              if [[ -n "$message_text" ]]; then
-                warn "  Fix before retry: ${message_text}"
-              fi
-              if [[ "$issue_count" =~ ^[0-9]+$ && "$issue_count" -gt 1 ]]; then
-                warn "  Multiple pre-check issues detected; update plan/focus once resolved."
-              fi
-              GC_COMMAND_GUARD_WARN_DIGESTS+="|$digest|"
-            fi
-            ;;
-          CMDFILE$'\t'*)
-            local rest="${line#CMDFILE$'\t'}"
-            local digest repeat_flag total_seen encoded_summary encoded_excerpt
-            IFS=$'\t' read -r digest repeat_flag total_seen encoded_summary encoded_excerpt <<<"$rest"
-            local summary_text excerpt_text
-            summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
-            excerpt_text="$(gc_decode_base64 "${encoded_excerpt:-}")"
-            summary_text="${summary_text//$'\r'/ }"
-            summary_text="${summary_text//$'\n'/ }"
-            excerpt_text="${excerpt_text//$'\r'/ }"
-            excerpt_text="${excerpt_text//$'\n'/ }"
-            summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
-            summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
-            excerpt_text="${excerpt_text#"${excerpt_text%%[![:space:]]*}"}"
-            excerpt_text="${excerpt_text%"${excerpt_text##*[![:space:]]}"}"
-            if [[ "$repeat_flag" == "1" ]]; then
-              if [[ "$GC_COMMAND_FILE_WARN_DIGESTS" != *"|$digest|"* ]]; then
-                warn "Repeated file read detected: ${summary_text}"
-                if [[ -n "$excerpt_text" ]]; then
-                  local preview="$excerpt_text"
-                  if [[ ${#preview} -gt 140 ]]; then
-                    preview="${preview:0:137}..."
-                  fi
-                  warn "  Refer to cached excerpt instead of re-running cat/sed: \"${preview}\""
-                else
-                  warn "  Refer to the cached excerpt listed in the prompt instead of re-reading the file."
-                fi
-                if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
-                  warn "  Observed ${total_seen} reads for this slice; reuse the cached snippet unless the file changed."
-                fi
-                GC_COMMAND_FILE_WARN_DIGESTS+="|$digest|"
-              fi
-            else
               if [[ -n "$summary_text" ]]; then
-                info "Cached file excerpt saved: ${summary_text}"
+                warn "  Last failure: ${summary_text}"
               fi
+              GC_COMMAND_FAILURE_WARN_DIGESTS+="|$digest|"
             fi
-            ;;
-        esac
-      done <<<"$py_output"
-      if [[ -n "$step" ]]; then
-        # shellcheck disable=SC2034  # tracked for downstream diagnostics
-        GC_LAST_CODEX_OUTPUT_STEP="$step"
-      fi
-      if [[ "$max_output" =~ ^[0-9]+$ ]]; then
-        # shellcheck disable=SC2034  # tracked for downstream diagnostics
-        GC_LAST_CODEX_OUTPUT_LIMIT="$max_output"
-      else
-        # shellcheck disable=SC2034  # tracked for downstream diagnostics
-        GC_LAST_CODEX_OUTPUT_LIMIT=0
-      fi
+          fi
+          ;;
+        CMDSTREAM$'\t'*)
+          local rest="${line#CMDSTREAM$'\t'}"
+          local digest repeat_flag total_seen encoded_summary encoded_advice
+          IFS=$'\t' read -r digest repeat_flag total_seen encoded_summary encoded_advice <<<"$rest"
+          local summary_text advice_text
+          summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
+          advice_text="$(gc_decode_base64 "${encoded_advice:-}")"
+          summary_text="${summary_text//$'\r'/ }"
+          summary_text="${summary_text//$'\n'/ }"
+          advice_text="${advice_text//$'\r'/ }"
+          advice_text="${advice_text//$'\n'/ }"
+          summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
+          summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
+          advice_text="${advice_text#"${advice_text%%[![:space:]]*}"}"
+          advice_text="${advice_text%"${advice_text##*[![:space:]]}"}"
+          if [[ "$GC_COMMAND_STREAM_WARN_DIGESTS" != *"|$digest|"* ]]; then
+            local repeat_note=""
+            if [[ "$repeat_flag" == "1" ]]; then
+              repeat_note=" (repeat)"
+            fi
+            warn "Sequential sed/cat streaming detected${repeat_note}: ${summary_text}"
+            if [[ -n "$advice_text" ]]; then
+              warn "  Recommendation: ${advice_text}"
+            fi
+            if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
+              warn "  Observed ${total_seen} times; pivot to targeted searches to cut token usage."
+            fi
+            GC_COMMAND_STREAM_WARN_DIGESTS+="|$digest|"
+          fi
+          ;;
+        CMDSCAN$'\t'*)
+          local rest="${line#CMDSCAN$'\t'}"
+          local digest repeat_flag total_seen encoded_command encoded_message
+          IFS=$'\t' read -r digest repeat_flag total_seen encoded_command encoded_message <<<"$rest"
+          local command_text message_text
+          command_text="$(gc_decode_base64 "${encoded_command:-}")"
+          message_text="$(gc_decode_base64 "${encoded_message:-}")"
+          command_text="${command_text//$'\r'/ }"
+          command_text="${command_text//$'\n'/ }"
+          message_text="${message_text//$'\r'/ }"
+          message_text="${message_text//$'\n'/ }"
+          command_text="${command_text#"${command_text%%[![:space:]]*}"}"
+          command_text="${command_text%"${command_text##*[![:space:]]}"}"
+          message_text="${message_text#"${message_text%%[![:space:]]*}"}"
+          message_text="${message_text%"${message_text##*[![:space:]]}"}"
+          if [[ "$GC_COMMAND_SCAN_WARN_DIGESTS" != *"|$digest|"* ]]; then
+            local repeat_note=""
+            if [[ "$repeat_flag" == "1" ]]; then
+              repeat_note=" (repeat)"
+            fi
+            warn "Directory crawl detected${repeat_note}: ${command_text:-<command unavailable>}"
+            if [[ -n "$message_text" ]]; then
+              warn "  Reason: ${message_text}"
+            fi
+            if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
+              warn "  Observed ${total_seen} times; declare new focus before exploring other areas."
+            fi
+            GC_COMMAND_SCAN_WARN_DIGESTS+="|$digest|"
+          fi
+          ;;
+        CMDGUARD$'\t'*)
+          local rest="${line#CMDGUARD$'\t'}"
+          local digest repeat_flag issue_count encoded_command encoded_message
+          IFS=$'\t' read -r digest repeat_flag issue_count encoded_command encoded_message <<<"$rest"
+          local command_text message_text
+          command_text="$(gc_decode_base64 "${encoded_command:-}")"
+          message_text="$(gc_decode_base64 "${encoded_message:-}")"
+          command_text="${command_text//$'\r'/ }"
+          command_text="${command_text//$'\n'/ }"
+          message_text="${message_text//$'\r'/ }"
+          message_text="${message_text//$'\n'/ }"
+          command_text="${command_text#"${command_text%%[![:space:]]*}"}"
+          command_text="${command_text%"${command_text##*[![:space:]]}"}"
+          message_text="${message_text#"${message_text%%[![:space:]]*}"}"
+          message_text="${message_text%"${message_text##*[![:space:]]}"}"
+          if [[ "$GC_COMMAND_GUARD_WARN_DIGESTS" != *"|$digest|"* ]]; then
+            warn "Guardrails blocked expensive command: ${command_text:-pnpm}"
+            if [[ -n "$message_text" ]]; then
+              warn "  Fix before retry: ${message_text}"
+            fi
+            if [[ "$issue_count" =~ ^[0-9]+$ && "$issue_count" -gt 1 ]]; then
+              warn "  Multiple pre-check issues detected; update plan/focus once resolved."
+            fi
+            GC_COMMAND_GUARD_WARN_DIGESTS+="|$digest|"
+          fi
+          ;;
+        CMDFILE$'\t'*)
+          local rest="${line#CMDFILE$'\t'}"
+          local digest repeat_flag total_seen encoded_summary encoded_excerpt
+          IFS=$'\t' read -r digest repeat_flag total_seen encoded_summary encoded_excerpt <<<"$rest"
+          local summary_text excerpt_text
+          summary_text="$(gc_decode_base64 "${encoded_summary:-}")"
+          excerpt_text="$(gc_decode_base64 "${encoded_excerpt:-}")"
+          summary_text="${summary_text//$'\r'/ }"
+          summary_text="${summary_text//$'\n'/ }"
+          excerpt_text="${excerpt_text//$'\r'/ }"
+          excerpt_text="${excerpt_text//$'\n'/ }"
+          summary_text="${summary_text#"${summary_text%%[![:space:]]*}"}"
+          summary_text="${summary_text%"${summary_text##*[![:space:]]}"}"
+          excerpt_text="${excerpt_text#"${excerpt_text%%[![:space:]]*}"}"
+          excerpt_text="${excerpt_text%"${excerpt_text##*[![:space:]]}"}"
+          if [[ "$repeat_flag" == "1" ]]; then
+            if [[ "$GC_COMMAND_FILE_WARN_DIGESTS" != *"|$digest|"* ]]; then
+              warn "Repeated file read detected: ${summary_text}"
+              if [[ -n "$excerpt_text" ]]; then
+                local preview="$excerpt_text"
+                if [[ ${#preview} -gt 140 ]]; then
+                  preview="${preview:0:137}..."
+                fi
+                warn "  Refer to cached excerpt instead of re-running cat/sed: \"${preview}\""
+              else
+                warn "  Refer to the cached excerpt listed in the prompt instead of re-reading the file."
+              fi
+              if [[ "$total_seen" =~ ^[0-9]+$ && "$total_seen" -gt 1 ]]; then
+                warn "  Observed ${total_seen} reads for this slice; reuse the cached snippet unless the file changed."
+              fi
+              GC_COMMAND_FILE_WARN_DIGESTS+="|$digest|"
+            fi
+          else
+            if [[ -n "$summary_text" ]]; then
+              info "Cached file excerpt saved: ${summary_text}"
+            fi
+          fi
+          ;;
+      esac
+    done <<<"$py_output"
+    if [[ -n "$step" ]]; then
+      # shellcheck disable=SC2034  # tracked for downstream diagnostics
+      GC_LAST_CODEX_OUTPUT_STEP="$step"
     fi
-    local limit_value="${GC_CODEX_MAX_TOKENS_PER_TASK:-0}"
-    if [[ "$limit_value" =~ ^[0-9]+$ ]]; then
-      limit_value=$((limit_value))
-      if (( limit_value > 0 && GC_LAST_CODEX_TOTAL_TOKENS > limit_value )); then
-        # shellcheck disable=SC2034
-        GC_CODEX_USAGE_LIMIT_REACHED=1
-        # shellcheck disable=SC2034
-        GC_CODEX_USAGE_LIMIT_CONFIRMED=1
-        if [[ -z "${GC_CODEX_USAGE_LIMIT_MESSAGE:-}" ]]; then
-          GC_CODEX_USAGE_LIMIT_MESSAGE="Codex tokens ${GC_LAST_CODEX_TOTAL_TOKENS} exceeded per-task limit ${limit_value}."
-        fi
-      fi
+    if [[ "$max_output" =~ ^[0-9]+$ ]]; then
+      # shellcheck disable=SC2034  # tracked for downstream diagnostics
+      GC_LAST_CODEX_OUTPUT_LIMIT="$max_output"
+    else
+      # shellcheck disable=SC2034  # tracked for downstream diagnostics
+      GC_LAST_CODEX_OUTPUT_LIMIT=0
     fi
-    if command -v python3 >/dev/null 2>&1; then
-      local tail_info=""
-      local tail_helper=""
-      if tail_helper="$(gc_clone_python_tool "codex_log_tail.py" "${PROJECT_ROOT:-$PWD}")"; then
-        tail_info="$(python3 "$tail_helper" "$log_file")" || tail_info=""
-      else
-        tail_info=""
-      fi
-      if [[ -n "$tail_info" ]]; then
-        local tail_hash tail_b64 turn_hash turn_blocks
-        IFS=$'\n' read -r tail_hash tail_b64 turn_hash turn_blocks <<<"$tail_info"
-        # shellcheck disable=SC2034
-        [[ -n "$tail_hash" ]] && GC_LAST_CODEX_STDOUT_TAIL_HASH="$tail_hash"
-        # shellcheck disable=SC2034
-        [[ -n "$tail_b64" ]] && GC_LAST_CODEX_STDOUT_TAIL_BASE64="$tail_b64"
-        # shellcheck disable=SC2034
-        [[ -n "$turn_hash" ]] && GC_LAST_CODEX_TURN_DIFF_HASH="$turn_hash"
-        if [[ "$turn_blocks" =~ ^[0-9]+$ ]]; then
-          # shellcheck disable=SC2034
-          GC_LAST_CODEX_TURN_DIFF_BLOCKS="$turn_blocks"
-        fi
-      fi
-    fi
-    local stage_blocked="false"
-    if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
-      stage_blocked="true"
-    fi
-    local stage_pruned="${GC_CURRENT_PRUNED_ITEMS:-[]}" 
-    if [[ -z "$stage_pruned" ]]; then
-      stage_pruned="[]"
-    fi
-    gc_budget_log_stage "${step:-patch}" "${GC_LAST_CODEX_PROMPT_TOKENS:-0}" "${GC_LAST_CODEX_COMPLETION_TOKENS:-0}" "${GC_LAST_CODEX_TOTAL_TOKENS:-0}" "${duration_ms:-0}" "$stage_pruned" "{}" "$stage_blocked"
-    if [[ -n "${step:-}" ]] && gc_budget_stage_tripped "${step}"; then
-      GC_STAGE_LIMIT_LAST_STEP="${step}"
-      GC_STAGE_LIMIT_LAST_LIMIT="$(gc_budget_get_stage_limit "${step}")"
-    fi
-    rm -f "$log_file" || true
-    return 0
-  else
-    rm -f "$tmp_output" || true
+  fi
+  if (( record_success == 0 )); then
     warn "Failed to record Codex usage for task=${task} model=${model}."
+    rm -f "$log_file" || true
     return 1
   fi
+  local limit_value="${GC_CODEX_MAX_TOKENS_PER_TASK:-0}"
+  if [[ "$limit_value" =~ ^[0-9]+$ ]]; then
+    limit_value=$((limit_value))
+    if (( limit_value > 0 && GC_LAST_CODEX_TOTAL_TOKENS > limit_value )); then
+      # shellcheck disable=SC2034
+      GC_CODEX_USAGE_LIMIT_REACHED=1
+      # shellcheck disable=SC2034
+      GC_CODEX_USAGE_LIMIT_CONFIRMED=1
+      if [[ -z "${GC_CODEX_USAGE_LIMIT_MESSAGE:-}" ]]; then
+        GC_CODEX_USAGE_LIMIT_MESSAGE="Codex tokens ${GC_LAST_CODEX_TOTAL_TOKENS} exceeded per-task limit ${limit_value}."
+      fi
+    fi
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    local tail_info=""
+    local tail_helper=""
+    if tail_helper="$(gc_clone_python_tool "codex_log_tail.py" "${PROJECT_ROOT:-$PWD}")"; then
+      tail_info="$(python3 "$tail_helper" "$log_file")" || tail_info=""
+    else
+      tail_info=""
+    fi
+    if [[ -n "$tail_info" ]]; then
+      local tail_hash tail_b64 turn_hash turn_blocks
+      IFS=$'\n' read -r tail_hash tail_b64 turn_hash turn_blocks <<<"$tail_info"
+      # shellcheck disable=SC2034
+      [[ -n "$tail_hash" ]] && GC_LAST_CODEX_STDOUT_TAIL_HASH="$tail_hash"
+      # shellcheck disable=SC2034
+      [[ -n "$tail_b64" ]] && GC_LAST_CODEX_STDOUT_TAIL_BASE64="$tail_b64"
+      # shellcheck disable=SC2034
+      [[ -n "$turn_hash" ]] && GC_LAST_CODEX_TURN_DIFF_HASH="$turn_hash"
+      if [[ "$turn_blocks" =~ ^[0-9]+$ ]]; then
+        # shellcheck disable=SC2034
+        GC_LAST_CODEX_TURN_DIFF_BLOCKS="$turn_blocks"
+      fi
+    fi
+  fi
+  local stage_blocked="false"
+  if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" ]]; then
+    stage_blocked="true"
+  fi
+  local stage_pruned="${GC_CURRENT_PRUNED_ITEMS:-[]}" 
+  if [[ -z "$stage_pruned" ]]; then
+    stage_pruned="[]"
+  fi
+  gc_budget_log_stage "${step:-patch}" "${GC_LAST_CODEX_PROMPT_TOKENS:-0}" "${GC_LAST_CODEX_COMPLETION_TOKENS:-0}" "${GC_LAST_CODEX_TOTAL_TOKENS:-0}" "${duration_ms:-0}" "$stage_pruned" "{}" "$stage_blocked"
+  if [[ -n "${step:-}" ]] && gc_budget_stage_tripped "${step}"; then
+    GC_STAGE_LIMIT_LAST_STEP="${step}"
+    GC_STAGE_LIMIT_LAST_LIMIT="$(gc_budget_get_stage_limit "${step}")"
+  fi
+  rm -f "$log_file" || true
+  return 0
 }
 
 gc_set_llm_output_limit_if_valid() {
@@ -4589,10 +4645,16 @@ if (( GC_RESET_TTY_SIGNALS )) && [[ -t 0 || -t 1 || -t 2 ]]; then
   fi
 fi
 
-: "${CI:=1}"
 : "${TZ:=UTC}"
-: "${NODE_ENV:=test}"
-export CI TZ NODE_ENV
+export TZ
+
+# Respect caller CI/NODE_ENV by default; allow opt-in forcing via GC_FORCE_CI_ENV=1
+if [[ "${GC_FORCE_CI_ENV:-0}" == "1" ]]; then
+  : "${CI:=1}"
+  : "${NODE_ENV:=test}"
+fi
+[[ -n "${CI+x}" ]] && export CI
+[[ -n "${NODE_ENV+x}" ]] && export NODE_ENV
 
 : "${PNPM_IGNORE_NODE_VERSION:=1}"
 : "${NPM_CONFIG_ENGINE_STRICT:=false}"

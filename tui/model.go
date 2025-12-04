@@ -8028,9 +8028,9 @@ func (m *model) submitChatMessage() tea.Cmd {
 	if cmdName == "" {
 		cmdName = "codex"
 	}
-	if _, lookErr := exec.LookPath(cmdName); lookErr != nil {
-		m.chatMessages[replyIndex].pending = false
-		m.chatMessages[replyIndex].content = fmt.Sprintf("Codex CLI '%s' not found. Install it or set CODEX_BIN.", cmdName)
+		if _, lookErr := exec.LookPath(cmdName); lookErr != nil {
+			m.chatMessages[replyIndex].pending = false
+			m.chatMessages[replyIndex].content = fmt.Sprintf("Adapter CLI '%s' not found. Install it or set CODEX_BIN/ADAPTER_CMD when using the codex adapter.", cmdName)
 		m.chatMessages[replyIndex].time = time.Now()
 		m.refreshChatView()
 		_ = os.Remove(outputPath)
@@ -9387,7 +9387,7 @@ func (m *model) loadTokensUsageCmd() tea.Cmd {
 	}
 	projectPath := filepath.Clean(m.currentProject.Path)
 	return func() tea.Msg {
-		logPath := filepath.Join(projectPath, ".gpt-creator", "logs", "codex-usage.ndjson")
+	logPath := filepath.Join(projectPath, ".gpt-creator", "logs", "usage.ndjson")
 		usage, err := readTokensUsage(logPath)
 		return tokensLoadedMsg{usage: usage, err: err}
 	}
@@ -9401,8 +9401,8 @@ func (m *model) handleTokensLoaded(msg tokensLoadedMsg) tea.Cmd {
 		m.tokensViewData = tokensViewData{}
 		m.tokensCurrentRow = ""
 		if os.IsNotExist(msg.err) {
-			m.tokensCol.SetPlaceholder("No usage log found under .gpt-creator/logs/codex-usage.ndjson.")
-			m.previewCol.SetContent("No token usage log found.\nRun codex-enabled commands to capture usage data.\n")
+			m.tokensCol.SetPlaceholder("No usage log found under .gpt-creator/logs/usage.ndjson (or codex-usage.ndjson).")
+			m.previewCol.SetContent("No token usage log found.\nRun adapter-backed commands to capture usage data.\n")
 		} else {
 			m.tokensCol.SetPlaceholder("Failed to read token usage log.")
 			m.previewCol.SetContent(fmt.Sprintf("Failed to read token usage log:\n%v\n", msg.err))
@@ -10076,7 +10076,7 @@ func (m *model) refreshTokensView(resetSelection bool) tea.Cmd {
 	if len(data.Rows) == 0 {
 		m.tokensCurrentRow = ""
 		if len(data.Records) == 0 {
-			m.previewCol.SetContent("No usage entries found in this range.\nRun codex-enabled commands to capture usage data.\n")
+			m.previewCol.SetContent("No usage entries found in this range.\nRun adapter-backed commands to capture usage data.\n")
 		} else {
 			m.previewCol.SetContent("No rollups available for this range.\nPress '-' or '=' to adjust the range, or 'g' to toggle grouping.\n")
 		}
@@ -11431,7 +11431,7 @@ func resolveCodexModel() string {
 			return trimmed
 		}
 	}
-	return "gpt-5.1-codex"
+	return "gpt-4.1"
 }
 
 func formatElapsed(d time.Duration) string {

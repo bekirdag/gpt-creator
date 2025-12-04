@@ -24,7 +24,7 @@ TERMINAL_LOCK_STATUSES = {
     "ready_to_qa",
     "ready_for_qa",
     "blocked-budget",
-    "blocked-quota",
+    "blocked-quota",  # legacy
     "blocked-merge-conflict",
     "blocked-schema-drift",
     "blocked-schema-guard-error",
@@ -239,6 +239,11 @@ def record_task_progress(
         progress_state_value = "queued"
     elif status_lower:
         progress_state_value = status_lower
+
+    status_normalized = (status or "").strip().lower()
+    if status_normalized == "blocked-quota":
+        status = "blocked-budget"
+        status_normalized = "blocked-budget"
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row

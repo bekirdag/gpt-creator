@@ -86,12 +86,21 @@ cddb::run_codex() {
   local label="${3:-codex}"
 
   if [[ "$CDDB_DRY_RUN" == "1" ]]; then
-    cddb::warn "[dry-run] Skipping Codex invocation for ${label}"
+    cddb::warn "[dry-run] Skipping model invocation for ${label}"
     printf '{"status": "dry-run", "label": "%s"}\n' "$label" >"$output_file"
     return 0
   fi
 
   mkdir -p "$(dirname "$output_file")"
+
+  if [[ "${CDDB_ADAPTER:-}" == "command" ]]; then
+    cddb::log "Running command adapter for ${label} (cmd='${CDDB_MODEL}')"
+    if ! eval "${CDDB_MODEL} < \"$prompt_file\" > \"$output_file\""; then
+      cddb::warn "Command adapter failed for ${label}"
+      return 1
+    fi
+    return 0
+  fi
 
   if cddb::codex_has_subcommand chat; then
     local cmd=("$CDDB_CODEX_CMD" chat --model "$CDDB_MODEL" --prompt-file "$prompt_file" --output "$output_file")
@@ -140,9 +149,9 @@ cddb::run_codex() {
 
 cddb::init() {
   CDDB_PROJECT_ROOT="${1:?project root required}"
-  CDDB_MODEL="${2:-${CODEX_MODEL:-gpt-5.1-codex}}"
+  CDDB_MODEL="${2:-${GC_ACTIVE_AGENT_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-}}}}"
   CDDB_DRY_RUN="${3:-0}"
-  # shellcheck disable=SC2034  # reserved for future force re-run behavior
+  CDDB_ADAPTER="${GC_ACTIVE_AGENT_ADAPTER:-codex_cli}"
   CDDB_FORCE="${4:-0}"
 
   CDDB_PROJECT_ROOT="$(cddb::abs_path "$CDDB_PROJECT_ROOT")"
@@ -165,18 +174,38 @@ cddb::init() {
   CDDB_SQL_DIR="$CDDB_PIPELINE_DIR/sql"
   CDDB_TMP_DIR="$CDDB_PIPELINE_DIR/tmp"
 
+  if [[ "$CDDB_FORCE" == "1" && "${CDDB_DRY_RUN:-0}" != "1" ]]; then
+    rm -rf "$CDDB_PIPELINE_DIR"
+  fi
+
   mkdir -p "$CDDB_PROMPTS_DIR" "$CDDB_OUTPUT_DIR" "$CDDB_SQL_DIR" "$CDDB_TMP_DIR"
 
   CDDB_SCHEMA_PATH="$CDDB_SQL_DIR/schema.sql"
   CDDB_SEED_PATH="$CDDB_SQL_DIR/seed.sql"
 
   CDDB_CODEX_CMD="${CODEX_BIN:-${CODEX_CMD:-codex}}"
-  if ! command -v "$CDDB_CODEX_CMD" >/dev/null 2>&1; then
+  if [[ "${CDDB_ADAPTER:-codex_cli}" == "codex_cli" && ! -x "$CDDB_CODEX_CMD" ]]; then
     cddb::warn "Codex CLI '$CDDB_CODEX_CMD' not found; enabling dry-run mode."
     CDDB_DRY_RUN=1
   fi
 
+  cddb::assert_overwrite_ok
   cddb::locate_documents
+}
+
+cddb::assert_overwrite_ok() {
+  # Only enforce overwrite guard when we plan to write files.
+  if [[ "${CDDB_DRY_RUN:-0}" == "1" ]]; then
+    return 0
+  fi
+  local -a existing=()
+  local path
+  for path in "$CDDB_SCHEMA_PATH" "$CDDB_SEED_PATH"; do
+    [[ -s "$path" ]] && existing+=("$path")
+  done
+  if (( ${#existing[@]} > 0 )) && [[ "${CDDB_FORCE:-0}" != "1" ]]; then
+    cddb::die "Existing dump artifacts found; rerun with --force to overwrite: ${existing[*]}"
+  fi
 }
 
 cddb::locate_documents() {
@@ -275,6 +304,9 @@ cddb::run_pipeline() {
     if [[ "$CDDB_DRY_RUN" == "1" ]]; then
       cddb::warn "[dry-run] schema generation skipped"
     else
+      if [[ ! -s "$schema_raw" ]]; then
+        cddb::die "Schema generation produced empty output; inspect ${schema_raw}"
+      fi
       cp "$schema_raw" "$CDDB_SCHEMA_PATH"
       cddb::log "Schema dump written → ${CDDB_SCHEMA_PATH}"
     fi
@@ -295,6 +327,9 @@ cddb::run_pipeline() {
     if [[ "$CDDB_DRY_RUN" == "1" ]]; then
       cddb::warn "[dry-run] seed generation skipped"
     else
+      if [[ ! -s "$seed_raw" ]]; then
+        cddb::die "Seed generation produced empty output; inspect ${seed_raw}"
+      fi
       cp "$seed_raw" "$CDDB_SEED_PATH"
       cddb::log "Seed dump written → ${CDDB_SEED_PATH}"
     fi

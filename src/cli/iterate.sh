@@ -17,8 +17,8 @@ fi
 
 # Sensible defaults if constants are missing
 : "${GC_NAME:=gpt-creator}"
-: "${GC_VERSION:=0.1.0}"
-: "${GC_DEFAULT_MODEL:=gpt-5-high}"
+# Prefer CLI default model to avoid gated SKUs.
+: "${GC_DEFAULT_MODEL:=gpt-4.1}"
 : "${PROJECT_DIR:=${PWD}}"
 : "${GC_STATE_DIR:=${PROJECT_DIR}/.gpt-creator}"
 : "${GC_STAGING_DIR:=${GC_STATE_DIR}/staging}"
@@ -127,7 +127,7 @@ fi
 [[ -f "$TASKS_FILE" ]] || die "Tasks file not found: $TASKS_FILE"
 
 timestamp="$(date +%Y%m%d_%H%M%S)"
-RUN_DIR="$GC_STATE_DIR/codex_runs/$timestamp"
+RUN_DIR="$GC_STATE_DIR/${GC_ITERATE_RUN_DIR:-iterate_runs}/$timestamp"
 CTX_DIR="$RUN_DIR/context"
 OUT_DIR="$RUN_DIR/out"
 mkdir -p "$CTX_DIR" "$OUT_DIR"

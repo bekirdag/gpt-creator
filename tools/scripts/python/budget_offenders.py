@@ -19,7 +19,8 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Detect budget offenders.")
-    parser.add_argument("--usage-file", default=".gpt-creator/logs/codex-usage.ndjson")
+    usage_default = os.getenv("GC_USAGE_FILE", ".gpt-creator/logs/usage.ndjson")
+    parser.add_argument("--usage-file", default=usage_default)
     parser.add_argument("--run-id", default="")
     parser.add_argument("--window-runs", type=int, default=10)
     parser.add_argument("--top-k", type=int, default=3)
@@ -33,7 +34,11 @@ def parse_args() -> argparse.Namespace:
 
 def load_usage(path: Path) -> List[Dict[str, Any]]:
     if not path.exists():
-        return []
+        alt_path = path.with_name("codex-usage.ndjson")
+        if path.name != "codex-usage.ndjson" and alt_path.exists():
+            path = alt_path
+        else:
+            return []
     entries: List[Dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()

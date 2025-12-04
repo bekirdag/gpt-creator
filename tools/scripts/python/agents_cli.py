@@ -175,7 +175,7 @@ def _resolve_pair(service: AgentService, client: str, model: str = "") -> Dict[s
 
 
 def _build_command_preview(pair: Dict[str, Any], prompt_text: Optional[str] = None) -> Dict[str, Any]:
-    adapter = pair.get("adapter") or "codex_cli"
+    adapter = pair.get("adapter") or ""
     cfg = pair.get("adapterConfig") or {}
     model = pair.get("model") or ""
     command: List[str] = []
@@ -188,12 +188,12 @@ def _build_command_preview(pair: Dict[str, Any], prompt_text: Optional[str] = No
             command = [cfg.get("binary")]
             if model:
                 command.append(model)
-    elif adapter in {"codex_cli", "openai_cli", "openai"}:
-        command = ["codex", "run", "--model", model]
-    else:
+    elif adapter:
         command = [adapter]
         if model:
             command.append(model)
+    else:
+        raise ValueError("Adapter not configured for this client/model; cannot preview command.")
     env: Dict[str, str] = {}
     for key in ("apiKeyEnv", "apiBaseEnv", "orgEnv"):
         env_name = pair.get(key)
@@ -410,7 +410,9 @@ def handle_agent_check(service: AgentService, args: argparse.Namespace) -> int:
         pair = _resolve_pair(service, client, model)
     except ValueError as exc:
         return _exit(str(exc), 2)
-    adapter = pair.get("adapter") or "codex_cli"
+    adapter = pair.get("adapter") or ""
+    if not adapter:
+        return _exit("Adapter not configured for this client/model; cannot run agent-check.", 2)
     env_overrides: Dict[str, str] = {}
     api_key_env = pair.get("apiKeyEnv")
     if api_key_env:
@@ -725,7 +727,10 @@ def handle_test_agent(service: AgentService, args: argparse.Namespace) -> int:
             resolved_pair = _resolve_pair(service, client_hint, model_hint or "")
         except Exception as exc:
             return _exit(str(exc), 2)
-    command_preview = _build_command_preview(resolved_pair, prompt_text)
+    try:
+        command_preview = _build_command_preview(resolved_pair, prompt_text)
+    except ValueError as exc:
+        return _exit(str(exc), 2)
     payload: Dict[str, Any] = {
         "agent": agent.name if agent else None,
         "resolved": resolved_pair,

@@ -53,6 +53,10 @@ _cmd_work_on_tasks_impl() {
   local binder_max_size_bytes=209715200
   local binder_clear_on_migration=0
   local python_bin="${PYTHON_BIN:-python3}"
+  # Avoid strict failure if Python is unavailable; downstream commands will error as needed.
+  if ! command -v "$python_bin" >/dev/null 2>&1; then
+    warn "Python runtime '$python_bin' not found; some helpers may fail."
+  fi
   prompt_safeguard_helper="$(gc_clone_python_tool "prompt_safeguard.py" "${PROJECT_ROOT:-$PWD}")" || return 1
   GC_PY_HELPERS_DIR="$(dirname "$prompt_safeguard_helper")"
   export GC_PY_HELPERS_DIR
@@ -75,22 +79,25 @@ _cmd_work_on_tasks_impl() {
     esac
   fi
 
-  local codex_timeout_default=600
-  local codex_timeout_value="${GC_CODEX_EXEC_TIMEOUT:-}"
-  if [[ -z "$codex_timeout_value" ]]; then
-    GC_CODEX_EXEC_TIMEOUT="$codex_timeout_default"
-  elif [[ "$codex_timeout_value" =~ ^[0-9]+$ ]]; then
-    if (( codex_timeout_value <= 0 )); then
-      if [[ -n "${GC_CODEX_EXEC_TIMEOUT_INITIAL:-}" ]]; then
-        warn "GC_CODEX_EXEC_TIMEOUT (idle timeout) must be greater than zero; defaulting to ${codex_timeout_default}s."
+  local adapter_timeout_default=600
+  local adapter_timeout_seconds="$adapter_timeout_default"
+  if [[ "${GC_ACTIVE_AGENT_ADAPTER:-codex_cli}" == "codex_cli" ]]; then
+    local adapter_timeout_value="${GC_CODEX_EXEC_TIMEOUT:-}"
+    if [[ -z "$adapter_timeout_value" ]]; then
+      adapter_timeout_seconds="$adapter_timeout_default"
+    elif [[ "$adapter_timeout_value" =~ ^[0-9]+$ ]]; then
+      if (( adapter_timeout_value > 0 )); then
+        adapter_timeout_seconds="$adapter_timeout_value"
+      else
+        [[ -n "${GC_CODEX_EXEC_TIMEOUT_INITIAL:-}" ]] && warn "GC_CODEX_EXEC_TIMEOUT (idle timeout) must be greater than zero; defaulting to ${adapter_timeout_default}s."
+        adapter_timeout_seconds="$adapter_timeout_default"
       fi
-      GC_CODEX_EXEC_TIMEOUT="$codex_timeout_default"
+    else
+      warn "GC_CODEX_EXEC_TIMEOUT ('${adapter_timeout_value}') is not numeric; defaulting idle timeout to ${adapter_timeout_default}s."
+      adapter_timeout_seconds="$adapter_timeout_default"
     fi
-  else
-    warn "GC_CODEX_EXEC_TIMEOUT ('${codex_timeout_value}') is not numeric; defaulting idle timeout to ${codex_timeout_default}s."
-    GC_CODEX_EXEC_TIMEOUT="$codex_timeout_default"
+    GC_CODEX_EXEC_TIMEOUT="$adapter_timeout_seconds"
   fi
-  local codex_timeout_seconds="${GC_CODEX_EXEC_TIMEOUT}"
 
   local loop_guard_triggered=0
   local loop_guard_exit_code="${GC_LOOP_GUARD_EXIT_CODE:-72}"
@@ -181,16 +188,16 @@ _cmd_work_on_tasks_impl() {
         [[ -n "$agent_selector" ]] || die "--agent requires an agent name"
         shift
         ;;
-      --codex-model)
+      --adapter-model)
         agent_model_override="${2:-}"
         agent_flag=1
-        [[ -n "$agent_model_override" ]] || die "--codex-model requires a model name"
+        [[ -n "$agent_model_override" ]] || die "--adapter-model requires a model name"
         shift 2
         ;;
-      --codex-model=*)
+      --adapter-model=*)
         agent_model_override="${1#*=}"
         agent_flag=1
-        [[ -n "$agent_model_override" ]] || die "--codex-model requires a model name"
+        [[ -n "$agent_model_override" ]] || die "--adapter-model requires a model name"
         shift
         ;;
       --keep-artifacts) keep_artifacts=1; shift;;
@@ -362,13 +369,26 @@ _cmd_work_on_tasks_impl() {
   GC_LAST_VERIFY_STATUS="skipped"
   export GC_LAST_VERIFY_SUMMARY=""
 
-  if [[ -n "$agent_model_override" ]]; then
+  if [[ -n "${agent_model_override:-${GC_ACTIVE_AGENT_MODEL:-}}" ]]; then
+    export GC_ACTIVE_MODEL="${agent_model_override:-${GC_ACTIVE_AGENT_MODEL}}"
+  fi
+  if [[ -n "${GC_ACTIVE_AGENT_ADAPTER:-}" ]]; then
+    export GC_ACTIVE_ADAPTER="${GC_ACTIVE_AGENT_ADAPTER}"
+  fi
+  gc_adapter_profile_init
+  if [[ -n "$agent_model_override" && "${GC_ACTIVE_AGENT_ADAPTER:-codex_cli}" == "codex_cli" ]]; then
     CODEX_MODEL="$agent_model_override"
     CODEX_MODEL_LOW="$agent_model_override"
     CODEX_MODEL_NON_CODE="$agent_model_override"
     CODEX_MODEL_CODE="$agent_model_override"
     export CODEX_MODEL CODEX_MODEL_LOW CODEX_MODEL_NON_CODE CODEX_MODEL_CODE
-    info "Codex agent override active → ${agent_model_override}"
+    info "Agent model override active for codex adapter → ${agent_model_override}"
+  fi
+  if [[ -n "${agent_model_override:-${GC_ACTIVE_AGENT_MODEL:-}}" ]]; then
+    export GC_ACTIVE_MODEL="${agent_model_override:-${GC_ACTIVE_AGENT_MODEL}}"
+  fi
+  if [[ -n "${GC_ACTIVE_AGENT_ADAPTER:-}" ]]; then
+    export GC_ACTIVE_ADAPTER="${GC_ACTIVE_AGENT_ADAPTER}"
   fi
   export GC_LAST_VERIFY_REPORT=""
   export GC_LAST_VERIFY_DETAILS=""
@@ -530,7 +550,7 @@ _cmd_work_on_tasks_impl() {
     info "Idle watchdog active → ${idle_timeout}s without progress."
   fi
   if [[ -n "$diff_repeat_limit_override" ]]; then
-    info "Codex diff repeat guard limit → ${diff_repeat_limit_override} diff(s)."
+    info "Adapter diff repeat guard limit → ${diff_repeat_limit_override} diff(s)."
   fi
 
   local diff_guard_stall_limit="${GC_DIFF_GUARD_STALL_LIMIT:-1}"
@@ -789,7 +809,10 @@ _cmd_work_on_tasks_impl() {
   }
 
   ensure_ctx "$root"
-  local work_plan_tasks_db="${PLAN_DIR}/tasks/tasks.db"
+  local work_plan_tasks_db="${GC_TASKS_DB_PATH:-${GC_TASKS_DB:-${PLAN_DIR}/tasks/tasks.db}}"
+  if [[ "$work_plan_tasks_db" != /* ]]; then
+    work_plan_tasks_db="${PROJECT_ROOT:-$PWD}/${work_plan_tasks_db}"
+  fi
   [[ -f "$work_plan_tasks_db" ]] || die "Tasks database not found at ${work_plan_tasks_db}. Run 'gpt-creator create-tasks' first."
 
   if ! gc_resolve_agent "$agent_selector" "$work_plan_tasks_db" "${PROJECT_ROOT:-$PWD}"; then
@@ -815,10 +838,9 @@ _cmd_work_on_tasks_impl() {
   fi
 
   if [[ -z "${GC_ACTIVE_AGENT_ADAPTER:-}" ]]; then
-    case "${GC_ACTIVE_AGENT_CLIENT:-codex_cli}" in
+    case "${GC_ACTIVE_AGENT_CLIENT:-}" in
       gpt-oss|ollama) GC_ACTIVE_AGENT_ADAPTER="command" ;;
-      openai) GC_ACTIVE_AGENT_ADAPTER="codex_cli" ;;
-      *) GC_ACTIVE_AGENT_ADAPTER="codex_cli" ;;
+      *) GC_ACTIVE_AGENT_ADAPTER="" ;;
     esac
   fi
 
@@ -1063,7 +1085,8 @@ if [[ -x "$schema_guard_script" ]]; then
     auto_abandon_flag=0
   fi
 
-  local budget_usage_file="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/codex-usage.ndjson"
+  local budget_usage_file="${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/usage.ndjson"
+  export GC_USAGE_FILE="$budget_usage_file"
   local budget_offenders_json="{}"
   local offenders_helper
   if offenders_helper="$(gc_clone_python_tool "budget_offenders.py" "$PROJECT_ROOT" 2>/dev/null)"; then
@@ -1407,7 +1430,7 @@ gc_clear_active_task
   local manual_followups=0
   local usage_limit_triggered=0
   local batch_limit_reached=0
-  local run_blocked_quota=0
+  local run_blocked_budget=0
 
   gc_touch_progress() {
     last_progress_ts="$(date +%s)"
@@ -1946,7 +1969,7 @@ print(error)'
       local stage_baseline_verify="${GC_BUDGET_STAGE_TOTAL_VERIFY:-0}"
 
       local prompt_meta
-      if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$position_int" "$prompt_path" "$context_tail" "$CODEX_MODEL_CODE" "$PROJECT_ROOT" "$STAGING_DIR")"; then
+      if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$position_int" "$prompt_path" "$context_tail" "${GC_ACTIVE_MODEL:-$CODEX_MODEL_CODE}" "$PROJECT_ROOT" "$STAGING_DIR")"; then
         warn "  Failed to build prompt for task index ${position_int}; skipping task."
         manual_followups=1
         work_failed=1
@@ -2013,12 +2036,16 @@ print(error)'
 
       local task_status_original="$task_status_current"
       local task_status_lower="${task_status_original,,}"
+      if [[ "$task_status_lower" == "blocked-quota" ]]; then
+        task_status_current="blocked-budget"
+        task_status_lower="blocked-budget"
+      fi
       local task_locked_migration=0
       if [[ "$task_locked_flag" =~ ^[0-9]+$ ]] && (( task_locked_flag > 0 )); then
         task_locked_migration=1
       fi
       local task_status_reason_current="$task_status_reason"
-      local terminal_locked_regex='^(complete|completed|completed-no-changes|dead-letter|permanent-fail|blocked-budget|blocked-quota|blocked-merge-conflict|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\([^)]+\)|skipped-already-complete)$'
+      local terminal_locked_regex='^(complete|completed|completed-no-changes|dead-letter|permanent-fail|blocked-budget|blocked-merge-conflict|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\([^)]+\)|skipped-already-complete)$'
       if [[ "$task_status_lower" == blocked-dependency\(* ]]; then
         local blocked_reason="${task_status_reason_current:-${task_status_original}}"
         warn "  Task ${task_number} (${banner_task_id}) blocked by dependency: ${blocked_reason}; skipping for now."
@@ -2027,25 +2054,32 @@ print(error)'
       fi
 
       printf '\n'
-      local task_codex_step="patch"
-      local task_codex_model=""
-      local task_codex_reasoning=""
-      gc_codex_profile_for_step "$task_codex_step" task_codex_model task_codex_reasoning
+      local task_adapter_step="patch"
+      local task_adapter_model=""
+      local task_adapter_reasoning=""
+      local task_adapter_name="${GC_ACTIVE_AGENT_ADAPTER:-${GC_ACTIVE_ADAPTER:-}}"
+      if [[ -z "$task_adapter_name" ]]; then
+        task_adapter_name="unknown-adapter"
+      fi
+      local is_codex_adapter=0
+      if [[ "$task_adapter_name" == "codex_cli" ]]; then
+        is_codex_adapter=1
+      fi
 
       local task_alias_line="Working on task ${task_number} (${banner_task_id})"
       local task_summary_line="${task_title:-(untitled)}"
-      local task_provider_display="${CODEX_BIN:-codex}"
+      local task_provider_display="$task_adapter_name"
       local task_workdir_display="${PROJECT_ROOT:-$PWD}"
       gc_render_task_start_panel \
         "$banner_task_id" \
         "$task_alias_line" \
         "$task_summary_line" \
-        "$task_codex_model" \
+        "$task_adapter_model" \
         "$task_provider_display" \
         "$task_workdir_display" \
-        "$task_codex_reasoning" \
+        "$task_adapter_reasoning" \
         "$run_stamp" \
-        "$task_codex_step"
+        "$task_adapter_step"
       local current_task_id="${task_id:-${banner_task_id:-${slug:-story}-${task_number}}}"
       CURRENT_TASK_ID="$current_task_id"
       export CURRENT_TASK_ID
@@ -2054,7 +2088,7 @@ print(error)'
       info "    ${task_summary_line}"
 
       local call_name="task-${order_prefix}-${slug}"
-      local codex_ok=0
+      local flow_ok=0
       local attempt=0
       local max_attempts=2
       gc_touch_progress
@@ -2095,7 +2129,7 @@ print(error)'
       local task_last_outcome_reason=""
       local previous_attempt_signature=""
       local apply_status="pending"
-      local skip_codex_reason="prompt-blocked"
+      local skip_reason="budget-guard"
       local task_report_path="${report_dir}/task_${task_number}.log"
       local task_log_archive_path="${story_log_dir}/task_${order_prefix}.log"
       local task_change_sizes=""
@@ -2111,19 +2145,23 @@ print(error)'
       fi
       local empty_checkpoint_created=0
       local attempt_tokens=0
-      local codex_attempted=0
-      local skip_codex=0
+      local adapter_attempted=0
+      local skip_flow=0
       local blocked_stop_run=0
       local prompt_status="ok"
       local prompt_soft_limit_value=0
       local prompt_hard_limit_value=0
       # shellcheck disable=SC2034
       local prompt_stop_on_overbudget="true"
+      local budget_block_status="blocked-budget"
       local prompt_token_estimate=0
       local prompt_pruned_bytes=0
       local prompt_pruned_items="[]"
       local prompt_binder_status=""
       local prompt_binder_reason=""
+      local last_attempt_prompt_tokens=0
+      local last_attempt_completion_tokens=0
+      local last_attempt_total_tokens=0
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
       export GC_ACTIVE_TASK_DB="$tasks_db"
       export GC_ACTIVE_TASK_SLUG="$slug"
@@ -2149,6 +2187,13 @@ print(error)'
           )
         fi
       fi
+      local prompt_status_normalized="${prompt_status,,}"
+      if [[ "$prompt_status_normalized" == "blocked-quota" ]]; then
+        prompt_status_normalized="$budget_block_status"
+      elif [[ "$prompt_status_normalized" == "blocked-budget" ]]; then
+        prompt_status_normalized="$budget_block_status"
+      fi
+      prompt_status="$prompt_status_normalized"
       GC_CURRENT_PRUNED_ITEMS="$prompt_pruned_items"
       if [[ "$prompt_token_estimate" =~ ^[0-9]+$ ]]; then
         task_prompt_estimate=$((prompt_token_estimate))
@@ -2188,13 +2233,15 @@ print(error)'
           continue
         fi
         task_notes+=("Retrieve stage exceeded maximum automatic budget (${retrieve_tokens}/${retrieve_limit_value}); deferring task for follow-up.")
-        skip_codex=1
-        codex_ok=1
+        skip_flow=1
+        run_blocked_budget=1
+        flow_ok=1
         manual_followups=1
         keep_output=0
         task_result_status="retryable"
-        apply_status="prompt-blocked"
-        skip_codex_reason="stage-limit"
+        apply_status="budget-skipped"
+        skip_reason="stage-limit"
+        task_outcome_reason="${task_outcome_reason:-budget-stage-limit}"
         break_after_update=1
         continue
       else
@@ -2223,15 +2270,17 @@ print(error)'
           fi
         fi
         if gc_budget_stage_should_skip "patch"; then
-          skip_codex=1
-          codex_ok=1
+          skip_flow=1
+          run_blocked_budget=1
+          flow_ok=1
           task_needs_review=0
           manual_followups=0
           keep_output=0
           task_result_status="abandoned-for-budget"
           apply_status="auto-abandon"
-          skip_codex_reason="$(gc_budget_stage_skip_reason "patch")"
-          [[ -z "$skip_codex_reason" ]] && skip_codex_reason="auto-abandon"
+          skip_reason="$(gc_budget_stage_skip_reason "patch")"
+          [[ -z "$skip_reason" ]] && skip_reason="auto-abandon"
+          task_outcome_reason="${task_outcome_reason:-budget-auto-abandon}"
         fi
       fi
 
@@ -2253,7 +2302,7 @@ print(error)'
         current_prompt_cap_int=$prompt_token_hard_cap
       fi
 
-      if (( prompt_token_hard_cap > 0 )) && (( prompt_estimate_tokens > prompt_token_hard_cap )) && (( skip_codex == 0 )); then
+      if (( prompt_token_hard_cap > 0 )) && (( prompt_estimate_tokens > prompt_token_hard_cap )) && (( skip_flow == 0 )); then
         local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-1000000}"
         local new_prompt_cap=$((prompt_estimate_tokens + prompt_estimate_tokens / 10 + 2048))
         if (( new_prompt_cap > max_prompt_cap )); then
@@ -2271,16 +2320,18 @@ print(error)'
           continue
         fi
         warn "    Prompt ~${prompt_estimate_tokens} tokens exceeds maximum automatic cap ${current_prompt_cap_int}; deferring task."
-        skip_codex=1
-        codex_ok=1
+        skip_flow=1
+        run_blocked_budget=1
+        flow_ok=1
         manual_followups=1
         keep_output=0
         task_result_status="retryable"
-        apply_status="prompt-blocked"
-        skip_codex_reason="hard-cap"
-        prompt_status="blocked-quota"
+        apply_status="budget-capped"
+        skip_reason="hard-cap"
+        prompt_status="$budget_block_status"
         prompt_hard_limit_value="$current_prompt_cap_int"
         prompt_token_estimate="$prompt_estimate_tokens"
+        task_outcome_reason="${task_outcome_reason:-budget-hard-cap}"
         if [[ "$prompt_stop_on_overbudget" != "true" ]]; then
           prompt_stop_on_overbudget="true"
         fi
@@ -2290,7 +2341,7 @@ print(error)'
         continue
       fi
 
-      if [[ "${prompt_status,,}" != "blocked-quota" ]]; then
+      if [[ "$prompt_status" != "$budget_block_status" ]]; then
         if (( current_prompt_cap_int > 0 )) && [[ "$prompt_token_estimate" =~ ^[0-9]+$ ]] && (( prompt_token_estimate > current_prompt_cap_int )); then
           local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-1000000}"
           local new_prompt_cap=$((prompt_token_estimate + prompt_token_estimate / 10 + 2048))
@@ -2308,20 +2359,22 @@ print(error)'
             fi
             continue
           fi
-          skip_codex=1
-          codex_ok=1
-          task_needs_review=1
-          manual_followups=1
-          keep_output=0
-          task_result_status="retryable"
-          apply_status="prompt-blocked"
-          skip_codex_reason="hard-cap"
-          local budget_note="${prompt_token_estimate}/${current_prompt_cap_int}"
-          task_notes+=("Prompt estimate ${budget_note} exceeds maximum automatic hard token budget; defer and retry after context trim.")
-          gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$codex_model_for_step"
-          break_after_update=1
-          continue
         fi
+        skip_flow=1
+        run_blocked_budget=1
+        flow_ok=1
+        task_needs_review=1
+        manual_followups=1
+        keep_output=0
+        task_result_status="retryable"
+        apply_status="budget-capped"
+        skip_reason="hard-cap"
+        local budget_note="${prompt_token_estimate}/${current_prompt_cap_int}"
+        task_notes+=("Prompt estimate ${budget_note} exceeds maximum automatic hard token budget; defer and retry after context trim.")
+        gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$adapter_model_for_step"
+        task_outcome_reason="${task_outcome_reason:-budget-hard-cap}"
+        break_after_update=1
+        continue
       fi
 
       if [[ -n "$prompt_binder_status" ]]; then
@@ -2338,13 +2391,13 @@ print(error)'
         esac
       fi
 
-      if [[ "${prompt_status,,}" == "blocked-quota" ]]; then
+      if [[ "$prompt_status" == "$budget_block_status" ]]; then
         local max_prompt_cap="${GC_AUTOBUDGET_PROMPT_MAX:-1000000}"
         local new_prompt_cap=$((prompt_token_estimate + prompt_token_estimate / 10 + 2048))
         if (( new_prompt_cap > max_prompt_cap )); then
           new_prompt_cap="$max_prompt_cap"
         fi
-        if (( skip_codex == 0 )) && (( new_prompt_cap > current_prompt_cap_int )); then
+        if (( skip_flow == 0 )) && (( new_prompt_cap > current_prompt_cap_int )); then
           warn "    Prompt exceeded token budgets (${prompt_token_estimate}/${current_prompt_cap_int}); raising cap to ${new_prompt_cap} and retrying."
           GC_TASK_TOKEN_HARD_LIMIT="$new_prompt_cap"
           gc_set_llm_output_limit_if_valid GC_LLM_OUTPUT_LIMIT_HARD_CAP "$new_prompt_cap"
@@ -2355,13 +2408,14 @@ print(error)'
           fi
           continue
         fi
-        skip_codex=1
-        codex_ok=1
+        skip_flow=1
+        run_blocked_budget=1
+        flow_ok=1
         task_needs_review=1
         manual_followups=1
         keep_output=0
         task_result_status="retryable"
-        apply_status="prompt-blocked"
+        apply_status="budget-capped"
         local budget_note="${prompt_token_estimate}"
         if (( current_prompt_cap_int > 0 )); then
           budget_note="${prompt_token_estimate}/${current_prompt_cap_int}"
@@ -2369,7 +2423,8 @@ print(error)'
           budget_note="${prompt_token_estimate}/${prompt_soft_limit_value}"
         fi
         task_notes+=("Prompt exceeded token budgets after deterministic pruning; estimated ${budget_note} tokens. Will retry with trimmed context.")
-        gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$codex_model_for_step"
+        gc_log_blocked_quota "$prompt_meta_path" "${task_id:-}" "$slug" "$run_stamp" "$adapter_model_for_step"
+        task_outcome_reason="${task_outcome_reason:-budget-hard-cap}"
         break_after_update=1
         continue
       fi
@@ -2388,9 +2443,9 @@ print(error)'
       fi
       [[ -n "$task_last_changes_count" ]] || task_last_changes_count="0"
 
-      if (( skip_codex == 1 )); then
+      if (( skip_flow == 1 )); then
         attempt=$max_attempts
-        gc_budget_log_stage "patch" 0 0 0 0 "$prompt_pruned_items" "{}" "true" "$skip_codex_reason"
+        gc_budget_log_stage "patch" 0 0 0 0 "$prompt_pruned_items" "{}" "true" "$skip_reason"
       fi
 
       while (( attempt < max_attempts )); do
@@ -2415,7 +2470,7 @@ print(error)'
         gc_touch_progress
         GC_LAST_APPLY_META=""
         GC_LAST_APPLY_PAYLOAD=""
-        codex_attempted=1
+        adapter_attempted=1
         task_change_operations=0
         local diff_before=""
         task_change_sizes=""
@@ -2447,27 +2502,27 @@ print(error)'
         fi
         local apply_helper="${scripts_root}/python/work_on_tasks_apply.py"
         if [[ ! -f "$apply_helper" ]]; then
-          warn "Python apply helper missing; skipping Codex apply."
+          warn "Python apply helper missing; skipping Adapter apply."
           task_needs_review=1
           manual_followups=1
           keep_output=1
           task_result_status="permanent-fail"
           gc_mark_outcome "PERMANENT_FAIL" "TOOLING"
-          apply_status="codex-failed"
-          task_notes+=("Codex apply helper missing; manual review required.")
+          apply_status="adapter-failed"
+          task_notes+=("Adapter apply helper missing; manual review required.")
           break
         fi
 
         local apply_json
-        if ! apply_json="$("${PYTHON_BIN:-python3}" "$apply_helper" --prompt "$prompt_path" --output "$output_path" --call-name "$call_name" --step "$task_codex_step" --project-root "$PROJECT_ROOT" --patch-artifact "$patch_artifact_path" ${diff_guard_enabled:+--diff-guard})"; then
-          warn "Codex apply helper failed; manual review required."
+        if ! apply_json="$("${PYTHON_BIN:-python3}" "$apply_helper" --prompt "$prompt_path" --output "$output_path" --call-name "$call_name" --step "$task_adapter_step" --project-root "$PROJECT_ROOT" --patch-artifact "$patch_artifact_path" ${diff_guard_enabled:+--diff-guard})"; then
+          warn "Adapter apply helper failed; manual review required."
           task_needs_review=1
           manual_followups=1
           keep_output=1
           task_result_status="permanent-fail"
           gc_mark_outcome "PERMANENT_FAIL" "TOOLING"
-          apply_status="codex-failed"
-          task_notes+=("Codex apply helper failed; manual review required.")
+          apply_status="adapter-failed"
+          task_notes+=("Adapter apply helper failed; manual review required.")
           break
         fi
 
@@ -2489,20 +2544,32 @@ print(error)'
         fi
         if [[ "$prompt_tokens_val" =~ ^[0-9]+$ ]]; then
           task_llm_prompt_tokens=$((task_llm_prompt_tokens + prompt_tokens_val))
+          last_attempt_prompt_tokens=$((prompt_tokens_val))
+        else
+          last_attempt_prompt_tokens=0
         fi
         if [[ "$completion_tokens_val" =~ ^[0-9]+$ ]]; then
           task_llm_completion_tokens=$((task_llm_completion_tokens + completion_tokens_val))
+          last_attempt_completion_tokens=$((completion_tokens_val))
+        else
+          last_attempt_completion_tokens=0
         fi
         if (( ${#apply_notes_parsed[@]} )); then
           task_notes+=("${apply_notes_parsed[@]}")
         fi
+        if [[ "$total_tokens_val" =~ ^[0-9]+$ ]]; then
+          last_attempt_total_tokens=$((total_tokens_val))
+        else
+          last_attempt_total_tokens=$((last_attempt_prompt_tokens + last_attempt_completion_tokens))
+        fi
+        gc_budget_log_stage "patch" "$last_attempt_prompt_tokens" "$last_attempt_completion_tokens" "$last_attempt_total_tokens" 0 "$prompt_pruned_items" "{}" "false" "${status_val:-adapter-run}"
         case "$status_val" in
           ok)
-            codex_ok=1
+            flow_ok=1
             apply_status="applied"
             ;;
           empty-output)
-            codex_ok=1
+            flow_ok=1
             apply_status="no-output"
             task_needs_review=1
             manual_followups=1
@@ -2511,20 +2578,20 @@ print(error)'
             gc_mark_outcome "DEAD_LETTER" "TOOLING"
             ;;
           empty-apply|no-diff)
-            codex_ok=1
+            flow_ok=1
             task_needs_review=1
             manual_followups=1
             keep_output=1
             task_result_status="apply-failed-migration-context"
             gc_mark_outcome "DEAD_LETTER" "CONTRACT"
             ;;
-          apply-failed|codex-failed|contract-violation)
+          apply-failed|adapter-failed|contract-violation)
             task_needs_review=1
             manual_followups=1
             keep_output=1
             task_result_status="permanent-fail"
             gc_mark_outcome "PERMANENT_FAIL" "TOOLING"
-            codex_ok=0
+            flow_ok=0
             break
             ;;
           *)
@@ -2533,7 +2600,7 @@ print(error)'
             keep_output=1
             task_result_status="permanent-fail"
             gc_mark_outcome "PERMANENT_FAIL" "TOOLING"
-            codex_ok=0
+            flow_ok=0
             break
             ;;
         esac
@@ -2607,16 +2674,19 @@ print(error)'
         gc_mark_outcome "RETRYABLE" "TRANSIENT"
       fi
 
-      if (( codex_ok == 0 )); then
+      if (( flow_ok == 0 )); then
         task_result_status="permanent-fail"
         if [[ "$task_terminal_state" == "RUNNING" ]]; then
           gc_mark_outcome "PERMANENT_FAIL" "TOOLING"
         fi
-        task_notes+=("Codex execution did not complete; no changes were applied.")
+        task_notes+=("Adapter execution did not complete; no changes were applied.")
       fi
 
-      if (( codex_attempted )) && (( codex_ok )) && (( context_lines_current > context_lines_min || context_file_lines_current > context_file_lines_min )); then
-        local last_tokens="${GC_LAST_CODEX_TOTAL_TOKENS:-0}"
+      if (( adapter_attempted )) && (( flow_ok )) && (( context_lines_current > context_lines_min || context_file_lines_current > context_file_lines_min )); then
+        local last_tokens="$last_attempt_total_tokens"
+        if [[ (-z "$last_tokens" || "$last_tokens" == "0") && "$is_codex_adapter" -eq 1 ]]; then
+          last_tokens="${GC_LAST_CODEX_TOTAL_TOKENS:-0}"
+        fi
         local shrink_threshold="$context_auto_shrink_threshold"
         if [[ "$prompt_soft_limit_value" =~ ^[0-9]+$ ]] && (( prompt_soft_limit_value > 0 )); then
           shrink_threshold="$prompt_soft_limit_value"
@@ -2819,7 +2889,7 @@ print(error)'
           retryable)
             gc_mark_terminal_state "RETRYABLE"
             ;;
-          blocked-quota|abandoned-for-budget|blocked-push)
+          blocked-budget|abandoned-for-budget|blocked-push)
             gc_mark_outcome "DEAD_LETTER" "QUOTA"
             ;;
           blocked)
@@ -3223,7 +3293,7 @@ print(error)'
         retryable)
           warn "  Task ${task_number} (${task_id:-no-id}) marked retryable; inspect ${report_entry_display} and rerun when ready."
           ;;
-        blocked|blocked-budget|blocked-quota|blocked-migration-transition|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|permanent-fail|dead-letter)
+        blocked|blocked-budget|blocked-migration-transition|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|permanent-fail|dead-letter)
           warn "  Task ${task_number} (${task_id:-no-id}) blocked; see ${report_entry_display}."
           ;;
         apply-failed-migration-context)
@@ -3267,7 +3337,7 @@ print(error)'
       (( ++iteration_processed ))
 
       case "$task_result_status" in
-        blocked|blocked-budget|blocked-quota|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|permanent-fail|dead-letter)
+        blocked|blocked-budget|blocked-schema-drift|blocked-schema-guard-error|blocked-dependency\(*\)|permanent-fail|dead-letter)
           break_after_update=1
           continue
           ;;
@@ -3451,7 +3521,7 @@ print(error)'
   fi
 
   if (( usage_limit_triggered )); then
-    warn "Codex usage limit confirmed by provider; halt further work until additional quota is available."
+    warn "Adapter usage limit confirmed by provider; halt further work until additional quota is available."
   fi
 
   if (( loop_guard_triggered )); then
@@ -3459,8 +3529,8 @@ print(error)'
     return "$loop_guard_exit_code"
   fi
 
-  if (( run_blocked_quota )); then
-    warn "Run terminated because a prompt exceeded the configured token budget (status: blocked-quota)."
+  if (( run_blocked_budget )); then
+    warn "Run terminated because a prompt exceeded the configured token budget (status: blocked-budget)."
   fi
 
   local budget_report_helper
@@ -3469,7 +3539,7 @@ print(error)'
     local budget_tool_actions_json
     budget_tool_actions_json="$(gc_budget_collect_tool_actions_json)"
     "$python_bin" "$budget_report_helper" \
-      --usage-file "${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/codex-usage.ndjson" \
+      --usage-file "${LOG_DIR:-${PROJECT_ROOT:-$PWD}/.gpt-creator/logs}/usage.ndjson" \
       --run-id "$run_stamp" \
       --stage-limits "${GC_BUDGET_STAGE_LIMITS_JSON:-{}}" \
       --tool-actions "$budget_tool_actions_json" \

@@ -4,11 +4,12 @@ Default location: `~/.config/gpt-creator/config.yaml`
 
 ```yaml
 version: 1
-codex:
-  provider: openai
-  model: gpt-5-high
-  base_url: ${CODEX_BASE_URL:-}
-  api_key_env: OPENAI_API_KEY
+llm:
+  # Default adapter/model for CLI operations (override with env GC_ACTIVE_AGENT_ADAPTER / GC_ACTIVE_MODEL).
+  adapter: ${GC_ACTIVE_AGENT_ADAPTER:-codex_cli}
+  model: ${GC_ACTIVE_MODEL:-gpt-5-high}
+  base_url: ${GC_LLM_BASE_URL:-${CODEX_BASE_URL:-}}
+  api_key_env: ${GC_LLM_API_KEY_ENV:-OPENAI_API_KEY}
 
 project:
   default_timezone: Europe/Istanbul

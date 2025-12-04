@@ -16,8 +16,8 @@ usage() {
 }
 
 PROJECT_PATH="$PWD"
-# Default model/agent from env for easy overrides
-DEFAULT_MODEL="${DEFAULT_LLM:-${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex-max}}}}"
+# Default model/agent from env for easy overrides; align with CLI default to avoid gated SKUs.
+DEFAULT_MODEL="${DEFAULT_LLM:-${GC_ACTIVE_MODEL:-${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-4.1}}}}}"
 MODEL="$DEFAULT_MODEL"
 DRY_RUN=0
 FORCE=0
@@ -72,12 +72,19 @@ if [[ -n "$AGENT_NAME" ]]; then
     MODEL="$resolved_model"
     echo "[agents] create-pdr using agent '${AGENT_NAME}' (model ${MODEL})"
   else
-    echo "[agents] create-pdr agent '${AGENT_NAME}' missing; treating argument as raw model id" >&2
+    echo "[agents] create-pdr agent '${AGENT_NAME}' missing; treating argument as raw model id (reasoning settings cleared)" >&2
     MODEL="$AGENT_NAME"
+    unset CODEX_REASONING_EFFORT CODEX_REASONING_EFFORT_NON_CODE
   fi
 fi
 
 cpdr::init "$PROJECT_PATH" "$MODEL" "$DRY_RUN" "$FORCE"
 cpdr::run_pipeline
 
-cpdr::log "create-pdr completed successfully"
+if [[ "${CPDR_DRY_RUN:-0}" == "1" ]]; then
+  cpdr::warn "Dry-run mode: no PDR document was generated."
+elif [[ -s "${CPDR_ASSEMBLY_DIR:-}/pdr.md" ]]; then
+  cpdr::log "create-pdr completed successfully"
+else
+  cpdr::die "create-pdr finished without producing pdr.md; see logs above."
+fi

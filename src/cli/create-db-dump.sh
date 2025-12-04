@@ -17,7 +17,8 @@ usage() {
 }
 
 PROJECT_PATH="$PWD"
-MODEL="${CODEX_MODEL:-gpt-5.1-codex}"
+# Align default model with CLI default to avoid gated SKUs.
+MODEL="${DEFAULT_LLM:-${CODEX_MODEL:-gpt-4.1}}"
 DRY_RUN=0
 FORCE=0
 AGENT_NAME=""
@@ -72,4 +73,10 @@ fi
 cddb::init "$PROJECT_PATH" "$MODEL" "$DRY_RUN" "$FORCE"
 cddb::run_pipeline
 
-cddb::log "create-db-dump completed successfully"
+if [[ "${CDDB_DRY_RUN:-0}" == "1" ]]; then
+  cddb::warn "Dry-run mode: no schema/seed files were written."
+elif [[ -s "${CDDB_SCHEMA_PATH:-}" && -s "${CDDB_SEED_PATH:-}" ]]; then
+  cddb::log "create-db-dump completed successfully"
+else
+  cddb::die "create-db-dump finished without generating schema/seed outputs; see logs above."
+fi

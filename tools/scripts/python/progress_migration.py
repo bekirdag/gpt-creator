@@ -30,7 +30,7 @@ TERMINAL_STATUSES = {
     "ready_for_qa",
     "ready_to_qa",
     "blocked-budget",
-    "blocked-quota",
+    "blocked-quota",  # legacy
     "blocked-merge-conflict",
     "blocked-schema-drift",
     "blocked-schema-guard-error",

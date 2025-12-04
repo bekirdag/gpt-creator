@@ -20,7 +20,7 @@ The implementation follows the Product Definition & Requirements (PDR v0.2) in `
 - **Iteration helpers**: `create-jira-tasks` mines staged docs into JSON story/task bundles, `migrate-tasks` pushes those artifacts into the SQLite backlog, `refine-tasks` enriches tasks in-place from the database, `create-tasks` converts existing Jira markdown, `order-tasks` rebuilds dependency metadata and DAG priority, and `work-on-tasks` executes/resumes backlog items using that persisted order so dependencies land first. When coding is done, `review-tasks` performs LLM-based code review (ready-to-review → ready-for-qa or → pending with comments), `qa-tasks` runs Playwright smoke (ready-for-qa → completed or → pending with findings), and `qa-llm` runs an agent-driven QA verdict/issue pass over ready-for-qa items. The legacy `iterate` command is deprecated.
 - **Backlog browser**: `backlog` prints non-interactive terminal summaries so you can list epics, enumerate stories, inspect children, dump task details, or preview the next DAG-prioritised tasks straight from the SQLite backlog.
 - **Backlog ETA**: `estimate` aggregates remaining story points in `.gpt-creator/staging/plan/tasks/tasks.db` and translates them into a formatted duration using the throughput observed during `work-on-tasks` runs (defaults to a 10-task window at 15 story points per hour until telemetry is captured). Use `--recent-tasks COUNT|all` to widen the sample window and `--project` to point at another workspace when needed.
-- **Token tracking**: `tokens` summarises Codex usage stored in `.gpt-creator/logs/codex-usage.ndjson` so you can translate model activity into spend.
+- **Token tracking**: `tokens` summarises adapter usage stored in `.gpt-creator/logs/usage.ndjson` (falls back to `codex-usage.ndjson`) so you can translate model activity into spend; per-call details include adapter, model, stage, and tokens in/out/total.
 - **Safety preflights**: Every CLI entry now runs through workspace/doc catalog/dependency guards so stale or unsafe paths are rejected, lockfiles are rebuilt automatically, and missing dependencies fall back to mock mode instead of crashing active runs.
 - **Guarded file writes**: `gpt-creator apply-block` (or the guarded helper `tools/scripts/python/write_block.py`, also reachable via the legacy `scripts/` symlink) are the only approved writers; Husky/CI guards reject heredocs, ellipses, and curl-to-shell pipelines so every change lands through an audited, atomic workflow.
 - **Schema evidence index**: A stack-neutral inspector builds an index of tables/indexes across SQL, Prisma, Knex, Rails, TypeORM, and Django sources. Commands such as `gc_assert table publish_jobs` use this cache so schema checks become tolerant hints rather than brittle `rg` probes.
@@ -84,7 +84,7 @@ docdexd ingest --repo /path/to/project --file docs/new.md
 | Node.js ≥ 20 | Required for generated NestJS / Vite projects. |
 | `pnpm` | Used by generated clients; install via `corepack enable`. |
 | MySQL client (`mysql`) | Used for import/health checks. |
-| Codex CLI (`codex` or compatible) | AI generation/iteration driver. |
+| Adapter CLI (`codex` or compatible) | AI generation/iteration driver (adapter-specific settings apply only when that adapter is active; Codex settings only when adapter=codex). |
 | `OPENAI_API_KEY` environment variable | Passed to Codex for model access. |
 | Optional: `npx`, `jq`, `curl`, `pa11y`, `lighthouse` | Used only when running the legacy verification scripts manually. |
 
@@ -468,7 +468,7 @@ gpt-creator run up --project /path/to/project
 ```
 gpt-creator tokens --project /path/to/project --details
 ```
-- Aggregates Codex token metrics from `.gpt-creator/logs/codex-usage.ndjson`, reporting prompt/completion/total counts and optional per-call breakdowns.
+- Aggregates token metrics from `.gpt-creator/logs/usage.ndjson` (legacy: `codex-usage.ndjson`), reporting tokens in/out/total plus optional per-call breakdowns with adapter/model/stage.
 - Add `--json` for machine-readable output or drop `--details` to print only the summary totals.
 
 ### 8. Create Tasks (Jira snapshot)
@@ -564,7 +564,7 @@ budget:
       rg: narrow
 ```
 
-Every Codex phase logs telemetry to `.gpt-creator/logs/codex-usage.ndjson`; the runner aggregates the latest run into `.gpt-creator/logs/budget-report.md`, highlights over-budget stages, and records which remedial actions (`range-only`, `narrow`, `summary`, etc.) were enforced next time.
+Every adapter phase logs telemetry to `.gpt-creator/logs/usage.ndjson` (legacy Codex runs also write `codex-usage.ndjson`); the runner aggregates the latest run into `.gpt-creator/logs/budget-report.md`, highlights over-budget stages, and records which remedial actions (`range-only`, `narrow`, `summary`, etc.) were enforced next time.
 
 Temporary overrides are also available via environment variables:
 
@@ -611,7 +611,7 @@ gpt-creator iterate --project /path/to/project --jira docs/jira.md
 | `GC_DB_NAME`, `GC_DB_USER`, `GC_DB_PASSWORD` | Injected into rendered DB templates. | `app`, `app`, `app_pass` |
 | `GC_SKIP_PROGRESS_MIGRATION` | Set to `1` to opt out of the automatic sweep that relocates legacy Codex artifacts into `.gpt-creator/`. | `0` |
 | `GC_AUTO_REVIEW` | Leave unset (default) or set to `1`/`true`/`on` to let `work-on-tasks` synthesize review artifacts automatically and clear review-required flags; set to `0`/`false` to disable. | `1` |
-| `CODEX_BIN`, `CODEX_MODEL` | Override Codex executable/model. | `codex`, `gpt-4.1` (high) |
+| `CODEX_BIN`, `CODEX_MODEL` | Override Codex executable/model (used only when adapter=codex). | `codex`, `gpt-4.1` (high) |
 | `CODEX_MODEL_CODE`, `CODEX_MODEL_NON_CODE` | Stage-specific Codex models (code-writing vs. planning/doc tasks). | `CODEX_MODEL`, `CODEX_MODEL` |
 | `CODEX_REASONING_EFFORT_CODE`, `CODEX_REASONING_EFFORT_NON_CODE` | Reasoning effort per stage (both default to `medium`). | `medium`, `medium` |
 | `DOCKER_BIN`, `MYSQL_BIN`, `EDITOR_CMD` | Command overrides used within scripts. | `docker`, `mysql`, `code` |
@@ -660,7 +660,7 @@ By default `GC_AUTO_REVIEW` is active; the CLI drops automated review stubs unde
 
 | Symptom | Suggested Action |
 |---------|------------------|
-| `codex` binary not found | Install Codex CLI or set `CODEX_BIN` to a compatible wrapper. |
+| `codex` binary not found | Install Codex CLI or set `CODEX_BIN` to a compatible wrapper (only needed when adapter=codex). |
 | `create-jira-tasks` stops with “Failed to parse Codex JSON output” | Check `.gpt-creator/staging/plan/create-jira-tasks/output/*.raw.txt` for the offending response. The CLI auto-cleans common issues (code fences, smart quotes, comments, trailing commas, Python-style literals); if it still fails, rerun with `--force` after pruning the bad snippet or adjust the prompts/docs. |
 | Legacy verification script exits with status 3 | Install the missing dependency (`npx`, `pa11y`, `lighthouse`, `docker`) if you maintain those legacy checks. |
 | Docker stack fails health check | Run `gpt-creator run logs`, inspect `docker/docker-compose.yml`, confirm environment variables. |

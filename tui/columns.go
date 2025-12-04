@@ -383,7 +383,7 @@ func (c *selectableColumn) highlightSelection(prev int) tea.Cmd {
 }
 
 func (c *selectableColumn) setHoverIndex(idx int) {
-	if idx < 0 || idx >= len(c.model.VisibleItems()) {
+	if idx < 0 || idx >= len(c.model.Items()) {
 		c.ClearHover()
 		return
 	}
@@ -416,8 +416,8 @@ func (c *selectableColumn) HandleMouse(localX, localY int, msg tea.MouseMsg) (co
 		return c, nil
 	}
 
-	items := c.model.VisibleItems()
-	if len(items) == 0 {
+	allItems := c.model.Items()
+	if len(allItems) == 0 {
 		return c, nil
 	}
 
@@ -428,7 +428,7 @@ func (c *selectableColumn) HandleMouse(localX, localY int, msg tea.MouseMsg) (co
 
 	indexOnPage := contentY / slotHeight
 
-	start, end := c.model.Paginator.GetSliceBounds(len(items))
+	start, end := c.model.Paginator.GetSliceBounds(len(allItems))
 	itemsOnPage := end - start
 	if itemsOnPage <= 0 {
 		return c, nil
@@ -438,7 +438,7 @@ func (c *selectableColumn) HandleMouse(localX, localY int, msg tea.MouseMsg) (co
 	}
 
 	target := start + indexOnPage
-	if target < 0 || target >= len(items) {
+	if target < 0 || target >= len(allItems) {
 		return c, nil
 	}
 	c.setHoverIndex(target)
@@ -3671,9 +3671,9 @@ var featureItemsByKey = map[string][]featureItemDefinition{
 			DisabledReason:  "Testing is out of scope for gpt-creator.",
 		},
 	},
-	"tokens": {
-		{Key: "tokens-details", Title: "tokens --details", Desc: "Summarise token usage with details", Command: []string{"tokens", "--details"}, ProjectRequired: true, PreviewKey: "path:.gpt-creator/logs/codex-usage.ndjson"},
-	},
+		"tokens": {
+			{Key: "tokens-details", Title: "tokens --details", Desc: "Summarise token usage with details", Command: []string{"tokens", "--details"}, ProjectRequired: true, PreviewKey: "path:.gpt-creator/logs/usage.ndjson"},
+		},
 	"reports": {
 		{Key: "reports-list", Title: "reports list", Desc: "List generated automation reports", Command: []string{"reports", "list"}, ProjectRequired: true, PreviewKey: "path:reports"},
 		{Key: "reports-backlog", Title: "reports backlog", Desc: "Show pending issue backlog", Command: []string{"reports", "backlog"}, ProjectRequired: true},
@@ -4580,7 +4580,7 @@ func tokensSummary(project *discoveredProject) string {
 	if project == nil {
 		return ""
 	}
-	logPath := filepath.Join(project.Path, ".gpt-creator", "logs", "codex-usage.ndjson")
+	logPath := filepath.Join(project.Path, ".gpt-creator", "logs", "usage.ndjson")
 	if info, err := os.Stat(logPath); err == nil {
 		return fmt.Sprintf("Usage log updated %s", info.ModTime().Format(time.RFC822))
 	}

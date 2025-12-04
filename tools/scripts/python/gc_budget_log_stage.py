@@ -2,6 +2,7 @@
 """Append budget stage telemetry entries in NDJSON format."""
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -39,18 +40,24 @@ def main(argv: list[str]) -> None:
     tool_raw = argv[13] if len(argv) > 13 else "{}"
     blocked_raw = argv[14] if len(argv) > 14 else "false"
     note = argv[15] if len(argv) > 15 else ""
+    adapter = argv[16] if len(argv) > 16 else ""
+
+    if not adapter:
+        adapter = os.getenv("GC_ACTIVE_AGENT_ADAPTER") or os.getenv("GC_ACTIVE_ADAPTER") or ""
 
     pruned_items = parse_json(pruned_raw, [])
     tool_bytes = parse_json(tool_raw, {})
     blocked_flag = str(blocked_raw).strip().lower() in {"1", "true", "yes", "on"}
 
     record = {
+        "timestamp": ts,
         "ts": ts,
         "run_id": run_id,
         "story": story,
         "task": task,
         "stage": stage,
         "model": model,
+        "adapter": adapter,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,

@@ -4,9 +4,19 @@
 
 gc_cli_agent_db_path() {
   local project="${1:-$PWD}"
-  local abs_path
-  abs_path="$(cd "$project" && pwd)"
-  printf '%s/.gpt-creator/staging/plan/tasks/tasks.db' "$abs_path"
+  local override="${GC_TASKS_DB_PATH:-${GC_TASKS_DB:-}}"
+  local abs_project
+  abs_project="$(cd "$project" && pwd)"
+  if [[ -n "$override" ]]; then
+    if [[ "$override" = /* ]]; then
+      printf '%s' "$override"
+    else
+      printf '%s/%s' "$abs_project" "$override"
+    fi
+    return
+  fi
+  local dir_base="${GC_DIR:-${abs_project}/.gpt-creator}"
+  printf '%s/staging/plan/tasks/tasks.db' "$dir_base"
 }
 
 gc_cli__log() {
@@ -87,7 +97,50 @@ gc_cli__apply_agent_env() {
   if [[ -n "$agent_org_env" && -n "$stored_org" ]]; then
     export "$agent_org_env"="$stored_org"
   fi
-  gc_cli__log "Agent '${name}' active (client=${client}, model=${model}${agent_adapter:+, adapter=${agent_adapter}})."
+  # Fallback: hydrate adapter/limits/api hints from the agent file when registry data is missing.
+  if [[ -f "$agent_file" ]]; then
+    local file_meta
+    file_meta="$(${PYTHON_BIN:-python3} - <<'PY' "$agent_file"
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+if not isinstance(data, dict):
+    sys.exit(0)
+agent = data.get("agent") or {}
+if not isinstance(agent, dict):
+    agent = data
+resolved = data.get("resolved") or {}
+def pick(*values):
+    for value in values:
+        if value:
+            return value
+    return ""
+adapter = pick(resolved.get("adapter"), agent.get("adapter"))
+max_ctx = pick(resolved.get("maxContextTokens"), agent.get("maxContextTokens"))
+max_out = pick(resolved.get("maxOutputTokens"), agent.get("maxOutputTokens"))
+api_base = pick(resolved.get("apiBase"), agent.get("client_api_base"))
+api_key_env = pick(agent.get("client_api_key_env"), resolved.get("apiKeyEnv"))
+org_env = pick(agent.get("client_api_org_env"), resolved.get("orgEnv"))
+api_base_env = pick(agent.get("client_api_base_env"), resolved.get("apiBaseEnv"))
+print("\\n".join([adapter or "", str(max_ctx or ""), str(max_out or ""), api_base or "", api_key_env or "", org_env or "", api_base_env or ""]))
+PY
+)"
+    local file_adapter file_ctx file_out file_api_base file_api_key_env file_org_env file_api_base_env
+    IFS=$'\n' read -r file_adapter file_ctx file_out file_api_base file_api_key_env file_org_env file_api_base_env <<<"$file_meta"
+    [[ -z "${GC_ACTIVE_AGENT_ADAPTER:-}" && -n "$file_adapter" ]] && export GC_ACTIVE_AGENT_ADAPTER="$file_adapter"
+    [[ -z "${GC_ACTIVE_AGENT_MAX_CONTEXT:-}" && -n "$file_ctx" ]] && export GC_ACTIVE_AGENT_MAX_CONTEXT="$file_ctx"
+    [[ -z "${GC_ACTIVE_AGENT_MAX_OUTPUT:-}" && -n "$file_out" ]] && export GC_ACTIVE_AGENT_MAX_OUTPUT="$file_out"
+    [[ -z "${GC_ACTIVE_AGENT_API_BASE:-}" && -n "$file_api_base" ]] && export GC_ACTIVE_AGENT_API_BASE="$file_api_base"
+    [[ -z "${GC_ACTIVE_AGENT_API_KEY_ENV:-}" && -n "$file_api_key_env" ]] && export GC_ACTIVE_AGENT_API_KEY_ENV="$file_api_key_env"
+    [[ -z "${GC_ACTIVE_AGENT_API_ORG_ENV:-}" && -n "$file_org_env" ]] && export GC_ACTIVE_AGENT_API_ORG_ENV="$file_org_env"
+    [[ -z "${GC_ACTIVE_AGENT_API_BASE_ENV:-}" && -n "$file_api_base_env" ]] && export GC_ACTIVE_AGENT_API_BASE_ENV="$file_api_base_env"
+  fi
+  local log_adapter="${GC_ACTIVE_AGENT_ADAPTER:-$agent_adapter}"
+  gc_cli__log "Agent '${name}' active (client=${client}, model=${model}${log_adapter:+, adapter=${log_adapter}})."
 }
 
 gc_cli_resolve_agent_model() {
@@ -98,7 +151,8 @@ gc_cli_resolve_agent_model() {
     printf ''
     return 1
   fi
-  helper="${GC_SCRIPTS_ROOT:-${ROOT_DIR}/scripts}/python/agents_cli.py"
+  local scripts_root="${GC_SCRIPTS_ROOT:-${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/scripts}"
+  helper="${scripts_root}/python/agents_cli.py"
   if [[ ! -f "$helper" ]]; then
     printf ''
     return 1
@@ -126,6 +180,7 @@ gc_cli_resolve_agent_model() {
   IFS=$'\n' read -r resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org <<<"$parse_output"
   if [[ "$resolved_kind" == "agent" && -n "$resolved_model" ]]; then
     gc_cli__apply_agent_env "$project" "$resolved_client" "$resolved_model" "$resolved_name" "$agent_tmp" "$resolved_api_key" "$resolved_api_base" "$resolved_api_org"
+    rm -f "$agent_tmp"
     printf '%s\n' "$resolved_model"
     return 0
   fi

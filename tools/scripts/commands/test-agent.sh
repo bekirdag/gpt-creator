@@ -159,12 +159,7 @@ try:
         "maxOutputTokens": data.get("maxOutputTokens"),
     }
     client = create_llm_client(adapter, config)
-    # Normalize reasoning effort for codex_cli tests to avoid unsupported values.
-    env = os.environ.copy()
-    if adapter in {"codex_cli", "openai", "openai_cli"}:
-        env.setdefault("CODEX_REASONING_EFFORT", "medium")
-        env.setdefault("CODEX_REASONING_EFFORT_CODE", "medium")
-    result = client.send_chat(["ping"], model=model, env=env)
+    result = client.send_chat(["ping"], model=model)
     print(result.content)
 except Exception as exc:
     print(str(exc))

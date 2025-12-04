@@ -1,4 +1,3 @@
 Usage: gpt-creator tokens [--project PATH] [--details] [--json]
 
-Print aggregated Codex token usage captured under .gpt-creator/logs/codex-usage.ndjson.
-
+Print aggregated adapter token usage captured under .gpt-creator/logs/usage.ndjson (falls back to codex-usage.ndjson for legacy runs). Per-call rows show adapter, task, stage, model, and tokens in/out/total.

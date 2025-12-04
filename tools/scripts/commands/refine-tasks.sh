@@ -27,7 +27,10 @@ cmd_refine_tasks() {
 
   ensure_ctx "$root"
 
-  local tasks_db="${PLAN_DIR}/tasks/tasks.db"
+  local tasks_db="${GC_TASKS_DB_PATH:-${GC_TASKS_DB:-${PLAN_DIR}/tasks/tasks.db}}"
+  if [[ "$tasks_db" != /* ]]; then
+    tasks_db="${PROJECT_ROOT:-$PWD}/${tasks_db}"
+  fi
   [[ -f "$tasks_db" ]] || die "Tasks database not found: ${tasks_db}"
 
   local python_bin="${PYTHON_BIN:-python3}"
@@ -63,12 +66,13 @@ cmd_refine_tasks() {
   info "Backlog summary → tasks: total=${total_tasks}, refined=${refined_tasks}, pending=${pending_tasks}; stories: total=${total_stories}, pending=${pending_stories}${story_filter:+ (filter='${story_filter}')}."
 
   local codex_cmd="${CODEX_BIN:-${CODEX_CMD:-codex}}"
-  if (( dry_run == 0 )) && ! command -v "$codex_cmd" >/dev/null 2>&1; then
+  local active_adapter="${GC_ACTIVE_AGENT_ADAPTER:-codex_cli}"
+  if (( dry_run == 0 )) && [[ "$active_adapter" == "codex_cli" ]] && ! command -v "$codex_cmd" >/dev/null 2>&1; then
     warn "Codex CLI '$codex_cmd' not found; switching to --dry-run."
     dry_run=1
   fi
 
-  local model_name="${model_override:-${CODEX_MODEL:-$GC_DEFAULT_MODEL}}"
+  local model_name="${model_override:-${GC_ACTIVE_AGENT_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-$GC_DEFAULT_MODEL:-gpt-4.1}}}}"
 
   # shellcheck source=src/lib/create-jira-tasks/pipeline.sh
   source "${CLI_ROOT}/src/lib/create-jira-tasks/pipeline.sh"
@@ -77,6 +81,10 @@ cmd_refine_tasks() {
   local skip_refine=0
   local dry_flag="$dry_run"
   cjt::init "$PROJECT_ROOT" "$model_name" "$force_flag" "$skip_refine" "$dry_flag"
+  if [[ "$active_adapter" == "command" ]]; then
+    export GC_ACTIVE_AGENT_ADAPTER="command"
+    export GC_ACTIVE_AGENT_MODEL="$model_name"
+  fi
   # shellcheck disable=SC2034
   CJT_DOC_FILES=()
   cjt::build_context_files
@@ -98,6 +106,9 @@ cmd_refine_tasks() {
     export CJT_REFINE_MODE="all"
   fi
 
-  cjt::refine_tasks
-  ok "Task refinement complete"
+  if cjt::refine_tasks; then
+    ok "Task refinement complete"
+  else
+    die "Task refinement failed; see logs above."
+  fi
 }

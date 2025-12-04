@@ -48,12 +48,21 @@ cpdr::run_codex() {
   local codex_reasoning="${CODEX_REASONING_EFFORT:-${CODEX_REASONING_EFFORT_NON_CODE:-low}}"
 
   if [[ "$CPDR_DRY_RUN" == "1" ]]; then
-    cpdr::warn "[dry-run] Skipping Codex invocation for ${label}"
+    cpdr::warn "[dry-run] Skipping model invocation for ${label}"
     printf '{"status": "dry-run", "label": "%s"}\n' "$label" >"$output_file"
     return 0
   fi
 
   mkdir -p "$(dirname "$output_file")"
+
+  if [[ "${CPDR_ADAPTER:-}" == "command" ]]; then
+    cpdr::log "Running command adapter for ${label} (cmd='${CPDR_MODEL}')"
+    if ! eval "${CPDR_MODEL} < \"$prompt_file\" > \"$output_file\""; then
+      cpdr::warn "Command adapter failed for ${label}."
+      return 1
+    fi
+    return 0
+  fi
 
   if cpdr::codex_has_subcommand chat; then
     local cmd=("$CPDR_CODEX_CMD" chat --model "$CPDR_MODEL" --prompt-file "$prompt_file" --output "$output_file")
@@ -161,10 +170,11 @@ cpdr::extract_json() {
 
 cpdr::init() {
   CPDR_PROJECT_ROOT="${1:?project root required}"
-  local cpdr_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex}}}"
+  local cpdr_default_model="${GC_ACTIVE_AGENT_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-}}}}}"
   CPDR_MODEL="${2:-$cpdr_default_model}"
   CPDR_DRY_RUN="${3:-0}"
   CPDR_FORCE="${4:-0}"
+  CPDR_ADAPTER="${GC_ACTIVE_AGENT_ADAPTER:-codex_cli}"
 
   CPDR_PROJECT_ROOT="$(cpdr::abs_path "$CPDR_PROJECT_ROOT")"
   [[ -d "$CPDR_PROJECT_ROOT" ]] || cpdr::die "Project root not found: $CPDR_PROJECT_ROOT"
@@ -186,11 +196,15 @@ cpdr::init() {
   CPDR_ASSEMBLY_DIR="$CPDR_PLAN_DIR/pdr"
   CPDR_TMP_DIR="$CPDR_PIPELINE_DIR/tmp"
 
+  if [[ "$CPDR_FORCE" == "1" && "${CPDR_DRY_RUN:-0}" != "1" ]]; then
+    rm -rf "$CPDR_PIPELINE_DIR"
+  fi
+
   mkdir -p "$CPDR_PROMPTS_DIR" "$CPDR_OUTPUT_DIR" "$CPDR_JSON_DIR" \
     "$CPDR_SECTIONS_DIR" "$CPDR_ASSEMBLY_DIR" "$CPDR_TMP_DIR"
 
   CPDR_CODEX_CMD="${CODEX_BIN:-${CODEX_CMD:-codex}}"
-  if ! command -v "$CPDR_CODEX_CMD" >/dev/null 2>&1; then
+  if [[ "${CPDR_ADAPTER:-codex_cli}" == "codex_cli" && ! -x "$CPDR_CODEX_CMD" ]]; then
     cpdr::warn "Codex CLI '$CPDR_CODEX_CMD' not found; enabling dry-run mode."
     CPDR_DRY_RUN=1
   fi

@@ -3606,7 +3606,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     status = "ok"
     hard_limit_final_trigger = hard_limit > 0 and final_token_estimate > hard_limit
     if hard_limit_final_trigger:
-        status = "blocked-quota"
+        status = "blocked-budget"
     
     if PROMPT_WARN_TOKENS and final_token_estimate > PROMPT_WARN_TOKENS:
         top_segments = sorted(
@@ -3636,7 +3636,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     stub_reason = ""
     if hard_limit_final_trigger and stop_on_overbudget:
         stub_reason = (
-            f"blocked-quota: estimated {final_token_estimate} tokens exceeds hard limit {hard_limit}"
+            f"blocked-budget: estimated {final_token_estimate} tokens exceeds hard limit {hard_limit}"
         )
         emit_progress(f"{stub_reason}; writing stub prompt.")
         for segment in segments:

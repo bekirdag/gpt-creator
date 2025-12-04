@@ -4,7 +4,7 @@ Generate Jira epics, user stories, and tasks directly from project documentation
 
 Options:
   --project PATH     Project root (defaults to current directory)
-  --model NAME       Codex model to use (default: gpt-5.1-codex (high))
+  --model NAME       Adapter model to use (default: GC defaults; when adapter=codex uses CODEX_MODEL)
   --agent NAME       Resolve the model from a stored agent persona (fallbacks to raw model id when missing)
   --force            Rebuild tasks.db from scratch (ignore saved progress)
   --dry-run          Prepare prompts but do not call Codex

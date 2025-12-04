@@ -16,8 +16,8 @@ usage() {
 }
 
 PROJECT_PATH="$PWD"
-# Default model/agent from env for easy overrides
-DEFAULT_MODEL="${DEFAULT_LLM:-${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex-max}}}}"
+# Default model/agent from env for easy overrides; align with CLI default to avoid gated SKUs.
+DEFAULT_MODEL="${DEFAULT_LLM:-${GC_ACTIVE_MODEL:-${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-4.1}}}}}"
 MODEL="$DEFAULT_MODEL"
 FORCE=0
 DRY_RUN=0
@@ -73,12 +73,19 @@ if [[ -n "$AGENT_NAME" ]]; then
     MODEL="$resolved_model"
     echo "[agents] create-jira-tasks using agent '${AGENT_NAME}' (model ${MODEL})"
   else
-    echo "[agents] create-jira-tasks agent '${AGENT_NAME}' missing; treating argument as raw model id" >&2
+    echo "[agents] create-jira-tasks agent '${AGENT_NAME}' missing; treating argument as raw model id (reasoning settings cleared)" >&2
     MODEL="$AGENT_NAME"
+    unset CODEX_REASONING_EFFORT CODEX_REASONING_EFFORT_NON_CODE
   fi
 fi
 
 cjt::init "$PROJECT_PATH" "$MODEL" "$FORCE" 0 "$DRY_RUN"
 cjt::run_pipeline
 
-cjt::log "create-jira-tasks completed successfully"
+if [[ "${CJT_DRY_RUN:-0}" == "1" ]]; then
+  cjt::warn "Dry-run mode: no Jira tasks were generated."
+elif [[ -s "${CJT_TASKS_DB_PATH:-}" && -d "${CJT_JSON_TASKS_DIR:-}" && "$(find "${CJT_JSON_TASKS_DIR:-/dev/null}" -maxdepth 1 -type f | head -n1)" ]]; then
+  cjt::log "create-jira-tasks completed successfully"
+else
+  cjt::die "create-jira-tasks finished without generating tasks artifacts; see logs above."
+fi

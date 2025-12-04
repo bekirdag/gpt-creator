@@ -17,11 +17,16 @@ def update_work_state(
 ) -> None:
     story_slug = (story_slug or "").strip()
     status_requested = (status or "pending").strip().lower()
+    if status_requested == "blocked-quota":
+        status_requested = "blocked-budget"
     completed_count = int(completed or 0)
     total_count_input = int(total or 0)
     run_stamp = run_stamp or "manual"
     timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+    if not Path(db_path).exists():
+        print(f"Stories/tasks database not found at {db_path}", file=sys.stderr)
+        return
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -69,7 +74,7 @@ def update_work_state(
         elif complete_count > 0 or in_progress_count > 0:
             if status_final == "complete":
                 status_final = "in-progress"
-            elif status_final not in {"blocked", "blocked-quota", "blocked-schema-drift", "blocked-schema-guard-error", "on-hold", "in-progress"} and not _is_blocked_dependency(status_final):
+            elif status_final not in {"blocked", "blocked-budget", "blocked-quota", "blocked-schema-drift", "blocked-schema-guard-error", "on-hold", "in-progress"} and not _is_blocked_dependency(status_final):
                 status_final = "in-progress"
         else:
             if status_final not in {"blocked", "blocked-schema-drift", "blocked-schema-guard-error", "on-hold"} and not _is_blocked_dependency(status_final):

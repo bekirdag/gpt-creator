@@ -18,7 +18,7 @@ LOCKABLE_STATUSES = {
     "ready_to_qa",
     "ready_for_qa",
     "blocked-budget",
-    "blocked-quota",
+    "blocked-quota",  # legacy alias
     "blocked-merge-conflict",
     "blocked-schema-drift",
     "blocked-schema-guard-error",
@@ -44,6 +44,9 @@ def update_task_state(
     run_stamp = run_stamp or "manual"
     timestamp = timestamp_override or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+    if not Path(db_path).exists():
+        print(f"Tasks database not found at {db_path}", file=sys.stderr)
+        return
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -79,6 +82,9 @@ def update_task_state(
         locked_by_migration = int(row["locked_by_migration"] or 0)
         reopened_by_migration = int(row["reopened_by_migration"] or 0)
         status_lower = (status or "").strip().lower()
+        if status_lower == "blocked-quota":
+            status_lower = "blocked-budget"
+            status = "blocked-budget"
 
         if locked_by_migration and status_lower not in LOCKABLE_STATUSES and not _is_blocked_dependency(status_lower):
             allow_reopen = False
@@ -122,7 +128,7 @@ def update_task_state(
         elif status == "pending":
             fields.append(("started_at", None))
             fields.append(("completed_at", None))
-        elif status in {"blocked", "blocked-quota", "blocked-schema-drift", "blocked-schema-guard-error"} or _is_blocked_dependency(status):
+        elif status in {"blocked", "blocked-budget", "blocked-quota", "blocked-schema-drift", "blocked-schema-guard-error"} or _is_blocked_dependency(status):
             if not started_at:
                 fields.append(("started_at", timestamp))
 

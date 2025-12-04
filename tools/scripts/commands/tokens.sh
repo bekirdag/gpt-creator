@@ -34,13 +34,22 @@ cmd_tokens() {
   ensure_ctx "$root"
   local project_root="${PROJECT_ROOT:-$PWD}"
 
-  local usage_file="${project_root}/.gpt-creator/logs/codex-usage.ndjson"
+  local log_dir="${project_root}/.gpt-creator/logs"
+  local default_usage="${log_dir}/usage.ndjson"
+  local legacy_usage="${log_dir}/codex-usage.ndjson"
+  local usage_file="${GC_USAGE_FILE:-$default_usage}"
+  if [[ ! -f "$usage_file" && -f "$legacy_usage" ]]; then
+    usage_file="$legacy_usage"
+  fi
   if [[ ! -f "$usage_file" ]]; then
-    warn "No Codex usage data found at ${usage_file}. Run a codex-enabled command first."
+    warn "No usage data found at ${usage_file}. Set GC_USAGE_FILE to point at a usage log or run an adapter task first."
     return 1
   fi
   local helper_path
   helper_path="$(gc_clone_python_tool "tokens_report.py" "$project_root")" || return 1
+  if ! command -v python3 >/dev/null 2>&1; then
+    warn "python3 not found; cannot render token report."
+    return 1
+  fi
   python3 "$helper_path" "$usage_file" "$details" "$json_output"
 }
-

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Run a Codex apply step for work-on-tasks and return structured results.
-This wraps the Codex CLI and patch application to reduce Bash complexity.
+Run an adapter apply step for work-on-tasks and return structured results.
+This wraps the adapter invocation and patch application to reduce Bash complexity.
 """
 from __future__ import annotations
 
@@ -39,6 +39,17 @@ def log_debug(project_root: Path, message: str) -> None:
     except Exception:
         # Never block on logging; this is best-effort only.
         pass
+
+
+def usage_paths(project_root: Path) -> list[Path]:
+    """Return usage log paths (primary + legacy)."""
+    log_dir = Path(os.getenv("LOG_DIR") or project_root / ".gpt-creator" / "logs")
+    primary = Path(os.getenv("GC_USAGE_FILE") or log_dir / "usage.ndjson")
+    legacy = log_dir / "codex-usage.ndjson"
+    paths = [primary]
+    if legacy != primary:
+        paths.append(legacy)
+    return paths
 
 
 def parse_token_counts(log_path: Path) -> Dict[str, int]:
@@ -113,7 +124,9 @@ def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, p
         stderr_log.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
-    default_model = os.getenv("CODEX_MODEL", "gpt-4.1")
+    default_model = os.getenv("CODEX_MODEL")
+    if not default_model:
+        raise RuntimeError("CODEX_MODEL must be set for codex adapter runs")
     cmd = [
         "bash",
         "-lc",
@@ -132,30 +145,57 @@ def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, p
     return proc, stderr_log
 
 
-def record_usage(project_root: Path, task_id: str, model: str, stderr_log: Path, prompt_path: Path, output_path: Path, rc: int) -> None:
-    """Append a usage entry to codex-usage.ndjson."""
-    usage_file = project_root / ".gpt-creator" / "logs" / "codex-usage.ndjson"
-    usage_file.parent.mkdir(parents=True, exist_ok=True)
+def record_usage(
+    project_root: Path,
+    task_id: str,
+    adapter: str,
+    model: str,
+    step: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+    exit_code: int,
+    status: str,
+    usage_captured: bool,
+) -> None:
+    """Append an adapter-neutral usage entry to usage logs."""
     ts = datetime.utcnow().isoformat() + "Z"
-    try:
-        # We don't have token counts; use 0s but capture rc and log path for auditing.
-        entry = {
-            "timestamp": ts,
-            "task": task_id,
-            "model": model,
-            "prompt_path": str(prompt_path),
-            "output_path": str(output_path),
-            "stderr_log": str(stderr_log),
-            "exit": rc,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "captured": False,
-        }
-        with usage_file.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry) + "\n")
-    except Exception as exc:
-        log_debug(project_root, f"[usage] failed to record codex usage: {exc}")
+    story_slug = os.getenv("GC_ACTIVE_TASK_SLUG", "") or None
+    run_id = os.getenv("GC_ACTIVE_RUN_STAMP") or os.getenv("GC_BUDGET_RUN_ID") or "manual"
+    if not adapter:
+        adapter = os.getenv("GC_ACTIVE_AGENT_ADAPTER") or os.getenv("GC_ACTIVE_ADAPTER") or "unknown-adapter"
+    if not model:
+        model = os.getenv("GC_ACTIVE_MODEL") or os.getenv("DEFAULT_LLM") or model
+    total = total_tokens or (prompt_tokens + completion_tokens)
+    entry = {
+        "timestamp": ts,
+        "run_id": run_id,
+        "task": task_id,
+        "story": story_slug,
+        "adapter": adapter,
+        "model": model,
+        "step": step,
+        "stage": step,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "tokens_in": prompt_tokens,
+        "tokens_out": completion_tokens,
+        "total_tokens": total,
+        "exit_code": exit_code,
+        "usage_captured": usage_captured,
+        "status": status,
+        "source": "adapter-call",
+    }
+    telemetry_payload = os.getenv("AGENT_TELEMETRY_PAYLOAD", "").strip()
+    if telemetry_payload:
+        entry["telemetry_payload"] = telemetry_payload
+    for path in usage_paths(project_root):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry) + "\n")
+        except Exception as exc:
+            log_debug(project_root, f"[usage] failed to append usage to {path}: {exc}")
 
 
 def merge_registry_config(
@@ -318,12 +358,13 @@ def main(argv: List[str]) -> int:
     if not active_client and agent_file_client:
         active_client = agent_file_client
     # Prefer the agent’s model, then user defaults, then Codex defaults.
-    model = (
-        active_model_env
-        or os.getenv("DEFAULT_LLM")
-        or os.getenv("CODEX_MODEL")
-        or "gpt-4.1"
-    )
+    model = active_model_env or os.getenv("DEFAULT_LLM") or registry_model or ""
+    if not model:
+        raise SystemExit("[agent] No model resolved (set DEFAULT_LLM or select an agent with a model).")
+    # Force OSS clients onto command adapter and their own model when not overridden.
+    if active_client in {"gpt-oss", "ollama"} and not adapter:
+        adapter = "command"
+        model = active_model_env or model
     registry_cfg: Optional[Dict[str, object]] = None
     if active_client:
         try:
@@ -337,24 +378,21 @@ def main(argv: List[str]) -> int:
         except Exception as exc:  # pragma: no cover - defensive
             log_debug(project_root, f"[agent] registry lookup failed: {exc}")
     if not adapter:
-        if agent_flag:
-            if active_client in {"gpt-oss", "ollama"}:
-                adapter = "command"
-            elif active_client == "openai":
-                adapter = "codex_cli"
-            else:
-                adapter = "codex_cli"
-        else:
-            adapter = "codex_cli"
+        raise SystemExit(f"[agent] No adapter resolved for client '{active_client}' (set GC_ACTIVE_AGENT_ADAPTER or registry adapter).")
+    if agent_flag and active_client in {"gpt-oss", "ollama"} and adapter in {"codex_cli", "openai_cli", "openai"}:
+        adapter = "command"
     chat_result: Optional[ChatResult] = None
+    parsed_tokens: Dict[str, int] = {}
+    adapter_exit_code = 0
 
-    if adapter in {"codex_cli", "openai_cli", "openai", ""}:
+    if adapter in {"codex_cli", "openai_cli", "openai"}:
         proc, stderr_log = run_codex(args.call_name, args.step, prompt_path, output_path, project_root)
+        adapter_exit_code = proc.returncode
         log_debug(project_root, f"[codex] completed rc={proc.returncode} (see stderr log at {stderr_log})")
-        record_usage(project_root, args.call_name, model, stderr_log, prompt_path, output_path, proc.returncode)
         parsed_tokens = parse_token_counts(stderr_log)
         if proc.returncode != 0:
-            result["status"] = "codex-failed"
+            result["status"] = "adapter-failed"
+            result["apply_status"] = "adapter-failed"
             stderr_snippet = ""
             try:
                 if stderr_log.exists():
@@ -363,21 +401,17 @@ def main(argv: List[str]) -> int:
             except Exception:
                 stderr_snippet = ""
             if stderr_snippet:
-                result["notes"].append(f"Codex failed: {stderr_snippet}")
-            result["notes"].append(f"Codex stderr log: {stderr_log}")
-            emit_plain(result)
-            return 0
+                result["notes"].append(f"Adapter '{adapter}' failed: {stderr_snippet}")
+            result["notes"].append(f"Adapter stderr log: {stderr_log}")
     else:
         try:
             chat_result = run_generic_agent(adapter, model, prompt_path, output_path, project_root, registry_cfg)
         except Exception as exc:
             log_debug(project_root, f"[agent] adapter '{adapter}' failed: {exc}")
-            result["status"] = "agent-failed"
-            result["apply_status"] = "agent-failed"
-            result["notes"].append(f"Agent adapter '{adapter}' failed: {exc}")
-            emit_plain(result)
-            return 0
-        parsed_tokens = {}
+            result["status"] = "adapter-failed"
+            result["apply_status"] = "adapter-failed"
+            result["notes"].append(f"Adapter '{adapter}' failed: {exc}")
+            adapter_exit_code = 1
 
     # Token accounting from environment if available
     prompt_tokens = int(os.getenv("GC_LAST_CODEX_PROMPT_TOKENS", "0") or 0)
@@ -398,11 +432,42 @@ def main(argv: List[str]) -> int:
             total_tokens = prompt_tokens + completion_tokens
     result["tokens"] = {"prompt": prompt_tokens, "completion": completion_tokens, "total": total_tokens}
 
+    usage_captured = any(val > 0 for val in (prompt_tokens, completion_tokens, total_tokens))
+    if result["status"] == "adapter-failed":
+        record_usage(
+            project_root,
+            args.call_name,
+            adapter,
+            model,
+            args.step,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            adapter_exit_code,
+            result["status"],
+            usage_captured,
+        )
+        emit_plain(result)
+        return 0
+
     if not output_path.exists() or output_path.stat().st_size == 0:
-        log_debug(project_root, "[codex] produced empty output file")
+        log_debug(project_root, "[adapter] produced empty output file")
         result["status"] = "empty-output"
         result["apply_status"] = "no-output"
-        result["notes"].append("Codex produced no output.")
+        result["notes"].append("Adapter produced no output.")
+        record_usage(
+            project_root,
+            args.call_name,
+            adapter,
+            model,
+            args.step,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            adapter_exit_code,
+            result["status"],
+            usage_captured,
+        )
         emit_plain(result)
         return 0
 
@@ -412,6 +477,19 @@ def main(argv: List[str]) -> int:
         result["status"] = "apply-failed"
         result["apply_status"] = "apply-failed"
         result["notes"].append(apply_proc.stderr.strip() or apply_proc.stdout.strip())
+        record_usage(
+            project_root,
+            args.call_name,
+            adapter,
+            model,
+            args.step,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            adapter_exit_code,
+            result["status"],
+            usage_captured,
+        )
         emit_plain(result)
         return 0
 
@@ -421,6 +499,19 @@ def main(argv: List[str]) -> int:
         result["status"] = "empty-apply"
         result["apply_status"] = apply_output
         result["notes"].append("Patch apply returned no actionable changes.")
+        record_usage(
+            project_root,
+            args.call_name,
+            adapter,
+            model,
+            args.step,
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+            adapter_exit_code,
+            result["status"],
+            usage_captured,
+        )
         emit_plain(result)
         return 0
 
@@ -431,11 +522,37 @@ def main(argv: List[str]) -> int:
             result["status"] = "no-diff"
             result["apply_status"] = "no-diff"
             result["notes"].append("No diff detected after apply.")
+            record_usage(
+                project_root,
+                args.call_name,
+                adapter,
+                model,
+                args.step,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                adapter_exit_code,
+                result["status"],
+                usage_captured,
+            )
             emit_plain(result)
             return 0
 
     result["status"] = "ok"
     result["apply_status"] = "applied"
+    record_usage(
+        project_root,
+        args.call_name,
+        adapter,
+        model,
+        args.step,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        adapter_exit_code,
+        result["status"],
+        usage_captured,
+    )
     emit_plain(result)
     return 0
 

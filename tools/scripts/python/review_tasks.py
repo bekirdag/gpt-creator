@@ -31,24 +31,37 @@ from update_task_state import update_task_state
 
 
 def _record_usage(project_root: Path, task_ref: str, model: str, adapter: str, prompt_tokens: int, completion_tokens: int, exit_code: int = 0) -> None:
-    usage_file = project_root / ".gpt-creator" / "logs" / "codex-usage.ndjson"
-    try:
-        usage_file.parent.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "task": task_ref,
-            "model": model,
-            "adapter": adapter,
-            "prompt_tokens": int(prompt_tokens or 0),
-            "completion_tokens": int(completion_tokens or 0),
-            "total_tokens": int((prompt_tokens or 0) + (completion_tokens or 0)),
-            "exit": int(exit_code),
-            "usage_captured": True,
-        }
-        with usage_file.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry) + "\n")
-    except Exception:
-        pass
+    log_dir = Path(os.getenv("LOG_DIR") or project_root / ".gpt-creator" / "logs")
+    primary = Path(os.getenv("GC_USAGE_FILE") or log_dir / "usage.ndjson")
+    legacy = log_dir / "codex-usage.ndjson"
+    paths = [primary]
+    if legacy != primary:
+        paths.append(legacy)
+    entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "run_id": os.getenv("GC_ACTIVE_RUN_STAMP") or os.getenv("GC_BUDGET_RUN_ID") or "manual",
+        "task": task_ref,
+        "model": model,
+        "adapter": adapter,
+        "tokens_in": int(prompt_tokens or 0),
+        "tokens_out": int(completion_tokens or 0),
+        "prompt_tokens": int(prompt_tokens or 0),
+        "completion_tokens": int(completion_tokens or 0),
+        "total_tokens": int((prompt_tokens or 0) + (completion_tokens or 0)),
+        "exit_code": int(exit_code),
+        "usage_captured": True,
+        "source": "review",
+    }
+    telemetry_payload = os.getenv("AGENT_TELEMETRY_PAYLOAD", "").strip()
+    if telemetry_payload:
+        entry["telemetry_payload"] = telemetry_payload
+    for path in paths:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry) + "\n")
+        except Exception:
+            continue
 
 
 def _normalize_status(value: str) -> str:
@@ -103,7 +116,7 @@ def _load_agent_from_env() -> Optional[Tuple[str, Dict[str, Any], str]]:
         os.getenv("DEFAULT_LLM")
         or os.getenv("GC_ACTIVE_AGENT_MODEL")
         or os.getenv("CODEX_MODEL")
-        or "gpt-5.1-codex-max"
+        or "gpt-4.1"
     )
     if not adapter and not os.getenv("DEFAULT_AGENT"):
         return None
@@ -343,6 +356,9 @@ def review_tasks(
     dry_run: bool,
     task_ref: Optional[str],
 ) -> int:
+    if not db_path.exists():
+        print(f"Tasks database not found at {db_path}", file=sys.stderr)
+        return 1
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
@@ -354,7 +370,7 @@ def review_tasks(
         model_override
         or os.getenv("DEFAULT_LLM")
         or os.getenv("CODEX_MODEL")
-        or "gpt-5.1-codex-max"
+        or "gpt-4.1"
     )
 
     # Highest precedence: active agent environment (registry).
@@ -380,7 +396,12 @@ def review_tasks(
     if model_override:
         model = model_override
 
-    client = create_llm_client(adapter, config)
+    try:
+        client = create_llm_client(adapter, config)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Failed to initialize LLM client (adapter={adapter}, model={model}): {exc}", file=sys.stderr)
+        conn.close()
+        return 1
 
     if not agent_name:
         agent_name = os.getenv("DEFAULT_AGENT", "")

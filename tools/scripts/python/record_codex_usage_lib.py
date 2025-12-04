@@ -191,13 +191,20 @@ if "total_tokens" not in fields:
         total = (prompt_val or 0) + (completion_val or 0)
         fields["total_tokens"] = total
 
+adapter = os.getenv("GC_ACTIVE_AGENT_ADAPTER") or os.getenv("GC_ACTIVE_ADAPTER") or "codex_cli"
+run_id = os.getenv("GC_BUDGET_RUN_ID") or os.getenv("GC_ACTIVE_RUN_STAMP") or "manual"
+story_slug = os.getenv("GC_ACTIVE_TASK_SLUG") or None
 record = {
     "timestamp": timestamp,
+    "run_id": run_id,
     "task": task,
+    "story": story_slug,
+    "adapter": adapter,
     "model": model,
     "prompt_file": prompt_file,
     "exit_code": exit_code,
     "usage_captured": bool(fields),
+    "source": "adapter-call",
 }
 
 for key in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "billable_units", "request_units"):

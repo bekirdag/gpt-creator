@@ -44,4 +44,4 @@ Global flags:
   --reports-idle-timeout <s> Override idle detection threshold in seconds (default: ${GC_REPORTS_IDLE_TIMEOUT})
 
 Environment overrides:
-  CODEX_BIN, CODEX_MODEL, DOCKER_BIN, MYSQL_BIN, EDITOR_CMD, GC_API_HEALTH_URL, GC_WEB_URL, GC_ADMIN_URL
+  CODEX_BIN, CODEX_MODEL (only when adapter=codex), DOCKER_BIN, MYSQL_BIN, EDITOR_CMD, GC_API_HEALTH_URL, GC_WEB_URL, GC_ADMIN_URL

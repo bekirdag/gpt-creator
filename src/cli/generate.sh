@@ -24,16 +24,18 @@ type die      >/dev/null 2>&1 || die(){ log_err "$*"; exit 1; }
 
 show_usage() {
   env \
-    GENERATE_USAGE_CODEX_MODEL="${CODEX_MODEL:-gpt-5-high}" \
+    GENERATE_USAGE_CODEX_MODEL="${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-gpt-4.1}}}" \
     GENERATE_USAGE_CODEX_CMD="${CODEX_CMD:-codex}" \
-    GENERATE_USAGE_OUT_ROOT="${PROJECT_ROOT:-$ROOT_DIR}/apps" \
+    GENERATE_USAGE_OUT_ROOT="${PROJECT_ROOT:-$PWD}/apps" \
     gc_cli_render_template "help/generate_usage.txt"
 }
 
 # Defaults (may be overridden by constants.sh or env)
-: "${PROJECT_ROOT:=${ROOT_DIR}}"
-: "${CODEX_MODEL:=gpt-5-high}"
+: "${PROJECT_ROOT:=${PWD}}"
+# Align default model with CLI default to avoid gated SKUs.
+: "${CODEX_MODEL:=${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-gpt-4.1}}}"
 : "${CODEX_CMD:=codex}"
+: "${CODEX_ADAPTER:=${GC_ACTIVE_AGENT_ADAPTER:-codex_cli}}"
 AGENT_NAME=""
 
 TARGET="all"
@@ -60,6 +62,9 @@ if [[ -n "$AGENT_NAME" ]]; then
     CODEX_MODEL="$resolved_model"
     export CODEX_MODEL
     log_info "[agents] generate using agent '${AGENT_NAME}' (model ${CODEX_MODEL})"
+    if [[ -n "${GC_ACTIVE_AGENT_ADAPTER:-}" ]]; then
+      CODEX_ADAPTER="$GC_ACTIVE_AGENT_ADAPTER"
+    fi
   else
     log_warn "[agents] agent '${AGENT_NAME}' not found; treating argument as raw model id"
     CODEX_MODEL="$AGENT_NAME"
@@ -72,7 +77,7 @@ run_part () {
   local script="${SCRIPT_DIR}/generate-${part}.sh"
   [[ -x "$script" ]] || die "Missing script: $script"
   log_info "▶ Generating ${part}…"
-  "$script" "${ARGS[@]}"
+  GC_ACTIVE_AGENT_MODEL="${CODEX_MODEL}" GC_ACTIVE_AGENT_ADAPTER="${CODEX_ADAPTER}" "$script" "${ARGS[@]}"
   log_info "✔ ${part} generation complete."
 }
 

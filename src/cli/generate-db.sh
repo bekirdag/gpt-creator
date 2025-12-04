@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # gpt-creator · generate-db.sh
 # Generate DB layer (Prisma by default) from an existing MySQL DB or SQL dump.
-# Falls back to Codex-assisted generation if introspection isn't available.
+# Falls back to adapter-assisted generation if introspection isn't available.
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +15,7 @@ if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
   source "${ROOT_DIR}/src/constants.sh"
 else
-  CODEX_MODEL="${CODEX_MODEL:-gpt-5-high}"
+  CODEX_MODEL="${CODEX_MODEL:-gpt-4.1}"
   log(){ printf "[generate-db] %s\n" "$*"; }
   die(){ printf "[generate-db][ERROR] %s\n" "$*" >&2; exit 1; }
 fi
@@ -61,7 +61,7 @@ gc_clone_python_tool() {
 
 humanize_name() {
   local helper_path
-  helper_path="$(gc_clone_python_tool "humanize_name.py" "$ROOT_DIR")" || return 1
+  helper_path="$(gc_clone_python_tool "humanize_name.py" "$PROJECT_ROOT")" || return 1
   python3 "$helper_path" "${1:-}"
 }
 
@@ -69,17 +69,21 @@ usage() {
   (
     set -a
     # shellcheck disable=SC2034
-    GEN_DB_CODEX_MODEL_DEFAULT="${CODEX_MODEL:-gpt-5-high}"
+    GEN_DB_CODEX_MODEL_DEFAULT="${ADAPTER_MODEL:-gpt-5-high}"
     set +a
     gc_cli_render_template "help/generate_db_usage.txt"
   )
 }
 
+PROJECT_ROOT="${PROJECT_ROOT:-$PWD}"
 ORM="prisma"
 DB_URL="${DATABASE_URL:-}"
 SQL_DUMP=""
 OUT_DIR="apps/api"
-MODEL="${CODEX_MODEL:-gpt-5-high}"
+MODEL="${ADAPTER_MODEL:-gpt-4.1}"
+: "${ADAPTER_NAME:=${GC_ACTIVE_AGENT_ADAPTER:-${CODEX_ADAPTER:-codex_cli}}}"
+: "${ADAPTER_MODEL:=${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-gpt-4.1}}}}"
+: "${ADAPTER_CMD:=${CODEX_BIN:-codex}}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -96,7 +100,7 @@ done
 if [[ -n "${GC_PROJECT_TITLE:-}" ]]; then
   PROJECT_LABEL="$GC_PROJECT_TITLE"
 else
-  PROJECT_LABEL="$(humanize_name "$ROOT_DIR")"
+  PROJECT_LABEL="$(humanize_name "$PROJECT_ROOT")"
 fi
 [[ -n "$PROJECT_LABEL" ]] || PROJECT_LABEL="Project"
 project_label_lower="$(printf '%s' "$PROJECT_LABEL" | tr '[:upper:]' '[:lower:]')"
@@ -106,7 +110,7 @@ else
   PROJECT_LABEL_PROMPT="the ${PROJECT_LABEL}"
 fi
 
-API_DIR="${ROOT_DIR}/${OUT_DIR}"
+API_DIR="${PROJECT_ROOT}/${OUT_DIR}"
 PRISMA_DIR="${API_DIR}/prisma"
 mkdir -p "${PRISMA_DIR}"
 
@@ -160,21 +164,19 @@ case "${ORM}" in
       log "Done. Prisma schema at: ${PRISMA_DIR}/schema.prisma"
       exit 0
     fi
-    log "DB not reachable. Falling back to Codex-assisted schema synthesis."
+    log "DB not reachable. Falling back to adapter-assisted schema synthesis."
     ;;
   typeorm)
-    log "TypeORM selected. Proceeding with Codex-assisted entity synthesis."
+    log "TypeORM selected. Proceeding with adapter-assisted entity synthesis."
     ;;
   *)
     die "Unsupported ORM: ${ORM}"
     ;;
 esac
 
-# Step 2: Codex-assisted synthesis (fallback)
-CODEX_BIN="${CODEX_BIN:-codex}"
-command -v "${CODEX_BIN}" >/dev/null 2>&1 || die "Codex client not found (set CODEX_BIN or install 'codex')."
+# Step 2: Adapter-assisted synthesis (fallback)
 
-PROMPT_DIR="${ROOT_DIR}/.gpt-creator/prompts"
+PROMPT_DIR="${PROJECT_ROOT}/${GC_WORK_DIR_NAME:-.gpt-creator}/prompts"
 mkdir -p "${PROMPT_DIR}"
 
 gc_cli_render_template "prompts/generate_db.system.md" > "${PROMPT_DIR}/db.system.md"
@@ -190,7 +192,7 @@ gc_cli_render_template "prompts/generate_db.system.md" > "${PROMPT_DIR}/db.syste
 # Collect likely inputs
 ATTACH=()
 add_if() { [[ -f "$1" ]] && ATTACH+=("$1"); }
-STAGING_ROOT="${ROOT_DIR}/${GC_WORK_DIR_NAME:-.gpt-creator}/staging"
+STAGING_ROOT="${PROJECT_ROOT}/${GC_WORK_DIR_NAME:-.gpt-creator}/staging"
 if [[ -d "$STAGING_ROOT" ]]; then
   for candidate in     "$STAGING_ROOT/docs/pdr.md"     "$STAGING_ROOT/docs/sds.md"     "$STAGING_ROOT/docs/rfp.md"     "$STAGING_ROOT/docs/jira.md"     "$STAGING_ROOT/docs/ui-pages.md"; do
     add_if "$candidate"
@@ -216,11 +218,63 @@ fi
 
 log "Attachments discovered: ${#ATTACH[@]} file(s)"
 
-# Try a generic Codex CLI call (adjust flags to your local client if needed)
+# Try a generic adapter call (command adapter, adapter CLI, or llm_client_factory)
 OUT_SYNTH="${PRISMA_DIR}/schema.prisma"
-log "Invoking Codex model=${MODEL} to synthesize ORM schema → ${OUT_SYNTH}"
-if "${CODEX_BIN}" chat     --model "${MODEL}"     --system-file "${PROMPT_DIR}/db.system.md"     --input-file "${PROMPT_DIR}/db.task.md"     "${ATTACH[@]/#/--file=}"     > "${OUT_SYNTH}"; then
-  log "Codex wrote: ${OUT_SYNTH}"
-else
-  die "Codex invocation failed. Please check your Codex CLI and flags."
+COMBINED_PROMPT="$(mktemp "${PROMPT_DIR}/db.combined.XXXXXX")"
+cat "${PROMPT_DIR}/db.system.md" "${PROMPT_DIR}/db.task.md" > "${COMBINED_PROMPT}"
+if (( ${#ATTACH[@]} > 0 )); then
+  printf "\n\n## Attachments (paths)\n" >> "${COMBINED_PROMPT}"
+  printf -- "- %s\n" "${ATTACH[@]}" >> "${COMBINED_PROMPT}"
 fi
+
+case "${ADAPTER_NAME}" in
+  command)
+    log "Running command adapter to synthesize ORM schema (cmd='${MODEL}') → ${OUT_SYNTH}"
+    if eval "${MODEL} < \"${COMBINED_PROMPT}\" > \"${OUT_SYNTH}\""; then
+      log "Adapter wrote: ${OUT_SYNTH}"
+      rm -f "${COMBINED_PROMPT}"
+      exit 0
+    fi
+    rm -f "${COMBINED_PROMPT}"
+    die "Command adapter failed to synthesize schema."
+    ;;
+  codex_cli|openai_cli|openai)
+    command -v "${ADAPTER_CMD}" >/dev/null 2>&1 || die "Adapter CLI not found (set ADAPTER_CMD/CODEX_BIN)."
+    log "Invoking adapter=${ADAPTER_NAME} model=${MODEL} to synthesize ORM schema → ${OUT_SYNTH}"
+    if [[ "${ADAPTER_NAME}" == "codex_cli" ]]; then
+      if "${ADAPTER_CMD}" chat --model "${MODEL}" --system-file "${PROMPT_DIR}/db.system.md" --input-file "${PROMPT_DIR}/db.task.md" "${ATTACH[@]/#/--file=}" > "${OUT_SYNTH}"; then
+        log "Adapter wrote: ${OUT_SYNTH}"
+        rm -f "${COMBINED_PROMPT}"
+        exit 0
+      fi
+    else
+      if "${ADAPTER_CMD}" exec --model "${MODEL}" < "${COMBINED_PROMPT}" > "${OUT_SYNTH}"; then
+        log "Adapter wrote: ${OUT_SYNTH}"
+        rm -f "${COMBINED_PROMPT}"
+        exit 0
+      fi
+    fi
+    die "Adapter CLI invocation failed."
+    ;;
+  *)
+    if [[ -z "${GC_SCRIPTS_ROOT:-}" ]]; then
+      die "GC_SCRIPTS_ROOT not set; cannot locate llm client for adapter '${ADAPTER_NAME}'."
+    fi
+    local_py_path="${GC_SCRIPTS_ROOT}/python"
+    log "Invoking adapter=${ADAPTER_NAME} model=${MODEL} via llm_client_factory → ${OUT_SYNTH}"
+    PYTHONPATH="${local_py_path}:${PYTHONPATH:-}" "${PYTHON_BIN:-python3}" - "$ADAPTER_NAME" "$MODEL" "$COMBINED_PROMPT" "$OUT_SYNTH" <<'PY'
+import sys
+from pathlib import Path
+adapter, model, prompt_path, out_path = sys.argv[1:5]
+prompt_text = Path(prompt_path).read_text(encoding="utf-8")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from llm_client_factory import create_llm_client  # type: ignore
+client = create_llm_client(adapter, {})
+response = client.send_chat([prompt_text], model=model)
+out_file = Path(out_path)
+out_file.write_text(response.content, encoding="utf-8")
+PY
+    rm -f "${COMBINED_PROMPT}"
+    log "Adapter wrote: ${OUT_SYNTH}"
+    ;;
+esac

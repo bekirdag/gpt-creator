@@ -1,4 +1,4 @@
-# You are Codex (model: ${ITERATE_CODEX_MODEL})
+# You are the active assistant (model: ${ITERATE_CODEX_MODEL:-${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-model}}})
 
 You are helping build ${ITERATE_PROJECT_LABEL} based on normalized docs. Read **all** context below, then complete the task precisely.
 Focus on: NestJS (API), MySQL 8 (Prisma/TypeORM), Vue 3 (site+admin), Docker. Adhere to PDR/SDS acceptance checks.
@@ -14,4 +14,3 @@ ${ITERATE_TASK_TITLE}
 
 ## Context (truncated when large)
 (Full context: context.md in this run directory)
-

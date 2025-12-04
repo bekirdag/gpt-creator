@@ -92,7 +92,7 @@ gpt-creator list-agents --client openai
 gpt-creator show-agent --name Fixer-A --json
 
 # Edit partial fields (resummarize derives new summaries from stored docs)
-gpt-creator edit-agent --name Fixer-A --model gpt-5-codex --resummarize
+gpt-creator edit-agent --name Fixer-A --model gpt-5.1 --resummarize
 
 # Soft delete (can be reinstated via edit --active true)
 gpt-creator delete-agent --name Fixer-A

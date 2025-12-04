@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Append a blocked-quota telemetry row based on a prompt meta file."""
+"""Append a blocked budget/quota telemetry row based on a prompt meta file."""
 
 from __future__ import annotations
 
@@ -32,11 +32,15 @@ def _append_row(log_path: Path, row: Dict[str, Any]) -> None:
 
 def log_blocked_quota(meta_path: Path, *, task_id: str, story_slug: str, run_id: str, model: str, log_path: Path) -> None:
     meta = _load_meta(meta_path)
-    if not meta or str(meta.get("status", "")).strip().lower() != "blocked-quota":
+    if not meta:
+        return
+    status_value = str(meta.get("status", "")).strip().lower()
+    if status_value not in {"blocked-quota", "blocked-budget"}:
         return
 
     timestamp = _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
     pruned_section = meta.get("pruned") or {}
+    normalized_status = "blocked-budget"
     row: Dict[str, Any] = {
         "ts": timestamp,
         "run_id": run_id,
@@ -44,6 +48,8 @@ def log_blocked_quota(meta_path: Path, *, task_id: str, story_slug: str, run_id:
         "task_id": task_id,
         "model": model,
         "blocked_quota": True,
+        "blocked_budget": True,
+        "status": normalized_status,
         "token_budget_soft": meta.get("token_budget_soft"),
         "token_budget_hard": meta.get("token_budget_hard"),
         "token_used_est": meta.get("token_estimate_final"),

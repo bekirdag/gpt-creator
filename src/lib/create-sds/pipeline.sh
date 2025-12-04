@@ -48,12 +48,21 @@ csds::run_codex() {
   local codex_reasoning="${CODEX_REASONING_EFFORT:-${CODEX_REASONING_EFFORT_NON_CODE:-low}}"
 
   if [[ "$CSDS_DRY_RUN" == "1" ]]; then
-    csds::warn "[dry-run] Skipping Codex invocation for ${label}"
+    csds::warn "[dry-run] Skipping model invocation for ${label}"
     printf '{"status": "dry-run", "label": "%s"}\n' "$label" >"$output_file"
     return 0
   fi
 
   mkdir -p "$(dirname "$output_file")"
+
+  if [[ "${CSDS_ADAPTER:-}" == "command" ]]; then
+    csds::log "Running command adapter for ${label} (cmd='${CSDS_MODEL}')"
+    if ! eval "${CSDS_MODEL} < \"$prompt_file\" > \"$output_file\""; then
+      csds::warn "Command adapter failed for ${label}."
+      return 1
+    fi
+    return 0
+  fi
 
   if csds::codex_has_subcommand chat; then
     local cmd=("$CSDS_CODEX_CMD" chat --model "$CSDS_MODEL" --prompt-file "$prompt_file" --output "$output_file")
@@ -161,10 +170,11 @@ csds::extract_json() {
 
 csds::init() {
   CSDS_PROJECT_ROOT="${1:?project root required}"
-  local csds_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex}}}"
+  local csds_default_model="${GC_ACTIVE_AGENT_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-}}}}}"
   CSDS_MODEL="${2:-$csds_default_model}"
   CSDS_DRY_RUN="${3:-0}"
   CSDS_FORCE="${4:-0}"
+  CSDS_ADAPTER="${GC_ACTIVE_AGENT_ADAPTER:-codex_cli}"
 
   CSDS_PROJECT_ROOT="$(csds::abs_path "$CSDS_PROJECT_ROOT")"
   [[ -d "$CSDS_PROJECT_ROOT" ]] || csds::die "Project root not found: $CSDS_PROJECT_ROOT"
@@ -187,11 +197,15 @@ csds::init() {
   CSDS_ASSEMBLY_DIR="$CSDS_PLAN_DIR/sds"
   CSDS_TMP_DIR="$CSDS_PIPELINE_DIR/tmp"
 
+  if [[ "$CSDS_FORCE" == "1" && "${CSDS_DRY_RUN:-0}" != "1" ]]; then
+    rm -rf "$CSDS_PIPELINE_DIR"
+  fi
+
   mkdir -p "$CSDS_PROMPTS_DIR" "$CSDS_OUTPUT_DIR" "$CSDS_JSON_DIR" \
     "$CSDS_SECTIONS_DIR" "$CSDS_ASSEMBLY_DIR" "$CSDS_TMP_DIR"
 
   CSDS_CODEX_CMD="${CODEX_BIN:-${CODEX_CMD:-codex}}"
-  if ! command -v "$CSDS_CODEX_CMD" >/dev/null 2>&1; then
+  if [[ "${CSDS_ADAPTER:-codex_cli}" == "codex_cli" && ! -x "$CSDS_CODEX_CMD" ]]; then
     csds::warn "Codex CLI '$CSDS_CODEX_CMD' not found; enabling dry-run mode."
     CSDS_DRY_RUN=1
   fi
@@ -346,17 +360,17 @@ csds::generate_sections() {
     fi
 
     csds::log "Preparing section prompt for ${slug}"
-    csds::write_section_prompt "$slug" "$prompt_path"
+  csds::write_section_prompt "$slug" "$prompt_path"
 
-    csds::log "Generating section content for ${slug}"
-    if csds::run_codex "$prompt_path" "$raw_output" "sds-section-${slug}"; then
-      if [[ ! -s "$raw_output" ]]; then
-        csds::die "Codex produced no output for section ${slug}; inspect ${raw_output}"
-      fi
-      cp "$raw_output" "$section_path"
-    else
-      csds::die "Codex generation failed for section ${slug}; inspect ${raw_output}"
+  csds::log "Generating section content for ${slug}"
+  if csds::run_codex "$prompt_path" "$raw_output" "sds-section-${slug}"; then
+    if [[ ! -s "$raw_output" ]]; then
+      csds::die "Codex produced no output for section ${slug}; inspect ${raw_output}"
     fi
+    cp "$raw_output" "$section_path"
+  else
+    csds::die "Codex generation failed for section ${slug}; inspect ${raw_output}"
+  fi
   done < <(csds::manifest_generation_order)
 }
 

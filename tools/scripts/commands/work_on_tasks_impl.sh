@@ -2055,12 +2055,16 @@ print(error)'
 
       printf '\n'
       local task_adapter_step="patch"
-      local task_adapter_model=""
+      local task_adapter_model="${GC_ACTIVE_MODEL:-${GC_ACTIVE_AGENT_MODEL:-}}"
       local task_adapter_reasoning=""
       local task_adapter_name="${GC_ACTIVE_AGENT_ADAPTER:-${GC_ACTIVE_ADAPTER:-}}"
       if [[ -z "$task_adapter_name" ]]; then
         task_adapter_name="unknown-adapter"
       fi
+      if [[ -z "$task_adapter_model" ]]; then
+        task_adapter_model="unknown-model"
+      fi
+      local adapter_model_for_step="$task_adapter_model"
       local is_codex_adapter=0
       if [[ "$task_adapter_name" == "codex_cli" ]]; then
         is_codex_adapter=1

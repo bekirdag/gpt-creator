@@ -169,7 +169,7 @@ max_out = pick(resolved.get("maxOutputTokens"), agent.get("maxOutputTokens"))
 api_key_env = pick(agent.get("client_api_key_env"), resolved.get("apiKeyEnv"))
 api_base_env = pick(agent.get("client_api_base_env"), resolved.get("apiBaseEnv"))
 api_org_env = pick(agent.get("client_api_org_env"), resolved.get("orgEnv"))
-print("\\n".join([
+print("\t".join([
     kind,
     client,
     model,
@@ -186,7 +186,7 @@ print("\\n".join([
 ]))
 PY
   )" || true
-  IFS=$'\n' read -r resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org resolved_adapter resolved_ctx resolved_out resolved_api_key_env resolved_api_base_env resolved_api_org_env <<<"$parsed_output"
+  IFS=$'\t' read -r resolved_kind resolved_client resolved_model resolved_name resolved_api_key resolved_api_base resolved_api_org resolved_adapter resolved_ctx resolved_out resolved_api_key_env resolved_api_base_env resolved_api_org_env <<<"$parsed_output"
 
   info "agent-resolve: parsed client=${resolved_client:-<empty>} model=${resolved_model:-<empty>} name=${resolved_name:-<empty>}"
 

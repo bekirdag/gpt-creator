@@ -47,74 +47,76 @@ EOF
   local tasks_db
   tasks_db="$(_gc_agents_require_db)" || return "$GC_AGENT_EXIT_DB"
 
-  local select_output=""
-  if ! select_output="$(GC_AGENT_READONLY=1 gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" select --name "$name")"; then
-    die "Failed to resolve agent '${name}' from tasks DB"
+  # Resolve the agent using the same path as work-on-tasks so env vars are populated.
+  if ! gc_resolve_agent "$name" "$tasks_db" "${PROJECT_ROOT:-$PWD}"; then
+    die "Failed to resolve agent '${name}' via work-on-tasks resolver"
   fi
 
   local summary=""
   summary="$(
-    "$python_bin" - <<'PY' "$select_output"
-import json, sys
-agent_raw = sys.argv[1]
-try:
-    data = json.loads(agent_raw)
-except Exception:
-    sys.stderr.write("invalid agent selection JSON\n")
-    sys.exit(1)
-if data.get("kind") != "agent":
-    sys.stderr.write("no agent found\n")
-    sys.exit(1)
-agent = data.get("agent") or {}
-client = agent.get("client", "")
-model = agent.get("model", "")
-name = agent.get("name", "")
-agent_adapter = (agent.get("adapter") or "").strip()
-agent_cfg = agent.get("adapterConfig") or {}
-max_ctx = agent.get("maxContextTokens")
-max_out = agent.get("maxOutputTokens")
-api_base = agent.get("client_api_base") or ""
-api_key_env = agent.get("client_api_key_env") or ""
-org_env = agent.get("client_api_org_env") or ""
-api_base_env = agent.get("client_api_base_env") or ""
+    GC_ACTIVE_AGENT_FILE="${GC_ACTIVE_AGENT_FILE:-}" "$python_bin" - <<'PY'
+import json, os, sys
+from pathlib import Path
 
-adapter = agent_adapter
-adapter_cfg = agent_cfg
-try:
-    import os
-    from pathlib import Path
+def load_agent():
+    agent_file = os.environ.get("GC_ACTIVE_AGENT_FILE") or ""
+    data = {}
+    if agent_file and Path(agent_file).exists():
+        try:
+            data = json.loads(Path(agent_file).read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    agent = data.get("agent") or {}
+    if not isinstance(agent, dict):
+        agent = {}
+    return agent
+
+def registry_overlay(agent):
+    client = (agent.get("client") or "").strip()
+    model = (agent.get("model") or "").strip()
+    adapter = (agent.get("adapter") or "").strip()
+    adapter_cfg = agent.get("adapterConfig") or {}
+    max_ctx = agent.get("maxContextTokens")
+    max_out = agent.get("maxOutputTokens")
+    api_base = agent.get("client_api_base") or ""
+    api_key_env = agent.get("client_api_key_env") or ""
+    org_env = agent.get("client_api_org_env") or ""
+    api_base_env = agent.get("client_api_base_env") or ""
     root = os.environ.get("GC_CLI_ROOT") or os.environ.get("CLI_ROOT") or ""
     if root:
         sys.path.insert(0, str(Path(root) / "tools" / "scripts" / "python"))
         sys.path.insert(0, str(Path(root) / "scripts" / "python"))
-    from agents_registry import AgentRegistry  # type: ignore
-    reg = AgentRegistry.load().validate_pair(client, model)
-    model = (reg.get("model") or model or "").strip()
-    adapter = adapter or (reg.get("adapter") or "").strip()
-    adapter_cfg = adapter_cfg or (reg.get("adapterConfig") or {})
-    max_ctx = max_ctx or reg.get("maxContextTokens")
-    max_out = max_out or reg.get("maxOutputTokens")
-    api_base = api_base or reg.get("apiBase") or ""
-    api_key_env = api_key_env or reg.get("apiKeyEnv") or ""
-    org_env = org_env or reg.get("orgEnv") or ""
-    api_base_env = api_base_env or reg.get("apiBaseEnv") or ""
-except Exception:
-    pass
+    try:
+        from agents_registry import AgentRegistry  # type: ignore
+        reg = AgentRegistry.load().validate_pair(client, model)
+        model = (reg.get("model") or model or "").strip()
+        adapter = adapter or (reg.get("adapter") or "").strip()
+        adapter_cfg = adapter_cfg or (reg.get("adapterConfig") or {})
+        max_ctx = max_ctx or reg.get("maxContextTokens")
+        max_out = max_out or reg.get("maxOutputTokens")
+        api_base = api_base or reg.get("apiBase") or ""
+        api_key_env = api_key_env or reg.get("apiKeyEnv") or ""
+        org_env = org_env or reg.get("orgEnv") or ""
+        api_base_env = api_base_env or reg.get("apiBaseEnv") or ""
+    except Exception:
+        pass
+    return {
+        "agent": agent.get("name") or agent.get("name_normalized") or "",
+        "client": client,
+        "model": model,
+        "adapter": adapter,
+        "adapterConfig": adapter_cfg,
+        "maxContextTokens": max_ctx,
+        "maxOutputTokens": max_out,
+        "apiBase": api_base,
+        "apiKeyEnv": api_key_env,
+        "apiBaseEnv": api_base_env,
+        "orgEnv": org_env,
+    }
 
-result = {
-    "agent": name,
-    "client": client,
-    "model": model,
-    "adapter": adapter,
-    "adapterConfig": adapter_cfg,
-    "maxContextTokens": max_ctx,
-    "maxOutputTokens": max_out,
-    "apiBase": api_base,
-    "apiKeyEnv": api_key_env,
-    "apiBaseEnv": api_base_env,
-    "orgEnv": org_env,
-}
-print(json.dumps(result))
+agent = load_agent()
+resolved = registry_overlay(agent)
+print(json.dumps(resolved))
 PY
   )" || return 1
 
@@ -207,5 +209,87 @@ PY
   printf 'Ping:            %s\n' "$ping_status"
   if [[ "$ping_status" == "failed" ]]; then
     printf 'Ping error:      %s\n' "$ping_error"
+  fi
+
+  # Simple workload simulation mirroring work-on-tasks adapter use.
+  local project_root="${PROJECT_ROOT:-$PWD}"
+  local workload_file="${project_root}/test.txt"
+  local -a workload_log=()
+  local workload_error=0
+  local iteration
+  for iteration in 1 2 3; do
+    local agent_line=""
+    if ! agent_line="$(
+      SUMMARY="$summary" ITERATION="$iteration" "$python_bin" - <<'PY' 2>&1
+import json, os, sys
+from pathlib import Path
+
+root = os.environ.get("GC_CLI_ROOT") or os.environ.get("CLI_ROOT") or ""
+if root:
+    sys.path.insert(0, str(Path(root) / "tools" / "scripts" / "python"))
+    sys.path.insert(0, str(Path(root) / "scripts" / "python"))
+
+try:
+    from llm_client_factory import create_llm_client
+except Exception as exc:  # pragma: no cover
+    print(f"llm client import failed: {exc}")
+    sys.exit(1)
+
+summary_raw = os.environ.get("SUMMARY") or "{}"
+iteration = os.environ.get("ITERATION") or "1"
+try:
+    data = json.loads(summary_raw)
+except Exception:
+    data = {}
+adapter = (data.get("adapter") or "").strip()
+model = (data.get("model") or "").strip()
+cfg = data.get("adapterConfig") or {}
+config = {
+    "adapterConfig": cfg,
+    "apiKeyEnv": data.get("apiKeyEnv"),
+    "apiBaseEnv": data.get("apiBaseEnv"),
+    "apiBase": data.get("apiBase"),
+    "orgEnv": data.get("orgEnv"),
+    "maxContextTokens": data.get("maxContextTokens"),
+    "maxOutputTokens": data.get("maxOutputTokens"),
+}
+if not adapter or not model:
+    print("missing adapter or model")
+    sys.exit(1)
+
+client = create_llm_client(adapter, config)
+prompt = [
+    {"role": "system", "content": "You are running a self-test. Output only the line to append to test.txt. No prose, no formatting."},
+    {"role": "user", "content": f"Append the number {iteration} as its own line."},
+]
+try:
+    result = client.send_chat(prompt, model=model)
+    content = getattr(result, "content", "") or ""
+    if not content:
+        print("empty response")
+        sys.exit(1)
+    line = content.strip().splitlines()[0].strip()
+    print(line)
+except Exception as exc:
+    print(str(exc))
+    sys.exit(1)
+PY
+    )"; then
+      workload_error=1
+      workload_log+=("run ${iteration}: agent call failed (${agent_line})")
+      continue
+    fi
+    printf '%s\n' "$agent_line" >>"$workload_file"
+    workload_log+=("run ${iteration}: appended '${agent_line}' to ${workload_file}")
+  done
+
+  printf '\nWorkload simulation:\n'
+  for entry in "${workload_log[@]}"; do
+    printf '  - %s\n' "$entry"
+  done
+  if (( workload_error )); then
+    printf 'Workload result: incomplete (errors encountered)\n'
+  else
+    printf 'Workload result: completed successfully\n'
   fi
 }

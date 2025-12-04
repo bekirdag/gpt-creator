@@ -16,8 +16,8 @@ usage() {
 }
 
 PROJECT_PATH="$PWD"
-# Default model/agent from env for easy overrides; align with CLI default to avoid gated SKUs.
-DEFAULT_MODEL="${DEFAULT_LLM:-${GC_ACTIVE_MODEL:-${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-4.1}}}}}"
+# Default model/agent from env for easy overrides; align with CLI default.
+DEFAULT_MODEL="${DEFAULT_LLM:-${GC_ACTIVE_MODEL:-${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex}}}}}"
 MODEL="$DEFAULT_MODEL"
 DRY_RUN=0
 FORCE=0

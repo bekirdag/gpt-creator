@@ -203,7 +203,7 @@ def test_document_index_meta_respects_overrides(tmp_path: Path, stop_override: s
         "0",
         str(prompt_path),
         str(context_tail),
-        "gpt-4.1-coder",
+        "gpt-5.1-codex",
         str(project_root),
         str(staging_dir),
     ]
@@ -240,7 +240,7 @@ def test_log_blocked_quota_appends_row(tmp_path: Path):
         task_id="TASK-99",
         story_slug="story-omega",
         run_id="run-123",
-        model="gpt-4.1-coder",
+        model="gpt-5.1-codex",
         log_path=log_path,
     )
 
@@ -251,7 +251,7 @@ def test_log_blocked_quota_appends_row(tmp_path: Path):
     assert row["task_id"] == "TASK-99"
     assert row["story_slug"] == "story-omega"
     assert row["run_id"] == "run-123"
-    assert row["model"] == "gpt-4.1-coder"
+    assert row["model"] == "gpt-5.1-codex"
     assert row["pruned_items"]["artefacts_elided"] == 3
     assert row["pruned_bytes"] == 2048
 
@@ -262,7 +262,7 @@ def test_log_blocked_quota_appends_row(tmp_path: Path):
         task_id="TASK-99",
         story_slug="story-omega",
         run_id="run-123",
-        model="gpt-4.1-coder",
+        model="gpt-5.1-codex",
         log_path=log_path,
     )
     lines_after = log_path.read_text(encoding="utf-8").splitlines()

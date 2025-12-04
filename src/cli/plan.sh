@@ -61,8 +61,8 @@ gc_cli_render_template "prompts/plan_prompt.txt" > "${PROMPT_FILE}"
 
 # Invoke adapter client if available, else just emit the prompt path.
 ADAPTER_BIN="${ADAPTER_CMD:-${CODEX_BIN:-codex}}"
-# Align with CLI default to avoid gated SKUs.
-MODEL="${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${GC_CODEX_MODEL:-gpt-4.1}}}"
+# Align with CLI default.
+MODEL="${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${GC_CODEX_MODEL:-gpt-5.1-codex}}}"
 
 if command -v "${ADAPTER_BIN}" >/dev/null 2>&1; then
   echo "[plan] Running adapter (${ADAPTER_BIN}) to produce build plan…"

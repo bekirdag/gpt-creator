@@ -130,7 +130,7 @@ def _load_agent_from_env() -> Optional[Tuple[str, Dict[str, Any], str]]:
         os.getenv("DEFAULT_LLM")
         or os.getenv("GC_ACTIVE_AGENT_MODEL")
         or os.getenv("CODEX_MODEL")
-        or "gpt-4.1"
+        or "gpt-5.1-codex"
     )
     if not adapter and not os.getenv("DEFAULT_AGENT"):
         return None
@@ -224,7 +224,7 @@ def qa_tasks_llm(
         model_override
         or os.getenv("DEFAULT_LLM")
         or os.getenv("CODEX_MODEL")
-        or "gpt-5.1-codex-max"
+        or "gpt-5.1-codex"
     )
 
     env_agent = _load_agent_from_env()

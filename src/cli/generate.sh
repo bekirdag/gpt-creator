@@ -24,7 +24,7 @@ type die      >/dev/null 2>&1 || die(){ log_err "$*"; exit 1; }
 
 show_usage() {
   env \
-    GENERATE_USAGE_CODEX_MODEL="${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-gpt-4.1}}}" \
+    GENERATE_USAGE_CODEX_MODEL="${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-gpt-5.1-codex}}}" \
     GENERATE_USAGE_CODEX_CMD="${CODEX_CMD:-codex}" \
     GENERATE_USAGE_OUT_ROOT="${PROJECT_ROOT:-$PWD}/apps" \
     gc_cli_render_template "help/generate_usage.txt"
@@ -33,7 +33,7 @@ show_usage() {
 # Defaults (may be overridden by constants.sh or env)
 : "${PROJECT_ROOT:=${PWD}}"
 # Align default model with CLI default to avoid gated SKUs.
-: "${CODEX_MODEL:=${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-gpt-4.1}}}"
+: "${CODEX_MODEL:=${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-gpt-5.1-codex}}}"
 : "${CODEX_CMD:=codex}"
 : "${CODEX_ADAPTER:=${GC_ACTIVE_AGENT_ADAPTER:-codex_cli}}"
 AGENT_NAME=""

@@ -549,9 +549,9 @@ export APP_NAME VERSION
 
 # Defaults (override via env)
 CODEX_BIN="${CODEX_BIN:-codex}"
-# Default to a widely-available Chat Completions model to avoid account/product gating on codex-* SKUs.
-CODEX_MODEL="${CODEX_MODEL:-gpt-4.1}"
-CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-gpt-4.1}"
+# Default to a widely-available Codex model.
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.1-codex}"
+CODEX_FALLBACK_MODEL="${CODEX_FALLBACK_MODEL:-gpt-5.1-codex}"
 
 # Stage-aware model selection (defaults fall back to CODEX_MODEL for compatibility)
 CODEX_MODEL_LOW="${CODEX_MODEL_LOW:-${CODEX_MODEL}}"

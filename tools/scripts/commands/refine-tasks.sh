@@ -72,7 +72,7 @@ cmd_refine_tasks() {
     dry_run=1
   fi
 
-  local model_name="${model_override:-${GC_ACTIVE_AGENT_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-$GC_DEFAULT_MODEL:-gpt-4.1}}}}"
+  local model_name="${model_override:-${GC_ACTIVE_AGENT_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-${GC_DEFAULT_MODEL:-gpt-5.1-codex}}}}}"
 
   # shellcheck source=src/lib/create-jira-tasks/pipeline.sh
   source "${CLI_ROOT}/src/lib/create-jira-tasks/pipeline.sh"

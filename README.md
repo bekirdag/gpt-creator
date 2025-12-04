@@ -203,7 +203,7 @@ The updater clones the latest `gpt-creator` sources into a temporary directory, 
    gpt-creator create-db-dump --project /path/to/project
    ```
    - `create-db-dump` synthesizes a MySQL schema and seed dump, stores them under `.gpt-creator/staging/plan/create-db-dump/sql/`, and finishes with a Codex review to ensure consistency across tables, constraints, and seed data.
-   - All of the Codex-backed doc commands above accept `-m/--model <model-id>` to override the `CODEX_MODEL`/`CODEX_MODEL_NON_CODE` defaults for that single run (for example, `gpt-creator create-sds --project /path/to/project --model gpt-4.1-mini`).
+  - All of the Codex-backed doc commands above accept `-m/--model <model-id>` to override the `CODEX_MODEL`/`CODEX_MODEL_NON_CODE` defaults for that single run (for example, `gpt-creator create-sds --project /path/to/project --model gpt-5.1-codex`).
 
 5. **Work Jira backlog** (optional):
    ```bash
@@ -443,7 +443,7 @@ gpt-creator db import      # mysql < staging/inputs/sql/*.sql
 gpt-creator db seed        # placeholder for custom seeds
 ```
 - The `.env` file already holds the DB host/user/password (including the mapped host port), so these commands work without extra setup.
-- `gpt-creator generate-db --sql dump.sql [--model gpt-4.1-mini]` introspects a live MySQL instance when `DATABASE_URL` is reachable and falls back to a Codex-assisted Prisma/TypeORM schema when offline; `--model` controls the Codex tier used during that fallback synthesis.
+-- `gpt-creator generate-db --sql dump.sql [--model gpt-5.1-codex]` introspects a live MySQL instance when `DATABASE_URL` is reachable and falls back to a Codex-assisted Prisma/TypeORM schema when offline; `--model` controls the Codex tier used during that fallback synthesis.
 
 ### 6. Run Stack
 ```
@@ -611,7 +611,7 @@ gpt-creator iterate --project /path/to/project --jira docs/jira.md
 | `GC_DB_NAME`, `GC_DB_USER`, `GC_DB_PASSWORD` | Injected into rendered DB templates. | `app`, `app`, `app_pass` |
 | `GC_SKIP_PROGRESS_MIGRATION` | Set to `1` to opt out of the automatic sweep that relocates legacy Codex artifacts into `.gpt-creator/`. | `0` |
 | `GC_AUTO_REVIEW` | Leave unset (default) or set to `1`/`true`/`on` to let `work-on-tasks` synthesize review artifacts automatically and clear review-required flags; set to `0`/`false` to disable. | `1` |
-| `CODEX_BIN`, `CODEX_MODEL` | Override Codex executable/model (used only when adapter=codex). | `codex`, `gpt-4.1` (high) |
+| `CODEX_BIN`, `CODEX_MODEL` | Override Codex executable/model (used only when adapter=codex). | `codex`, `gpt-5.1-codex` (high) |
 | `CODEX_MODEL_CODE`, `CODEX_MODEL_NON_CODE` | Stage-specific Codex models (code-writing vs. planning/doc tasks). | `CODEX_MODEL`, `CODEX_MODEL` |
 | `CODEX_REASONING_EFFORT_CODE`, `CODEX_REASONING_EFFORT_NON_CODE` | Reasoning effort per stage (both default to `medium`). | `medium`, `medium` |
 | `DOCKER_BIN`, `MYSQL_BIN`, `EDITOR_CMD` | Command overrides used within scripts. | `docker`, `mysql`, `code` |

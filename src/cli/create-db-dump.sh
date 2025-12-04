@@ -17,8 +17,8 @@ usage() {
 }
 
 PROJECT_PATH="$PWD"
-# Align default model with CLI default to avoid gated SKUs.
-MODEL="${DEFAULT_LLM:-${CODEX_MODEL:-gpt-4.1}}"
+# Align default model with CLI default.
+MODEL="${DEFAULT_LLM:-${CODEX_MODEL:-gpt-5.1-codex}}"
 DRY_RUN=0
 FORCE=0
 AGENT_NAME=""

@@ -73,7 +73,7 @@ gc_codex_normalize_reasoning() {
 
 gc_codex_normalize_model() {
   local value="${1:-}"
-  local fallback="${2:-gpt-4.1}"
+  local fallback="${2:-gpt-5.1-codex}"
   if [[ -z "$value" ]]; then
     printf '%s' "$fallback"
     return 0
@@ -139,7 +139,7 @@ codex_call() {
   local codex_model_for_step=""
   local codex_reasoning_for_step=""
   gc_codex_profile_for_step "$call_step" codex_model_for_step codex_reasoning_for_step
-  codex_model_for_step="$(gc_codex_normalize_model "$codex_model_for_step" "${CODEX_MODEL:-gpt-4.1}")"
+  codex_model_for_step="$(gc_codex_normalize_model "$codex_model_for_step" "${CODEX_MODEL:-gpt-5.1-codex}")"
   codex_reasoning_for_step="$(gc_codex_normalize_reasoning "$codex_reasoning_for_step" "${CODEX_REASONING_EFFORT:-medium}")"
 
   if [[ "${GC_CODEX_USAGE_LIMIT_REACHED:-0}" == "1" && "${GC_CODEX_USAGE_LIMIT_CONFIRMED:-0}" == "1" ]]; then

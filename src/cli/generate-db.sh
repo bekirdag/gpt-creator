@@ -15,7 +15,7 @@ if [[ -f "${ROOT_DIR}/src/constants.sh" ]]; then
   # shellcheck disable=SC1091
   source "${ROOT_DIR}/src/constants.sh"
 else
-  CODEX_MODEL="${CODEX_MODEL:-gpt-4.1}"
+  CODEX_MODEL="${CODEX_MODEL:-gpt-5.1-codex}"
   log(){ printf "[generate-db] %s\n" "$*"; }
   die(){ printf "[generate-db][ERROR] %s\n" "$*" >&2; exit 1; }
 fi
@@ -69,7 +69,7 @@ usage() {
   (
     set -a
     # shellcheck disable=SC2034
-    GEN_DB_CODEX_MODEL_DEFAULT="${ADAPTER_MODEL:-gpt-5-high}"
+    GEN_DB_CODEX_MODEL_DEFAULT="${ADAPTER_MODEL:-gpt-5.1-codex}"
     set +a
     gc_cli_render_template "help/generate_db_usage.txt"
   )
@@ -80,9 +80,9 @@ ORM="prisma"
 DB_URL="${DATABASE_URL:-}"
 SQL_DUMP=""
 OUT_DIR="apps/api"
-MODEL="${ADAPTER_MODEL:-gpt-4.1}"
+MODEL="${ADAPTER_MODEL:-gpt-5.1-codex}"
 : "${ADAPTER_NAME:=${GC_ACTIVE_AGENT_ADAPTER:-${CODEX_ADAPTER:-codex_cli}}}"
-: "${ADAPTER_MODEL:=${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-gpt-4.1}}}}"
+: "${ADAPTER_MODEL:=${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-gpt-5.1-codex}}}}"
 : "${ADAPTER_CMD:=${CODEX_BIN:-codex}}"
 
 while [[ $# -gt 0 ]]; do

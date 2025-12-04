@@ -22,7 +22,7 @@ if command -v node >/dev/null 2>&1 && [[ -f "${ROOT_DIR}/package.json" ]]; then
   GC_VERSION_RESOLVED="$(node -p "require('${ROOT_DIR}/package.json').version" 2>/dev/null || true)"
 fi
 : "${GC_VERSION:=${GC_VERSION_RESOLVED:-0.1.0}}"
-: "${GC_DEFAULT_MODEL:=gpt-4.1}"
+: "${GC_DEFAULT_MODEL:=gpt-5.1-codex}"
 : "${PROJECT_DIR:=${PWD}}"
 : "${GC_STATE_DIR:=${PROJECT_DIR}/.gpt-creator}"
 : "${GC_STAGING_DIR:=${GC_STATE_DIR}/staging}"

@@ -37,8 +37,8 @@ resolve_doc() {
 }
 
 : "${PROJECT_ROOT:=${PWD}}"
-# Use the standard CLI default model to avoid gated SKUs.
-: "${ADAPTER_MODEL:=${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-gpt-4.1}}}}"
+# Use the standard CLI default model.
+: "${ADAPTER_MODEL:=${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-gpt-5.1-codex}}}}"
 : "${ADAPTER_CMD:=${CODEX_CMD:-codex}}"
 : "${ADAPTER_NAME:=${GC_ACTIVE_AGENT_ADAPTER:-${CODEX_ADAPTER:-codex_cli}}}"
 : "${STAGING_DIR:=${PROJECT_ROOT}/.gpt-creator/staging}"

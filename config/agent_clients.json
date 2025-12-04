@@ -16,7 +16,7 @@
         "macos": "echo 'Install the Codex CLI package from https://platform.openai.com and ensure codex is on PATH.'",
         "windows": "powershell -Command \"Write-Host 'Install the Codex CLI from https://platform.openai.com and add it to PATH.'\""
       },
-      "defaultModel": "gpt-4.1",
+      "defaultModel": "gpt-5.1-codex",
       "models": [
         "gpt-5-codex",
         "gpt-5.1-codex",

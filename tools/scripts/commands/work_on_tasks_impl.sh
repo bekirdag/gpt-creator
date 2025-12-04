@@ -380,7 +380,7 @@ _cmd_work_on_tasks_impl() {
     if [[ -n "${GC_ACTIVE_AGENT_FILE:-}" && -f "${GC_ACTIVE_AGENT_FILE}" ]]; then
       read -r file_adapter file_model < <(
         "${PYTHON_BIN:-python3}" - <<'PY' "${GC_ACTIVE_AGENT_FILE}"
-import json, sys
+import json, os, sys
 from pathlib import Path
 path = Path(sys.argv[1])
 try:
@@ -894,7 +894,7 @@ PY
     if [[ -z "${GC_ACTIVE_AGENT_ADAPTER}" && -n "${GC_ACTIVE_AGENT_CLIENT:-}" ]]; then
       read -r _reg_adapter _reg_model < <(
         "${PYTHON_BIN:-python3}" - <<'PY' "${GC_ACTIVE_AGENT_CLIENT:-}" "${GC_ACTIVE_AGENT_MODEL:-}"
-import json, sys
+import json, os, sys
 from pathlib import Path
 client = sys.argv[1]
 model = sys.argv[2]

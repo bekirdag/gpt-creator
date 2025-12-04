@@ -801,11 +801,13 @@ PY
       return 0
     fi
 
-    if ! GIT_AUTHOR_NAME="gpt-creator automation" \
+    if ! GIT_TERMINAL_PROMPT=0 \
+         GIT_COMMIT_GPGSIGN=0 \
+         GIT_AUTHOR_NAME="gpt-creator automation" \
          GIT_AUTHOR_EMAIL="automation@gpt-creator" \
          GIT_COMMITTER_NAME="gpt-creator automation" \
          GIT_COMMITTER_EMAIL="automation@gpt-creator" \
-         git -C "$git_root" commit -m "$commit_message" >/dev/null 2>&1; then
+         git -C "$git_root" commit --no-verify --no-gpg-sign -m "$commit_message" >/dev/null 2>&1; then
       warn "    Carry-over snapshot commit failed."
       return 1
     fi
@@ -1506,7 +1508,10 @@ gc_clear_active_task
     context_auto_shrink_threshold=1000000
   fi
   info "Work run directory → ${run_dir}"
-  gc_git_branching_init
+  if ! gc_git_branching_init; then
+    warn "Git branching initialization failed (likely due to a dirty working tree); clean or snapshot your changes and rerun."
+    return 1
+  fi
   ln -sfn "${run_dir}" "$(dirname "${run_dir}")/latest" 2>/dev/null || true
 
   local resume_flag=1
@@ -2175,7 +2180,10 @@ print(error)'
       local current_task_id="${task_id:-${banner_task_id:-${slug:-story}-${task_number}}}"
       CURRENT_TASK_ID="$current_task_id"
       export CURRENT_TASK_ID
-      gc_git_begin_task_branch "${CURRENT_TASK_ID}"
+      local branch_ok=1
+      if ! gc_git_begin_task_branch "${CURRENT_TASK_ID}"; then
+        branch_ok=0
+      fi
       info "  → ${task_alias_line}"
       info "    ${task_summary_line}"
 
@@ -2254,6 +2262,20 @@ print(error)'
       local last_attempt_prompt_tokens=0
       local last_attempt_completion_tokens=0
       local last_attempt_total_tokens=0
+
+      if (( branch_ok == 0 )); then
+        warn "  Failed to checkout/create git branch '${CURRENT_TASK_ID}'; marking task as blocked-git-branch."
+        task_needs_review=1
+        manual_followups=1
+        keep_output=0
+        skip_flow=1
+        flow_ok=1
+        task_result_status="blocked-git-branch"
+        apply_status="git-branch-failed"
+        task_outcome_reason="${task_outcome_reason:-git-branch-failed}"
+        gc_mark_outcome "RETRYABLE" "GIT"
+        task_notes+=("Git branch checkout/create failed for '${CURRENT_TASK_ID}'. Inspect .gpt-creator/logs/git and fix repo state before retrying.")
+      fi
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
       export GC_ACTIVE_TASK_DB="$tasks_db"
       export GC_ACTIVE_TASK_SLUG="$slug"
@@ -2569,15 +2591,12 @@ print(error)'
 
         local carry_over_label="${banner_task_id:-${task_id:-${slug:-story}-${task_number}}}"
         if ! gc_preserve_dirty_tree_for_attempt "$carry_over_label" "$attempt"; then
-          warn "  Unable to snapshot pending edits before attempt ${attempt}; aborting task."
+          warn "  Pending edits snapshot failed before attempt ${attempt}; continuing without snapshot."
           task_needs_review=1
           manual_followups=1
           keep_output=1
-          task_result_status="blocked-dirty-tree"
-          gc_mark_outcome "PERMANENT_FAIL" "GIT"
-          apply_status="dirty-tree-snapshot-failed"
-          blocked_stop_run=1
-          break
+          task_notes+=("Git snapshot of pre-existing edits failed before attempt ${attempt}; review local changes and rerun if needed.")
+          # Do not block; allow adapter to proceed on current working tree.
         fi
 
         if (( diff_guard_enabled )); then

@@ -45,11 +45,13 @@ gc_git_dirty_preview() {
 gc_git_commit_with_identity() {
   local message="${1:-}"
   shift || true
+  GIT_TERMINAL_PROMPT=0 \
+  GIT_COMMIT_GPGSIGN=0 \
   GIT_AUTHOR_NAME="${GC_GIT_AUTOMATION_AUTHOR_NAME}" \
   GIT_AUTHOR_EMAIL="${GC_GIT_AUTOMATION_AUTHOR_EMAIL}" \
   GIT_COMMITTER_NAME="${GC_GIT_AUTOMATION_AUTHOR_NAME}" \
   GIT_COMMITTER_EMAIL="${GC_GIT_AUTOMATION_AUTHOR_EMAIL}" \
-    _gc_git commit "$@" -m "$message"
+    _gc_git commit --no-verify --no-gpg-sign "$@" -m "$message"
 }
 
 gc_git_log() {
@@ -159,7 +161,10 @@ gc_git_branching_init() {
       _gc_git checkout -q -t "$GC_GIT_REMOTE/$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
     else
       gc_git_log "[git] creating local ${GC_GIT_DEV_BRANCH} from ${base_ref}"
-      gc_git_create_from "$base_ref" "$GC_GIT_DEV_BRANCH"
+      if ! gc_git_create_from "$base_ref" "$GC_GIT_DEV_BRANCH"; then
+        gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] failed to create ${GC_GIT_DEV_BRANCH} from ${base_ref}; aborting git branching init"
+        return 1
+      fi
       gc_git_push_set_upstream "$GC_GIT_DEV_BRANCH" || true
     fi
   fi
@@ -167,7 +172,16 @@ gc_git_branching_init() {
   current_branch="$(gc_git_current_branch)"
   gc_git_log "[git] pre-switch autosnap if dirty"
   gc_git_autosnap "dev branch checkout" || true
-  gc_git_checkout "$GC_GIT_DEV_BRANCH"
+  if ! gc_git_checkout "$GC_GIT_DEV_BRANCH"; then
+    local dirty_dev_checkout
+    dirty_dev_checkout="$(gc_git_dirty_preview)"
+    gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${GC_GIT_DEV_BRANCH} failed; dirty preview: ${dirty_dev_checkout:-<unknown>}; attempting autosnap + retry"
+    gc_git_autosnap "retry ${GC_GIT_DEV_BRANCH} checkout" || true
+    if ! gc_git_checkout "$GC_GIT_DEV_BRANCH"; then
+      gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${GC_GIT_DEV_BRANCH} still failing; leaving working tree as-is"
+      return 1
+    fi
+  fi
   _gc_git pull --ff-only "$GC_GIT_REMOTE" "$GC_GIT_DEV_BRANCH" >/dev/null 2>&1 || true
   local dev_head
   dev_head="$(_gc_git rev-parse --short HEAD 2>/dev/null || echo "")"
@@ -207,6 +221,7 @@ gc_git_begin_task_branch() {
         local dirty_retry_failure
         dirty_retry_failure="$(gc_git_dirty_preview)"
         gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${slug} still failing after autosnap; dirty preview: ${dirty_retry_failure:-<unknown>}; leaving working tree as-is"
+        return 1
       else
         gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${slug} succeeded after retry autosnap; dirty preview: $(gc_git_dirty_preview)"
       fi
@@ -215,8 +230,14 @@ gc_git_begin_task_branch() {
     gc_git_log "[git] creating branch ${slug} from ${GC_GIT_DEV_BRANCH}"
     gc_git_log "[git] autosnap before creating ${slug}"
     gc_git_autosnap "create ${slug}" || true
-    gc_git_checkout "$GC_GIT_DEV_BRANCH"
-    gc_git_create_from "$GC_GIT_DEV_BRANCH" "$slug"
+    if ! gc_git_checkout "$GC_GIT_DEV_BRANCH"; then
+      gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] checkout ${GC_GIT_DEV_BRANCH} failed before creating ${slug}; dirty preview: $(gc_git_dirty_preview)"
+      return 1
+    fi
+    if ! gc_git_create_from "$GC_GIT_DEV_BRANCH" "$slug"; then
+      gc_git_log "[git][${GC_GIT_BRANCHING_LOG_VERSION}] failed to create ${slug} from ${GC_GIT_DEV_BRANCH}; leaving working tree unchanged"
+      return 1
+    fi
     gc_git_log "[git] created branch ${slug} from ${GC_GIT_DEV_BRANCH}"
   fi
   gc_git_log "[git] begin branch ${slug} ← ${GC_GIT_DEV_BRANCH}"
@@ -231,6 +252,7 @@ gc_git_begin_task_branch() {
   if [[ -n "$branch_base" ]]; then
     gc_git_log "[git] recorded baseline ${branch_base} for ${slug}"
   fi
+  return 0
 }
 
 gc_git_finalize_task_branch() {

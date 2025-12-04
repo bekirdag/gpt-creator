@@ -942,36 +942,22 @@ PY
     warn "work-on-tasks: unable to verify global task order; continuing with existing queue."
   fi
 
-  local prepare_prompts_flag="$prepare_prompts"
-  if [[ -n "${GC_WORK_PREPARE_PROMPTS:-}" ]]; then
-    case "${GC_WORK_PREPARE_PROMPTS,,}" in
-      0|false|no) prepare_prompts_flag=0 ;;
-      1|true|yes) prepare_prompts_flag=1 ;;
-    esac
-  fi
-  export GC_WORK_PREPARE_PROMPTS="$prepare_prompts_flag"
-  if [[ "${GC_WORK_PREPARE_PROMPTS}" == "1" ]]; then
-    export GC_SKIP_STORY_PROMPT_SYNC=0
-  else
-    export GC_SKIP_STORY_PROMPT_SYNC=1
-  fi
+  # Legacy prompt-prep mode is disabled: work-on-tasks always runs prompts+patch.
+  # Hard-set GC_WORK_PREPARE_PROMPTS to 0 so downstream helpers never enter
+  # "prepare prompts only" mode, regardless of existing env configuration.
+  export GC_WORK_PREPARE_PROMPTS=0
+  export GC_SKIP_STORY_PROMPT_SYNC=1
 
   local work_state_dir="${PLAN_DIR}/work"
   mkdir -p "$work_state_dir"
   local prompt_guard="${work_state_dir}/.prompt_sync.once"
   export GC_WORK_PROMPT_SYNC_RUN_GUARD="$prompt_guard"
-  if [[ "${GC_WORK_PREPARE_PROMPTS}" == "1" ]]; then
-    rm -f "$prompt_guard" 2>/dev/null || true
-  else
-    : > "$prompt_guard"
-  fi
+  : > "$prompt_guard"
 
   if [[ -z "${GC_PROMPT_PUBLISH_DISABLE:-}" ]]; then
-    if [[ "${GC_WORK_PREPARE_PROMPTS}" == "1" ]]; then
-      export GC_PROMPT_PUBLISH_DISABLE=0
-    else
-      export GC_PROMPT_PUBLISH_DISABLE=1
-    fi
+    # With prompts+patch as the default, keep prompt publishing disabled
+    # unless the caller explicitly opts in via GC_PROMPT_PUBLISH_DISABLE=0.
+    export GC_PROMPT_PUBLISH_DISABLE=1
   fi
 
   local scripts_root="${GC_SCRIPTS_ROOT:-${CLI_ROOT}/tools/scripts}"
@@ -2061,6 +2047,17 @@ print(error)'
       local stage_baseline_patch="${GC_BUDGET_STAGE_TOTAL_PATCH:-0}"
       local stage_baseline_verify="${GC_BUDGET_STAGE_TOTAL_VERIFY:-0}"
 
+      local current_task_id="${task_filter_value:-${slug:-story}-${task_number}}"
+      CURRENT_TASK_ID="$current_task_id"
+      export CURRENT_TASK_ID
+      if ! gc_git_begin_task_branch "${CURRENT_TASK_ID}"; then
+        warn "  Failed to switch to task branch '${CURRENT_TASK_ID}'; skipping task to avoid dirty state."
+        gc_mark_outcome "BLOCKED" "GIT_BRANCH_FAIL"
+        manual_followups=1
+        work_failed=1
+        continue
+      fi
+
       local prompt_meta
       if ! prompt_meta="$(gc_write_task_prompt "$tasks_db" "$slug" "$position_int" "$prompt_path" "$context_tail" "${GC_ACTIVE_MODEL:-$CODEX_MODEL_CODE}" "$PROJECT_ROOT" "$STAGING_DIR")"; then
         warn "  Failed to build prompt for task index ${position_int}; skipping task."
@@ -2177,13 +2174,6 @@ print(error)'
         "$task_adapter_reasoning" \
         "$run_stamp" \
         "$task_adapter_step"
-      local current_task_id="${task_id:-${banner_task_id:-${slug:-story}-${task_number}}}"
-      CURRENT_TASK_ID="$current_task_id"
-      export CURRENT_TASK_ID
-      local branch_ok=1
-      if ! gc_git_begin_task_branch "${CURRENT_TASK_ID}"; then
-        branch_ok=0
-      fi
       info "  → ${task_alias_line}"
       info "    ${task_summary_line}"
 
@@ -2262,20 +2252,6 @@ print(error)'
       local last_attempt_prompt_tokens=0
       local last_attempt_completion_tokens=0
       local last_attempt_total_tokens=0
-
-      if (( branch_ok == 0 )); then
-        warn "  Failed to checkout/create git branch '${CURRENT_TASK_ID}'; marking task as blocked-git-branch."
-        task_needs_review=1
-        manual_followups=1
-        keep_output=0
-        skip_flow=1
-        flow_ok=1
-        task_result_status="blocked-git-branch"
-        apply_status="git-branch-failed"
-        task_outcome_reason="${task_outcome_reason:-git-branch-failed}"
-        gc_mark_outcome "RETRYABLE" "GIT"
-        task_notes+=("Git branch checkout/create failed for '${CURRENT_TASK_ID}'. Inspect .gpt-creator/logs/git and fix repo state before retrying.")
-      fi
       gc_update_task_state "$tasks_db" "$slug" "$task_index" "in-progress" "$run_stamp"
       export GC_ACTIVE_TASK_DB="$tasks_db"
       export GC_ACTIVE_TASK_SLUG="$slug"

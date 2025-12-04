@@ -691,8 +691,12 @@ PY
           branch_switch_source="$preferred_branch"
           info "Dirty working tree likely belongs to ${preferred_branch}; snapshotting there before continuing."
         else
-          warn "Auto snapshot: unable to checkout ${preferred_branch}; continuing on ${current_branch:-current branch}."
+          warn "Auto snapshot: unable to checkout ${preferred_branch}; attempting snapshot on current branch."
+          branch_switched=0
+          branch_switch_source=""
         fi
+      else
+        warn "Auto snapshot: preferred branch ${preferred_branch} missing; snapshotting on ${current_branch:-current branch}."
       fi
     fi
     if (cd "$git_root" && git add --all >/dev/null 2>&1); then

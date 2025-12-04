@@ -375,6 +375,54 @@ _cmd_work_on_tasks_impl() {
   if [[ -n "${GC_ACTIVE_AGENT_ADAPTER:-}" ]]; then
     export GC_ACTIVE_ADAPTER="${GC_ACTIVE_AGENT_ADAPTER}"
   fi
+  # If adapter/model are still missing, pull them from the resolved agent file (mirrors test-agent).
+  if [[ -z "${GC_ACTIVE_AGENT_ADAPTER:-}" || -z "${GC_ACTIVE_AGENT_MODEL:-}" ]]; then
+    if [[ -n "${GC_ACTIVE_AGENT_FILE:-}" && -f "${GC_ACTIVE_AGENT_FILE}" ]]; then
+      read -r file_adapter file_model < <(
+        "${PYTHON_BIN:-python3}" - <<'PY' "${GC_ACTIVE_AGENT_FILE}"
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("")
+    print("")
+    sys.exit(0)
+agent = data.get("agent") or {}
+if not isinstance(agent, dict):
+    agent = {}
+adapter = (agent.get("adapter") or "").strip()
+model = (agent.get("model") or agent.get("name") or "").strip()
+# Overlay adapter/model from registry if missing.
+client = (agent.get("client") or "").strip()
+if (not adapter or not model) and client:
+    try:
+        import os
+        root = os.environ.get("GC_CLI_ROOT") or os.environ.get("CLI_ROOT") or ""
+        if root:
+            sys.path.insert(0, str(Path(root) / "tools" / "scripts" / "python"))
+            sys.path.insert(0, str(Path(root) / "scripts" / "python"))
+        from agents_registry import AgentRegistry  # type: ignore
+        reg = AgentRegistry.load().validate_pair(client, model)
+        adapter = adapter or (reg.get("adapter") or "").strip()
+        model = (reg.get("model") or model).strip()
+    except Exception:
+        pass
+print(adapter)
+print(model)
+PY
+      )
+      if [[ -z "${GC_ACTIVE_AGENT_ADAPTER:-}" && -n "$file_adapter" ]]; then
+        export GC_ACTIVE_AGENT_ADAPTER="$file_adapter"
+        export GC_ACTIVE_ADAPTER="$file_adapter"
+      fi
+      if [[ -z "${GC_ACTIVE_AGENT_MODEL:-}" && -n "$file_model" ]]; then
+        export GC_ACTIVE_AGENT_MODEL="$file_model"
+        export GC_ACTIVE_MODEL="${GC_ACTIVE_MODEL:-$file_model}"
+      fi
+    fi
+  fi
   gc_adapter_profile_init
   if [[ -n "$agent_model_override" && "${GC_ACTIVE_AGENT_ADAPTER:-codex_cli}" == "codex_cli" ]]; then
     CODEX_MODEL="$agent_model_override"
@@ -842,6 +890,42 @@ _cmd_work_on_tasks_impl() {
       gpt-oss|ollama) GC_ACTIVE_AGENT_ADAPTER="command" ;;
       *) GC_ACTIVE_AGENT_ADAPTER="" ;;
     esac
+    # If still empty, consult the registry using client/model (align with test-agent).
+    if [[ -z "${GC_ACTIVE_AGENT_ADAPTER}" && -n "${GC_ACTIVE_AGENT_CLIENT:-}" ]]; then
+      read -r _reg_adapter _reg_model < <(
+        "${PYTHON_BIN:-python3}" - <<'PY' "${GC_ACTIVE_AGENT_CLIENT:-}" "${GC_ACTIVE_AGENT_MODEL:-}"
+import json, sys
+from pathlib import Path
+client = sys.argv[1]
+model = sys.argv[2]
+adapter = ""
+resolved_model = model
+try:
+    root = Path(os.environ.get("GC_CLI_ROOT") or os.environ.get("CLI_ROOT") or "")
+    if root:
+        sys.path.insert(0, str(root / "tools" / "scripts" / "python"))
+        sys.path.insert(0, str(root / "scripts" / "python"))
+    from agents_registry import AgentRegistry  # type: ignore
+    reg = AgentRegistry.load().validate_pair(client, model)
+    adapter = (reg.get("adapter") or "").strip()
+    resolved_model = (reg.get("model") or resolved_model or "").strip()
+except Exception:
+    pass
+print(adapter)
+print(resolved_model)
+PY
+      )
+      if [[ -n "$_reg_adapter" ]]; then
+        GC_ACTIVE_AGENT_ADAPTER="$_reg_adapter"
+        GC_ACTIVE_ADAPTER="$_reg_adapter"
+        export GC_ACTIVE_AGENT_ADAPTER GC_ACTIVE_ADAPTER
+      fi
+      if [[ -n "$_reg_model" ]]; then
+        GC_ACTIVE_AGENT_MODEL="${GC_ACTIVE_AGENT_MODEL:-$_reg_model}"
+        GC_ACTIVE_MODEL="${GC_ACTIVE_MODEL:-$_reg_model}"
+        export GC_ACTIVE_AGENT_MODEL GC_ACTIVE_MODEL
+      fi
+    fi
   fi
 
   local order_helper=""

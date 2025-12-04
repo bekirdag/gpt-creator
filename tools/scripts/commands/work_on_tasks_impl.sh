@@ -943,26 +943,16 @@ PY
     warn "work-on-tasks: unable to verify global task order; continuing with existing queue."
   fi
 
-  # Prompt-prep mode is opt-in via CLI; default is prompts+patch.
-  # Ignore any sticky GC_WORK_PREPARE_PROMPTS from the environment.
-  local prepare_prompts_flag="$prepare_prompts"
-  export GC_WORK_PREPARE_PROMPTS="$prepare_prompts_flag"
-
-  if (( prepare_prompts_flag )); then
-    export GC_SKIP_STORY_PROMPT_SYNC=0
-  else
-    export GC_SKIP_STORY_PROMPT_SYNC=1
-  fi
+  # Disable "prepare prompts only" – always run full work (prompts + patch).
+  export GC_WORK_PREPARE_PROMPTS=0
+  export GC_SKIP_STORY_PROMPT_SYNC=1
 
   local work_state_dir="${PLAN_DIR}/work"
   mkdir -p "$work_state_dir"
   local prompt_guard="${work_state_dir}/.prompt_sync.once"
   export GC_WORK_PROMPT_SYNC_RUN_GUARD="$prompt_guard"
-  if (( prepare_prompts_flag )); then
-    rm -f "$prompt_guard" 2>/dev/null || true
-  else
-    : > "$prompt_guard"
-  fi
+  # In full mode we treat prompt sync as satisfied.
+  : > "$prompt_guard"
 
   # Keep prompt snapshots by default for debugging.
   if [[ -z "${GC_PROMPT_PUBLISH_DISABLE:-}" ]]; then
@@ -2536,8 +2526,9 @@ print(error)'
       [[ -n "$task_last_changes_count" ]] || task_last_changes_count="0"
 
       if (( skip_flow == 1 )); then
-        attempt=$max_attempts
+        # Previously this short-circuited the patch loop; keep the log but still run patch.
         gc_budget_log_stage "patch" 0 0 0 0 "$prompt_pruned_items" "{}" "true" "$skip_reason"
+        skip_flow=0
       fi
 
       while (( attempt < max_attempts )); do

@@ -116,7 +116,14 @@ def parse_token_counts(log_path: Path) -> Dict[str, int]:
     return counts
 
 
-def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, project_root: Path) -> tuple[subprocess.CompletedProcess, Path]:
+def run_codex(
+    call_name: str,
+    step: str,
+    prompt_path: Path,
+    output_path: Path,
+    project_root: Path,
+    model_hint: str | None = None,
+) -> tuple[subprocess.CompletedProcess, Path]:
     # Keep the Codex invocation minimal and non-interactive: feed prompt via stdin
     # and constrain the sandbox to workspace-write.
     stderr_log = project_root / ".gpt-creator" / "logs" / "codex-apply" / f"{call_name}.stderr.log"
@@ -124,14 +131,21 @@ def run_codex(call_name: str, step: str, prompt_path: Path, output_path: Path, p
         stderr_log.parent.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
-    default_model = os.getenv("CODEX_MODEL")
+    default_model = (
+        os.getenv("CODEX_MODEL")
+        or os.getenv("GC_ACTIVE_AGENT_MODEL")
+        or os.getenv("DEFAULT_LLM")
+        or model_hint
+    )
     if not default_model:
-        raise RuntimeError("CODEX_MODEL must be set for codex adapter runs")
+        raise RuntimeError(
+            "No model resolved for codex-style adapter runs; set GC_ACTIVE_AGENT_MODEL or DEFAULT_LLM."
+        )
     cmd = [
         "bash",
         "-lc",
         (
-            f"codex exec --model \"${{CODEX_MODEL:-{default_model}}}\" "
+            f"codex exec --model \"{default_model}\" "
             f"-c task_name=\"{call_name}\" "
             f"--sandbox workspace-write "
             f"--cd \"{project_root}\" "
@@ -357,6 +371,7 @@ def main(argv: List[str]) -> int:
         active_model_env = agent_file_model
     if not active_client and agent_file_client:
         active_client = agent_file_client
+    registry_model = ""
     # Prefer the agent’s model, then user defaults, then Codex defaults.
     model = active_model_env or os.getenv("DEFAULT_LLM") or registry_model or ""
     if not model:
@@ -386,7 +401,14 @@ def main(argv: List[str]) -> int:
     adapter_exit_code = 0
 
     if adapter in {"codex_cli", "openai_cli", "openai"}:
-        proc, stderr_log = run_codex(args.call_name, args.step, prompt_path, output_path, project_root)
+        proc, stderr_log = run_codex(
+            args.call_name,
+            args.step,
+            prompt_path,
+            output_path,
+            project_root,
+            model_hint=model,
+        )
         adapter_exit_code = proc.returncode
         log_debug(project_root, f"[codex] completed rc={proc.returncode} (see stderr log at {stderr_log})")
         parsed_tokens = parse_token_counts(stderr_log)

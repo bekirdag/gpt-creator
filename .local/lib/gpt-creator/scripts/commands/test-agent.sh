@@ -47,75 +47,19 @@ EOF
   local tasks_db
   tasks_db="$(_gc_agents_require_db)" || return "$GC_AGENT_EXIT_DB"
 
-  local select_output=""
-  if ! select_output="$(GC_AGENT_READONLY=1 gc_run_agents_cli "${PROJECT_ROOT:-$PWD}" "$tasks_db" select --name "$name")"; then
-    die "Failed to resolve agent '${name}' from tasks DB"
+  # Resolve the agent using the same path as work-on-tasks so env vars are populated.
+  if ! gc_resolve_agent "$name" "$tasks_db" "${PROJECT_ROOT:-$PWD}"; then
+    die "Failed to resolve agent '${name}' via work-on-tasks resolver"
   fi
 
+  local summary_helper=""
+  summary_helper="$(gc_clone_python_tool "agents_summary_with_registry.py" "${PROJECT_ROOT:-$PWD}")" || summary_helper=""
   local summary=""
-  summary="$(
-    "$python_bin" - <<'PY' "$select_output"
-import json, sys
-agent_raw = sys.argv[1]
-try:
-    data = json.loads(agent_raw)
-except Exception:
-    sys.stderr.write("invalid agent selection JSON\n")
-    sys.exit(1)
-if data.get("kind") != "agent":
-    sys.stderr.write("no agent found\n")
-    sys.exit(1)
-agent = data.get("agent") or {}
-client = agent.get("client", "")
-model = agent.get("model", "")
-name = agent.get("name", "")
-agent_adapter = (agent.get("adapter") or "").strip()
-agent_cfg = agent.get("adapterConfig") or {}
-max_ctx = agent.get("maxContextTokens")
-max_out = agent.get("maxOutputTokens")
-api_base = agent.get("client_api_base") or ""
-api_key_env = agent.get("client_api_key_env") or ""
-org_env = agent.get("client_api_org_env") or ""
-api_base_env = agent.get("client_api_base_env") or ""
-
-adapter = agent_adapter
-adapter_cfg = agent_cfg
-try:
-    import os
-    from pathlib import Path
-    root = os.environ.get("GC_CLI_ROOT") or os.environ.get("CLI_ROOT") or ""
-    if root:
-        sys.path.insert(0, str(Path(root) / "tools" / "scripts" / "python"))
-        sys.path.insert(0, str(Path(root) / "scripts" / "python"))
-    from agents_registry import AgentRegistry  # type: ignore
-    reg = AgentRegistry.load().validate_pair(client, model)
-    adapter = adapter or (reg.get("adapter") or "").strip()
-    adapter_cfg = adapter_cfg or (reg.get("adapterConfig") or {})
-    max_ctx = max_ctx or reg.get("maxContextTokens")
-    max_out = max_out or reg.get("maxOutputTokens")
-    api_base = api_base or reg.get("apiBase") or ""
-    api_key_env = api_key_env or reg.get("apiKeyEnv") or ""
-    org_env = org_env or reg.get("orgEnv") or ""
-    api_base_env = api_base_env or reg.get("apiBaseEnv") or ""
-except Exception:
-    pass
-
-result = {
-    "agent": name,
-    "client": client,
-    "model": model,
-    "adapter": adapter,
-    "adapterConfig": adapter_cfg,
-    "maxContextTokens": max_ctx,
-    "maxOutputTokens": max_out,
-    "apiBase": api_base,
-    "apiKeyEnv": api_key_env,
-    "apiBaseEnv": api_base_env,
-    "orgEnv": org_env,
-}
-print(json.dumps(result))
-PY
-  )" || return 1
+  if [[ -n "$summary_helper" ]]; then
+    summary="$("${python_bin}" "$summary_helper" "${GC_ACTIVE_AGENT_FILE:-}")" || return 1
+  else
+    die "Missing agents_summary_with_registry.py helper"
+  fi
 
   if (( json )); then
     printf '%s\n' "$summary"
@@ -129,42 +73,15 @@ PY
   if [[ -n "$adapter_val" ]]; then
     ping_status="ok"
     set +e
-    ping_error="$(
-SUMMARY="$summary" "$python_bin" - <<'PY' 2>&1
-import json, os, sys
-from pathlib import Path
-
-root = os.environ.get("GC_CLI_ROOT") or os.environ.get("CLI_ROOT") or ""
-if root:
-    sys.path.insert(0, str(Path(root) / "tools" / "scripts" / "python"))
-    sys.path.insert(0, str(Path(root) / "scripts" / "python"))
-
-from llm_client_factory import create_llm_client
-try:
-    data = json.loads(os.environ.get("SUMMARY", "{}"))
-    adapter = (data.get("adapter") or "").strip()
-    model = (data.get("model") or "").strip()
-    cfg = data.get("adapterConfig") or {}
-    if not adapter or not model:
-        sys.exit(2)
-    # Pass the full config shape expected by create_llm_client
-    config = {
-        "adapterConfig": cfg,
-        "apiKeyEnv": data.get("apiKeyEnv"),
-        "apiBaseEnv": data.get("apiBaseEnv"),
-        "apiBase": data.get("apiBase"),
-        "orgEnv": data.get("orgEnv"),
-        "maxContextTokens": data.get("maxContextTokens"),
-        "maxOutputTokens": data.get("maxOutputTokens"),
-    }
-    client = create_llm_client(adapter, config)
-    result = client.send_chat(["ping"], model=model)
-    print(result.content)
-except Exception as exc:
-    print(str(exc))
-    sys.exit(1)
-PY
-)"
+    local ping_helper=""
+    ping_helper="$(gc_clone_python_tool "agents_ping_adapter.py" "${PROJECT_ROOT:-$PWD}")" || ping_helper=""
+    if [[ -n "$ping_helper" ]]; then
+      ping_error="$(SUMMARY="$summary" "$python_bin" "$ping_helper" 2>&1)"
+      ping_rc=$?
+    else
+      ping_error="ping helper missing"
+      ping_rc=1
+    fi
     ping_rc=$?
     set -e
     if [[ $ping_rc -ne 0 ]]; then
@@ -206,5 +123,39 @@ PY
   printf 'Ping:            %s\n' "$ping_status"
   if [[ "$ping_status" == "failed" ]]; then
     printf 'Ping error:      %s\n' "$ping_error"
+  fi
+
+  # Simple workload simulation mirroring work-on-tasks adapter use.
+  local project_root="${PROJECT_ROOT:-$PWD}"
+  local workload_file="${project_root}/test.txt"
+  local -a workload_log=()
+  local workload_error=0
+  local iteration
+  for iteration in 1 2 3; do
+    local agent_line=""
+    local workload_helper=""
+    workload_helper="$(gc_clone_python_tool "agents_workload_iteration.py" "${PROJECT_ROOT:-$PWD}")" || workload_helper=""
+    if [[ -z "$workload_helper" ]]; then
+      workload_error=1
+      workload_log+=("run ${iteration}: workload helper missing")
+      continue
+    fi
+    if ! agent_line="$(SUMMARY="$summary" ITERATION="$iteration" "$python_bin" "$workload_helper" 2>&1)"; then
+      workload_error=1
+      workload_log+=("run ${iteration}: agent call failed (${agent_line})")
+      continue
+    fi
+    printf '%s\n' "$agent_line" >>"$workload_file"
+    workload_log+=("run ${iteration}: appended '${agent_line}' to ${workload_file}")
+  done
+
+  printf '\nWorkload simulation:\n'
+  for entry in "${workload_log[@]}"; do
+    printf '  - %s\n' "$entry"
+  done
+  if (( workload_error )); then
+    printf 'Workload result: incomplete (errors encountered)\n'
+  else
+    printf 'Workload result: completed successfully\n'
   fi
 }

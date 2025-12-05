@@ -1,39 +1,36 @@
 #!/usr/bin/env python3
-"""Normalize --sleep-between values to a safe decimal string."""
+"""Normalize duration strings (e.g., 2s, 500ms) into milliseconds."""
 
-from __future__ import annotations
-
+import math
 import sys
-from decimal import Decimal, InvalidOperation
 
 
-def normalize(value: str) -> str:
-    text = value.strip()
-    if not text:
-        text = "0"
-    try:
-        number = Decimal(text)
-    except InvalidOperation as exc:  # pragma: no cover - defensive path
-        raise ValueError("invalid decimal") from exc
-    if number < 0:
-        raise ValueError("negative values are not allowed")
-    if number == 0:
-        return "0"
-    normalized = number.normalize()
-    rendered = format(normalized, "f").rstrip("0").rstrip(".")
-    return rendered or "0"
+def parse_duration(val: str) -> int:
+    val = val.strip().lower()
+    if val.endswith("ms"):
+        return math.ceil(float(val[:-2]))
+    if val.endswith("s"):
+        return math.ceil(float(val[:-1]) * 1000)
+    if val.endswith("m"):
+        return math.ceil(float(val[:-1]) * 60_000)
+    if val.endswith("h"):
+        return math.ceil(float(val[:-1]) * 3_600_000)
+    if val.isdigit():
+        return int(val)
+    raise ValueError(f"invalid duration: {val}")
 
 
-def main(argv: list[str]) -> int:
-    if len(argv) != 2:
+def main() -> int:
+    if len(sys.argv) < 2:
         return 1
     try:
-        result = normalize(argv[1])
-    except ValueError:
+        parsed = parse_duration(sys.argv[1])
+    except Exception as exc:
+        sys.stderr.write(str(exc) + "\n")
         return 1
-    print(result)
+    print(parsed)
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    raise SystemExit(main())

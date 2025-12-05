@@ -320,15 +320,14 @@ cmd_refresh_stack() {
         local db_output
         if db_output="$("${python_bin}" "$db_helper" "$db_container" "$root_user" "$root_pass" "$app_user" "$app_pass" "$db_name" "$db_port" "${refresh_sql_init_files[@]}" "${refresh_sql_schema_files[@]}" -- "${refresh_sql_seed_files[@]}")"; then
           local parsed
-          if parsed="$("${python_bin}" - "$db_output" <<'PY'
-import json, sys
-data = json.loads(sys.argv[1])
-print(data.get("schema_rc", 1))
-print(data.get("seed_rc", 1))
-print(len(data.get("schema_applied", [])))
-print(len(data.get("seed_applied", [])))
-PY
-)"; then
+          local parse_helper=""
+          if ! parse_helper="$(gc_clone_python_tool "parse_refresh_stack_db_output.py" "${PROJECT_ROOT:-$PWD}")"; then
+            parse_helper=""
+          fi
+          if [[ -n "$parse_helper" ]]; then
+            parsed="$("${python_bin}" "$parse_helper" "$db_output")"
+          fi
+          if [[ -n "$parsed" ]]; then
             read -r import_rc seed_rc schema_attempted seed_attempted <<<"$parsed"
           else
             warn "Failed to parse refresh_stack_db.py output; assuming errors."

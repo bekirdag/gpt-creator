@@ -262,18 +262,9 @@ case "${ADAPTER_NAME}" in
     fi
     local_py_path="${GC_SCRIPTS_ROOT}/python"
     log "Invoking adapter=${ADAPTER_NAME} model=${MODEL} via llm_client_factory → ${OUT_SYNTH}"
-    PYTHONPATH="${local_py_path}:${PYTHONPATH:-}" "${PYTHON_BIN:-python3}" - "$ADAPTER_NAME" "$MODEL" "$COMBINED_PROMPT" "$OUT_SYNTH" <<'PY'
-import sys
-from pathlib import Path
-adapter, model, prompt_path, out_path = sys.argv[1:5]
-prompt_text = Path(prompt_path).read_text(encoding="utf-8")
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from llm_client_factory import create_llm_client  # type: ignore
-client = create_llm_client(adapter, {})
-response = client.send_chat([prompt_text], model=model)
-out_file = Path(out_path)
-out_file.write_text(response.content, encoding="utf-8")
-PY
+    local llm_helper="${GC_SCRIPTS_ROOT:-${ROOT_DIR}/scripts}/python/llm_client_prompt_to_file.py"
+    [[ -f "$llm_helper" ]] || llm_helper="${ROOT_DIR}/tools/scripts/python/llm_client_prompt_to_file.py"
+    PYTHONPATH="${local_py_path}:${PYTHONPATH:-}" "${PYTHON_BIN:-python3}" "$llm_helper" "$ADAPTER_NAME" "$MODEL" "$COMBINED_PROMPT" "$OUT_SYNTH"
     rm -f "${COMBINED_PROMPT}"
     log "Adapter wrote: ${OUT_SYNTH}"
     ;;

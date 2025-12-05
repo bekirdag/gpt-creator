@@ -380,39 +380,11 @@ _cmd_work_on_tasks_impl() {
   if [[ -z "${GC_ACTIVE_AGENT_ADAPTER:-}" || -z "${GC_ACTIVE_AGENT_MODEL:-}" ]]; then
     if [[ -n "${GC_ACTIVE_AGENT_FILE:-}" && -f "${GC_ACTIVE_AGENT_FILE}" ]]; then
       read -r file_adapter file_model < <(
-        "${PYTHON_BIN:-python3}" - <<'PY' "${GC_ACTIVE_AGENT_FILE}"
-import json, os, sys
-from pathlib import Path
-path = Path(sys.argv[1])
-try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-except Exception:
-    print("")
-    print("")
-    sys.exit(0)
-agent = data.get("agent") or {}
-if not isinstance(agent, dict):
-    agent = {}
-adapter = (agent.get("adapter") or "").strip()
-model = (agent.get("model") or agent.get("name") or "").strip()
-# Overlay adapter/model from registry if missing.
-client = (agent.get("client") or "").strip()
-if (not adapter or not model) and client:
-    try:
-        import os
-        root = os.environ.get("GC_CLI_ROOT") or os.environ.get("CLI_ROOT") or ""
-        if root:
-            sys.path.insert(0, str(Path(root) / "tools" / "scripts" / "python"))
-            sys.path.insert(0, str(Path(root) / "scripts" / "python"))
-        from agents_registry import AgentRegistry  # type: ignore
-        reg = AgentRegistry.load().validate_pair(client, model)
-        adapter = adapter or (reg.get("adapter") or "").strip()
-        model = (reg.get("model") or model).strip()
-    except Exception:
-        pass
-print(adapter)
-print(model)
-PY
+        local adapter_model_helper=""
+        adapter_model_helper="$(gc_clone_python_tool "agents_adapter_model_from_file.py" "${PROJECT_ROOT:-$PWD}")" || adapter_model_helper=""
+        if [[ -n "$adapter_model_helper" ]]; then
+          "${PYTHON_BIN:-python3}" "$adapter_model_helper" "${GC_ACTIVE_AGENT_FILE}" 2>/dev/null
+        fi
       )
       if [[ -z "${GC_ACTIVE_AGENT_ADAPTER:-}" && -n "$file_adapter" ]]; then
         export GC_ACTIVE_AGENT_ADAPTER="$file_adapter"
@@ -899,29 +871,24 @@ PY
     esac
     # If still empty, consult the registry using client/model (align with test-agent).
     if [[ -z "${GC_ACTIVE_AGENT_ADAPTER}" && -n "${GC_ACTIVE_AGENT_CLIENT:-}" ]]; then
-      read -r _reg_adapter _reg_model < <(
-        "${PYTHON_BIN:-python3}" - <<'PY' "${GC_ACTIVE_AGENT_CLIENT:-}" "${GC_ACTIVE_AGENT_MODEL:-}"
-import json, os, sys
-from pathlib import Path
-client = sys.argv[1]
-model = sys.argv[2]
-adapter = ""
-resolved_model = model
-try:
-    root = Path(os.environ.get("GC_CLI_ROOT") or os.environ.get("CLI_ROOT") or "")
-    if root:
-        sys.path.insert(0, str(root / "tools" / "scripts" / "python"))
-        sys.path.insert(0, str(root / "scripts" / "python"))
-    from agents_registry import AgentRegistry  # type: ignore
-    reg = AgentRegistry.load().validate_pair(client, model)
-    adapter = (reg.get("adapter") or "").strip()
-    resolved_model = (reg.get("model") or resolved_model or "").strip()
-except Exception:
-    pass
-print(adapter)
-print(resolved_model)
-PY
-      )
+      local registry_info="" registry_helper="" registry_parse_helper=""
+      if registry_info="$(gc_agents_registry_cmd validate --client "${GC_ACTIVE_AGENT_CLIENT:-}" --model "${GC_ACTIVE_AGENT_MODEL:-}" 2>/dev/null)"; then
+        :
+      else
+        registry_helper="$(gc_clone_python_tool "agents_registry.py" "${PROJECT_ROOT:-$PWD}")" || registry_helper=""
+        if [[ -n "$registry_helper" ]]; then
+          registry_info="$("${PYTHON_BIN:-python3}" "$registry_helper" validate --client "${GC_ACTIVE_AGENT_CLIENT:-}" --model "${GC_ACTIVE_AGENT_MODEL:-}" 2>/dev/null)" || registry_info=""
+        fi
+      fi
+      local _reg_adapter="" _reg_ctx="" _reg_out="" _reg_api_base="" _reg_api_key_env="" _reg_org_env="" _reg_api_base_env="" _reg_model=""
+      if [[ -n "$registry_info" ]]; then
+        registry_parse_helper="$(gc_clone_python_tool "agents_parse_registry_info.py" "${PROJECT_ROOT:-$PWD}")" || registry_parse_helper=""
+        if [[ -n "$registry_parse_helper" ]]; then
+          read -r _reg_adapter _reg_ctx _reg_out _reg_api_base _reg_api_key_env _reg_org_env _reg_api_base_env _reg_model < <(
+            "${PYTHON_BIN:-python3}" "$registry_parse_helper" "$registry_info" 2>/dev/null
+          )
+        fi
+      fi
       if [[ -n "$_reg_adapter" ]]; then
         GC_ACTIVE_AGENT_ADAPTER="$_reg_adapter"
         GC_ACTIVE_ADAPTER="$_reg_adapter"

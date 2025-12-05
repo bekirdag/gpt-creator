@@ -595,18 +595,9 @@ cjt::tasks_json_has_entries() {
   if [[ ! -s "$json_path" ]]; then
     return 1
   fi
-  python3 - "$json_path" <<'PY'
-import json, sys
-path = sys.argv[1]
-try:
-    data = json.loads(open(path, "r", encoding="utf-8").read())
-except Exception:
-    sys.exit(1)
-tasks = data.get("tasks")
-if not isinstance(tasks, list) or len(tasks) == 0:
-    sys.exit(1)
-sys.exit(0)
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "tasks_json_has_entries.py")" || return 1
+  python3 "$helper_path" "$json_path"
 }
 
 cjt::write_epics_prompt() {
@@ -816,6 +807,8 @@ cjt::normalize_story_jsons() {
   split_helper="$(cjt::clone_python_tool "split_story_json.py")" || return 0
   local list_helper=""
   list_helper="$(cjt::clone_python_tool "list_json_files.py")" || list_helper=""
+  local bundled_helper=""
+  bundled_helper="$(cjt::clone_python_tool "is_bundled_story_json.py")" || bundled_helper=""
   local tmp_dir="$CJT_JSON_STORIES_DIR/.split_tmp"
   rm -rf "$tmp_dir" 2>/dev/null || true
   mkdir -p "$tmp_dir"
@@ -824,18 +817,7 @@ cjt::normalize_story_jsons() {
   while IFS= read -r story_file; do
     [[ -n "$story_file" ]] || continue
     # Detect bundled story payloads shaped like {"epic_id": "...", "user_stories": [...]}
-    if python3 - "$story_file" <<'PY'
-import json, sys
-path = sys.argv[1]
-try:
-    data = json.loads(open(path, "r", encoding="utf-8").read())
-except Exception:
-    sys.exit(1)
-if isinstance(data, dict) and isinstance(data.get("user_stories"), list):
-    sys.exit(0)
-sys.exit(1)
-PY
-    then
+    if [[ -n "$bundled_helper" ]] && python3 "$bundled_helper" "$story_file"; then
       cjt::log "Splitting bundled story file ${story_file} into per-story JSON"
       if python3 "$split_helper" "$story_file" "$tmp_dir"; then
         rm -f "$story_file"

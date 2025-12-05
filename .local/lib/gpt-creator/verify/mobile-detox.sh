@@ -60,31 +60,13 @@ fi
 detect_config() {
   local platform="$1" result=""
   if command -v python3 >/dev/null 2>&1; then
-    if result="$(
-      python3 - <<'PY' "$APP_DIR" "$platform" 2>/dev/null
-import json, sys, pathlib
-root = pathlib.Path(sys.argv[1])
-platform = sys.argv[2].lower()
-pkg = root / "package.json"
-if not pkg.exists():
-    sys.exit(1)
-try:
-    data = json.loads(pkg.read_text())
-except Exception:
-    sys.exit(1)
-configs = data.get("detox", {}).get("configurations", {}) or {}
-if not configs:
-    sys.exit(1)
-for name in configs:
-    if platform in name.lower():
-        print(name)
-        sys.exit(0)
-print(next(iter(configs)))
-PY
-    )"; then
-      :
-    else
-      result=""
+    local script_dir repo_root helper=""
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    repo_root="$(cd "${script_dir}/.." && pwd)"
+    helper="${repo_root}/tools/scripts/python/detox_detect_config.py"
+    [[ -f "$helper" ]] || helper="${repo_root}/scripts/python/detox_detect_config.py"
+    if [[ -f "$helper" ]]; then
+      result="$(python3 "$helper" "$APP_DIR" "$platform" 2>/dev/null || true)"
     fi
   fi
   printf '%s' "$result"

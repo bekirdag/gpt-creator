@@ -2599,38 +2599,9 @@ gc_run_agents_cli() {
 
 gc_agents_emit_agent_json() {
   local indent="${1:-0}"
-  python3 - "$indent" <<'PY'
-import json
-import sys
-
-indent = int(sys.argv[1])
-raw = sys.stdin.read()
-if not raw.strip():
-    sys.stderr.write("agents command returned no JSON output; run with --verbose for details.\n")
-    sys.exit(1)
-try:
-    payload = json.loads(raw)
-except json.JSONDecodeError as exc:
-    sys.stderr.write("agents command produced invalid JSON ({}):\n".format(exc))
-    sys.stderr.write(raw)
-    if not raw.endswith("\n"):
-        sys.stderr.write("\n")
-    sys.exit(1)
-indent_value = None if indent <= 0 else indent
-warnings = []
-agent_payload = None
-if isinstance(payload, dict):
-    warnings = payload.get("warnings") or []
-    if "agent" in payload:
-        agent_payload = payload["agent"]
-target = agent_payload if agent_payload is not None else payload
-text = json.dumps(target, indent=indent_value)
-sys.stdout.write(text)
-if not text.endswith("\n"):
-    sys.stdout.write("\n")
-for warning in warnings:
-    sys.stderr.write(f"Warning: {warning}\n")
-PY
+  local helper_path
+  helper_path="$(gc_clone_python_tool "agents_emit_agent_json.py" "${PROJECT_ROOT:-$PWD}")" || return 1
+  python3 "$helper_path" "$indent"
 }
 
 gc_ensure_agents_schema() {

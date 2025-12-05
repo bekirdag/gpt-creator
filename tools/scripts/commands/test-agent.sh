@@ -52,73 +52,14 @@ EOF
     die "Failed to resolve agent '${name}' via work-on-tasks resolver"
   fi
 
+  local summary_helper=""
+  summary_helper="$(gc_clone_python_tool "agents_summary_with_registry.py" "${PROJECT_ROOT:-$PWD}")" || summary_helper=""
   local summary=""
-  summary="$(
-    GC_ACTIVE_AGENT_FILE="${GC_ACTIVE_AGENT_FILE:-}" "$python_bin" - <<'PY'
-import json, os, sys
-from pathlib import Path
-
-def load_agent():
-    agent_file = os.environ.get("GC_ACTIVE_AGENT_FILE") or ""
-    data = {}
-    if agent_file and Path(agent_file).exists():
-        try:
-            data = json.loads(Path(agent_file).read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-    agent = data.get("agent") or {}
-    if not isinstance(agent, dict):
-        agent = {}
-    return agent
-
-def registry_overlay(agent):
-    client = (agent.get("client") or "").strip()
-    model = (agent.get("model") or "").strip()
-    adapter = (agent.get("adapter") or "").strip()
-    adapter_cfg = agent.get("adapterConfig") or {}
-    max_ctx = agent.get("maxContextTokens")
-    max_out = agent.get("maxOutputTokens")
-    api_base = agent.get("client_api_base") or ""
-    api_key_env = agent.get("client_api_key_env") or ""
-    org_env = agent.get("client_api_org_env") or ""
-    api_base_env = agent.get("client_api_base_env") or ""
-    root = os.environ.get("GC_CLI_ROOT") or os.environ.get("CLI_ROOT") or ""
-    if root:
-        sys.path.insert(0, str(Path(root) / "tools" / "scripts" / "python"))
-        sys.path.insert(0, str(Path(root) / "scripts" / "python"))
-    try:
-        from agents_registry import AgentRegistry  # type: ignore
-        reg = AgentRegistry.load().validate_pair(client, model)
-        model = (reg.get("model") or model or "").strip()
-        adapter = adapter or (reg.get("adapter") or "").strip()
-        adapter_cfg = adapter_cfg or (reg.get("adapterConfig") or {})
-        max_ctx = max_ctx or reg.get("maxContextTokens")
-        max_out = max_out or reg.get("maxOutputTokens")
-        api_base = api_base or reg.get("apiBase") or ""
-        api_key_env = api_key_env or reg.get("apiKeyEnv") or ""
-        org_env = org_env or reg.get("orgEnv") or ""
-        api_base_env = api_base_env or reg.get("apiBaseEnv") or ""
-    except Exception:
-        pass
-    return {
-        "agent": agent.get("name") or agent.get("name_normalized") or "",
-        "client": client,
-        "model": model,
-        "adapter": adapter,
-        "adapterConfig": adapter_cfg,
-        "maxContextTokens": max_ctx,
-        "maxOutputTokens": max_out,
-        "apiBase": api_base,
-        "apiKeyEnv": api_key_env,
-        "apiBaseEnv": api_base_env,
-        "orgEnv": org_env,
-    }
-
-agent = load_agent()
-resolved = registry_overlay(agent)
-print(json.dumps(resolved))
-PY
-  )" || return 1
+  if [[ -n "$summary_helper" ]]; then
+    summary="$("${python_bin}" "$summary_helper" "${GC_ACTIVE_AGENT_FILE:-}")" || return 1
+  else
+    die "Missing agents_summary_with_registry.py helper"
+  fi
 
   if (( json )); then
     printf '%s\n' "$summary"
@@ -132,42 +73,15 @@ PY
   if [[ -n "$adapter_val" ]]; then
     ping_status="ok"
     set +e
-    ping_error="$(
-SUMMARY="$summary" "$python_bin" - <<'PY' 2>&1
-import json, os, sys
-from pathlib import Path
-
-root = os.environ.get("GC_CLI_ROOT") or os.environ.get("CLI_ROOT") or ""
-if root:
-    sys.path.insert(0, str(Path(root) / "tools" / "scripts" / "python"))
-    sys.path.insert(0, str(Path(root) / "scripts" / "python"))
-
-from llm_client_factory import create_llm_client
-try:
-    data = json.loads(os.environ.get("SUMMARY", "{}"))
-    adapter = (data.get("adapter") or "").strip()
-    model = (data.get("model") or "").strip()
-    cfg = data.get("adapterConfig") or {}
-    if not adapter or not model:
-        sys.exit(2)
-    # Pass the full config shape expected by create_llm_client
-    config = {
-        "adapterConfig": cfg,
-        "apiKeyEnv": data.get("apiKeyEnv"),
-        "apiBaseEnv": data.get("apiBaseEnv"),
-        "apiBase": data.get("apiBase"),
-        "orgEnv": data.get("orgEnv"),
-        "maxContextTokens": data.get("maxContextTokens"),
-        "maxOutputTokens": data.get("maxOutputTokens"),
-    }
-    client = create_llm_client(adapter, config)
-    result = client.send_chat(["ping"], model=model)
-    print(result.content)
-except Exception as exc:
-    print(str(exc))
-    sys.exit(1)
-PY
-)"
+    local ping_helper=""
+    ping_helper="$(gc_clone_python_tool "agents_ping_adapter.py" "${PROJECT_ROOT:-$PWD}")" || ping_helper=""
+    if [[ -n "$ping_helper" ]]; then
+      ping_error="$(SUMMARY="$summary" "$python_bin" "$ping_helper" 2>&1)"
+      ping_rc=$?
+    else
+      ping_error="ping helper missing"
+      ping_rc=1
+    fi
     ping_rc=$?
     set -e
     if [[ $ping_rc -ne 0 ]]; then
@@ -219,62 +133,14 @@ PY
   local iteration
   for iteration in 1 2 3; do
     local agent_line=""
-    if ! agent_line="$(
-      SUMMARY="$summary" ITERATION="$iteration" "$python_bin" - <<'PY' 2>&1
-import json, os, sys
-from pathlib import Path
-
-root = os.environ.get("GC_CLI_ROOT") or os.environ.get("CLI_ROOT") or ""
-if root:
-    sys.path.insert(0, str(Path(root) / "tools" / "scripts" / "python"))
-    sys.path.insert(0, str(Path(root) / "scripts" / "python"))
-
-try:
-    from llm_client_factory import create_llm_client
-except Exception as exc:  # pragma: no cover
-    print(f"llm client import failed: {exc}")
-    sys.exit(1)
-
-summary_raw = os.environ.get("SUMMARY") or "{}"
-iteration = os.environ.get("ITERATION") or "1"
-try:
-    data = json.loads(summary_raw)
-except Exception:
-    data = {}
-adapter = (data.get("adapter") or "").strip()
-model = (data.get("model") or "").strip()
-cfg = data.get("adapterConfig") or {}
-config = {
-    "adapterConfig": cfg,
-    "apiKeyEnv": data.get("apiKeyEnv"),
-    "apiBaseEnv": data.get("apiBaseEnv"),
-    "apiBase": data.get("apiBase"),
-    "orgEnv": data.get("orgEnv"),
-    "maxContextTokens": data.get("maxContextTokens"),
-    "maxOutputTokens": data.get("maxOutputTokens"),
-}
-if not adapter or not model:
-    print("missing adapter or model")
-    sys.exit(1)
-
-client = create_llm_client(adapter, config)
-prompt = [
-    {"role": "system", "content": "You are running a self-test. Output only the line to append to test.txt. No prose, no formatting."},
-    {"role": "user", "content": f"Append the number {iteration} as its own line."},
-]
-try:
-    result = client.send_chat(prompt, model=model)
-    content = getattr(result, "content", "") or ""
-    if not content:
-        print("empty response")
-        sys.exit(1)
-    line = content.strip().splitlines()[0].strip()
-    print(line)
-except Exception as exc:
-    print(str(exc))
-    sys.exit(1)
-PY
-    )"; then
+    local workload_helper=""
+    workload_helper="$(gc_clone_python_tool "agents_workload_iteration.py" "${PROJECT_ROOT:-$PWD}")" || workload_helper=""
+    if [[ -z "$workload_helper" ]]; then
+      workload_error=1
+      workload_log+=("run ${iteration}: workload helper missing")
+      continue
+    fi
+    if ! agent_line="$(SUMMARY="$summary" ITERATION="$iteration" "$python_bin" "$workload_helper" 2>&1)"; then
       workload_error=1
       workload_log+=("run ${iteration}: agent call failed (${agent_line})")
       continue

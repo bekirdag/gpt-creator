@@ -39,21 +39,15 @@ cmd_generate() {
       copy_template_tree "$templates/db/mysql" "$out"
       # Render DB templates (*.tmpl) with environment defaults and drop the suffix
       local python_bin="${PYTHON_BIN:-python3}"
+      local render_helper=""
+      if command -v "$python_bin" >/dev/null 2>&1; then
+        render_helper="$(gc_clone_python_tool "render_env_template.py" "${PROJECT_ROOT:-$PWD}")" || render_helper=""
+      fi
       for tmpl in "$out"/*.tmpl; do
         [[ -f "$tmpl" ]] || continue
         local dest="${tmpl%.tmpl}"
-        if command -v "$python_bin" >/dev/null 2>&1; then
-          "$python_bin" - "$tmpl" "$dest" <<'PY'
-import os, re, sys
-src, dst = sys.argv[1:3]
-data = open(src, "r", encoding="utf-8").read()
-def repl(match):
-    key = match.group(1)
-    return os.environ.get(key, match.group(0))
-data = re.sub(r"\{\{([A-Za-z0-9_]+)\}\}", repl, data)
-with open(dst, "w", encoding="utf-8") as fh:
-    fh.write(data)
-PY
+        if [[ -n "$render_helper" ]]; then
+          "$python_bin" "$render_helper" "$tmpl" "$dest"
         else
           cp "$tmpl" "$dest"
         fi
@@ -164,21 +158,15 @@ PY
       fi
       # Render docker templates (*.tmpl) with environment defaults and drop the suffix
       local python_bin="${PYTHON_BIN:-python3}"
+      local render_helper=""
+      if command -v "$python_bin" >/dev/null 2>&1; then
+        render_helper="$(gc_clone_python_tool "render_env_template.py" "${PROJECT_ROOT:-$PWD}")" || render_helper=""
+      fi
       for tmpl in "$out"/*.tmpl; do
         [[ -f "$tmpl" ]] || continue
         local dest="${tmpl%.tmpl}"
-        if command -v "$python_bin" >/dev/null 2>&1; then
-          "$python_bin" - "$tmpl" "$dest" <<'PY'
-import os, re, sys
-src, dst = sys.argv[1:3]
-data = open(src, "r", encoding="utf-8").read()
-def repl(match):
-    key = match.group(1)
-    return os.environ.get(key, match.group(0))
-data = re.sub(r"\{\{([A-Za-z0-9_]+)\}\}", repl, data)
-with open(dst, "w", encoding="utf-8") as fh:
-    fh.write(data)
-PY
+        if [[ -n "$render_helper" ]]; then
+          "$python_bin" "$render_helper" "$tmpl" "$dest"
         else
           cp "$tmpl" "$dest"
         fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# gpt-creator :: generate-admin — uses Codex to scaffold Vue 3 Admin (Backoffice) from workflows + docs
+# gpt-creator :: generate-admin — uses the active adapter to scaffold Vue 3 Admin (Backoffice) from workflows + docs
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,10 +37,12 @@ resolve_doc() {
 }
 
 : "${PROJECT_ROOT:=${ROOT_DIR}}"
-: "${CODEX_MODEL:=gpt-5-high}"
-: "${CODEX_CMD:=codex}"
-: "${STAGING_DIR:=${PROJECT_ROOT}/.gpt-creator/staged}"
-: "${WORK_DIR:=${PROJECT_ROOT}/.gpt-creator/work}"
+# Use the standard CLI default model.
+: "${ADAPTER_MODEL:=${GC_ACTIVE_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL:-gpt-5.1-codex}}}}"
+: "${ADAPTER_CMD:=${CODEX_CMD:-codex}}"
+: "${ADAPTER_NAME:=${GC_ACTIVE_AGENT_ADAPTER:-${CODEX_ADAPTER:-codex_cli}}}"
+: "${STAGING_DIR:=${PROJECT_ROOT}/.gpt-creator/staging}"
+: "${WORK_DIR:=${PROJECT_ROOT}/.gpt-creator/staging/generate-admin}"
 : "${ADMIN_DIR:=${PROJECT_ROOT}/apps/admin}"
 
 mkdir -p "${WORK_DIR}/prompts" "${ADMIN_DIR}"
@@ -88,40 +90,62 @@ fi
 
 PROMPT_FILE="${WORK_DIR}/prompts/generate-admin.prompt.md"
 
-  (
-    set -a
-    export GEN_ADMIN_SDS="${SDS}"
-    export GEN_ADMIN_PDR="${PDR}"
-    export GEN_ADMIN_MMD="${BACKOFFICE_MMD:-<none>}"
-    export GEN_ADMIN_JIRA="${JIRA}"
-    set +a
-    gc_cli_render_template "prompts/generate_admin.prompt.md.tmpl"
-  ) > "$PROMPT_FILE"
+(
+  set -a
+  export GEN_ADMIN_SDS="${SDS}"
+  export GEN_ADMIN_PDR="${PDR}"
+  export GEN_ADMIN_MMD="${BACKOFFICE_MMD:-<none>}"
+  export GEN_ADMIN_JIRA="${JIRA}"
+  set +a
+  gc_cli_render_template "prompts/generate_admin.prompt.md.tmpl"
+) > "$PROMPT_FILE"
 
-log_info "Prepared Codex prompt → $PROMPT_FILE"
+log_info "Prepared adapter prompt → $PROMPT_FILE"
 log_info "Output directory         → $ADMIN_DIR"
 
 mkdir -p "$ADMIN_DIR"
 
-run_codex() {
+run_adapter() {
   local prompt="$1"
   local out="$2"
+  local out_md="${out}/adapter.out.md"
   if [[ -n "${GC_DRY_RUN:-}" ]]; then
-    log_info "[dry-run] Would call Codex ${CODEX_CMD} --model ${CODEX_MODEL}"
+    log_info "[dry-run] Skipping model invocation; prompt at ${prompt}"
+    printf '{"status":"dry-run","label":"generate-admin"}\n' > "${out}/adapter.out.json"
     return 0
   fi
-  if command -v "${CODEX_CMD}" >/dev/null 2>&1; then
-    if "${CODEX_CMD}" --help 2>/dev/null | grep -qi "chat"; then
-      "${CODEX_CMD}" chat --model "${CODEX_MODEL}" --prompt-file "${prompt}" --out-dir "${out}"
-    else
-      "${CODEX_CMD}" generate --model "${CODEX_MODEL}" --prompt-file "${prompt}" --out-dir "${out}"
-    fi
-  else
-    die "Codex CLI not found: ${CODEX_CMD}. Set CODEX_CMD or install client."
-  fi
+  case "${ADAPTER_NAME}" in
+    command)
+      log_info "Running command adapter for admin generation (cmd='${ADAPTER_MODEL}')"
+      eval "${ADAPTER_MODEL} < \"${prompt}\" > \"${out_md}\""
+      ;;
+    codex_cli|openai_cli|openai)
+      if ! command -v "${ADAPTER_CMD}" >/dev/null 2>&1; then
+        die "Adapter CLI not found: ${ADAPTER_CMD}. Set ADAPTER_CMD/CODEX_CMD or install client."
+      fi
+      if [[ "${ADAPTER_NAME}" == "codex_cli" ]]; then
+        if "${ADAPTER_CMD}" --help 2>/dev/null | grep -qi "exec"; then
+          "${ADAPTER_CMD}" exec --model "${ADAPTER_MODEL}" < "${prompt}" > "${out_md}"
+        else
+          "${ADAPTER_CMD}" chat --model "${ADAPTER_MODEL}" --prompt-file "${prompt}" --out-dir "${out}" || \
+            "${ADAPTER_CMD}" generate --model "${ADAPTER_MODEL}" --prompt-file "${prompt}" --out-dir "${out}"
+          [[ -f "${out}/output.md" ]] && cp "${out}/output.md" "${out_md}"
+        fi
+      else
+        "${ADAPTER_CMD}" exec --model "${ADAPTER_MODEL}" < "${prompt}" > "${out_md}"
+      fi
+      ;;
+    *)
+      local llm_helper="${GC_SCRIPTS_ROOT:-${ROOT_DIR}/scripts}/python/llm_client_prompt_to_file.py"
+      [[ -f "$llm_helper" ]] || llm_helper="${ROOT_DIR}/tools/scripts/python/llm_client_prompt_to_file.py"
+      PYTHONPATH="${GC_SCRIPTS_ROOT:-${ROOT_DIR}/scripts}/python:${PYTHONPATH:-}" \
+        "${PYTHON_BIN:-python3}" "$llm_helper" "$ADAPTER_NAME" "$ADAPTER_MODEL" "$prompt" "$out_md"
+      ;;
+  esac
+  log_info "Adapter output saved → ${out_md}"
 }
 
-run_codex "$PROMPT_FILE" "$ADMIN_DIR"
+run_adapter "$PROMPT_FILE" "$ADMIN_DIR"
 
 if [[ "${INSTALL_DEPS}" -eq 1 && -z "${GC_DRY_RUN:-}" ]]; then
   if command -v pnpm >/dev/null 2>&1; then
@@ -132,4 +156,8 @@ if [[ "${INSTALL_DEPS}" -eq 1 && -z "${GC_DRY_RUN:-}" ]]; then
   fi
 fi
 
-log_info "Admin generation script finished."
+if [[ -s "${ADMIN_DIR}/adapter.out.md" ]]; then
+  log_info "Admin generation script finished."
+else
+  die "Admin generation did not produce adapter.out.md in ${ADMIN_DIR}; check logs above."
+fi

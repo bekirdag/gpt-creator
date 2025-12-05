@@ -151,21 +151,10 @@ run_adapter() {
       fi
       ;;
     *)
+      local llm_helper="${GC_SCRIPTS_ROOT:-${ROOT_DIR}/scripts}/python/llm_client_prompt_to_file.py"
+      [[ -f "$llm_helper" ]] || llm_helper="${ROOT_DIR}/tools/scripts/python/llm_client_prompt_to_file.py"
       PYTHONPATH="${GC_SCRIPTS_ROOT:-${ROOT_DIR}/scripts}/python:${PYTHONPATH:-}" \
-        "${PYTHON_BIN:-python3}" - "$prompt" "$out_md" "$ADAPTER_NAME" "$ADAPTER_MODEL" <<'PY'
-import sys
-from pathlib import Path
-adapter, model = sys.argv[3], sys.argv[4]
-prompt_text = Path(sys.argv[1]).read_text(encoding="utf-8")
-out_path = Path(sys.argv[2])
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools" / "scripts" / "python"))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "python"))
-from llm_client_factory import create_llm_client  # type: ignore
-client = create_llm_client(adapter, {})
-response = client.send_chat([prompt_text], model=model)
-out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(response.content, encoding="utf-8")
-PY
+        "${PYTHON_BIN:-python3}" "$llm_helper" "$ADAPTER_NAME" "$ADAPTER_MODEL" "$prompt" "$out_md"
       ;;
   esac
   log_info "Adapter output saved → ${out_md}"

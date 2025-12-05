@@ -334,31 +334,21 @@ gc_wot_normalize_sleep_between() {
   if ! command -v "$python_bin" >/dev/null 2>&1; then
     die "Python runtime '${python_bin}' not available; cannot normalize --sleep-between"
   fi
-  "$python_bin" - "$value" <<'PY'
-import sys
-import math
-
-def parse_duration(val: str) -> int:
-    val = val.strip().lower()
-    if val.endswith("ms"):
-        return math.ceil(float(val[:-2]))
-    if val.endswith("s"):
-        return math.ceil(float(val[:-1]) * 1000)
-    if val.endswith("m"):
-        return math.ceil(float(val[:-1]) * 60_000)
-    if val.endswith("h"):
-        return math.ceil(float(val[:-1]) * 3_600_000)
-    if val.isdigit():
-        return int(val)
-    raise ValueError(f"invalid duration: {val}")
-
-try:
-    parsed = parse_duration(sys.argv[1])
-    print(parsed)
-except Exception as e:
-    sys.stderr.write(str(e) + "\\n")
-    sys.exit(1)
-PY
+  local helper_path=""
+  if declare -F gc_clone_python_tool >/dev/null 2>&1; then
+    helper_path="$(gc_clone_python_tool "normalize_sleep_between.py" "${PROJECT_ROOT:-$PWD}")" || helper_path=""
+  fi
+  if [[ -z "$helper_path" ]]; then
+    local scripts_root="${GC_SCRIPTS_ROOT:-${CLI_ROOT:-$PWD}/tools/scripts}"
+    if [[ -n "${CLI_ROOT:-}" && ! -d "$scripts_root" ]]; then
+      scripts_root="${CLI_ROOT}/scripts"
+    fi
+    if [[ -f "${scripts_root}/python/normalize_sleep_between.py" ]]; then
+      helper_path="${scripts_root}/python/normalize_sleep_between.py"
+    fi
+  fi
+  [[ -n "$helper_path" ]] || die "normalize_sleep_between.py helper missing; cannot normalize --sleep-between"
+  "$python_bin" "$helper_path" "$value"
 }
 
 gc_apply_codex_changes() {

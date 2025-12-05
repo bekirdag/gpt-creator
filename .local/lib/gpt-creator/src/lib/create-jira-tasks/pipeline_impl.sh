@@ -68,8 +68,9 @@ cjt::err()   { printf '\033[31m[create-jira-tasks][ERROR]\033[0m %s\n' "$*" >&2;
 cjt::die()   { cjt::err "$*"; exit 1; }
 cjt::state_init() {
   CJT_STATE_FILE="$CJT_PIPELINE_DIR/state.json"
-  if (( CJT_FORCE )); then
+  if (( CJT_FORCE )) && [[ "${CJT_DRY_RUN:-0}" != "1" ]]; then
     rm -f "$CJT_STATE_FILE"
+    rm -rf "$CJT_PIPELINE_DIR"
   fi
   if [[ ! -f "$CJT_STATE_FILE" ]]; then
     cat "$CJT_TEMPLATE_ROOT/state_init.json" >"$CJT_STATE_FILE"
@@ -154,11 +155,12 @@ cjt::derive_project_title() {
 
 cjt::init() {
   CJT_PROJECT_ROOT="${1:?project root required}"
-  local cjt_default_model="${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-gpt-5.1-codex}}}"
+  local cjt_default_model="${GC_ACTIVE_AGENT_MODEL:-${DEFAULT_LLM:-${CODEX_MODEL_NON_CODE:-${CODEX_MODEL_LOW:-${CODEX_MODEL:-}}}}}"
   CJT_MODEL="${2:-$cjt_default_model}"
   CJT_FORCE="${3:-0}"
   CJT_SKIP_REFINE="${4:-0}"
   CJT_DRY_RUN="${5:-0}"
+  CJT_ADAPTER="${GC_ACTIVE_AGENT_ADAPTER:-codex_cli}"
 
   CJT_PROJECT_ROOT="$(cjt::abs_path "$CJT_PROJECT_ROOT")"
   [[ -d "$CJT_PROJECT_ROOT" ]] || cjt::die "Project root not found: $CJT_PROJECT_ROOT"
@@ -216,6 +218,10 @@ cjt::init() {
 
   if [[ "$CJT_FORCE" == "1" && "${CJT_DRY_RUN:-0}" != "1" ]]; then
     rm -f "$CJT_TASKS_DB_PATH"
+    # Reset pipeline artifacts to avoid stale state on forced reruns.
+    rm -rf "$CJT_PROMPTS_DIR" "$CJT_OUTPUT_DIR" "$CJT_JSON_DIR" "$CJT_TMP_DIR"
+    mkdir -p "$CJT_PROMPTS_DIR" "$CJT_OUTPUT_DIR" "$CJT_JSON_DIR" \
+      "$CJT_JSON_STORIES_DIR" "$CJT_JSON_TASKS_DIR" "$CJT_JSON_REFINED_DIR" "$CJT_TMP_DIR"
   fi
 
   CJT_INCREMENTAL_DB=0
@@ -514,13 +520,22 @@ cjt::run_codex() {
   local codex_reasoning="${CODEX_REASONING_EFFORT:-${CODEX_REASONING_EFFORT_NON_CODE:-low}}"
 
   if [[ "$CJT_DRY_RUN" == "1" ]]; then
-    cjt::warn "[dry-run] Skipping Codex invocation for $label"
+    cjt::warn "[dry-run] Skipping model invocation for $label"
     printf '{"status": "dry-run", "label": "%s"}\n' "$label" >"$output_file"
     return 0
   fi
 
   mkdir -p "$(dirname "$output_file")"
   local model="$CJT_MODEL"
+
+  if [[ "${GC_ACTIVE_AGENT_ADAPTER:-}" == "command" ]]; then
+    cjt::log "Running command adapter for ${label} (cmd='${model}')"
+    if ! eval "${model} < \"$prompt_file\" > \"$output_file\""; then
+      cjt::warn "Command adapter failed for ${label}."
+      return 1
+    fi
+    return 0
+  fi
 
   if cjt::codex_has_subcommand chat; then
     local cmd=("$CJT_CODEX_CMD" chat --model "$model" --prompt-file "$prompt_file" --output "$output_file")
@@ -580,18 +595,9 @@ cjt::tasks_json_has_entries() {
   if [[ ! -s "$json_path" ]]; then
     return 1
   fi
-  python3 - "$json_path" <<'PY'
-import json, sys
-path = sys.argv[1]
-try:
-    data = json.loads(open(path, "r", encoding="utf-8").read())
-except Exception:
-    sys.exit(1)
-tasks = data.get("tasks")
-if not isinstance(tasks, list) or len(tasks) == 0:
-    sys.exit(1)
-sys.exit(0)
-PY
+  local helper_path
+  helper_path="$(cjt::clone_python_tool "tasks_json_has_entries.py")" || return 1
+  python3 "$helper_path" "$json_path"
 }
 
 cjt::write_epics_prompt() {
@@ -801,6 +807,8 @@ cjt::normalize_story_jsons() {
   split_helper="$(cjt::clone_python_tool "split_story_json.py")" || return 0
   local list_helper=""
   list_helper="$(cjt::clone_python_tool "list_json_files.py")" || list_helper=""
+  local bundled_helper=""
+  bundled_helper="$(cjt::clone_python_tool "is_bundled_story_json.py")" || bundled_helper=""
   local tmp_dir="$CJT_JSON_STORIES_DIR/.split_tmp"
   rm -rf "$tmp_dir" 2>/dev/null || true
   mkdir -p "$tmp_dir"
@@ -809,18 +817,7 @@ cjt::normalize_story_jsons() {
   while IFS= read -r story_file; do
     [[ -n "$story_file" ]] || continue
     # Detect bundled story payloads shaped like {"epic_id": "...", "user_stories": [...]}
-    if python3 - "$story_file" <<'PY'
-import json, sys
-path = sys.argv[1]
-try:
-    data = json.loads(open(path, "r", encoding="utf-8").read())
-except Exception:
-    sys.exit(1)
-if isinstance(data, dict) and isinstance(data.get("user_stories"), list):
-    sys.exit(0)
-sys.exit(1)
-PY
-    then
+    if [[ -n "$bundled_helper" ]] && python3 "$bundled_helper" "$story_file"; then
       cjt::log "Splitting bundled story file ${story_file} into per-story JSON"
       if python3 "$split_helper" "$story_file" "$tmp_dir"; then
         rm -f "$story_file"

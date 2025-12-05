@@ -99,36 +99,12 @@ gc_cli__apply_agent_env() {
   fi
   # Fallback: hydrate adapter/limits/api hints from the agent file when registry data is missing.
   if [[ -f "$agent_file" ]]; then
-    local file_meta
-    file_meta="$(${PYTHON_BIN:-python3} - <<'PY' "$agent_file"
-import json, sys
-from pathlib import Path
-path = Path(sys.argv[1])
-try:
-    data = json.loads(path.read_text(encoding="utf-8"))
-except Exception:
-    sys.exit(0)
-if not isinstance(data, dict):
-    sys.exit(0)
-agent = data.get("agent") or {}
-if not isinstance(agent, dict):
-    agent = data
-resolved = data.get("resolved") or {}
-def pick(*values):
-    for value in values:
-        if value:
-            return value
-    return ""
-adapter = pick(resolved.get("adapter"), agent.get("adapter"))
-max_ctx = pick(resolved.get("maxContextTokens"), agent.get("maxContextTokens"))
-max_out = pick(resolved.get("maxOutputTokens"), agent.get("maxOutputTokens"))
-api_base = pick(resolved.get("apiBase"), agent.get("client_api_base"))
-api_key_env = pick(agent.get("client_api_key_env"), resolved.get("apiKeyEnv"))
-org_env = pick(agent.get("client_api_org_env"), resolved.get("orgEnv"))
-api_base_env = pick(agent.get("client_api_base_env"), resolved.get("apiBaseEnv"))
-print("\\n".join([adapter or "", str(max_ctx or ""), str(max_out or ""), api_base or "", api_key_env or "", org_env or "", api_base_env or ""]))
-PY
-)"
+    local file_meta_helper
+    file_meta_helper="$(gc_cli__agents_helper_path "agents_extract_file_meta.py" "$project")" || file_meta_helper=""
+    local file_meta=""
+    if [[ -n "$file_meta_helper" ]]; then
+      file_meta="$(${PYTHON_BIN:-python3} "$file_meta_helper" "$agent_file")"
+    fi
     local file_adapter file_ctx file_out file_api_base file_api_key_env file_org_env file_api_base_env
     IFS=$'\n' read -r file_adapter file_ctx file_out file_api_base file_api_key_env file_org_env file_api_base_env <<<"$file_meta"
     [[ -z "${GC_ACTIVE_AGENT_ADAPTER:-}" && -n "$file_adapter" ]] && export GC_ACTIVE_AGENT_ADAPTER="$file_adapter"
